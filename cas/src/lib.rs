@@ -4,22 +4,26 @@
 //! It is the primary target for Miri, proptest, and the TLA+ commit-
 //! protocol model before M2 implementation begins.
 //!
-//! Modules (M2 work items):
+//! Modules:
 //!   - `chunk`    — FastCDC gear-hash chunker, target 16–64 KiB
 //!   - `hash`     — BLAKE3 chunk addressing
-//!   - `prolly`   — nested per-directory prolly trees (Merkle search trees)
-//!   - `memtable` — per-ref in-memory overlay (interval map, §4.3–4.4)
-//!   - `wal`      — write-ahead log (§4.3 step 2)
-//!   - `commit`   — A/B superblock flip + fsync barriers (§4.3 step 4)
-//!   - `gc`       — mark-and-sweep from live roots (§4.6)
-//!   - `snapshot` — snapshot log rows (§4.7)
+//!   - `prolly`   — per-directory prolly trees, deterministic-TLV entries
+//!   - `file`     — inline / chunk-list file content storage
+//!   - `tree`     — nested-directory path operations (openat-shaped)
 //!
-//! Key proptest invariants to cover before M2:
-//!   - same logical content → same prolly tree root regardless of edit order
-//!   - round-trip: serialize then deserialize tree = identity
-//!   - after crash (any point in flush/commit), recovered state = committed
-//!     roots + WAL replay (matches TLA+ CommitProtocol invariant)
+//!   - `dev`      — block-device trait; file/mem/crash-injection backends
+//!   - `disk`     — on-disk formats: superblocks, WAL records, ref table
+//!   - `overlay`  — per-ref in-memory overlay (interval maps, §4.3–4.4)
+//!   - `store`    — the engine: WAL + flush + A/B commit + recovery
+//!
+//! Remaining M2+ work items: `gc` (mark-and-sweep, M5).
 
 pub mod chunk;
+pub mod dev;
+pub mod disk;
+pub mod file;
 pub mod hash;
+pub mod overlay;
 pub mod prolly;
+pub mod store;
+pub mod tree;
