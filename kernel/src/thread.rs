@@ -55,6 +55,9 @@ pub struct Tcb {
     pub state: ThreadState,
     pub priority: u8,
     pub cspace: *mut CSpaceObj,
+    /// Translation tables this thread runs under; null = the boot
+    /// identity map (idle, the M1 scaffold threads).
+    pub aspace: *mut crate::aspace::AspaceObj,
     /// Ready-queue / notification-wait-queue link (a thread is on at most
     /// one queue, disambiguated by `state`).
     pub qnext: *mut Tcb,
@@ -70,6 +73,7 @@ impl Tcb {
             state: ThreadState::Inactive,
             priority: 0,
             cspace: ptr::null_mut(),
+            aspace: ptr::null_mut(),
             qnext: ptr::null_mut(),
             wait_notif: ptr::null_mut(),
         }
@@ -78,15 +82,7 @@ impl Tcb {
     /// pre:  memory at `this` writable, sized size_of::<Tcb>().
     /// post: inactive thread, refs = 1 (creator cap).
     pub unsafe fn init(this: *mut Tcb) {
-        this.write(Tcb {
-            hdr: ObjHeader { refs: 1 },
-            frame: TrapFrame::zeroed(),
-            state: ThreadState::Inactive,
-            priority: 0,
-            cspace: ptr::null_mut(),
-            qnext: ptr::null_mut(),
-            wait_notif: ptr::null_mut(),
-        });
+        this.write(Tcb::empty());
     }
 }
 
@@ -210,6 +206,19 @@ pub unsafe fn maybe_switch(frame: *mut TrapFrame, preempt_equal: bool) {
     (*next).state = ThreadState::Running;
     CURRENT = next;
     *frame = (*next).frame;
+    activate_aspace(next);
+}
+
+/// Point TTBR0 at the thread's translation tables. ASID tagging makes
+/// the switch flush-free; the shared kernel entries keep EL1 mapped
+/// across it.
+pub unsafe fn activate_aspace(t: *mut Tcb) {
+    let ttbr = if (*t).aspace.is_null() {
+        crate::mmu::kernel_ttbr0()
+    } else {
+        crate::aspace::AspaceObj::ttbr0((*t).aspace)
+    };
+    core::arch::asm!("msr ttbr0_el1, {v}", "isb", v = in(reg) ttbr);
 }
 
 /// pre:  refs == 0 (last cap gone).
@@ -220,6 +229,14 @@ pub unsafe fn maybe_switch(frame: *mut TrapFrame, preempt_equal: bool) {
 pub unsafe fn destroy_tcb(t: *mut Tcb) {
     unqueue(t);
     (*t).state = ThreadState::Halted;
+    if !(*t).cspace.is_null() {
+        crate::cspace::unref_cspace((*t).cspace);
+        (*t).cspace = ptr::null_mut();
+    }
+    if !(*t).aspace.is_null() {
+        crate::cspace::unref_aspace((*t).aspace);
+        (*t).aspace = ptr::null_mut();
+    }
     if CURRENT == t {
         // The exit path's maybe_switch sees a non-Running current and
         // picks someone else; idle is always there.

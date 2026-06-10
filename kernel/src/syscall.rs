@@ -31,10 +31,29 @@ pub const ERR_STATE: i64 = -11;
 
 pub const SLOT_NONE: u32 = u32::MAX;
 
-fn user_range_ok(ptr: u64, len: u64) -> bool {
-    len <= USER_SIZE
-        && ptr >= USER_BASE
-        && ptr.checked_add(len).is_some_and(|end| end <= USER_BASE + USER_SIZE)
+/// Validate a user buffer for the current thread before the kernel
+/// dereferences it. Identity-map threads (M1 scaffold, idle) get the
+/// fixed EL0 window; aspace threads get a page-table walk — the kernel
+/// reads user memory through the thread's own translation, so the walk
+/// is exactly the check that the access cannot fault at EL1.
+unsafe fn user_range_ok(ptr: u64, len: u64) -> bool {
+    let t = thread::current();
+    if (*t).aspace.is_null() {
+        len <= USER_SIZE
+            && ptr >= USER_BASE
+            && ptr.checked_add(len).is_some_and(|end| end <= USER_BASE + USER_SIZE)
+    } else {
+        crate::aspace::AspaceObj::range_mapped((*t).aspace, ptr, len, false)
+    }
+}
+
+unsafe fn user_range_writable(ptr: u64, len: u64) -> bool {
+    let t = thread::current();
+    if (*t).aspace.is_null() {
+        user_range_ok(ptr, len)
+    } else {
+        crate::aspace::AspaceObj::range_mapped((*t).aspace, ptr, len, true)
+    }
 }
 
 /// Slot `idx` of the current thread's cspace, or null.
@@ -251,6 +270,9 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
             if !user_range_ok(a[1], MSG_PAYLOAD as u64) {
                 return Some(ERR_FAULT);
             }
+            if !user_range_writable(a[1], MSG_PAYLOAD as u64) {
+                return Some(ERR_FAULT);
+            }
             let mut dests = [ptr::null_mut(); MSG_CAPS];
             if let Err(e) = resolve_cap_list(a[2], &mut dests, false) {
                 return Some(e);
@@ -357,6 +379,116 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
             (*t).frame.sp_el0 = a[3];
             (*t).frame.spsr = 0; // EL0t, interrupts enabled
             (*t).frame.x[0] = a[5];
+            thread::enqueue(t);
+            Some(0)
+        }
+        // map(aspace_slot, frame_slot, va, perms) — §2.5: the mapping
+        // lives in the frame cap; mapping an already-mapped cap fails
+        // (copy the cap to map the frame twice).
+        16 => {
+            let asp_slot = cur_slot(a[0]);
+            let fr_slot = cur_slot(a[1]);
+            if asp_slot.is_null() || fr_slot.is_null() {
+                return Some(ERR_BADSLOT);
+            }
+            let CapKind::Aspace(asp) = (*asp_slot).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            if !(*asp_slot).cap.rights.has(Rights::WRITE) {
+                return Some(ERR_PERM);
+            }
+            let CapKind::Frame { base, pages, mapping } = (*fr_slot).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            if mapping.is_some() {
+                return Some(ERR_STATE);
+            }
+            let perms = a[3];
+            // Monotone: an RO frame cap cannot become writable memory.
+            if perms & crate::aspace::PERM_W != 0 && !(*fr_slot).cap.rights.has(Rights::WRITE)
+            {
+                return Some(ERR_PERM);
+            }
+            match crate::aspace::AspaceObj::map(asp, base, a[2], pages, perms) {
+                Ok(()) => {
+                    (*asp).hdr.refs += 1;
+                    (*fr_slot).cap.kind =
+                        CapKind::Frame { base, pages, mapping: Some((asp, a[2])) };
+                    Some(0)
+                }
+                Err(crate::aspace::MapError::NeedMemory) => Some(ERR_NOMEM),
+                Err(crate::aspace::MapError::AlreadyMapped) => Some(ERR_STATE),
+                Err(_) => Some(ERR_ARG),
+            }
+        }
+        // frame_write(frame_slot, offset, buf, len) — spawn-time program
+        // loading: the kernel copies caller bytes into the (unmapped or
+        // mapped) frame through the identity map.
+        17 => {
+            let fr_slot = cur_slot(a[0]);
+            if fr_slot.is_null() {
+                return Some(ERR_BADSLOT);
+            }
+            let CapKind::Frame { base, pages, .. } = (*fr_slot).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            if !(*fr_slot).cap.rights.has(Rights::WRITE) {
+                return Some(ERR_PERM);
+            }
+            let (off, len) = (a[1], a[3]);
+            if off.checked_add(len).is_none_or(|end| end > pages * 4096) {
+                return Some(ERR_ARG);
+            }
+            if !user_range_ok(a[2], len) {
+                return Some(ERR_FAULT);
+            }
+            core::ptr::copy_nonoverlapping(
+                a[2] as *const u8,
+                (base + off) as *mut u8,
+                len as usize,
+            );
+            Some(0)
+        }
+        // thread_start_as(tcb_slot, cspace_slot, aspace_slot, entry, sp, prio)
+        18 => {
+            let ts = cur_slot(a[0]);
+            let cs_slot = cur_slot(a[1]);
+            let asp_slot = cur_slot(a[2]);
+            if ts.is_null() || cs_slot.is_null() || asp_slot.is_null() {
+                return Some(ERR_BADSLOT);
+            }
+            let CapKind::Thread(t) = (*ts).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            let CapKind::CSpace(cs) = (*cs_slot).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            let CapKind::Aspace(asp) = (*asp_slot).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            if (*t).state != ThreadState::Inactive {
+                return Some(ERR_STATE);
+            }
+            let prio = a[5] & 0xFF;
+            if prio as usize >= NUM_PRIOS {
+                return Some(ERR_ARG);
+            }
+            if prio > (*thread::current()).priority as u64 {
+                return Some(ERR_PERM);
+            }
+            // Entry/SP live in the child's aspace, not the caller's.
+            if !crate::aspace::AspaceObj::range_mapped(asp, a[3], 4, false) {
+                return Some(ERR_FAULT);
+            }
+            (*cs).hdr.refs += 1;
+            (*asp).hdr.refs += 1;
+            (*t).cspace = cs;
+            (*t).aspace = asp;
+            (*t).priority = prio as u8;
+            (*t).frame = TrapFrame::zeroed();
+            (*t).frame.elr = a[3];
+            (*t).frame.sp_el0 = a[4];
+            (*t).frame.spsr = 0;
             thread::enqueue(t);
             Some(0)
         }

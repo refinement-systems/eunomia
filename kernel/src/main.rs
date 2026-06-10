@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+mod aspace;
 mod boot;
 mod channel;
 mod cspace;

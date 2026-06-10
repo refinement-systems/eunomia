@@ -47,6 +47,17 @@ const DESC_KERNEL: u64 = UXN | AF | SH_INNER | ATTR_NORMAL | AP_EL1_RW | BLOCK;
 // EL0-executable, EL1-never: the kernel must not fetch from user memory.
 const DESC_USER: u64 = PXN | AF | SH_INNER | ATTR_NORMAL | AP_EL0_RW | BLOCK;
 
+/// The boot identity-map L1 — its first two entries are the shared
+/// kernel mappings copied into every process aspace (aspace.rs).
+pub fn kernel_l1() -> *const u64 {
+    core::ptr::addr_of!(L1_TABLE) as *const u64
+}
+
+/// TTBR0 value for kernel-identity threads (ASID 0).
+pub fn kernel_ttbr0() -> u64 {
+    kernel_l1() as u64
+}
+
 pub fn init() {
     unsafe {
         let l2 = &mut *core::ptr::addr_of_mut!(L2_DRAM);

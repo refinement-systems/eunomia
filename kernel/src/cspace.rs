@@ -56,7 +56,8 @@ pub enum ChanEnd {
 
 /// The object a cap designates. Untyped carries its region inline: untyped
 /// caps are never copied (the watermark must have one owner), so the state
-/// needs no shared object.
+/// needs no shared object. Frames carry their mapping inline too — one
+/// mapping per cap copy, and deleting the cap unmaps it (§2.5).
 #[derive(Clone, Copy)]
 pub enum CapKind {
     Empty,
@@ -65,6 +66,12 @@ pub enum CapKind {
         size: u64,
         watermark: u64,
     },
+    Frame {
+        base: u64,
+        pages: u64,
+        mapping: Option<(*mut crate::aspace::AspaceObj, u64)>,
+    },
+    Aspace(*mut crate::aspace::AspaceObj),
     CSpace(*mut crate::cspace::CSpaceObj),
     Thread(*mut crate::thread::Tcb),
     Channel(*mut crate::channel::Channel, ChanEnd),
@@ -88,10 +95,12 @@ impl Cap {
         matches!(self.kind, CapKind::Empty)
     }
 
-    /// The refcounted object header behind this cap, if any.
+    /// The refcounted object header behind this cap, if any. Frames are
+    /// bare memory like untyped — no object, no refcount.
     fn header(&self) -> Option<*mut ObjHeader> {
         match self.kind {
-            CapKind::Empty | CapKind::Untyped { .. } => None,
+            CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => None,
+            CapKind::Aspace(p) => Some(p.cast()),
             CapKind::CSpace(p) => Some(p.cast()),
             CapKind::Thread(p) => Some(p.cast()),
             CapKind::Channel(p, _) => Some(p.cast()),
@@ -181,8 +190,25 @@ unsafe fn obj_unref(cap: &Cap) {
             CapKind::Channel(p, _) => crate::channel::destroy_channel(p),
             CapKind::Notification(p) => crate::notification::destroy_notif(p),
             CapKind::Timer(p) => crate::timer::destroy_timer(p),
-            CapKind::Empty | CapKind::Untyped { .. } => {}
+            CapKind::Aspace(p) => crate::aspace::destroy_aspace(p),
+            CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => {}
         }
+    }
+}
+
+/// Drop a non-cap reference to an aspace (mapped frames and bound
+/// threads hold these so the aspace can't die under them).
+pub unsafe fn unref_aspace(a: *mut crate::aspace::AspaceObj) {
+    (*a).hdr.refs -= 1;
+    if (*a).hdr.refs == 0 {
+        crate::aspace::destroy_aspace(a);
+    }
+}
+
+pub unsafe fn unref_cspace(cs: *mut CSpaceObj) {
+    (*cs).hdr.refs -= 1;
+    if (*cs).hdr.refs == 0 {
+        destroy_cspace(cs);
     }
 }
 
@@ -301,8 +327,13 @@ pub unsafe fn derive(src: *mut CapSlot, dst: *mut CapSlot, mask: u8) -> Result<(
     if !(*dst).cap.is_empty() {
         return Err(());
     }
+    let mut kind = (*src).cap.kind;
+    // One mapping per cap copy (§2.5): a fresh frame copy starts unmapped.
+    if let CapKind::Frame { mapping, .. } = &mut kind {
+        *mapping = None;
+    }
     (*dst).cap = Cap {
-        kind: (*src).cap.kind,
+        kind,
         rights: (*src).cap.rights.masked(mask),
     };
     obj_ref(&(*dst).cap);
@@ -327,6 +358,12 @@ pub unsafe fn delete(slot: *mut CapSlot) {
     // Channel endpoint liveness is tracked per end for peer-closed (§3.3).
     if let CapKind::Channel(ch, end) = cap.kind {
         crate::channel::endpoint_cap_dropped(ch, end);
+    }
+    // Deleting a mapped frame cap unmaps it — the one revocation story
+    // for shared memory (§2.5).
+    if let CapKind::Frame { pages, mapping: Some((asp, va)), .. } = cap.kind {
+        crate::aspace::AspaceObj::unmap(asp, va, pages);
+        unref_aspace(asp);
     }
     obj_unref(&cap);
 }

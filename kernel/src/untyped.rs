@@ -20,6 +20,10 @@ pub enum ObjType {
     Channel,
     Notification,
     Timer,
+    /// param = page count; 4 KiB-aligned, zeroed at retype.
+    Frame,
+    /// param = table-pool pages (pool-at-creation, §2.5).
+    Aspace,
 }
 
 impl ObjType {
@@ -30,12 +34,19 @@ impl ObjType {
             2 => ObjType::Channel,
             3 => ObjType::Notification,
             4 => ObjType::Timer,
+            5 => ObjType::Frame,
+            6 => ObjType::Aspace,
             _ => return None,
         })
     }
-}
 
-const OBJ_ALIGN: u64 = 16;
+    fn align(self) -> u64 {
+        match self {
+            ObjType::Frame | ObjType::Aspace => 4096,
+            _ => 16,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetypeError {
@@ -90,9 +101,22 @@ pub unsafe fn retype(
         }
         ObjType::Notification => core::mem::size_of::<crate::notification::NotifObj>(),
         ObjType::Timer => core::mem::size_of::<crate::timer::TimerObj>(),
+        ObjType::Frame => {
+            if param == 0 || param > 1 << 16 {
+                return Err(RetypeError::BadArg);
+            }
+            (param * 4096) as usize
+        }
+        ObjType::Aspace => {
+            if param == 0 || param > 256 {
+                return Err(RetypeError::BadArg);
+            }
+            crate::aspace::AspaceObj::bytes_for(param)
+        }
     } as u64;
 
-    let start = (base + watermark + OBJ_ALIGN - 1) & !(OBJ_ALIGN - 1);
+    let align = ty.align();
+    let start = (base + watermark + align - 1) & !(align - 1);
     let end = start.checked_add(bytes).ok_or(RetypeError::NoMemory)?;
     if end > base + size {
         return Err(RetypeError::NoMemory);
@@ -123,6 +147,17 @@ pub unsafe fn retype(
             let p = start as *mut crate::timer::TimerObj;
             crate::timer::TimerObj::init(p);
             CapKind::Timer(p)
+        }
+        ObjType::Frame => {
+            // Zeroed: frames flow into fresh address spaces; leaking prior
+            // contents across processes would break confinement.
+            core::ptr::write_bytes(start as *mut u8, 0, bytes as usize);
+            CapKind::Frame { base: start, pages: param, mapping: None }
+        }
+        ObjType::Aspace => {
+            let p = start as *mut crate::aspace::AspaceObj;
+            crate::aspace::AspaceObj::init(p, param);
+            CapKind::Aspace(p)
         }
     };
 
