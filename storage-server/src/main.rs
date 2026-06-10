@@ -1,18 +1,12 @@
 //! Storage server — userspace process holding the virtio-blk cap (spec §4).
 //!
-//! Runs on macOS (for host testing) or on the OS (M2+).
-//! Owns the session/handle table; all storage caps are handles in this table.
-//!
-//! M2 work items:
-//!   - Session management: open/close sessions, per-session handle tables
-//!   - Handle operations: read, write, open_child, close, snapshot, sync
-//!   - Claim-ticket minting and redemption (spec §2.4)
-//!   - Memtable + flush + commit (spec §4.3–4.4) backed by cas crate
-//!   - Crash recovery (spec §4.5)
-//!   - WAL: durability before flush (spec §4.3 step 2)
-//!
-//! The TLA+ CommitProtocol model must be checked BEFORE M2 implementation.
+//! The session/handle/dispatch core lives in lib.rs and is host-testable.
+//! This binary becomes the on-OS server at M3 (real processes + IPC
+//! transport over channel sessions); until then it has nothing to run.
 
 fn main() {
-    todo!("M2: storage server main loop")
+    eprintln!(
+        "storage-server: session core is library-only until the M3 IPC \
+         transport exists (see storage_server::Server)"
+    );
 }

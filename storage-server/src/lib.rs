@@ -1,0 +1,571 @@
+//! Storage server core: sessions, handles, tickets (spec §2.2–2.4).
+//!
+//! A storage cap at the boundary is a small integer handle, meaningful
+//! only relative to its session. The server keeps, per session:
+//!
+//!   handle → (kind: snapshot | ref, target, subtree, rights, gen-at-grant)
+//!
+//! The wire protocol is handle-relative: every operation names a handle
+//! plus a component-list path resolved *under* the handle's subtree —
+//! confinement by unreachability, not checked policy (§2.3). Raw hashes
+//! never appear as request parameters.
+//!
+//! This module is transport-agnostic and host-testable: `Server::handle`
+//! maps one `Request` to one `Response`. The IPC binding (channel
+//! sessions, postcard bodies via the ipc crate, peer-closed cleanup)
+//! arrives when real processes exist (M3); session lifecycle here is
+//! driven by explicit `open_session` / `close_session` calls that the
+//! transport will own.
+
+use cas::dev::BlockDev;
+use cas::hash::Hash;
+use cas::overlay::Path as TreePath;
+use cas::prolly::{Content, Entry, EntryKind};
+use cas::store::{Store, StoreError};
+use std::collections::HashMap;
+
+// ── Rights (§2.3) ───────────────────────────────────────────────────────
+
+pub const R_READ: u8 = 1 << 0;
+pub const R_WRITE: u8 = 1 << 1;
+pub const R_SNAPSHOT: u8 = 1 << 2;
+/// Destructive enough to deserve its own bit (§2.3); also gates mass
+/// revocation (generation bump, §2.2).
+pub const R_REWRITE_HISTORY: u8 = 1 << 3;
+pub const R_ENUMERATE: u8 = 1 << 4;
+pub const R_ALL: u8 = 0b1_1111;
+
+pub type SessionId = u64;
+pub type HandleId = u32;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandleTarget {
+    /// Immutable subtree, denoted by its node hash (internal only — the
+    /// hash never crosses the boundary).
+    Snapshot { root: Hash },
+    /// Live ref, subtree-scoped by server-side path resolution (§2.3).
+    Ref {
+        name: Vec<u8>,
+        subtree: TreePath,
+        gen_at_grant: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandleEntry {
+    pub target: HandleTarget,
+    pub rights: u8,
+}
+
+#[derive(Default)]
+struct Session {
+    handles: HashMap<HandleId, HandleEntry>,
+    next_handle: HandleId,
+}
+
+impl Session {
+    fn insert(&mut self, entry: HandleEntry) -> HandleId {
+        let id = self.next_handle;
+        self.next_handle += 1;
+        self.handles.insert(id, entry);
+        id
+    }
+}
+
+// ── Protocol ────────────────────────────────────────────────────────────
+
+/// Handle-relative requests (§2.4). Paths are component lists; `/` is
+/// shell presentation. Capability-bearing results are handle ids; tickets
+/// are the only bearer tokens and are one-shot with a TTL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Request {
+    Read { handle: HandleId, path: TreePath },
+    Write { handle: HandleId, path: TreePath, offset: u64, data: Vec<u8> },
+    Unlink { handle: HandleId, path: TreePath },
+    List { handle: HandleId, path: TreePath },
+    /// Attenuate: sub-subtree + rights mask, in one step (§2.4 delegation).
+    OpenChild { handle: HandleId, path: TreePath, rights_mask: u8 },
+    Close { handle: HandleId },
+    Sync { handle: HandleId },
+    Snapshot { handle: HandleId, message: Vec<u8>, class: u8 },
+    ListSnapshots { handle: HandleId },
+    /// A snapshot handle from a ref handle's history, subtree-scoped.
+    OpenSnapshot { handle: HandleId, snap_id: u64, path: TreePath, rights_mask: u8 },
+    Rollback { handle: HandleId, snap_id: u64 },
+    /// Mass revocation: bump the ref's generation; every outstanding
+    /// handle on it (all sessions) goes stale on next use (§2.2).
+    RevokeRef { handle: HandleId },
+    MintTicket { handle: HandleId, ttl_nanos: u64 },
+    RedeemTicket { ticket: [u8; 16] },
+    EnumerateSession,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DirEnt {
+    File { name: Vec<u8>, size: u64 },
+    Dir { name: Vec<u8> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapInfo {
+    pub id: u64,
+    pub timestamp: u64,
+    pub provenance: Vec<u8>,
+    pub message: Vec<u8>,
+    pub class: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Response {
+    Ok,
+    Data(Vec<u8>),
+    NotFound,
+    Handle(HandleId),
+    Listing(Vec<DirEnt>),
+    Snapshots(Vec<SnapInfo>),
+    SnapId(u64),
+    Ticket([u8; 16]),
+    SessionDump(Vec<(HandleId, String)>),
+    Err(ErrorCode),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCode {
+    BadHandle,
+    /// Generation mismatch: the handle was mass-revoked (§2.2).
+    Stale,
+    Denied,
+    BadPath,
+    NotADir,
+    ReadOnly,
+    NoSuchSnapshot,
+    BadTicket,
+    Internal,
+}
+
+// ── Server ──────────────────────────────────────────────────────────────
+
+struct PendingTicket {
+    entry: HandleEntry,
+    expires: u64,
+}
+
+pub struct Server<D: BlockDev> {
+    store: Store<D>,
+    sessions: HashMap<SessionId, Session>,
+    next_session: SessionId,
+    tickets: HashMap<[u8; 16], PendingTicket>,
+    ticket_seq: u64,
+    ticket_seed: u64,
+}
+
+impl<D: BlockDev> Server<D> {
+    pub fn new(store: Store<D>, ticket_seed: u64) -> Server<D> {
+        Server {
+            store,
+            sessions: HashMap::new(),
+            next_session: 1,
+            tickets: HashMap::new(),
+            ticket_seq: 0,
+            ticket_seed,
+        }
+    }
+
+    pub fn store(&mut self) -> &mut Store<D> {
+        &mut self.store
+    }
+
+    /// Open a session pre-populated with grants — the delegation-along-
+    /// spawn path (§2.4): the parent names handles + attenuation, the
+    /// child gets a fresh session. Grant construction is the caller's
+    /// (init's / the parent's) authority; there is no other way to get a
+    /// first handle.
+    pub fn open_session(&mut self, grants: Vec<HandleEntry>) -> SessionId {
+        let id = self.next_session;
+        self.next_session += 1;
+        let mut session = Session::default();
+        for g in grants {
+            session.insert(g);
+        }
+        self.sessions.insert(id, session);
+        id
+    }
+
+    /// Transport's peer-closed path (§2.4 cleanup): drop the whole table.
+    pub fn close_session(&mut self, id: SessionId) {
+        self.sessions.remove(&id);
+    }
+
+    /// Convenience for wiring init's world: a full-rights handle at a
+    /// ref's root.
+    pub fn root_grant(&self, ref_name: &[u8]) -> Result<HandleEntry, StoreError> {
+        let gen = self
+            .store
+            .refs()
+            .find(|(n, _)| n.as_slice() == ref_name)
+            .ok_or(StoreError::NoSuchRef)?
+            .1
+            .generation;
+        Ok(HandleEntry {
+            target: HandleTarget::Ref {
+                name: ref_name.to_vec(),
+                subtree: Vec::new(),
+                gen_at_grant: gen,
+            },
+            rights: R_ALL,
+        })
+    }
+
+    pub fn handle(&mut self, session: SessionId, req: Request, now: u64) -> Response {
+        match self.dispatch(session, req, now) {
+            Ok(resp) => resp,
+            Err(e) => Response::Err(e),
+        }
+    }
+
+    /// Validate handle liveness (generation check — lazy mass revocation,
+    /// §2.2) and the rights needed for the op.
+    fn lookup(
+        &self,
+        session: SessionId,
+        handle: HandleId,
+        need: u8,
+    ) -> Result<HandleEntry, ErrorCode> {
+        let s = self.sessions.get(&session).ok_or(ErrorCode::BadHandle)?;
+        let e = s.handles.get(&handle).ok_or(ErrorCode::BadHandle)?.clone();
+        if let HandleTarget::Ref { name, gen_at_grant, .. } = &e.target {
+            let current = self
+                .store
+                .refs()
+                .find(|(n, _)| n == &name)
+                .ok_or(ErrorCode::Stale)?
+                .1
+                .generation;
+            if current != *gen_at_grant {
+                return Err(ErrorCode::Stale);
+            }
+        }
+        if e.rights & need != need {
+            return Err(ErrorCode::Denied);
+        }
+        Ok(e)
+    }
+
+    fn full_path(subtree: &TreePath, path: &TreePath) -> TreePath {
+        let mut p = subtree.clone();
+        p.extend(path.iter().cloned());
+        p
+    }
+
+    /// "." and ".." are path syntax for shells, never sent to the server
+    /// (§4.9); reject them and any malformed component up front.
+    fn validate_path(path: &TreePath) -> Result<(), ErrorCode> {
+        for c in path {
+            cas::prolly::validate_name(c).map_err(|_| ErrorCode::BadPath)?;
+        }
+        Ok(())
+    }
+
+    fn dispatch(
+        &mut self,
+        session: SessionId,
+        req: Request,
+        now: u64,
+    ) -> Result<Response, ErrorCode> {
+        match &req {
+            Request::Read { path, .. }
+            | Request::Write { path, .. }
+            | Request::Unlink { path, .. }
+            | Request::List { path, .. }
+            | Request::OpenChild { path, .. }
+            | Request::OpenSnapshot { path, .. } => Self::validate_path(path)?,
+            _ => {}
+        }
+        match req {
+            Request::Read { handle, path } => {
+                let e = self.lookup(session, handle, R_READ)?;
+                let data = match &e.target {
+                    HandleTarget::Ref { name, subtree, .. } => self
+                        .store
+                        .read(name, &Self::full_path(subtree, &path))
+                        .map_err(store_err)?,
+                    HandleTarget::Snapshot { root } => {
+                        self.store.read_at_root(root, &path).map_err(store_err)?
+                    }
+                };
+                Ok(match data {
+                    Some(d) => Response::Data(d),
+                    None => Response::NotFound,
+                })
+            }
+            Request::Write { handle, path, offset, data } => {
+                let e = self.lookup(session, handle, R_WRITE)?;
+                let HandleTarget::Ref { name, subtree, .. } = &e.target else {
+                    return Err(ErrorCode::ReadOnly); // snapshots are immutable
+                };
+                self.store
+                    .write(name, &Self::full_path(subtree, &path), offset, &data, now)
+                    .map_err(store_err)?;
+                Ok(Response::Ok)
+            }
+            Request::Unlink { handle, path } => {
+                let e = self.lookup(session, handle, R_WRITE)?;
+                let HandleTarget::Ref { name, subtree, .. } = &e.target else {
+                    return Err(ErrorCode::ReadOnly);
+                };
+                self.store
+                    .unlink(name, &Self::full_path(subtree, &path), now)
+                    .map_err(store_err)?;
+                Ok(Response::Ok)
+            }
+            Request::List { handle, path } => {
+                let e = self.lookup(session, handle, R_READ)?;
+                let raw = match &e.target {
+                    HandleTarget::Ref { name, subtree, .. } => self
+                        .store
+                        .list(name, &Self::full_path(subtree, &path))
+                        .map_err(store_err)?,
+                    HandleTarget::Snapshot { root } => {
+                        self.list_at_root(root, &path).map_err(store_err)?
+                    }
+                };
+                Ok(Response::Listing(
+                    raw.into_iter()
+                        .map(|(name, kind, size)| match kind {
+                            EntryKind::File => DirEnt::File { name, size },
+                            EntryKind::Dir => DirEnt::Dir { name },
+                        })
+                        .collect(),
+                ))
+            }
+            Request::OpenChild { handle, path, rights_mask } => {
+                let e = self.lookup(session, handle, 0)?;
+                // Monotone derivation (§2.3): intersection only.
+                let rights = e.rights & rights_mask;
+                let entry = match &e.target {
+                    HandleTarget::Ref { name, subtree, gen_at_grant } => {
+                        // The subtree must currently resolve to a directory.
+                        let full = Self::full_path(subtree, &path);
+                        self.resolve_ref_dir(name, &full)?;
+                        HandleEntry {
+                            target: HandleTarget::Ref {
+                                name: name.clone(),
+                                subtree: full,
+                                gen_at_grant: *gen_at_grant,
+                            },
+                            rights,
+                        }
+                    }
+                    HandleTarget::Snapshot { root } => {
+                        let child = self.resolve_snap_dir(root, &path)?;
+                        HandleEntry {
+                            target: HandleTarget::Snapshot { root: child },
+                            rights,
+                        }
+                    }
+                };
+                let s = self.sessions.get_mut(&session).ok_or(ErrorCode::BadHandle)?;
+                Ok(Response::Handle(s.insert(entry)))
+            }
+            Request::Close { handle } => {
+                let s = self.sessions.get_mut(&session).ok_or(ErrorCode::BadHandle)?;
+                s.handles.remove(&handle).ok_or(ErrorCode::BadHandle)?;
+                Ok(Response::Ok)
+            }
+            Request::Sync { handle } => {
+                let e = self.lookup(session, handle, R_WRITE)?;
+                let HandleTarget::Ref { name, .. } = &e.target else {
+                    return Ok(Response::Ok); // snapshots are always durable
+                };
+                self.store.sync_ref(&name.clone()).map_err(store_err)?;
+                Ok(Response::Ok)
+            }
+            Request::Snapshot { handle, message, class } => {
+                let e = self.lookup(session, handle, R_SNAPSHOT)?;
+                let HandleTarget::Ref { name, .. } = &e.target else {
+                    return Err(ErrorCode::ReadOnly);
+                };
+                // Provenance is server-filled (§4.7), never client-supplied.
+                let prov = format!("session={session}");
+                let id = self
+                    .store
+                    .snapshot(&name.clone(), prov.as_bytes(), &message, class, now)
+                    .map_err(store_err)?;
+                Ok(Response::SnapId(id))
+            }
+            Request::ListSnapshots { handle } => {
+                let e = self.lookup(session, handle, R_READ)?;
+                let HandleTarget::Ref { name, .. } = &e.target else {
+                    return Err(ErrorCode::ReadOnly);
+                };
+                Ok(Response::Snapshots(
+                    self.store
+                        .snapshots(name)
+                        .map(|r| SnapInfo {
+                            id: r.id,
+                            timestamp: r.timestamp,
+                            provenance: r.provenance.clone(),
+                            message: r.message.clone(),
+                            class: r.class,
+                        })
+                        .collect(),
+                ))
+            }
+            Request::OpenSnapshot { handle, snap_id, path, rights_mask } => {
+                let e = self.lookup(session, handle, R_READ)?;
+                let HandleTarget::Ref { name, subtree, .. } = &e.target else {
+                    return Err(ErrorCode::ReadOnly);
+                };
+                let root = self
+                    .store
+                    .snapshot_root(name, snap_id)
+                    .map_err(|_| ErrorCode::NoSuchSnapshot)?;
+                // Scope to the handle's subtree first: a subtree handle
+                // must not see the snapshot's wider world.
+                let scoped = if subtree.is_empty() {
+                    root
+                } else {
+                    self.resolve_snap_dir(&root, subtree)?
+                };
+                let child = if path.is_empty() {
+                    scoped
+                } else {
+                    self.resolve_snap_dir(&scoped, &path)?
+                };
+                let rights = e.rights & rights_mask & (R_READ | R_ENUMERATE);
+                let s = self.sessions.get_mut(&session).ok_or(ErrorCode::BadHandle)?;
+                Ok(Response::Handle(s.insert(HandleEntry {
+                    target: HandleTarget::Snapshot { root: child },
+                    rights,
+                })))
+            }
+            Request::Rollback { handle, snap_id } => {
+                let e = self.lookup(session, handle, R_REWRITE_HISTORY)?;
+                let HandleTarget::Ref { name, subtree, .. } = &e.target else {
+                    return Err(ErrorCode::ReadOnly);
+                };
+                if !subtree.is_empty() {
+                    // Ref-head surgery from a subtree view is not a thing.
+                    return Err(ErrorCode::Denied);
+                }
+                self.store
+                    .rollback(&name.clone(), snap_id)
+                    .map_err(store_err)?;
+                Ok(Response::Ok)
+            }
+            Request::RevokeRef { handle } => {
+                let e = self.lookup(session, handle, R_REWRITE_HISTORY)?;
+                let HandleTarget::Ref { name, subtree, .. } = &e.target else {
+                    return Err(ErrorCode::ReadOnly);
+                };
+                if !subtree.is_empty() {
+                    return Err(ErrorCode::Denied);
+                }
+                self.store.bump_generation(&name.clone()).map_err(store_err)?;
+                Ok(Response::Ok)
+            }
+            Request::MintTicket { handle, ttl_nanos } => {
+                let e = self.lookup(session, handle, 0)?;
+                self.ticket_seq += 1;
+                let mut seed = [0u8; 24];
+                seed[..8].copy_from_slice(&self.ticket_seed.to_le_bytes());
+                seed[8..16].copy_from_slice(&self.ticket_seq.to_le_bytes());
+                seed[16..24].copy_from_slice(&now.to_le_bytes());
+                let digest = Hash::of(&seed);
+                let mut ticket = [0u8; 16];
+                ticket.copy_from_slice(&digest.as_bytes()[..16]);
+                self.tickets.insert(
+                    ticket,
+                    PendingTicket { entry: e, expires: now.saturating_add(ttl_nanos) },
+                );
+                Ok(Response::Ticket(ticket))
+            }
+            Request::RedeemTicket { ticket } => {
+                // One-shot by construction: redemption removes the ticket.
+                let pending = self.tickets.remove(&ticket).ok_or(ErrorCode::BadTicket)?;
+                if now > pending.expires {
+                    return Err(ErrorCode::BadTicket);
+                }
+                let s = self.sessions.get_mut(&session).ok_or(ErrorCode::BadHandle)?;
+                Ok(Response::Handle(s.insert(pending.entry)))
+            }
+            Request::EnumerateSession => {
+                let s = self.sessions.get(&session).ok_or(ErrorCode::BadHandle)?;
+                // Enumerate is a per-handle right; require it on at least
+                // one handle in the session (the supervisor pattern).
+                if !s.handles.values().any(|h| h.rights & R_ENUMERATE != 0) {
+                    return Err(ErrorCode::Denied);
+                }
+                let mut dump: Vec<(HandleId, String)> = s
+                    .handles
+                    .iter()
+                    .map(|(id, h)| (*id, describe(h)))
+                    .collect();
+                dump.sort();
+                Ok(Response::SessionDump(dump))
+            }
+        }
+    }
+
+    fn resolve_ref_dir(&self, ref_name: &[u8], path: &TreePath) -> Result<(), ErrorCode> {
+        if path.is_empty() {
+            return Ok(());
+        }
+        let root = self
+            .store
+            .refs()
+            .find(|(n, _)| n.as_slice() == ref_name)
+            .ok_or(ErrorCode::Stale)?
+            .1
+            .root;
+        self.resolve_snap_dir(&root, path).map(|_| ())
+    }
+
+    fn resolve_snap_dir(&self, root: &Hash, path: &TreePath) -> Result<Hash, ErrorCode> {
+        let comps: Vec<&[u8]> = path.iter().map(|c| c.as_slice()).collect();
+        match self.store.lookup_at_root(root, &comps) {
+            Ok(Some(Entry { content: Content::DirRoot(h), .. })) => Ok(h),
+            Ok(Some(_)) => Err(ErrorCode::NotADir),
+            Ok(None) => Err(ErrorCode::BadPath),
+            Err(_) => Err(ErrorCode::Internal),
+        }
+    }
+
+    fn list_at_root(
+        &self,
+        root: &Hash,
+        path: &TreePath,
+    ) -> Result<Vec<(Vec<u8>, EntryKind, u64)>, StoreError> {
+        let node = if path.is_empty() {
+            *root
+        } else {
+            match self.resolve_snap_dir(root, path) {
+                Ok(h) => h,
+                Err(_) => return Ok(Vec::new()),
+            }
+        };
+        self.store.list_dir_node(&node)
+    }
+}
+
+fn describe(h: &HandleEntry) -> String {
+    let rights = h.rights;
+    match &h.target {
+        HandleTarget::Ref { name, subtree, .. } => format!(
+            "ref {} subtree depth {} rights {rights:#x}",
+            String::from_utf8_lossy(name),
+            subtree.len()
+        ),
+        HandleTarget::Snapshot { .. } => format!("snapshot rights {rights:#x}"),
+    }
+}
+
+fn store_err(e: StoreError) -> ErrorCode {
+    match e {
+        StoreError::NoSuchRef => ErrorCode::Stale,
+        StoreError::NoSuchSnapshot => ErrorCode::NoSuchSnapshot,
+        StoreError::NotAFile => ErrorCode::BadPath,
+        StoreError::Format(_) => ErrorCode::BadPath,
+        _ => ErrorCode::Internal,
+    }
+}
