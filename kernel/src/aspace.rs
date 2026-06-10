@@ -30,6 +30,8 @@ pub const USER_VA_END: u64 = 1 << 39;
 
 pub const PERM_W: u64 = 1 << 0;
 pub const PERM_X: u64 = 1 << 1;
+/// Device-nGnRnE mapping (MMIO windows). Never executable.
+pub const PERM_DEVICE: u64 = 1 << 2;
 
 const DESC_TABLE: u64 = 0b11;
 const DESC_PAGE: u64 = 0b11;
@@ -37,9 +39,11 @@ const AF: u64 = 1 << 10;
 const UXN: u64 = 1 << 54;
 const PXN: u64 = 1 << 53;
 const SH_INNER: u64 = 0b11 << 8;
+const SH_NONE: u64 = 0b00 << 8;
 const AP_EL0_RW: u64 = 0b01 << 6;
 const AP_EL0_RO: u64 = 0b11 << 6;
-const ATTR_NORMAL: u64 = 0 << 2;
+const ATTR_NORMAL: u64 = 0 << 2; // MAIR Attr0 (mmu.rs)
+const ATTR_DEVICE: u64 = 1 << 2; // MAIR Attr1: device nGnRnE
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MapError {
@@ -150,7 +154,12 @@ impl AspaceObj {
         }
         let ap = if perms & PERM_W != 0 { AP_EL0_RW } else { AP_EL0_RO };
         let xn = if perms & PERM_X != 0 { 0 } else { UXN };
-        let attrs = DESC_PAGE | AF | SH_INNER | ATTR_NORMAL | ap | xn | PXN;
+        let (attr, sh) = if perms & PERM_DEVICE != 0 {
+            (ATTR_DEVICE, SH_NONE)
+        } else {
+            (ATTR_NORMAL, SH_INNER)
+        };
+        let attrs = DESC_PAGE | AF | sh | attr | ap | xn | PXN;
         // First pass: nothing may already be mapped (no silent remap).
         for i in 0..pages {
             let slot = Self::l3_slot(this, va + i * PAGE)?;

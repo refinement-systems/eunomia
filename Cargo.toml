@@ -10,6 +10,7 @@ members = [
     "loader",
     "shell",
     "mkfs",
+    "urt",
 ]
 
 [workspace.package]

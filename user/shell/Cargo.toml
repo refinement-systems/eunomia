@@ -1,0 +1,24 @@
+[package]
+name = "shell"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[[bin]]
+name = "ushell"
+path = "src/main.rs"
+
+[dependencies]
+ipc = { path = "../../ipc" }
+urt = { path = "../../urt" }
+loader = { path = "../../loader", default-features = false }
+storage-server = { path = "../../storage-server", default-features = false, features = ["serde"] }
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+
+[profile.dev]
+panic = "abort"

@@ -1,0 +1,22 @@
+[package]
+name = "storaged"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+ipc = { path = "../../ipc" }
+urt = { path = "../../urt" }
+cas = { path = "../../cas", default-features = false }
+dma-pool = { path = "../../dma-pool" }
+virtio-blk = { path = "../../virtio-blk", default-features = false }
+storage-server = { path = "../../storage-server", default-features = false, features = ["serde"] }
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+
+[profile.dev]
+panic = "abort"

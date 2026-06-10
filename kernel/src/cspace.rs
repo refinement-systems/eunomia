@@ -29,6 +29,10 @@ pub struct Rights(pub u8);
 impl Rights {
     pub const READ: u8 = 1 << 0; // recv / wait
     pub const WRITE: u8 = 1 << 1; // send / signal
+    /// phys-read (§2.5): gates frame_paddr and device mappings. Granted
+    /// only on boot-created device/DMA caps — ALL deliberately excludes
+    /// it so ordinary derivation chains can never reach a PA.
+    pub const PHYS: u8 = 1 << 2;
     pub const ALL: Rights = Rights(0b11);
 
     pub fn has(self, bits: u8) -> bool {

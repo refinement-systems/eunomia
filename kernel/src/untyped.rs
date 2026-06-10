@@ -166,7 +166,14 @@ pub unsafe fn retype(
         size,
         watermark: end - base,
     };
-    (*dst).cap = Cap { kind, rights: Rights::ALL };
+    // Frames inherit the untyped's rights so phys-read (§2.5) flows only
+    // from boot untypeds along explicit grants; kernel objects get the
+    // ordinary full mask.
+    let rights = match ty {
+        ObjType::Frame => (*ut_slot).cap.rights,
+        _ => Rights::ALL,
+    };
+    (*dst).cap = Cap { kind, rights };
     cspace::cdt_insert_child(ut_slot, dst);
     if let CapKind::Channel(ch, _) = kind {
         crate::channel::endpoint_cap_added(ch, cspace::ChanEnd::A);

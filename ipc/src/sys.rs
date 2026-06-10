@@ -31,6 +31,9 @@ pub const RIGHTS_ALL: u64 = 3;
 
 pub const PERM_W: u64 = 1;
 pub const PERM_X: u64 = 2;
+pub const PERM_DEVICE: u64 = 4;
+
+pub const RIGHT_PHYS: u64 = 4;
 
 pub const EV_READABLE: u64 = 0;
 pub const EV_WRITABLE: u64 = 1;
@@ -169,4 +172,15 @@ pub fn thread_start_as(tcb: u32, cspace: u32, aspace: u32, entry: u64, sp: u64, 
     unsafe {
         syscall(18, tcb as u64, cspace as u64, aspace as u64, entry, sp, prio)
     }
+}
+
+/// Physical address of a frame — phys-read right required (§2.5); the
+/// DmaPool is the only legitimate caller.
+pub fn frame_paddr(frame: u32) -> i64 {
+    unsafe { syscall(19, frame as u64, 0, 0, 0, 0, 0) }
+}
+
+/// Non-blocking console byte (scaffold until the userspace UART driver).
+pub fn debug_getc() -> i64 {
+    unsafe { syscall(20, 0, 0, 0, 0, 0, 0) }
 }

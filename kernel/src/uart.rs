@@ -25,6 +25,21 @@ impl Uart {
     }
 }
 
+const FR_RXFE: u32 = 1 << 4; // RX FIFO empty
+
+/// Non-blocking receive (debug console scaffold).
+pub fn getc() -> Option<u8> {
+    let fr = (UART_BASE + FR) as *const u32;
+    let dr = (UART_BASE + DR) as *const u32;
+    unsafe {
+        if fr.read_volatile() & FR_RXFE != 0 {
+            None
+        } else {
+            Some(dr.read_volatile() as u8)
+        }
+    }
+}
+
 impl core::fmt::Write for Uart {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         for byte in s.bytes() {

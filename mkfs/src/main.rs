@@ -67,7 +67,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let size_mib: u64 = args.get(3).map(|s| s.parse()).transpose()?.unwrap_or(64);
 
     let dev = FileDev::create(image, size_mib * 1024 * 1024)?;
-    let mut store = Store::format(dev, StoreOptions::default())?;
+    // A modest WAL: recovery replay buffers the whole region, and the
+    // on-OS server has megabytes of heap, not gigabytes. (Streaming
+    // replay is recorded M4 debt in store.rs.)
+    let opts = StoreOptions { wal_len: 1024 * 1024, ..StoreOptions::default() };
+    let mut store = Store::format(dev, opts)?;
     store.create_ref(b"main")?;
 
     let mut prefix = Vec::new();

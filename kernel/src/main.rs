@@ -65,6 +65,8 @@ pub extern "C" fn kernel_main() -> ! {
 
         // Slot 0: all remaining free DRAM below the EL0 window as init's
         // untyped — the root of every grant in the system (§1, §2.5).
+        // Boot untypeds carry phys-read (§2.5): frames retyped from them
+        // inherit it, and init alone decides where it propagates.
         let slot0 = CSpaceObj::slot(root, 0);
         (*slot0).cap = Cap {
             kind: CapKind::Untyped {
@@ -72,7 +74,18 @@ pub extern "C" fn kernel_main() -> ! {
                 size: mmu::USER_BASE - untyped_base,
                 watermark: 0,
             },
-            rights: Rights::ALL,
+            rights: Rights(Rights::READ | Rights::WRITE | Rights::PHYS),
+        };
+        // Slot 2: the DRAM above the identity user window, for delegation
+        // (the shell's spawner draws from it).
+        let slot2 = CSpaceObj::slot(root, 2);
+        (*slot2).cap = Cap {
+            kind: CapKind::Untyped {
+                base: mmu::USER_BASE + mmu::USER_SIZE,
+                size: 0x5000_0000 - (mmu::USER_BASE + mmu::USER_SIZE),
+                watermark: 0,
+            },
+            rights: Rights(Rights::READ | Rights::WRITE | Rights::PHYS),
         };
         writeln!(
             out,
@@ -82,6 +95,16 @@ pub extern "C" fn kernel_main() -> ! {
             (mmu::USER_BASE - untyped_base) / 1024
         )
         .unwrap();
+
+        // Slot 3: the virtio-mmio window (32 transports × 0x200 at
+        // 0x0a00_0000 on QEMU virt) as a phys-capable device frame.
+        // Init delegates it (or an attenuated copy) to the one DMA
+        // driver; phys-read never enters ordinary derivation (§2.5).
+        let slot3 = CSpaceObj::slot(root, 3);
+        (*slot3).cap = Cap {
+            kind: CapKind::Frame { base: 0x0a00_0000, pages: 4, mapping: None },
+            rights: Rights(Rights::READ | Rights::WRITE | Rights::PHYS),
+        };
 
         // Slot 1: init's own thread cap.
         (*init).cspace = root;

@@ -409,6 +409,12 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
             {
                 return Some(ERR_PERM);
             }
+            // Device mappings only via phys-capable caps (§2.5).
+            if perms & crate::aspace::PERM_DEVICE != 0
+                && !(*fr_slot).cap.rights.has(Rights::PHYS)
+            {
+                return Some(ERR_PERM);
+            }
             match crate::aspace::AspaceObj::map(asp, base, a[2], pages, perms) {
                 Ok(()) => {
                     (*asp).hdr.refs += 1;
@@ -511,6 +517,27 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
             timer::arm(t, n, a[2], timer::counter().saturating_add(a[3]));
             Some(0)
         }
+        // frame_paddr(frame_slot) → PA. Gated on the phys-read bit
+        // (§2.5): only the DmaPool holder's caps carry it.
+        19 => {
+            let s = cur_slot(a[0]);
+            if s.is_null() {
+                return Some(ERR_BADSLOT);
+            }
+            let CapKind::Frame { base, .. } = (*s).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            if !(*s).cap.rights.has(Rights::PHYS) {
+                return Some(ERR_PERM);
+            }
+            Some(base as i64)
+        }
+        // debug_getc() → byte, or ERR_EMPTY. Scaffold console input until
+        // the userspace UART driver exists (§7).
+        20 => Some(match crate::uart::getc() {
+            Some(b) => b as i64,
+            None => ERR_EMPTY,
+        }),
         // exit
         15 => {
             let t = thread::current();
