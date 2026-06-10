@@ -29,7 +29,8 @@ doc/spec/        Design documents
 ### Kernel (cross-compiled for AArch64 bare-metal)
 
 ```sh
-# Build (target and build-std set by kernel/.cargo/config.toml)
+# Build (target aarch64-unknown-none-softfloat and build-std set by
+# kernel/.cargo/config.toml; softfloat because trap frames don't save SIMD)
 cd kernel && cargo build
 
 # Release build
@@ -38,11 +39,15 @@ cd kernel && cargo build --release
 # Run in QEMU (uses the runner in kernel/.cargo/config.toml)
 cd kernel && cargo run
 
-# Run with GDB stub (attach with gdb-multiarch on :1234)
-qemu-system-aarch64 -machine virt -cpu cortex-a72 -m 256M -nographic \
-  -serial mon:stdio -kernel target/aarch64-unknown-none/debug/kernel \
+# Run manually / with GDB stub (attach with gdb-multiarch on :1234).
+# gic-version=3 is required (gic.rs drives GICv3 redistributor + ICC_*).
+qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a72 -m 256M \
+  -nographic -serial mon:stdio \
+  -kernel target/aarch64-unknown-none-softfloat/debug/kernel \
   -s -S
 ```
+Note: the cargo target directory is at the workspace root (`target/`), not
+under `kernel/`.
 
 ### Host crates (storage-server, cas, mkfs, etc.)
 
@@ -75,16 +80,38 @@ bash tools/tla/tla-model-check.sh tla/cap_revocation/CapRevocation.tla
 
 | Milestone | Status | Key deliverable |
 |-----------|--------|-----------------|
-| **M0** | 🚧 In progress | Boot, UART, MMU, exception handling |
-| **M1** | 🔲 Not started | Caps + threads + async channels; CDT revoke |
-| **M2** | 🔲 Not started | virtio-blk; CAS + prolly tree; session protocol; mkfs |
+| **M0** | ✅ Done | Boot, UART, MMU, exception handling |
+| **M1** | ✅ Done | Caps + threads + async channels; CDT revoke |
+| **M2** | 🚧 In progress | virtio-blk; CAS + prolly tree; session protocol; mkfs |
 | **M3** | 🔲 Not started | ELF loader; spawn-with-caps; shell |
 | **M4** | 🔲 Not started | Snapshot / rollback demo (MVP) |
 | **M5** | 🔲 Not started | GC + history rewriting |
 
-### M0 exit criterion
-Boot QEMU → kernel prints over PL011 → MMU enabled → synchronous exception
-triggered, caught, and reported → system halts with ESR/ELR printed.
+Both TLA+ models (CapRevocation, CommitProtocol) are complete and
+TLC-checked — the M1/M2 formal gates are cleared. The `cas` crate's
+chunker + prolly tree + canonical-form proptest suite passes (incl. Miri).
+
+### M2 progress
+Done (host-side): the full storage engine in `cas` (`dev.rs` block devices
+incl. crash-injection, `disk.rs` on-disk formats, `overlay.rs` memtable,
+`store.rs` WAL/flush/A-B-commit/recovery — crash-injection proptest mirrors
+the TLA+ AckedWritesRecoverable invariant); `mkfs` builds bootable images
+from a host tree (integration-tested); `storage-server/src/lib.rs` has the
+transport-agnostic session/handle/ticket layer (7 semantics tests).
+Remaining for M2: dma-pool + virtio-blk + kernel frame caps/mapping +
+running the server against the virtio disk in QEMU. The IPC transport
+binding (postcard over channels) lands with M3 processes.
+
+### M1 exit criterion (met)
+Booting prints `1234M1 PASS`: the embedded EL0 test program
+(`kernel/src/user.rs`) retypes untyped into kernel objects, builds a second
+thread's cspace explicitly, exchanges a message + derived cap over a
+channel with notification-driven waiting, then revokes the parent cap and
+verifies both the received copy and a queued in-flight cap died; a timer
+object signals a bound notification. The embedded user program is an M1
+scaffold, replaced by real binaries at M3 — it must not call into kernel
+.text (EL0 execute-never), hence `opt-level = 1` for dev and care with
+non-`#[inline(always)]` helpers in user.rs.
 
 ### Sequencing rules
 - **TLA+ `CapRevocation` model must be checked before M1 implementation.**
@@ -136,14 +163,20 @@ The IPC crate (`ipc/`) is the first serious Loom/Shuttle target (§3.5).
 
 | File | Responsibility |
 |------|---------------|
-| `main.rs` | Entry point (`kernel_main`), panic handler |
+| `main.rs` | Entry point (`kernel_main`), boot caps, first eret, panic handler |
 | `boot.rs` | `_start` assembly: core selection, SP_EL1, BSS zero, → kernel_main |
 | `uart.rs` | PL011 UART driver (MMIO at 0x0900_0000); `core::fmt::Write` impl |
-| `exceptions.rs` | AArch64 exception vector table + EL1 handlers |
-| `mmu.rs` | Identity-map MMU setup: MAIR/TCR/TTBR0, enable SCTLR_EL1.M |
-
-M1 additions: `cspace.rs`, `untyped.rs`, `thread.rs`, `channel.rs`,
-`notification.rs`, `timer.rs`, `syscall.rs`.
+| `exceptions.rs` | Vector table; EL0 trap-frame save/restore; EL1 = fatal |
+| `mmu.rs` | Identity map: 2 MiB L2 blocks for DRAM, EL0 window at 0x4800_0000 |
+| `cspace.rs` | Cap slots, CDT (parent/child/sibling), derive/delete/revoke/move |
+| `untyped.rs` | Untyped caps (region+watermark inline), retype, reset |
+| `thread.rs` | TCB, TrapFrame layout, ready queues, `maybe_switch` |
+| `channel.rs` | Two-ring channels, CDT-visible queue cap slots, event bindings |
+| `notification.rs` | Signal word + FIFO waiter queue |
+| `timer.rs` | Generic-timer tick (100 Hz), timer objects, CNTVCT helpers |
+| `gic.rs` | GICv3 minimal bring-up (vtimer PPI 27), ack/eoi |
+| `syscall.rs` | SVC dispatch (x7 = nr); M1 scaffold ABI, not stable |
+| `user.rs` | Embedded EL0 test program (M1 exit criterion; removed at M3) |
 
 ### QEMU virt memory map (relevant to M0)
 ```
