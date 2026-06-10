@@ -82,9 +82,9 @@ bash tools/tla/tla-model-check.sh tla/cap_revocation/CapRevocation.tla
 |-----------|--------|-----------------|
 | **M0** | ✅ Done | Boot, UART, MMU, exception handling |
 | **M1** | ✅ Done | Caps + threads + async channels; CDT revoke |
-| **M2** | 🚧 Host side done | virtio-blk; CAS + prolly tree; session protocol; mkfs |
-| **M3** | 🚧 Core done | ELF loader; spawn-with-caps; shell |
-| **M4** | 🔲 Not started | Snapshot / rollback demo (MVP) |
+| **M2** | ✅ Done | virtio-blk; CAS + prolly tree; session protocol; mkfs |
+| **M3** | ✅ Done | ELF loader; spawn-with-caps; shell |
+| **M4** | ✅ Done | Snapshot / rollback demo (MVP) |
 | **M5** | 🔲 Not started | GC + history rewriting |
 
 Both TLA+ models (CapRevocation, CommitProtocol) are complete and
@@ -113,12 +113,19 @@ m1-test` boots the M1 exit test instead. QEMU prints "M3 SPAWN PASS".
 Userspace linker scripts must keep each permission class page-aligned
 (one PT_LOAD per class — the loader maps per segment).
 
-### M4 critical path (next)
-The storage server on-OS needs: cas ported to no_std+alloc (drop
-std::io::Error/HashMap, gate FileDev), a userspace heap allocator, MMIO
-frame caps for the virtio window (driver can poll; IRQ caps optional for
-MVP), the postcard IPC transport (§3.7), shell + console input, mkfs
-image as a QEMU virtio drive (`-global virtio-mmio.force-legacy=false`).
+### M4: the MVP demo (done)
+`bash scripts/run-demo.sh` builds everything, assembles a demo image with
+mkfs, and boots the full system: init spawns storaged (virtio-blk over
+the MMIO window + DMA region it grants, postcard session protocol,
+blocks on a readable→notification binding) and the shell
+(ls/cat/write/rm/snap/snaps/rollback/sync/run). `run bin/hello` loads an
+ELF from the versioned store and spawns it with an explicit cspace.
+cas/storage-server/virtio-blk are no_std+alloc (`urt` provides the
+userspace heap). Remaining debt: streaming WAL replay (mount buffers the
+whole WAL region — mkfs images use a 1 MiB WAL), IRQ-driven virtio
+completion (driver polls), bulk data path (reads are message-bounded).
+
+Remaining milestone: M5 (GC + history rewriting).
 
 ### M1 exit criterion (met)
 Booting prints `1234M1 PASS`: the embedded EL0 test program
