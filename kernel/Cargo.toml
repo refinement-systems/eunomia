@@ -7,4 +7,10 @@ edition.workspace = true
 name = "kernel"
 path = "src/main.rs"
 
+[features]
+# Boot the M1 embedded EL0 exit-criterion test instead of loading the
+# real init process.
+m1-test = []
+
 [dependencies]
+loader = { path = "../loader", default-features = false }

@@ -13,6 +13,8 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+pub mod sys;
+
 // ── Milestone M1 work items ──────────────────────────────────────────────────
 
 /// Opaque handle to a kernel channel endpoint.

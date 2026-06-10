@@ -5,3 +5,7 @@ edition.workspace = true
 
 [dependencies]
 ipc = { path = "../ipc" }
+
+[features]
+default = ["std"]
+std = []

@@ -1,0 +1,19 @@
+[package]
+name = "hello"
+version = "0.1.0"
+edition = "2021"
+
+# Built by kernel/build.rs for aarch64-unknown-none-softfloat; not a
+# workspace member (host builds make no sense for a no_std EL0 binary).
+[workspace]
+
+[dependencies]
+ipc = { path = "../../ipc" }
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+
+[profile.dev]
+panic = "abort"

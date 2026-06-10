@@ -50,7 +50,7 @@ pub extern "C" fn kernel_main() -> ! {
     exceptions::init();
 
     let mut out = uart::Uart::new();
-    writeln!(out, "\nEunomia OS — M1").unwrap();
+    writeln!(out, "\nEunomia OS").unwrap();
 
     mmu::init();
     gic::init();
@@ -59,16 +59,17 @@ pub extern "C" fn kernel_main() -> ! {
 
     unsafe {
         let root = addr_of_mut!(ROOT_CSPACE.obj);
+        let init = addr_of_mut!(INIT_TCB);
 
-        // Slot 0: all free DRAM between the kernel image and the user
-        // window, as init's untyped. Every kernel object the test creates
-        // is carved from this (§2.5, §3.2).
-        let ut_base = (addr_of!(__kernel_end) as u64 + 0xFFF) & !0xFFF;
+        let untyped_base = setup_init(root, init, &mut out);
+
+        // Slot 0: all remaining free DRAM below the EL0 window as init's
+        // untyped — the root of every grant in the system (§1, §2.5).
         let slot0 = CSpaceObj::slot(root, 0);
         (*slot0).cap = Cap {
             kind: CapKind::Untyped {
-                base: ut_base,
-                size: mmu::USER_BASE - ut_base,
+                base: untyped_base,
+                size: mmu::USER_BASE - untyped_base,
                 watermark: 0,
             },
             rights: Rights::ALL,
@@ -76,22 +77,16 @@ pub extern "C" fn kernel_main() -> ! {
         writeln!(
             out,
             "init untyped: {:#x}..{:#x} ({} KiB)",
-            ut_base,
+            untyped_base,
             mmu::USER_BASE,
-            (mmu::USER_BASE - ut_base) / 1024
+            (mmu::USER_BASE - untyped_base) / 1024
         )
         .unwrap();
 
-        // Init thread: the embedded EL0 test program (user.rs), with a
-        // cap to itself in slot 1.
-        let init = addr_of_mut!(INIT_TCB);
+        // Slot 1: init's own thread cap.
         (*init).cspace = root;
         (*root).hdr.refs += 1;
         (*init).priority = 16;
-        (*init).frame = TrapFrame::zeroed();
-        (*init).frame.elr = (user::user_main as extern "C" fn(u64) -> !) as usize as u64;
-        (*init).frame.sp_el0 = user::USER_STACK_TOP;
-        (*init).frame.spsr = 0; // EL0t, interrupts unmasked
         (*init).state = ThreadState::Running;
         let slot1 = CSpaceObj::slot(root, 1);
         (*slot1).cap = Cap {
@@ -99,19 +94,90 @@ pub extern "C" fn kernel_main() -> ! {
             rights: Rights::ALL,
         };
 
-        // Idle: EL0 WFI loop, priority 0, always ready (§5.4).
+        // Idle: EL0 WFI loop in the identity window, priority 0 (§5.4).
         let idle = addr_of_mut!(IDLE_TCB);
         (*idle).priority = 0;
         (*idle).frame = TrapFrame::zeroed();
         (*idle).frame.elr = (user::user_idle as extern "C" fn(u64) -> !) as usize as u64;
-        (*idle).frame.sp_el0 = user::T2_STACK_TOP - 0x1_0000;
+        (*idle).frame.sp_el0 = mmu::USER_BASE + mmu::USER_SIZE - 0x2_0000;
         (*idle).frame.spsr = 0;
         thread::enqueue(idle);
 
         thread::set_current(init);
+        thread::activate_aspace(init);
         writeln!(out, "entering EL0").unwrap();
         enter_first_thread(&(*init).frame);
     }
+}
+
+/// M1 regression path: the embedded identity-window test program.
+#[cfg(feature = "m1-test")]
+unsafe fn setup_init(_root: *mut CSpaceObj, init: *mut Tcb, out: &mut uart::Uart) -> u64 {
+    writeln!(out, "boot: M1 embedded test").unwrap();
+    (*init).frame = TrapFrame::zeroed();
+    (*init).frame.elr = (user::user_main as extern "C" fn(u64) -> !) as usize as u64;
+    (*init).frame.sp_el0 = user::USER_STACK_TOP;
+    (*init).frame.spsr = 0;
+    (addr_of!(__kernel_end) as u64 + 0xFFF) & !0xFFF
+}
+
+/// Real boot (§1): construct exactly one process — init — by loading the
+/// embedded init ELF into a fresh address space. Everything not carved
+/// here becomes init's untyped.
+#[cfg(not(feature = "m1-test"))]
+unsafe fn setup_init(_root: *mut CSpaceObj, init: *mut Tcb, out: &mut uart::Uart) -> u64 {
+    use aspace::{AspaceObj, PAGE, PERM_W, PERM_X};
+
+    static INIT_ELF: &[u8] = include_bytes!(env!("INIT_ELF_PATH"));
+    const STACK_TOP: u64 = 0x9000_0000;
+    const STACK_PAGES: u64 = 16;
+
+    let mut bump = (addr_of!(__kernel_end) as u64 + PAGE - 1) & !(PAGE - 1);
+    let mut carve = |bytes: u64| {
+        let p = bump;
+        bump = (bump + bytes + PAGE - 1) & !(PAGE - 1);
+        p
+    };
+
+    let asp = carve(AspaceObj::bytes_for(16) as u64) as *mut AspaceObj;
+    AspaceObj::init(asp, 16);
+
+    let img = loader::elf::parse(INIT_ELF).expect("embedded init ELF is malformed");
+    for seg in &img.segments[..img.nsegments] {
+        let va_start = seg.vaddr & !(PAGE - 1);
+        let va_end = (seg.vaddr + seg.memsz + PAGE - 1) & !(PAGE - 1);
+        let pages = (va_end - va_start) / PAGE;
+        let pa = carve(pages * PAGE);
+        core::ptr::write_bytes(pa as *mut u8, 0, (pages * PAGE) as usize);
+        core::ptr::copy_nonoverlapping(
+            INIT_ELF.as_ptr().add(seg.offset as usize),
+            (pa + (seg.vaddr - va_start)) as *mut u8,
+            seg.filesz as usize,
+        );
+        let mut perms = 0;
+        if seg.flags & loader::elf::PF_W != 0 {
+            perms |= PERM_W;
+        }
+        if seg.flags & loader::elf::PF_X != 0 {
+            perms |= PERM_X;
+        }
+        AspaceObj::map(asp, pa, va_start, pages, perms).expect("mapping init segment");
+    }
+
+    let stack_pa = carve(STACK_PAGES * PAGE);
+    core::ptr::write_bytes(stack_pa as *mut u8, 0, (STACK_PAGES * PAGE) as usize);
+    AspaceObj::map(asp, stack_pa, STACK_TOP - STACK_PAGES * PAGE, STACK_PAGES, PERM_W)
+        .expect("mapping init stack");
+
+    (*asp).hdr.refs += 1; // init thread's reference
+    (*init).aspace = asp;
+    (*init).frame = TrapFrame::zeroed();
+    (*init).frame.elr = img.entry;
+    (*init).frame.sp_el0 = STACK_TOP;
+    (*init).frame.spsr = 0;
+
+    writeln!(out, "boot: init ELF loaded, entry {:#x}", img.entry).unwrap();
+    bump
 }
 
 /// Drop into EL0 for the first time: load the frame's PC/SP/PSTATE, clear

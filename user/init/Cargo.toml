@@ -1,0 +1,20 @@
+[package]
+name = "init"
+version = "0.1.0"
+edition = "2021"
+
+# Built by kernel/build.rs for aarch64-unknown-none-softfloat; not a
+# workspace member. The hello ELF path arrives via HELLO_ELF_PATH.
+[workspace]
+
+[dependencies]
+ipc = { path = "../../ipc" }
+loader = { path = "../../loader", default-features = false }
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+
+[profile.dev]
+panic = "abort"
