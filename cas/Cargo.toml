@@ -1,0 +1,12 @@
+[package]
+name = "cas"
+version.workspace = true
+edition.workspace = true
+
+# "std" enables host testing; "no_std" for embedded use is planned but
+# not yet wired — all algorithms are host-testable (spec §1).
+[features]
+default = ["std"]
+std = []
+
+[dependencies]

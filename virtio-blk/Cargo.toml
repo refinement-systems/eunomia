@@ -1,0 +1,11 @@
+[package]
+name = "virtio-blk"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+std = []
+
+[dependencies]
+dma-pool = { path = "../dma-pool" }

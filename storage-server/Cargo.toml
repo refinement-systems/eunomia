@@ -1,0 +1,8 @@
+[package]
+name = "storage-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ipc  = { path = "../ipc" }
+cas  = { path = "../cas" }

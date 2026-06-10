@@ -1,0 +1,11 @@
+[package]
+name = "ipc"
+version.workspace = true
+edition.workspace = true
+
+# no_std by default; enable "std" for host testing.
+[features]
+default = []
+std = []
+
+[dependencies]

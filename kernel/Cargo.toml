@@ -1,0 +1,10 @@
+[package]
+name = "kernel"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "kernel"
+path = "src/main.rs"
+
+[dependencies]

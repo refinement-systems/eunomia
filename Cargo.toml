@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "kernel",
+    "ipc",
+    "dma-pool",
+    "cas",
+    "storage-server",
+    "virtio-blk",
+    "loader",
+    "shell",
+    "mkfs",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = "s"

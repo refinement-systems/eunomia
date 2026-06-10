@@ -1,0 +1,8 @@
+[package]
+name = "mkfs"
+version.workspace = true
+edition.workspace = true
+
+# Host tool — always std, always native target.
+[dependencies]
+cas = { path = "../cas" }
