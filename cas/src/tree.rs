@@ -9,6 +9,7 @@
 //! sharing and O(depth) cost per edit.
 
 use crate::hash::Hash;
+use alloc::vec::Vec;
 use crate::prolly::{Content, Dir, Entry, EntryKind, FormatError, NodeStore};
 
 /// Resolve a path to an entry. An empty path names no entry (the root

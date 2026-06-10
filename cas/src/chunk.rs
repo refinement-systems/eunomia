@@ -14,6 +14,8 @@
 //! gear boundary degrade to fixed max-size cuts and may never realign —
 //! inherent to CDC, accepted (same as upstream FastCDC).
 
+use alloc::vec::Vec;
+
 /// Gear table — format constant. splitmix64 stream seeded with 0.
 const fn gear_table() -> [u64; 256] {
     let mut table = [0u64; 256];

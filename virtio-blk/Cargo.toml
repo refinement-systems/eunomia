@@ -8,11 +8,11 @@ edition.workspace = true
 # cas BlockDev adapter for host testing.
 [features]
 default = []
-std = ["dep:cas", "dma-pool/std"]
+std = ["dma-pool/std", "cas/std"]
 
 [dependencies]
 dma-pool = { path = "../dma-pool" }
-cas = { path = "../cas", optional = true }
+cas = { path = "../cas", default-features = false }
 
 [dev-dependencies]
 cas = { path = "../cas" }

@@ -17,12 +17,21 @@
 //! driven by explicit `open_session` / `close_session` calls that the
 //! transport will own.
 
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
+pub mod wire;
+
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
 use cas::dev::BlockDev;
 use cas::hash::Hash;
 use cas::overlay::Path as TreePath;
 use cas::prolly::{Content, Entry, EntryKind};
 use cas::store::{Store, StoreError};
-use std::collections::HashMap;
 
 // ── Rights (§2.3) ───────────────────────────────────────────────────────
 
@@ -59,7 +68,7 @@ pub struct HandleEntry {
 
 #[derive(Default)]
 struct Session {
-    handles: HashMap<HandleId, HandleEntry>,
+    handles: BTreeMap<HandleId, HandleEntry>,
     next_handle: HandleId,
 }
 
@@ -78,8 +87,9 @@ impl Session {
 /// shell presentation. Capability-bearing results are handle ids; tickets
 /// are the only bearer tokens and are one-shot with a TTL.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Request {
-    Read { handle: HandleId, path: TreePath },
+    Read { handle: HandleId, path: TreePath, offset: u64, len: u32 },
     Write { handle: HandleId, path: TreePath, offset: u64, data: Vec<u8> },
     Unlink { handle: HandleId, path: TreePath },
     List { handle: HandleId, path: TreePath },
@@ -97,16 +107,20 @@ pub enum Request {
     RevokeRef { handle: HandleId },
     MintTicket { handle: HandleId, ttl_nanos: u64 },
     RedeemTicket { ticket: [u8; 16] },
+    /// Size of a file (None response = absent).
+    Stat { handle: HandleId, path: TreePath },
     EnumerateSession,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum DirEnt {
     File { name: Vec<u8>, size: u64 },
     Dir { name: Vec<u8> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SnapInfo {
     pub id: u64,
     pub timestamp: u64,
@@ -116,6 +130,7 @@ pub struct SnapInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Response {
     Ok,
     Data(Vec<u8>),
@@ -130,6 +145,7 @@ pub enum Response {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ErrorCode {
     BadHandle,
     /// Generation mismatch: the handle was mass-revoked (§2.2).
@@ -152,9 +168,9 @@ struct PendingTicket {
 
 pub struct Server<D: BlockDev> {
     store: Store<D>,
-    sessions: HashMap<SessionId, Session>,
+    sessions: BTreeMap<SessionId, Session>,
     next_session: SessionId,
-    tickets: HashMap<[u8; 16], PendingTicket>,
+    tickets: BTreeMap<[u8; 16], PendingTicket>,
     ticket_seq: u64,
     ticket_seed: u64,
 }
@@ -163,9 +179,9 @@ impl<D: BlockDev> Server<D> {
     pub fn new(store: Store<D>, ticket_seed: u64) -> Server<D> {
         Server {
             store,
-            sessions: HashMap::new(),
+            sessions: BTreeMap::new(),
             next_session: 1,
-            tickets: HashMap::new(),
+            tickets: BTreeMap::new(),
             ticket_seq: 0,
             ticket_seed,
         }
@@ -278,11 +294,12 @@ impl<D: BlockDev> Server<D> {
             | Request::Unlink { path, .. }
             | Request::List { path, .. }
             | Request::OpenChild { path, .. }
+            | Request::Stat { path, .. }
             | Request::OpenSnapshot { path, .. } => Self::validate_path(path)?,
             _ => {}
         }
         match req {
-            Request::Read { handle, path } => {
+            Request::Read { handle, path, offset, len } => {
                 let e = self.lookup(session, handle, R_READ)?;
                 let data = match &e.target {
                     HandleTarget::Ref { name, subtree, .. } => self
@@ -294,7 +311,11 @@ impl<D: BlockDev> Server<D> {
                     }
                 };
                 Ok(match data {
-                    Some(d) => Response::Data(d),
+                    Some(d) => {
+                        let start = (offset as usize).min(d.len());
+                        let end = start.saturating_add(len as usize).min(d.len());
+                        Response::Data(d[start..end].to_vec())
+                    }
                     None => Response::NotFound,
                 })
             }
@@ -488,6 +509,22 @@ impl<D: BlockDev> Server<D> {
                 }
                 let s = self.sessions.get_mut(&session).ok_or(ErrorCode::BadHandle)?;
                 Ok(Response::Handle(s.insert(pending.entry)))
+            }
+            Request::Stat { handle, path } => {
+                let e = self.lookup(session, handle, R_READ)?;
+                let data = match &e.target {
+                    HandleTarget::Ref { name, subtree, .. } => self
+                        .store
+                        .read(name, &Self::full_path(subtree, &path))
+                        .map_err(store_err)?,
+                    HandleTarget::Snapshot { root } => {
+                        self.store.read_at_root(root, &path).map_err(store_err)?
+                    }
+                };
+                Ok(match data {
+                    Some(d) => Response::SnapId(d.len() as u64),
+                    None => Response::NotFound,
+                })
             }
             Request::EnumerateSession => {
                 let s = self.sessions.get(&session).ok_or(ErrorCode::BadHandle)?;

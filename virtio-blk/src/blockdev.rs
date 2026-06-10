@@ -4,18 +4,18 @@
 //! (§4.8) rides on QEMU honoring FLUSH under cache=writeback.
 
 use crate::{Mmio, VirtioBlk, VirtioError, SECTOR};
-use cas::dev::BlockDev;
+use alloc::vec;
+use cas::dev::{BlockDev, DevError, DevResult};
+use core::cell::RefCell;
 use dma_pool::DmaBacking;
-use std::cell::RefCell;
-use std::io;
 
 pub struct VirtioBlockDev<M: Mmio, B: DmaBacking> {
     inner: RefCell<VirtioBlk<M, B>>,
     len: u64,
 }
 
-fn io_err(e: VirtioError) -> io::Error {
-    io::Error::other(format!("virtio-blk: {e:?}"))
+fn io_err(_e: VirtioError) -> DevError {
+    DevError::Io("virtio-blk request failed")
 }
 
 impl<M: Mmio, B: DmaBacking> VirtioBlockDev<M, B> {
@@ -26,7 +26,7 @@ impl<M: Mmio, B: DmaBacking> VirtioBlockDev<M, B> {
 }
 
 impl<M: Mmio, B: DmaBacking> BlockDev for VirtioBlockDev<M, B> {
-    fn read(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+    fn read(&self, offset: u64, buf: &mut [u8]) -> DevResult<()> {
         if buf.is_empty() {
             return Ok(());
         }
@@ -49,7 +49,7 @@ impl<M: Mmio, B: DmaBacking> BlockDev for VirtioBlockDev<M, B> {
         Ok(())
     }
 
-    fn write(&mut self, offset: u64, data: &[u8]) -> io::Result<()> {
+    fn write(&mut self, offset: u64, data: &[u8]) -> DevResult<()> {
         if data.is_empty() {
             return Ok(());
         }
@@ -77,7 +77,7 @@ impl<M: Mmio, B: DmaBacking> BlockDev for VirtioBlockDev<M, B> {
         Ok(())
     }
 
-    fn flush(&mut self) -> io::Result<()> {
+    fn flush(&mut self) -> DevResult<()> {
         self.inner.borrow_mut().flush().map_err(io_err)
     }
 

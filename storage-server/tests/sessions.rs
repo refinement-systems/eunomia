@@ -31,11 +31,11 @@ fn handles_are_session_relative() {
     // Same integer, different sessions: handle 0 means something in s1,
     // nothing in s2 — the integers carry no authority (§2.4).
     assert_eq!(
-        srv.handle(s1, Request::Read { handle: 0, path: p(&["top.txt"]) }, 10),
+        srv.handle(s1, Request::Read { handle: 0, path: p(&["top.txt"]), offset: 0, len: u32::MAX }, 10),
         Response::Data(b"top secret".to_vec())
     );
     assert_eq!(
-        srv.handle(s2, Request::Read { handle: 0, path: p(&["top.txt"]) }, 10),
+        srv.handle(s2, Request::Read { handle: 0, path: p(&["top.txt"]), offset: 0, len: u32::MAX }, 10),
         Response::Err(ErrorCode::BadHandle)
     );
 }
@@ -56,18 +56,18 @@ fn subtree_confinement_by_unreachability() {
 
     // Inside the subtree: fine.
     assert_eq!(
-        srv.handle(s, Request::Read { handle: sub, path: p(&["readme"]) }, 11),
+        srv.handle(s, Request::Read { handle: sub, path: p(&["readme"]), offset: 0, len: u32::MAX }, 11),
         Response::Data(b"public info".to_vec())
     );
     // The sibling simply has no name from here (§2.3): the same path that
     // works on the root handle resolves under pub/ and finds nothing.
     assert_eq!(
-        srv.handle(s, Request::Read { handle: sub, path: p(&["top.txt"]) }, 11),
+        srv.handle(s, Request::Read { handle: sub, path: p(&["top.txt"]), offset: 0, len: u32::MAX }, 11),
         Response::NotFound
     );
     // ".." is path syntax, never stored — rejected outright (§4.9).
     assert_eq!(
-        srv.handle(s, Request::Read { handle: sub, path: p(&["..", "top.txt"]) }, 11),
+        srv.handle(s, Request::Read { handle: sub, path: p(&["..", "top.txt"]), offset: 0, len: u32::MAX }, 11),
         Response::Err(ErrorCode::BadPath)
     );
     // Writes through the subtree handle land under the subtree.
@@ -80,7 +80,7 @@ fn subtree_confinement_by_unreachability() {
         Response::Ok
     );
     assert_eq!(
-        srv.handle(s, Request::Read { handle: 0, path: p(&["pub", "new"]) }, 13),
+        srv.handle(s, Request::Read { handle: 0, path: p(&["pub", "new"]), offset: 0, len: u32::MAX }, 13),
         Response::Data(b"x".to_vec())
     );
 }
@@ -124,7 +124,7 @@ fn attenuation_is_monotone() {
         Response::Err(ErrorCode::Denied)
     );
     assert_eq!(
-        srv.handle(s, Request::Read { handle: child, path: p(&["leaf"]) }, 14),
+        srv.handle(s, Request::Read { handle: child, path: p(&["leaf"]), offset: 0, len: u32::MAX }, 14),
         Response::Data(b"leaf data".to_vec())
     );
 }
@@ -151,7 +151,7 @@ fn generation_bump_revokes_all_handles_lazily() {
     // including the revoker's own and s2's derived subtree handle.
     for (sess, h) in [(s1, 0), (s2, 0), (s2, sub)] {
         assert_eq!(
-            srv.handle(sess, Request::Read { handle: h, path: p(&["readme"]) }, 12),
+            srv.handle(sess, Request::Read { handle: h, path: p(&["readme"]), offset: 0, len: u32::MAX }, 12),
             Response::Err(ErrorCode::Stale),
             "session {sess} handle {h}"
         );
@@ -161,7 +161,7 @@ fn generation_bump_revokes_all_handles_lazily() {
     let fresh = srv.root_grant(b"main").unwrap();
     let s3 = srv.open_session(vec![fresh]);
     assert_eq!(
-        srv.handle(s3, Request::Read { handle: 0, path: p(&["top.txt"]) }, 13),
+        srv.handle(s3, Request::Read { handle: 0, path: p(&["top.txt"]), offset: 0, len: u32::MAX }, 13),
         Response::Data(b"top secret".to_vec())
     );
 }
@@ -203,7 +203,7 @@ fn snapshots_are_immutable_and_survive_rollback() {
         panic!()
     };
     assert_eq!(
-        srv.handle(s, Request::Read { handle: sh, path: p(&["top.txt"]) }, 103),
+        srv.handle(s, Request::Read { handle: sh, path: p(&["top.txt"]), offset: 0, len: u32::MAX }, 103),
         Response::Data(b"top secret".to_vec())
     );
     // OpenSnapshot strips write rights unconditionally, so the rights
@@ -223,7 +223,7 @@ fn snapshots_are_immutable_and_survive_rollback() {
         Response::Ok
     );
     assert_eq!(
-        srv.handle(s, Request::Read { handle: 0, path: p(&["top.txt"]) }, 106),
+        srv.handle(s, Request::Read { handle: 0, path: p(&["top.txt"]), offset: 0, len: u32::MAX }, 106),
         Response::Data(b"top secret".to_vec())
     );
 
@@ -263,7 +263,7 @@ fn tickets_are_one_shot_with_ttl() {
         panic!()
     };
     assert_eq!(
-        srv.handle(bob, Request::Read { handle: bh, path: p(&["readme"]) }, 26),
+        srv.handle(bob, Request::Read { handle: bh, path: p(&["readme"]), offset: 0, len: u32::MAX }, 26),
         Response::Data(b"public info".to_vec())
     );
 
@@ -312,7 +312,7 @@ fn session_cleanup_and_audit() {
     // Peer-closed → whole table dropped (§2.4 cleanup).
     srv.close_session(s);
     assert_eq!(
-        srv.handle(s, Request::Read { handle: 0, path: p(&["top.txt"]) }, 12),
+        srv.handle(s, Request::Read { handle: 0, path: p(&["top.txt"]), offset: 0, len: u32::MAX }, 12),
         Response::Err(ErrorCode::BadHandle)
     );
 }

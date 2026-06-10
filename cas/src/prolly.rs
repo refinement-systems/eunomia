@@ -29,7 +29,9 @@
 //! trailing bytes are errors.
 
 use crate::hash::Hash;
-use std::collections::{BTreeMap, HashMap};
+use alloc::collections::BTreeMap;
+use alloc::vec;
+use alloc::vec::Vec;
 
 /// Files at or below this size live inline in the directory entry (§4.9).
 /// The rule is a pure function of content, preserving canonical form.
@@ -96,6 +98,7 @@ impl core::fmt::Display for FormatError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for FormatError {}
 
 /// Content-addressed object store: chunks, tree nodes, and chunk lists all
@@ -108,7 +111,7 @@ pub trait NodeStore {
 /// In-memory store for tests and host-side tooling.
 #[derive(Default)]
 pub struct MemStore {
-    objects: HashMap<Hash, Vec<u8>>,
+    objects: BTreeMap<Hash, Vec<u8>>,
 }
 
 impl MemStore {

@@ -13,7 +13,8 @@
 
 use crate::hash::Hash;
 use crate::prolly::{FormatError, Reader};
-use std::collections::BTreeMap;
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 
 pub const SB_SIZE: usize = 4096;
 pub const SB_A_OFF: u64 = 0;

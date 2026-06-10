@@ -4,6 +4,8 @@
 //! function of content, preserving canonical form.
 
 use crate::chunk::{boundaries, ChunkerParams};
+use alloc::vec;
+use alloc::vec::Vec;
 use crate::hash::Hash;
 use crate::prolly::{Content, Entry, EntryKind, FormatError, NodeStore, INLINE_MAX};
 

@@ -3,6 +3,15 @@ name = "storage-server"
 version.workspace = true
 edition.workspace = true
 
+# The lib (sessions/handles/wire) is no_std+alloc for the on-OS build;
+# "std" covers host testing and the placeholder host binary.
+[features]
+default = ["std", "serde"]
+std = ["cas/std"]
+serde = ["dep:serde", "dep:postcard"]
+
 [dependencies]
 ipc  = { path = "../ipc" }
-cas  = { path = "../cas" }
+cas  = { path = "../cas", default-features = false }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"], optional = true }
+postcard = { version = "1", default-features = false, features = ["alloc"], optional = true }

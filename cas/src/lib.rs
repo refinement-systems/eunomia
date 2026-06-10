@@ -18,6 +18,10 @@
 //!
 //! Remaining M2+ work items: `gc` (mark-and-sweep, M5).
 
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
 pub mod chunk;
 pub mod dev;
 pub mod disk;

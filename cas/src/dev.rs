@@ -8,14 +8,38 @@
 //! a crash resolves each unflushed write independently to kept / dropped /
 //! torn (prefix only), in original order — page-cache semantics.
 
-use std::cell::RefCell;
-use std::io;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::cell::RefCell;
+
+/// Device error — the no_std-friendly analogue of std::io::Error. The
+/// `std` feature adds conversions for host backends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DevError {
+    OutOfRange,
+    /// Injected or real I/O failure (power loss, transport error).
+    Io(&'static str),
+}
+
+impl core::fmt::Display for DevError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            DevError::OutOfRange => write!(f, "access past end of device"),
+            DevError::Io(w) => write!(f, "device i/o: {w}"),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for DevError {}
+
+pub type DevResult<T> = Result<T, DevError>;
 
 pub trait BlockDev {
-    fn read(&self, offset: u64, buf: &mut [u8]) -> io::Result<()>;
-    fn write(&mut self, offset: u64, data: &[u8]) -> io::Result<()>;
+    fn read(&self, offset: u64, buf: &mut [u8]) -> DevResult<()>;
+    fn write(&mut self, offset: u64, data: &[u8]) -> DevResult<()>;
     /// fsync barrier: all prior writes are durable when this returns.
-    fn flush(&mut self) -> io::Result<()>;
+    fn flush(&mut self) -> DevResult<()>;
     fn len(&self) -> u64;
 }
 
@@ -31,29 +55,29 @@ impl MemDev {
 }
 
 impl BlockDev for MemDev {
-    fn read(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+    fn read(&self, offset: u64, buf: &mut [u8]) -> DevResult<()> {
         let data = self.data.borrow();
         let start = offset as usize;
         let end = start + buf.len();
         if end > data.len() {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "read past end"));
+            return Err(DevError::OutOfRange);
         }
         buf.copy_from_slice(&data[start..end]);
         Ok(())
     }
 
-    fn write(&mut self, offset: u64, data: &[u8]) -> io::Result<()> {
+    fn write(&mut self, offset: u64, data: &[u8]) -> DevResult<()> {
         let mut d = self.data.borrow_mut();
         let start = offset as usize;
         let end = start + data.len();
         if end > d.len() {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "write past end"));
+            return Err(DevError::OutOfRange);
         }
         d[start..end].copy_from_slice(data);
         Ok(())
     }
 
-    fn flush(&mut self) -> io::Result<()> {
+    fn flush(&mut self) -> DevResult<()> {
         Ok(())
     }
 
@@ -63,13 +87,15 @@ impl BlockDev for MemDev {
 }
 
 /// Host-file device for mkfs and manual testing.
+#[cfg(feature = "std")]
 pub struct FileDev {
     file: std::fs::File,
     len: u64,
 }
 
+#[cfg(feature = "std")]
 impl FileDev {
-    pub fn create(path: &std::path::Path, len: u64) -> io::Result<FileDev> {
+    pub fn create(path: &std::path::Path, len: u64) -> std::io::Result<FileDev> {
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -80,26 +106,27 @@ impl FileDev {
         Ok(FileDev { file, len })
     }
 
-    pub fn open(path: &std::path::Path) -> io::Result<FileDev> {
+    pub fn open(path: &std::path::Path) -> std::io::Result<FileDev> {
         let file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
         let len = file.metadata()?.len();
         Ok(FileDev { file, len })
     }
 }
 
+#[cfg(feature = "std")]
 impl BlockDev for FileDev {
-    fn read(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+    fn read(&self, offset: u64, buf: &mut [u8]) -> DevResult<()> {
         use std::os::unix::fs::FileExt;
-        self.file.read_exact_at(buf, offset)
+        self.file.read_exact_at(buf, offset).map_err(|_| DevError::Io("file read"))
     }
 
-    fn write(&mut self, offset: u64, data: &[u8]) -> io::Result<()> {
+    fn write(&mut self, offset: u64, data: &[u8]) -> DevResult<()> {
         use std::os::unix::fs::FileExt;
-        self.file.write_all_at(data, offset)
+        self.file.write_all_at(data, offset).map_err(|_| DevError::Io("file write"))
     }
 
-    fn flush(&mut self) -> io::Result<()> {
-        self.file.sync_data()
+    fn flush(&mut self) -> DevResult<()> {
+        self.file.sync_data().map_err(|_| DevError::Io("fsync"))
     }
 
     fn len(&self) -> u64 {
@@ -139,10 +166,10 @@ impl CrashDev {
         self.fail_after = None;
     }
 
-    fn check_fail(&mut self) -> io::Result<()> {
+    fn check_fail(&mut self) -> DevResult<()> {
         if let Some(n) = self.fail_after.as_mut() {
             if *n == 0 {
-                return Err(io::Error::other("injected power loss"));
+                return Err(DevError::Io("injected power loss"));
             }
             *n -= 1;
         }
@@ -185,31 +212,31 @@ impl CrashDev {
 }
 
 impl BlockDev for CrashDev {
-    fn read(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+    fn read(&self, offset: u64, buf: &mut [u8]) -> DevResult<()> {
         let cur = self.current.borrow();
         let start = offset as usize;
         let end = start + buf.len();
         if end > cur.len() {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "read past end"));
+            return Err(DevError::OutOfRange);
         }
         buf.copy_from_slice(&cur[start..end]);
         Ok(())
     }
 
-    fn write(&mut self, offset: u64, data: &[u8]) -> io::Result<()> {
+    fn write(&mut self, offset: u64, data: &[u8]) -> DevResult<()> {
         self.check_fail()?;
         let mut cur = self.current.borrow_mut();
         let start = offset as usize;
         let end = start + data.len();
         if end > cur.len() {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "write past end"));
+            return Err(DevError::OutOfRange);
         }
         cur[start..end].copy_from_slice(data);
         self.pending.push((offset, data.to_vec()));
         Ok(())
     }
 
-    fn flush(&mut self) -> io::Result<()> {
+    fn flush(&mut self) -> DevResult<()> {
         self.check_fail()?;
         self.durable.copy_from_slice(&self.current.borrow());
         self.pending.clear();

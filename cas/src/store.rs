@@ -24,7 +24,7 @@
 //!     index is one).
 
 use crate::chunk::ChunkerParams;
-use crate::dev::BlockDev;
+use crate::dev::{BlockDev, DevError};
 use crate::disk::{
     self, RefEntry, RefTable, SnapRow, Superblock, WalOp, SB_A_OFF, SB_B_OFF, SB_SIZE, WAL_OFF,
 };
@@ -33,12 +33,13 @@ use crate::hash::Hash;
 use crate::overlay::{FileState, Overlay, Path};
 use crate::prolly::{Content, Dir, Entry, EntryKind, FormatError, NodeStore};
 use crate::tree;
-use std::collections::{HashMap, VecDeque};
-use std::io;
+use alloc::collections::{BTreeMap, VecDeque};
+use alloc::vec;
+use alloc::vec::Vec;
 
 #[derive(Debug)]
 pub enum StoreError {
-    Io(io::Error),
+    Io(DevError),
     Format(FormatError),
     NoSuperblock,
     NoSuchRef,
@@ -48,8 +49,8 @@ pub enum StoreError {
     NoSpace,
 }
 
-impl From<io::Error> for StoreError {
-    fn from(e: io::Error) -> Self {
+impl From<DevError> for StoreError {
+    fn from(e: DevError) -> Self {
         StoreError::Io(e)
     }
 }
@@ -75,6 +76,7 @@ impl core::fmt::Display for StoreError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for StoreError {}
 
 #[derive(Clone, Copy, Debug)]
@@ -102,8 +104,8 @@ struct ChunkStore<D: BlockDev> {
     chunk_off: u64,
     tail: u64,
     birth_gen: u64,
-    index: HashMap<Hash, (u64, u32)>, // hash → (data offset in region, len)
-    io_error: Option<io::Error>,
+    index: BTreeMap<Hash, (u64, u32)>, // hash → (data offset in region, len)
+    io_error: Option<DevError>,
 }
 
 impl<D: BlockDev> ChunkStore<D> {
@@ -135,7 +137,7 @@ impl<D: BlockDev> NodeStore for ChunkStore<D> {
         }
         let frame = disk::encode_chunk_frame(bytes, self.birth_gen, &hash);
         if self.tail + frame.len() as u64 > self.region_len() {
-            self.io_error = Some(io::Error::other("chunk region full"));
+            self.io_error = Some(DevError::Io("chunk region full"));
             return hash;
         }
         if let Err(e) = self.dev.write(self.chunk_off + self.tail, &frame) {
@@ -171,7 +173,7 @@ pub struct Store<D: BlockDev> {
     /// Working ref table: committed state + flushed-but-uncommitted roots
     /// and staged row edits. Serialized at commit.
     table: RefTable,
-    overlays: HashMap<Vec<u8>, Overlay>,
+    overlays: BTreeMap<Vec<u8>, Overlay>,
     wal_tail: u64,
     wal_seq: u64,
     wal_records: VecDeque<RecMeta>,
@@ -194,7 +196,7 @@ impl<D: BlockDev> Store<D> {
             chunk_off,
             tail: 0,
             birth_gen: 1,
-            index: HashMap::new(),
+            index: BTreeMap::new(),
             io_error: None,
         };
         let table = RefTable::default();
@@ -219,7 +221,7 @@ impl<D: BlockDev> Store<D> {
             sb,
             sb_in_b: false,
             table,
-            overlays: HashMap::new(),
+            overlays: BTreeMap::new(),
             wal_tail: 0,
             wal_seq: 1,
             wal_records: VecDeque::new(),
@@ -253,7 +255,7 @@ impl<D: BlockDev> Store<D> {
             chunk_off,
             tail: sb.chunk_tail,
             birth_gen: sb.generation + 1,
-            index: HashMap::new(),
+            index: BTreeMap::new(),
             io_error: None,
         };
         // Index rebuild: the committed region is durable and framed; a
@@ -285,7 +287,7 @@ impl<D: BlockDev> Store<D> {
             sb: sb.clone(),
             sb_in_b,
             table,
-            overlays: HashMap::new(),
+            overlays: BTreeMap::new(),
             wal_tail: sb.wal_head,
             wal_seq: sb.wal_next_seq,
             wal_records: VecDeque::new(),

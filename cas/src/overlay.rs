@@ -10,7 +10,8 @@
 //! ephemeral file-id indirection of §4.9) is deferred until a rename
 //! operation exists — M2 debt, recorded.
 
-use std::collections::{BTreeMap, BTreeSet};
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::vec::Vec;
 
 pub type Path = Vec<Vec<u8>>;
 

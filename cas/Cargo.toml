@@ -7,10 +7,10 @@ edition.workspace = true
 # not yet wired — all algorithms are host-testable (spec §1).
 [features]
 default = ["std"]
-std = []
+std = ["blake3/std"]
 
 [dependencies]
-blake3 = "1"
+blake3 = { version = "1", default-features = false, features = ["pure"] }
 
 [dev-dependencies]
 proptest = "1"

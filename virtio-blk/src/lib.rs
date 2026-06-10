@@ -293,8 +293,9 @@ impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
     }
 }
 
+extern crate alloc;
+
 #[cfg(any(feature = "std", test))]
 pub mod fake;
 
-#[cfg(any(feature = "std", test))]
 pub mod blockdev;
