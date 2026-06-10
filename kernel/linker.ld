@@ -4,7 +4,8 @@
 ENTRY(_start)
 
 MEMORY {
-    DRAM (rwx) : ORIGIN = 0x40200000, LENGTH = 254M
+    DRAM (rwx) : ORIGIN = 0x40200000, LENGTH = 0x07E00000  /* up to user window */
+    USER (rwx) : ORIGIN = 0x48000000, LENGTH = 2M           /* EL0 window (mmu.rs) */
 }
 
 SECTIONS {
@@ -40,6 +41,15 @@ SECTIONS {
         . += 0x10000;
         __stack_top = .;
     } > DRAM
+
+    . = ALIGN(4096);
+    __kernel_end = .;
+
+    /* Embedded EL0 test program (M1): linked and loaded at the
+     * EL0-accessible identity-mapped window. */
+    .user_text : {
+        *(.user_text .user_text.*)
+    } > USER
 
     /* Discard unwanted sections that trip up the bare-metal linker. */
     /DISCARD/ : {

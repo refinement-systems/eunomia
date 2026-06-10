@@ -18,6 +18,11 @@ edition = "2021"
 
 [profile.dev]
 panic = "abort"
+# The M1 embedded EL0 test program (kernel/src/user.rs) must not call into
+# kernel .text (EL0 execute-never); opt-level 1 inlines core's #[inline]
+# helpers into .user_text. Scaffold constraint until the M3 loader gives
+# userspace its own binaries.
+opt-level = 1
 
 [profile.release]
 panic = "abort"

@@ -1,0 +1,391 @@
+//! Syscall dispatch (M1 surface).
+//!
+//! ABI: SVC #0 with the syscall number in x7, arguments in x0..x5, primary
+//! result in x0 (negative = error), secondary in x1. Capability arguments
+//! are slot indices into the calling thread's cspace. User pointers must
+//! lie inside the identity-mapped user window (until M3 address spaces).
+//!
+//! This ABI is a milestone scaffold, not a stable surface — the public
+//! syscall ABI is an explicit later milestone (§3.7, §8).
+
+use crate::channel::{self, ChanError, MSG_CAPS, MSG_PAYLOAD};
+use crate::cspace::{self, CapKind, CapSlot, CSpaceObj, Rights};
+use crate::mmu::{USER_BASE, USER_SIZE};
+use crate::notification;
+use crate::thread::{self, ThreadState, TrapFrame, NUM_PRIOS};
+use crate::timer;
+use crate::untyped::{self, ObjType, RetypeError};
+use core::ptr;
+
+pub const ERR_BADSLOT: i64 = -1;
+pub const ERR_TYPE: i64 = -2;
+pub const ERR_PERM: i64 = -3;
+pub const ERR_FULL: i64 = -4;
+pub const ERR_EMPTY: i64 = -5;
+pub const ERR_NOSLOT: i64 = -6;
+pub const ERR_FAULT: i64 = -7;
+pub const ERR_NOMEM: i64 = -8;
+pub const ERR_ARG: i64 = -9;
+pub const ERR_CLOSED: i64 = -10;
+pub const ERR_STATE: i64 = -11;
+
+pub const SLOT_NONE: u32 = u32::MAX;
+
+fn user_range_ok(ptr: u64, len: u64) -> bool {
+    len <= USER_SIZE
+        && ptr >= USER_BASE
+        && ptr.checked_add(len).is_some_and(|end| end <= USER_BASE + USER_SIZE)
+}
+
+/// Slot `idx` of the current thread's cspace, or null.
+unsafe fn cur_slot(idx: u64) -> *mut CapSlot {
+    if idx > u32::MAX as u64 {
+        return ptr::null_mut();
+    }
+    let cs = (*thread::current()).cspace;
+    if cs.is_null() {
+        return ptr::null_mut();
+    }
+    CSpaceObj::slot(cs, idx as u32)
+}
+
+/// Resolve a user array of 4 slot indices (SLOT_NONE = absent) into slot
+/// pointers. `must_be_full(i)` distinguishes send (slots must hold caps)
+/// from recv (slots must be empty); recv emptiness is checked by the
+/// channel itself.
+unsafe fn resolve_cap_list(
+    list_ptr: u64,
+    out: &mut [*mut CapSlot; MSG_CAPS],
+    require_full: bool,
+) -> Result<(), i64> {
+    *out = [ptr::null_mut(); MSG_CAPS];
+    if list_ptr == 0 {
+        return Ok(());
+    }
+    if !user_range_ok(list_ptr, (MSG_CAPS * 4) as u64) || list_ptr % 4 != 0 {
+        return Err(ERR_FAULT);
+    }
+    let arr = list_ptr as *const u32;
+    for i in 0..MSG_CAPS {
+        let idx = arr.add(i).read();
+        if idx == SLOT_NONE {
+            continue;
+        }
+        let s = cur_slot(idx as u64);
+        if s.is_null() {
+            return Err(ERR_BADSLOT);
+        }
+        if require_full && (*s).cap.is_empty() {
+            return Err(ERR_BADSLOT);
+        }
+        out[i] = s;
+    }
+    Ok(())
+}
+
+/// Returns Some(result for x0), or None when the thread blocked (its x0
+/// will be written by whoever wakes it).
+pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
+    let nr = (*frame).x[7];
+    let a = [
+        (*frame).x[0],
+        (*frame).x[1],
+        (*frame).x[2],
+        (*frame).x[3],
+        (*frame).x[4],
+        (*frame).x[5],
+    ];
+    match nr {
+        // debug_putc(ch)
+        0 => {
+            use core::fmt::Write;
+            let mut uart = crate::uart::Uart::new();
+            let _ = uart.write_char(a[0] as u8 as char);
+            Some(0)
+        }
+        // debug_write(ptr, len)
+        1 => {
+            if !user_range_ok(a[0], a[1]) || a[1] > 1024 {
+                return Some(ERR_FAULT);
+            }
+            use core::fmt::Write;
+            let mut uart = crate::uart::Uart::new();
+            for i in 0..a[1] {
+                let b = ((a[0] + i) as *const u8).read();
+                let _ = uart.write_char(b as char);
+            }
+            Some(0)
+        }
+        // yield
+        2 => {
+            // Set our own return value before the frame may be swapped for
+            // the incoming thread's — writing x0 after the switch would
+            // clobber the winner's register state.
+            (*frame).x[0] = 0;
+            thread::maybe_switch(frame, true);
+            None
+        }
+        // retype(ut_slot, ty, param, dst_slot, dst2_slot)
+        3 => {
+            let ut = cur_slot(a[0]);
+            let dst = cur_slot(a[3]);
+            if ut.is_null() || dst.is_null() {
+                return Some(ERR_BADSLOT);
+            }
+            let Some(ty) = ObjType::from_u64(a[1]) else {
+                return Some(ERR_ARG);
+            };
+            let dst2 = if ty == ObjType::Channel {
+                let d2 = cur_slot(a[4]);
+                if d2.is_null() {
+                    return Some(ERR_BADSLOT);
+                }
+                d2
+            } else {
+                ptr::null_mut()
+            };
+            Some(match untyped::retype(ut, ty, a[2], dst, dst2) {
+                Ok(()) => 0,
+                Err(RetypeError::NotUntyped) => ERR_TYPE,
+                Err(RetypeError::DestOccupied) => ERR_NOSLOT,
+                Err(RetypeError::NoMemory) => ERR_NOMEM,
+                Err(RetypeError::BadArg) => ERR_ARG,
+            })
+        }
+        // cap_copy(src, dst, rights_mask) — derive, monotone (§2.3)
+        4 => {
+            let src = cur_slot(a[0]);
+            let dst = cur_slot(a[1]);
+            if src.is_null() || dst.is_null() {
+                return Some(ERR_BADSLOT);
+            }
+            Some(match cspace::derive(src, dst, a[2] as u8) {
+                Ok(()) => 0,
+                Err(()) => ERR_NOSLOT,
+            })
+        }
+        // cap_delete(slot)
+        5 => {
+            let s = cur_slot(a[0]);
+            if s.is_null() || (*s).cap.is_empty() {
+                return Some(ERR_BADSLOT);
+            }
+            cspace::delete(s);
+            Some(0)
+        }
+        // cap_revoke(slot)
+        6 => {
+            let s = cur_slot(a[0]);
+            if s.is_null() || (*s).cap.is_empty() {
+                return Some(ERR_BADSLOT);
+            }
+            cspace::revoke(s);
+            Some(0)
+        }
+        // cap_install(cspace_cap_slot, src_slot, dst_index) — move a cap
+        // into another cspace (explicit child-cspace construction, §5.1).
+        7 => {
+            let cs_slot = cur_slot(a[0]);
+            let src = cur_slot(a[1]);
+            if cs_slot.is_null() || src.is_null() || (*src).cap.is_empty() {
+                return Some(ERR_BADSLOT);
+            }
+            let CapKind::CSpace(cs) = (*cs_slot).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            if a[2] > u32::MAX as u64 {
+                return Some(ERR_ARG);
+            }
+            let dst = CSpaceObj::slot(cs, a[2] as u32);
+            if dst.is_null() {
+                return Some(ERR_BADSLOT);
+            }
+            if !(*dst).cap.is_empty() {
+                return Some(ERR_NOSLOT);
+            }
+            cspace::slot_move(src, dst);
+            Some(0)
+        }
+        // chan_send(chan_slot, buf, len, cap_list_ptr)
+        8 => {
+            let s = cur_slot(a[0]);
+            if s.is_null() {
+                return Some(ERR_BADSLOT);
+            }
+            let CapKind::Channel(ch, end) = (*s).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            if !(*s).cap.rights.has(Rights::WRITE) {
+                return Some(ERR_PERM);
+            }
+            if a[2] > MSG_PAYLOAD as u64 {
+                return Some(ERR_ARG);
+            }
+            if !user_range_ok(a[1], a[2]) {
+                return Some(ERR_FAULT);
+            }
+            let data = core::slice::from_raw_parts(a[1] as *const u8, a[2] as usize);
+            let mut caps = [ptr::null_mut(); MSG_CAPS];
+            if let Err(e) = resolve_cap_list(a[3], &mut caps, true) {
+                return Some(e);
+            }
+            Some(match channel::send(ch, end, data, &caps) {
+                Ok(()) => 0,
+                Err(ChanError::Full) => ERR_FULL,
+                Err(ChanError::PeerClosed) => ERR_CLOSED,
+                Err(_) => ERR_ARG,
+            })
+        }
+        // chan_recv(chan_slot, buf[256], dest_list_ptr) → x0=len, x1=mask
+        9 => {
+            let s = cur_slot(a[0]);
+            if s.is_null() {
+                return Some(ERR_BADSLOT);
+            }
+            let CapKind::Channel(ch, end) = (*s).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            if !(*s).cap.rights.has(Rights::READ) {
+                return Some(ERR_PERM);
+            }
+            if !user_range_ok(a[1], MSG_PAYLOAD as u64) {
+                return Some(ERR_FAULT);
+            }
+            let mut dests = [ptr::null_mut(); MSG_CAPS];
+            if let Err(e) = resolve_cap_list(a[2], &mut dests, false) {
+                return Some(e);
+            }
+            let mut buf = [0u8; MSG_PAYLOAD];
+            match channel::recv(ch, end, &mut buf, &dests) {
+                Ok((len, mask)) => {
+                    core::ptr::copy_nonoverlapping(buf.as_ptr(), a[1] as *mut u8, len);
+                    (*frame).x[1] = mask as u64;
+                    Some(len as i64)
+                }
+                Err(ChanError::Empty) => Some(ERR_EMPTY),
+                Err(ChanError::NoCapSlot) => Some(ERR_NOSLOT),
+                Err(_) => Some(ERR_ARG),
+            }
+        }
+        // chan_bind(chan_slot, event, notif_slot, bits)
+        10 => {
+            let s = cur_slot(a[0]);
+            let ns = cur_slot(a[2]);
+            if s.is_null() || ns.is_null() {
+                return Some(ERR_BADSLOT);
+            }
+            let CapKind::Channel(ch, end) = (*s).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            let CapKind::Notification(n) = (*ns).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            if !(*ns).cap.rights.has(Rights::WRITE) {
+                return Some(ERR_PERM);
+            }
+            if a[1] > 2 {
+                return Some(ERR_ARG);
+            }
+            channel::bind(ch, end, a[1] as usize, n, a[3]);
+            Some(0)
+        }
+        // notif_signal(slot, bits)
+        11 => {
+            let s = cur_slot(a[0]);
+            if s.is_null() {
+                return Some(ERR_BADSLOT);
+            }
+            let CapKind::Notification(n) = (*s).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            if !(*s).cap.rights.has(Rights::WRITE) {
+                return Some(ERR_PERM);
+            }
+            notification::signal(n, a[1]);
+            Some(0)
+        }
+        // notif_wait(slot) → accumulated word
+        12 => {
+            let s = cur_slot(a[0]);
+            if s.is_null() {
+                return Some(ERR_BADSLOT);
+            }
+            let CapKind::Notification(n) = (*s).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            if !(*s).cap.rights.has(Rights::READ) {
+                return Some(ERR_PERM);
+            }
+            match notification::wait(n, thread::current()) {
+                Some(word) => Some(word as i64),
+                None => None, // blocked; signal() writes x0 on wake
+            }
+        }
+        // thread_start(tcb_slot, cspace_slot, entry, sp, prio, arg)
+        13 => {
+            let ts = cur_slot(a[0]);
+            let cs_slot = cur_slot(a[1]);
+            if ts.is_null() || cs_slot.is_null() {
+                return Some(ERR_BADSLOT);
+            }
+            let CapKind::Thread(t) = (*ts).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            let CapKind::CSpace(cs) = (*cs_slot).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            if (*t).state != ThreadState::Inactive {
+                return Some(ERR_STATE);
+            }
+            if !user_range_ok(a[2], 4) || !user_range_ok(a[3], 0) {
+                return Some(ERR_FAULT);
+            }
+            let prio = a[4] & 0xFF;
+            if prio as usize >= NUM_PRIOS {
+                return Some(ERR_ARG);
+            }
+            // Spawner's priority is the ceiling (§5.4 maximum-controlled
+            // priority): the lattice stays monotone.
+            if prio > (*thread::current()).priority as u64 {
+                return Some(ERR_PERM);
+            }
+            (*cs).hdr.refs += 1;
+            (*t).cspace = cs;
+            (*t).priority = prio as u8;
+            (*t).frame = TrapFrame::zeroed();
+            (*t).frame.elr = a[2];
+            (*t).frame.sp_el0 = a[3];
+            (*t).frame.spsr = 0; // EL0t, interrupts enabled
+            (*t).frame.x[0] = a[5];
+            thread::enqueue(t);
+            Some(0)
+        }
+        // timer_arm(timer_slot, notif_slot, bits, delta_counter_ticks)
+        14 => {
+            let ts = cur_slot(a[0]);
+            let ns = cur_slot(a[1]);
+            if ts.is_null() || ns.is_null() {
+                return Some(ERR_BADSLOT);
+            }
+            let CapKind::Timer(t) = (*ts).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            let CapKind::Notification(n) = (*ns).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            if !(*ns).cap.rights.has(Rights::WRITE) {
+                return Some(ERR_PERM);
+            }
+            timer::arm(t, n, a[2], timer::counter().saturating_add(a[3]));
+            Some(0)
+        }
+        // exit
+        15 => {
+            let t = thread::current();
+            (*t).state = ThreadState::Halted;
+            // maybe_switch at exception exit picks someone else.
+            Some(0)
+        }
+        _ => Some(ERR_ARG),
+    }
+}
