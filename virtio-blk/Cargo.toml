@@ -3,9 +3,20 @@ name = "virtio-blk"
 version.workspace = true
 edition.workspace = true
 
+# no_std by default (the OS userspace build uses default-features = false
+# once the M3 process model exists); "std" pulls the fake device and the
+# cas BlockDev adapter for host testing.
 [features]
 default = []
-std = []
+std = ["dep:cas", "dma-pool/std"]
 
 [dependencies]
 dma-pool = { path = "../dma-pool" }
+cas = { path = "../cas", optional = true }
+
+[dev-dependencies]
+cas = { path = "../cas" }
+dma-pool = { path = "../dma-pool", features = ["std"] }
+# Self dev-dependency: integration tests need the std-gated modules
+# (fake device, BlockDev adapter) compiled into the lib.
+virtio-blk = { path = ".", features = ["std"] }

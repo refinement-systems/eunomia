@@ -1,27 +1,300 @@
-//! Userspace virtio-blk driver (spec §2.5, M2).
+//! Userspace virtio-blk driver (spec §2.5, M2): virtio-mmio (modern,
+//! version 2) split virtqueue, written exclusively against DmaPool —
+//! the driver never sees a physical address, only opaque
+//! `DeviceAddress`es.
 //!
-//! Written exclusively against DmaPool — never touches physical addresses
-//! directly. Implements the virtio-blk spec over virtio-mmio for QEMU virt.
+//! Transport is abstract (`Mmio`), so the identical driver logic runs
+//! against the QEMU virt MMIO window on the OS and against the fake
+//! device in `fake.rs` on the host (where the whole storage stack is
+//! integration-tested over it).
 //!
-//! M2 work items:
-//!   - Virtqueue setup (descriptor ring, available ring, used ring)
-//!   - Block read/write via DmaPool-backed descriptors
-//!   - Interrupt/notification binding for completions (spec §3.6)
+//! MVP shape: one queue, one synchronous in-flight request, completion
+//! by polling the used ring. On the OS the device interrupt binds to a
+//! notification (§3.6) and the poll loop becomes a wait; the driver
+//! exposes `complete()` so the caller owns the waiting strategy.
+//! QEMU note: modern MMIO needs `-global virtio-mmio.force-legacy=false`.
 
-#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(not(any(feature = "std", test)), no_std)]
 
-pub struct VirtioBlk;
+use dma_pool::{DmaBacking, DmaBuf, DmaPool};
 
-impl VirtioBlk {
-    pub fn new() -> Self {
-        todo!("M2: probe virtio-mmio, negotiate features, init queues")
+pub const SECTOR: usize = 512;
+
+/// Volatile 32-bit register access. Implementors: real MMIO on the OS,
+/// the fake device on the host.
+pub trait Mmio {
+    fn read32(&self, offset: usize) -> u32;
+    fn write32(&mut self, offset: usize, value: u32);
+}
+
+// Virtio-mmio register offsets (virtio spec 4.2.2, version 2 layout).
+mod reg {
+    pub const MAGIC: usize = 0x000;
+    pub const VERSION: usize = 0x004;
+    pub const DEVICE_ID: usize = 0x008;
+    pub const DEVICE_FEATURES: usize = 0x010;
+    pub const DEVICE_FEATURES_SEL: usize = 0x014;
+    pub const DRIVER_FEATURES: usize = 0x020;
+    pub const DRIVER_FEATURES_SEL: usize = 0x024;
+    pub const QUEUE_SEL: usize = 0x030;
+    pub const QUEUE_NUM_MAX: usize = 0x034;
+    pub const QUEUE_NUM: usize = 0x038;
+    pub const QUEUE_READY: usize = 0x044;
+    pub const QUEUE_NOTIFY: usize = 0x050;
+    pub const INTERRUPT_STATUS: usize = 0x060;
+    pub const INTERRUPT_ACK: usize = 0x064;
+    pub const STATUS: usize = 0x070;
+    pub const QUEUE_DESC_LOW: usize = 0x080;
+    pub const QUEUE_DESC_HIGH: usize = 0x084;
+    pub const QUEUE_DRIVER_LOW: usize = 0x090;
+    pub const QUEUE_DRIVER_HIGH: usize = 0x094;
+    pub const QUEUE_DEVICE_LOW: usize = 0x0A0;
+    pub const QUEUE_DEVICE_HIGH: usize = 0x0A4;
+    pub const CONFIG: usize = 0x100; // blk: capacity (sectors) u64 LE
+}
+
+pub mod status {
+    pub const ACKNOWLEDGE: u32 = 1;
+    pub const DRIVER: u32 = 2;
+    pub const DRIVER_OK: u32 = 4;
+    pub const FEATURES_OK: u32 = 8;
+    pub const FAILED: u32 = 128;
+}
+
+const MAGIC_VIRT: u32 = 0x7472_6976;
+const DEVICE_ID_BLOCK: u32 = 2;
+/// VIRTIO_F_VERSION_1 (bit 32) — the only feature we negotiate.
+const F_VERSION_1_SEL1: u32 = 1;
+
+const DESC_F_NEXT: u16 = 1;
+const DESC_F_WRITE: u16 = 2;
+
+const REQ_IN: u32 = 0; // device → driver (read)
+const REQ_OUT: u32 = 1; // driver → device (write)
+const REQ_FLUSH: u32 = 4;
+
+const STATUS_OK: u8 = 0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VirtioError {
+    BadMagic,
+    BadVersion,
+    NotABlockDevice,
+    FeatureNegotiation,
+    NoQueue,
+    NoMemory,
+    TooLarge,
+    DeviceError,
+    Unsupported,
+}
+
+pub struct VirtioBlk<M: Mmio, B: DmaBacking> {
+    mmio: M,
+    pool: DmaPool<B>,
+    queue_size: u16,
+    desc: DmaBuf,
+    avail: DmaBuf,
+    used: DmaBuf,
+    hdr: DmaBuf,
+    data: DmaBuf,
+    status: DmaBuf,
+    avail_idx: u16,
+    last_used: u16,
+    capacity: u64,
+    max_transfer: usize,
+}
+
+impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
+    /// Probe, negotiate VERSION_1, build queue 0 from pool memory,
+    /// DRIVER_OK. `max_transfer` bounds a single request's data size.
+    pub fn new(mut mmio: M, mut pool: DmaPool<B>, max_transfer: usize) -> Result<Self, VirtioError> {
+        if mmio.read32(reg::MAGIC) != MAGIC_VIRT {
+            return Err(VirtioError::BadMagic);
+        }
+        if mmio.read32(reg::VERSION) != 2 {
+            return Err(VirtioError::BadVersion);
+        }
+        if mmio.read32(reg::DEVICE_ID) != DEVICE_ID_BLOCK {
+            return Err(VirtioError::NotABlockDevice);
+        }
+
+        mmio.write32(reg::STATUS, 0); // reset
+        mmio.write32(reg::STATUS, status::ACKNOWLEDGE);
+        mmio.write32(reg::STATUS, status::ACKNOWLEDGE | status::DRIVER);
+
+        mmio.write32(reg::DEVICE_FEATURES_SEL, 1);
+        if mmio.read32(reg::DEVICE_FEATURES) & F_VERSION_1_SEL1 == 0 {
+            mmio.write32(reg::STATUS, status::FAILED);
+            return Err(VirtioError::FeatureNegotiation);
+        }
+        mmio.write32(reg::DRIVER_FEATURES_SEL, 0);
+        mmio.write32(reg::DRIVER_FEATURES, 0);
+        mmio.write32(reg::DRIVER_FEATURES_SEL, 1);
+        mmio.write32(reg::DRIVER_FEATURES, F_VERSION_1_SEL1);
+
+        let st = status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK;
+        mmio.write32(reg::STATUS, st);
+        if mmio.read32(reg::STATUS) & status::FEATURES_OK == 0 {
+            mmio.write32(reg::STATUS, status::FAILED);
+            return Err(VirtioError::FeatureNegotiation);
+        }
+
+        mmio.write32(reg::QUEUE_SEL, 0);
+        let max = mmio.read32(reg::QUEUE_NUM_MAX);
+        if max == 0 {
+            return Err(VirtioError::NoQueue);
+        }
+        let queue_size = (max as u16).min(8);
+        mmio.write32(reg::QUEUE_NUM, queue_size as u32);
+
+        let n = queue_size as usize;
+        let desc = pool.alloc(16 * n, 16).ok_or(VirtioError::NoMemory)?;
+        let avail = pool.alloc(6 + 2 * n, 2).ok_or(VirtioError::NoMemory)?;
+        let used = pool.alloc(6 + 8 * n, 4).ok_or(VirtioError::NoMemory)?;
+        let hdr = pool.alloc(16, 16).ok_or(VirtioError::NoMemory)?;
+        let data = pool.alloc(max_transfer, SECTOR).ok_or(VirtioError::NoMemory)?;
+        let stat = pool.alloc(1, 1).ok_or(VirtioError::NoMemory)?;
+        for buf in [&desc, &avail, &used] {
+            let len = buf.len();
+            pool.bytes_mut(buf)[..len].fill(0);
+        }
+
+        let mut w64 = |low: usize, high: usize, addr: u64| {
+            mmio.write32(low, addr as u32);
+            mmio.write32(high, (addr >> 32) as u32);
+        };
+        w64(reg::QUEUE_DESC_LOW, reg::QUEUE_DESC_HIGH, desc.device_addr().0);
+        w64(reg::QUEUE_DRIVER_LOW, reg::QUEUE_DRIVER_HIGH, avail.device_addr().0);
+        w64(reg::QUEUE_DEVICE_LOW, reg::QUEUE_DEVICE_HIGH, used.device_addr().0);
+        mmio.write32(reg::QUEUE_READY, 1);
+        mmio.write32(reg::STATUS, st | status::DRIVER_OK);
+
+        let capacity = (mmio.read32(reg::CONFIG) as u64)
+            | ((mmio.read32(reg::CONFIG + 4) as u64) << 32);
+
+        Ok(VirtioBlk {
+            mmio,
+            pool,
+            queue_size,
+            desc,
+            avail,
+            used,
+            hdr,
+            data,
+            status: stat,
+            avail_idx: 0,
+            last_used: 0,
+            capacity,
+            max_transfer,
+        })
     }
 
-    pub fn read_block(&mut self, _lba: u64, _buf: &mut [u8]) {
-        todo!("M2: submit read request via virtqueue")
+    pub fn capacity_sectors(&self) -> u64 {
+        self.capacity
     }
 
-    pub fn write_block(&mut self, _lba: u64, _buf: &[u8]) {
-        todo!("M2: submit write request via virtqueue")
+    pub fn max_transfer(&self) -> usize {
+        self.max_transfer
+    }
+
+    fn write_desc(&mut self, i: u16, addr: u64, len: u32, flags: u16, next: u16) {
+        let mut d = [0u8; 16];
+        d[0..8].copy_from_slice(&addr.to_le_bytes());
+        d[8..12].copy_from_slice(&len.to_le_bytes());
+        d[12..14].copy_from_slice(&flags.to_le_bytes());
+        d[14..16].copy_from_slice(&next.to_le_bytes());
+        let buf = self.desc;
+        self.pool.write(&buf, i as usize * 16, &d);
+    }
+
+    /// One synchronous request: header / data / status descriptor chain,
+    /// doorbell, poll the used ring, check the device's status byte.
+    fn request(&mut self, req_type: u32, sector: u64, data_len: usize, device_writes: bool)
+        -> Result<(), VirtioError> {
+        let mut hdr = [0u8; 16];
+        hdr[0..4].copy_from_slice(&req_type.to_le_bytes());
+        hdr[8..16].copy_from_slice(&sector.to_le_bytes());
+        let hbuf = self.hdr;
+        self.pool.write(&hbuf, 0, &hdr);
+        let sbuf = self.status;
+        self.pool.write(&sbuf, 0, &[0xFF]);
+
+        let data_flags = if device_writes { DESC_F_WRITE } else { 0 };
+        if data_len > 0 {
+            self.write_desc(0, self.hdr.device_addr().0, 16, DESC_F_NEXT, 1);
+            self.write_desc(1, self.data.device_addr().0, data_len as u32, data_flags | DESC_F_NEXT, 2);
+            self.write_desc(2, self.status.device_addr().0, 1, DESC_F_WRITE, 0);
+        } else {
+            self.write_desc(0, self.hdr.device_addr().0, 16, DESC_F_NEXT, 1);
+            self.write_desc(1, self.status.device_addr().0, 1, DESC_F_WRITE, 0);
+        }
+
+        // avail.ring[idx % size] = head; then publish idx+1.
+        let slot = 4 + (self.avail_idx % self.queue_size) as usize * 2;
+        let abuf = self.avail;
+        self.pool.write(&abuf, slot, &0u16.to_le_bytes());
+        self.avail_idx = self.avail_idx.wrapping_add(1);
+        self.pool.write(&abuf, 2, &self.avail_idx.to_le_bytes());
+
+        self.mmio.write32(reg::QUEUE_NOTIFY, 0);
+        self.complete()
+    }
+
+    /// Wait for the in-flight request. Polling MVP; the OS binds the
+    /// device IRQ to a notification and waits between polls instead.
+    fn complete(&mut self) -> Result<(), VirtioError> {
+        loop {
+            let mut idx = [0u8; 2];
+            self.pool.read(&self.used, 2, &mut idx);
+            if u16::from_le_bytes(idx) != self.last_used {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        self.last_used = self.last_used.wrapping_add(1);
+        let isr = self.mmio.read32(reg::INTERRUPT_STATUS);
+        if isr != 0 {
+            self.mmio.write32(reg::INTERRUPT_ACK, isr);
+        }
+        let mut st = [0u8; 1];
+        self.pool.read(&self.status, 0, &mut st);
+        if st[0] == STATUS_OK {
+            Ok(())
+        } else {
+            Err(VirtioError::DeviceError)
+        }
+    }
+
+    pub fn read_sectors(&mut self, lba: u64, out: &mut [u8]) -> Result<(), VirtioError> {
+        debug_assert_eq!(out.len() % SECTOR, 0);
+        if out.len() > self.max_transfer {
+            return Err(VirtioError::TooLarge);
+        }
+        self.request(REQ_IN, lba, out.len(), true)?;
+        let data = self.data;
+        self.pool.read(&data, 0, out);
+        Ok(())
+    }
+
+    pub fn write_sectors(&mut self, lba: u64, data: &[u8]) -> Result<(), VirtioError> {
+        debug_assert_eq!(data.len() % SECTOR, 0);
+        if data.len() > self.max_transfer {
+            return Err(VirtioError::TooLarge);
+        }
+        let dbuf = self.data;
+        self.pool.write(&dbuf, 0, data);
+        self.request(REQ_OUT, lba, data.len(), false)
+    }
+
+    /// VIRTIO_BLK_T_FLUSH — the fsync barrier the storage stack trusts
+    /// (§4.8: stated axiom; QEMU honors FLUSH with cache=writeback).
+    pub fn flush(&mut self) -> Result<(), VirtioError> {
+        self.request(REQ_FLUSH, 0, 0, false)
     }
 }
+
+#[cfg(any(feature = "std", test))]
+pub mod fake;
+
+#[cfg(any(feature = "std", test))]
+pub mod blockdev;
