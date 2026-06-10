@@ -82,8 +82,8 @@ bash tools/tla/tla-model-check.sh tla/cap_revocation/CapRevocation.tla
 |-----------|--------|-----------------|
 | **M0** | ✅ Done | Boot, UART, MMU, exception handling |
 | **M1** | ✅ Done | Caps + threads + async channels; CDT revoke |
-| **M2** | 🚧 In progress | virtio-blk; CAS + prolly tree; session protocol; mkfs |
-| **M3** | 🔲 Not started | ELF loader; spawn-with-caps; shell |
+| **M2** | 🚧 Host side done | virtio-blk; CAS + prolly tree; session protocol; mkfs |
+| **M3** | 🚧 Core done | ELF loader; spawn-with-caps; shell |
 | **M4** | 🔲 Not started | Snapshot / rollback demo (MVP) |
 | **M5** | 🔲 Not started | GC + history rewriting |
 
@@ -98,9 +98,27 @@ incl. crash-injection, `disk.rs` on-disk formats, `overlay.rs` memtable,
 the TLA+ AckedWritesRecoverable invariant); `mkfs` builds bootable images
 from a host tree (integration-tested); `storage-server/src/lib.rs` has the
 transport-agnostic session/handle/ticket layer (7 semantics tests).
-Remaining for M2: dma-pool + virtio-blk + kernel frame caps/mapping +
-running the server against the virtio disk in QEMU. The IPC transport
-binding (postcard over channels) lands with M3 processes.
+dma-pool + virtio-blk are done and host-integrated (the cas engine runs
+over the driver over a register-accurate fake device in tests).
+
+### M3 progress
+Done: kernel address spaces (aspace.rs, ASID-tagged TTBR0 switching,
+shared kernel L1 entries), frame caps with mapping-in-the-cap (§2.5),
+map/frame_write/thread_start_as syscalls; `ipc::sys` syscall wrappers;
+`loader` is a lib (host-tested ELF64 parser + spawn). Real userspace
+binaries live under `user/` (own mini-workspaces, built by
+kernel/build.rs into `target/user`, embedded with include_bytes!). The
+default boot loads init as a real process; `cargo build --features
+m1-test` boots the M1 exit test instead. QEMU prints "M3 SPAWN PASS".
+Userspace linker scripts must keep each permission class page-aligned
+(one PT_LOAD per class — the loader maps per segment).
+
+### M4 critical path (next)
+The storage server on-OS needs: cas ported to no_std+alloc (drop
+std::io::Error/HashMap, gate FileDev), a userspace heap allocator, MMIO
+frame caps for the virtio window (driver can poll; IRQ caps optional for
+MVP), the postcard IPC transport (§3.7), shell + console input, mkfs
+image as a QEMU virtio drive (`-global virtio-mmio.force-legacy=false`).
 
 ### M1 exit criterion (met)
 Booting prints `1234M1 PASS`: the embedded EL0 test program
