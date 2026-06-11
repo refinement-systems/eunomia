@@ -60,7 +60,9 @@ cargo build -p cas -p storage-server -p mkfs ...
 # Run tests for cas (primary proptest target)
 cargo test -p cas
 
-# Run with Miri
+# Run with Miri — budget hours, not minutes: the proptest suites hash with
+# blake3 (interpreted, no SIMD under Miri) and case counts are not reduced
+# under cfg(miri). Scope with --test / test-name filters for a quick UB check.
 cargo +nightly miri test -p cas
 ```
 
