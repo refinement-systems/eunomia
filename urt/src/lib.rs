@@ -11,6 +11,8 @@
 
 #![no_std]
 
+pub mod time;
+
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::ptr;

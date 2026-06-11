@@ -96,6 +96,15 @@ A local fuzzing run grows `fuzz/corpus/<target>/` with coverage-expanding
 inputs; minimize before sharing with `cargo +nightly fuzz cmin <target>`.
 `fuzz/artifacts/` (crashes) and `fuzz/target/` are git-ignored.
 
+**Corpus rot on version bumps.** When a format or protocol version
+constant moves (the on-disk `SB_VERSION`, the wire header), every
+committed seed of the old version silently changes meaning: it stops
+exercising the live decode path and starts exercising the refusal branch.
+Re-run the generator so the live path stays covered, and keep a
+deliberate old-version seed (the generator emits `mount_*/v2_refused`)
+because refusal is itself code under test. This recurs at every bump —
+budget for it in the same change, not after.
+
 Every committed input is also replayed by `cargo test` (the `fuzz_corpus`
 integration test in each crate). Pointed at Miri it UB-checks each one — the
 two tools compose. The replay reads the corpus from disk, and Miri's

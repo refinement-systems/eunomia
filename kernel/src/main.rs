@@ -61,7 +61,7 @@ pub extern "C" fn kernel_main() -> ! {
         let root = addr_of_mut!(ROOT_CSPACE.obj);
         let init = addr_of_mut!(INIT_TCB);
 
-        let untyped_base = setup_init(root, init, &mut out);
+        let (untyped_base, init_aspace) = setup_init(root, init, &mut out);
 
         // Slot 0: all remaining free DRAM below the EL0 window as init's
         // untyped — the root of every grant in the system (§1, §2.5).
@@ -106,6 +106,27 @@ pub extern "C" fn kernel_main() -> ! {
             rights: Rights(Rights::READ | Rights::WRITE | Rights::PHYS),
         };
 
+        // Slot 4: the PL031 RTC frame (QEMU virt), read-only — init reads
+        // RTCDR once at boot to seed the time page (§2.6) and the device
+        // is never touched again; no write authority exists anywhere.
+        let slot4 = CSpaceObj::slot(root, 4);
+        (*slot4).cap = Cap {
+            kind: CapKind::Frame { base: 0x0901_0000, pages: 1, mapping: None },
+            rights: Rights(Rights::READ | Rights::PHYS),
+        };
+
+        // Slot 5: init's own address space. Init is the one process that
+        // maps things into itself (the PL031 window for the boot-time RTC
+        // read, §2.6); children never hold their own aspace caps.
+        if !init_aspace.is_null() {
+            let slot5 = CSpaceObj::slot(root, 5);
+            (*slot5).cap = Cap {
+                kind: CapKind::Aspace(init_aspace),
+                rights: Rights::ALL,
+            };
+            (*init_aspace).hdr.refs += 1;
+        }
+
         // Slot 1: init's own thread cap.
         (*init).cspace = root;
         (*root).hdr.refs += 1;
@@ -135,20 +156,31 @@ pub extern "C" fn kernel_main() -> ! {
 
 /// M1 regression path: the embedded identity-window test program.
 #[cfg(feature = "m1-test")]
-unsafe fn setup_init(_root: *mut CSpaceObj, init: *mut Tcb, out: &mut uart::Uart) -> u64 {
+unsafe fn setup_init(
+    _root: *mut CSpaceObj,
+    init: *mut Tcb,
+    out: &mut uart::Uart,
+) -> (u64, *mut aspace::AspaceObj) {
     writeln!(out, "boot: M1 embedded test").unwrap();
     (*init).frame = TrapFrame::zeroed();
     (*init).frame.elr = (user::user_main as extern "C" fn(u64) -> !) as usize as u64;
     (*init).frame.sp_el0 = user::USER_STACK_TOP;
     (*init).frame.spsr = 0;
-    (addr_of!(__kernel_end) as u64 + 0xFFF) & !0xFFF
+    (
+        (addr_of!(__kernel_end) as u64 + 0xFFF) & !0xFFF,
+        core::ptr::null_mut(),
+    )
 }
 
 /// Real boot (§1): construct exactly one process — init — by loading the
 /// embedded init ELF into a fresh address space. Everything not carved
 /// here becomes init's untyped.
 #[cfg(not(feature = "m1-test"))]
-unsafe fn setup_init(_root: *mut CSpaceObj, init: *mut Tcb, out: &mut uart::Uart) -> u64 {
+unsafe fn setup_init(
+    _root: *mut CSpaceObj,
+    init: *mut Tcb,
+    out: &mut uart::Uart,
+) -> (u64, *mut aspace::AspaceObj) {
     use aspace::{AspaceObj, PAGE, PERM_W, PERM_X};
 
     static INIT_ELF: &[u8] = include_bytes!(env!("INIT_ELF_PATH"));
@@ -200,7 +232,7 @@ unsafe fn setup_init(_root: *mut CSpaceObj, init: *mut Tcb, out: &mut uart::Uart
     (*init).frame.spsr = 0;
 
     writeln!(out, "boot: init ELF loaded, entry {:#x}", img.entry).unwrap();
-    bump
+    (bump, asp)
 }
 
 /// Drop into EL0 for the first time: load the frame's PC/SP/PSTATE, clear

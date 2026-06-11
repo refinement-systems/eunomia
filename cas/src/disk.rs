@@ -15,6 +15,13 @@
 //! frame. v1 rebuilt the index by scanning an append-only region; a scan
 //! cannot represent holes, and GC exists to make holes.
 //!
+//! Format v3 (time page, §2.6): snapshot timestamps and file mtimes are
+//! UTC nanoseconds since the Unix epoch. The layout did not change — a
+//! tick field and a nanosecond field are structurally identical — which
+//! is exactly why the version had to: pre-v3 images (whose on-OS rows
+//! hold raw CNTVCT ticks) are refused with a version error and re-created
+//! with mkfs, never silently misread as dates in 1970.
+//!
 //! The generation-checksummed A/B superblock flip is the single atomicity
 //! mechanism for the entire system (§4.2).
 
@@ -29,8 +36,10 @@ pub const SB_B_OFF: u64 = 4096;
 pub const WAL_OFF: u64 = 8192;
 
 pub(crate) const SB_MAGIC: &[u8; 8] = b"EUNOMIA\0";
-pub(crate) const SB_VERSION: u32 = 2;
-pub(crate) const SB_BODY: usize = 96; // checksummed prefix
+pub(crate) const SB_VERSION: u32 = 3;
+/// Checksummed prefix length (pub: the corpus generator forges
+/// old-version slots and must re-seal them).
+pub const SB_BODY: usize = 96;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Superblock {
@@ -89,19 +98,32 @@ impl Superblock {
         Ok(())
     }
 
-    /// None = torn or never written; recovery discards it (§4.5).
+    /// None = unusable for any reason; recovery discards it (§4.5).
     pub fn decode(buf: &[u8]) -> Option<Superblock> {
+        Self::decode_checked(buf).ok()
+    }
+
+    /// Like `decode`, but distinguishes *why* a slot is unusable: a torn
+    /// slot is recovery's business (discard, try the other slot), while an
+    /// intact slot from another format version must surface as a version
+    /// error — tick-era (pre-v3) timestamp fields are structurally
+    /// identical to nanosecond fields, so misreading is silent (§2.6).
+    pub fn decode_checked(buf: &[u8]) -> Result<Superblock, SbError> {
         if buf.len() != SB_SIZE || &buf[0..8] != SB_MAGIC {
-            return None;
-        }
-        if u32::from_le_bytes(buf[8..12].try_into().unwrap()) != SB_VERSION {
-            return None;
+            return Err(SbError::Invalid);
         }
         let sum = Hash::of(&buf[..SB_BODY]);
         if &buf[SB_BODY..SB_BODY + 32] != sum.as_bytes() {
-            return None;
+            return Err(SbError::Invalid);
         }
-        Some(Superblock {
+        // After the checksum: a torn old-format slot is just torn. (Every
+        // version so far shares this layout and checksum extent; a future
+        // layout change must move this check ahead of the checksum.)
+        let version = u32::from_le_bytes(buf[8..12].try_into().unwrap());
+        if version != SB_VERSION {
+            return Err(SbError::WrongVersion(version));
+        }
+        Ok(Superblock {
             generation: u64::from_le_bytes(buf[16..24].try_into().unwrap()),
             ref_table: Hash::from_bytes(buf[24..56].try_into().unwrap()),
             wal_head: u64::from_le_bytes(buf[56..64].try_into().unwrap()),
@@ -111,6 +133,16 @@ impl Superblock {
             index_off: u64::from_le_bytes(buf[88..96].try_into().unwrap()),
         })
     }
+}
+
+/// Why a superblock slot was rejected (see `Superblock::decode_checked`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SbError {
+    /// Torn, unwritten, or not a superblock at all.
+    Invalid,
+    /// Intact (magic and checksum verify) but written by another format
+    /// version — refuse, never reinterpret (§2.6).
+    WrongVersion(u32),
 }
 
 // ── Chunk index object (§4.2 items 3–4, durable since format v2) ───────
@@ -350,6 +382,10 @@ pub struct RefEntry {
 pub struct SnapRow {
     pub id: u64,
     pub root: Hash,
+    /// UTC nanoseconds since the Unix epoch (format v3; the spec-level
+    /// representation is signed 64-bit, §2.6 — positive in practice, so
+    /// the u64 carries identical bytes). Server-assigned, strictly
+    /// increasing per ref (§4.7).
     pub timestamp: u64,
     pub provenance: Vec<u8>,
     pub parent: Option<u64>,

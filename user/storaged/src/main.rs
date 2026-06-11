@@ -4,9 +4,10 @@
 //!
 //! World (built by init, §5.1): slot 0 = bootstrap channel whose first
 //! message is the config block; slot 1 = the shell's session channel.
-//! The MMIO window and DMA region are pre-mapped by init; the DMA
-//! region's device address arrives in the config (init read it via
-//! frame_paddr — the phys-read path, §2.5).
+//! The MMIO window, DMA region, and time page are pre-mapped by init;
+//! their addresses arrive in the config block (the DMA device address
+//! via frame_paddr — the phys-read path, §2.5; the time page under the
+//! `"time"` grant, §2.6/§5.1).
 
 #![no_std]
 #![no_main]
@@ -61,10 +62,13 @@ unsafe impl DmaBacking for DmaRegion {
     }
 }
 
-fn counter() -> u64 {
-    let v: u64;
-    unsafe { core::arch::asm!("mrs {v}, cntvct_el0", v = out(reg) v) };
-    v
+/// The server clock: UTC nanoseconds from the time page (§2.6). One
+/// value feeds snapshot timestamps, file mtimes, and ticket TTLs. The
+/// spec representation is signed 64-bit; init refuses an insane RTC at
+/// boot, so the value is positive and the u64 cast at the storage API
+/// boundary carries identical bytes.
+fn now_utc() -> u64 {
+    urt::time::now_utc_ns() as u64
 }
 
 fn recv_blocking(chan: u32, buf: &mut [u8; 256]) -> usize {
@@ -95,11 +99,14 @@ fn fail(msg: &[u8]) -> ! {
 pub extern "C" fn _start() -> ! {
     let mut buf = [0u8; 256];
     let len = recv_blocking(BOOT_CHAN, &mut buf);
-    if len < 36 || &buf[..4] != b"SD01" {
+    if len < 44 || &buf[..4] != b"SD02" {
         fail(b"bad config block");
     }
     let rd = |off: usize| u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
-    let (mmio_va, dma_va, dma_pa, dma_len) = (rd(4), rd(12), rd(20), rd(28));
+    let (mmio_va, dma_va, dma_pa, dma_len, time_va) = (rd(4), rd(12), rd(20), rd(28), rd(36));
+    // Safety: init mapped the read-only time page at this address before
+    // starting us, and the mapping lives as long as the process.
+    unsafe { urt::time::attach(time_va as usize) };
 
     // Probe the 32 virtio-mmio transports for the block device.
     let mut blk = None;
@@ -131,7 +138,7 @@ pub extern "C" fn _start() -> ! {
     };
     sys::debug_write(b"[storaged] store mounted\n");
 
-    let mut server = Server::new(store, counter());
+    let mut server = Server::new(store, now_utc());
     let grant = match server.root_grant(b"main") {
         Ok(g) => g,
         Err(_) => fail(b"no main ref"),
@@ -148,7 +155,7 @@ pub extern "C" fn _start() -> ! {
                 break;
             }
             let resp = match wire::decode_request(&buf[..len as usize]) {
-                Ok(req) => server.handle(session, req, counter()),
+                Ok(req) => server.handle(session, req, now_utc()),
                 Err(_) => storage_server::Response::Err(storage_server::ErrorCode::Internal),
             };
             match wire::encode_response(&resp) {

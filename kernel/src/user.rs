@@ -32,19 +32,21 @@ pub const SLOT_NONE: u32 = u32::MAX;
 const RIGHT_READ: u64 = 1;
 const RIGHT_WRITE: u64 = 2;
 
-// T1 (root cspace) slot map.
+// T1 (root cspace) slot map. Slots 0..6 are kernel-bestowed boot caps
+// (untypeds, thread, device frames, init's aspace) even on the m1-test
+// path; the scaffold's own allocations start above them.
 const UNTYPED: u64 = 0;
 const SELF_TCB: u64 = 1;
-const N1: u64 = 2;
-const N2: u64 = 3;
-const CHAN_A: u64 = 4;
-const CHAN_B: u64 = 5;
-const CSPACE2: u64 = 6;
-const TCB2: u64 = 7;
-const N2_COPY: u64 = 8;
-const SEND1: u64 = 9;
-const SEND2: u64 = 10;
-const TIMER: u64 = 11;
+const N1: u64 = 6;
+const N2: u64 = 7;
+const CHAN_A: u64 = 8;
+const CHAN_B: u64 = 9;
+const CSPACE2: u64 = 10;
+const TCB2: u64 = 11;
+const N2_COPY: u64 = 12;
+const SEND1: u64 = 13;
+const SEND2: u64 = 14;
+const TIMER: u64 = 15;
 
 // T2 (cspace2) slot map.
 const T2_CHAN: u64 = 0;

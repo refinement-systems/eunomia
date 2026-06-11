@@ -1,12 +1,14 @@
 //! The Eunomia shell (spec §7): built-ins over a storage session.
 //!
-//! World (built by init, §5.1): slot 0 = bootstrap channel, slot 1 =
-//! storage session (handle 0 = main ref root, full rights), slot 2 =
-//! untyped for spawning, slots 8+ free for the spawner.
+//! World (built by init, §5.1): slot 0 = bootstrap channel (first message
+//! is the "SH01" startup block carrying the time-page address, §2.6),
+//! slot 1 = storage session (handle 0 = main ref root, full rights),
+//! slot 2 = untyped for spawning, slots 8+ free for the spawner.
 //!
 //!   ls [path] · cat <path> · write <path> <text> · rm <path>
 //!   snap [msg] · snaps · rollback <id> · sync · run <path> · help
 //!   snapdel <id> · keep <id> · prune <n> · gc · df          (M5)
+//!   date                                              (time page, §2.6)
 
 #![no_std]
 #![no_main]
@@ -20,6 +22,7 @@ use storage_server::{wire, DirEnt, Request, Response};
 #[global_allocator]
 static HEAP: urt::Heap<{ 1024 * 1024 }> = urt::Heap::new();
 
+const BOOT_CHAN: u32 = 0;
 const STORE_CHAN: u32 = 1;
 const UNTYPED: u32 = 2;
 const SPAWN_BASE: u32 = 8;
@@ -42,6 +45,59 @@ fn out_num(mut n: u64) {
         }
     }
     out(&digits[i..]);
+}
+
+/// Zero-padded fixed-width decimal (date/time components).
+fn out_num_pad(mut n: u64, width: usize) {
+    let mut digits = [b'0'; 20];
+    let mut i = digits.len();
+    while n > 0 {
+        i -= 1;
+        digits[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    out(&digits[digits.len() - width..]);
+}
+
+/// Days since 1970-01-01 → (year, month, day); Howard Hinnant's
+/// civil-from-days. Valid for the whole u64-nanosecond range.
+fn civil_from_days(days: u64) -> (u64, u64, u64) {
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z % 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    (y, m, d)
+}
+
+/// UTC nanoseconds → ISO-8601 with nanosecond precision
+/// (`2026-06-11T12:34:56.123456789Z`). All stored time is UTC; timezones
+/// are presentation and this shell presents UTC only (§2.6). Full
+/// precision so per-ref strict ordering (§4.7) is visible, not rounded
+/// away — the RTC's whole-second base makes sub-second digits relative,
+/// not absolute.
+fn out_utc(ns: u64) {
+    let secs = ns / 1_000_000_000;
+    let (y, m, d) = civil_from_days(secs / 86_400);
+    let tod = secs % 86_400;
+    out_num_pad(y, 4);
+    out(b"-");
+    out_num_pad(m, 2);
+    out(b"-");
+    out_num_pad(d, 2);
+    out(b"T");
+    out_num_pad(tod / 3600, 2);
+    out(b":");
+    out_num_pad(tod % 3600 / 60, 2);
+    out(b":");
+    out_num_pad(tod % 60, 2);
+    out(b".");
+    out_num_pad(ns % 1_000_000_000, 9);
+    out(b"Z");
 }
 
 fn request(req: &Request) -> Response {
@@ -175,11 +231,25 @@ fn cmd_snaps() {
                 });
                 out(&r.provenance);
                 out(b"] ");
+                out_utc(r.timestamp);
+                out(b" ");
                 out(&r.message);
                 out(b"\n");
             }
         }
         r => report(r),
+    }
+}
+
+/// Wall-clock time end to end: two register reads and the time page,
+/// zero syscalls, zero IPC on the read path (§2.6).
+fn cmd_date() {
+    match urt::time::page() {
+        Some(p) => {
+            out_utc(p.sample().utc_ns_at(urt::time::cntvct()) as u64);
+            out(b"\n");
+        }
+        None => out(b"error: no time grant\n"),
     }
 }
 
@@ -311,8 +381,9 @@ fn dispatch(line: &[u8]) {
     match cmd {
         b"" => {}
         b"help" => out(
-            b"ls cat write rm sync run\nsnap snaps rollback snapdel keep prune gc df help\n",
+            b"ls cat write rm sync run date\nsnap snaps rollback snapdel keep prune gc df help\n",
         ),
+        b"date" => cmd_date(),
         b"ls" => cmd_ls(arg),
         b"cat" => cmd_cat(arg),
         b"rm" => report(request(&Request::Unlink { handle: 0, path: parse_path(arg) })),
@@ -363,6 +434,18 @@ fn dispatch(line: &[u8]) {
 #[no_mangle]
 #[link_section = ".text._start"]
 pub extern "C" fn _start() -> ! {
+    // The §5.1 startup block, queued by init before this thread started:
+    // "SH01" + time-page VA. No grant, no clock — `date` degrades, the
+    // store-backed built-ins don't.
+    let mut boot = [0u8; 256];
+    let (blen, _) = sys::chan_recv(BOOT_CHAN, boot.as_mut_ptr(), None);
+    if blen >= 12 && &boot[..4] == b"SH01" {
+        let time_va = u64::from_le_bytes(boot[4..12].try_into().unwrap());
+        // Safety: init mapped the read-only time page at this address
+        // before starting us; the mapping outlives the process.
+        unsafe { urt::time::attach(time_va as usize) };
+    }
+
     out(b"\nEunomia shell - type help\n");
     let mut line = [0u8; 200];
     let mut len = 0usize;

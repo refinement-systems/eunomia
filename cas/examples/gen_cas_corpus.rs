@@ -243,4 +243,23 @@ fn mount_recovery_seeds() {
         dev.crash(seed);
         seed_both(&format!("torn_{seed:x}"), &dump(&dev));
     }
+
+    // A deliberately old-format image, intact but re-stamped v2: the
+    // refusal branch (§2.6 — pre-v3 images get a version error, never a
+    // reinterpretation) is code under test, and without a committed seed
+    // a format bump silently rots mount coverage toward the live path.
+    // (Under mount_reseal the fix-up re-stamps the current version, so
+    // there this seed mutates into a live-path image — also useful.)
+    let mut store = Store::format(MemDev::new(32 * 1024), small_opts()).unwrap();
+    store.create_ref(b"main").unwrap();
+    store.write(b"main", &vec![b"old".to_vec()], 0, b"tick era", 1).unwrap();
+    store.sync_all().unwrap();
+    let mut img = dump(&store.into_dev());
+    for off in [cas::disk::SB_A_OFF as usize, cas::disk::SB_B_OFF as usize] {
+        img[off + 8..off + 12].copy_from_slice(&2u32.to_le_bytes());
+        let sum = Hash::of(&img[off..off + cas::disk::SB_BODY]);
+        img[off + cas::disk::SB_BODY..off + cas::disk::SB_BODY + 32]
+            .copy_from_slice(sum.as_bytes());
+    }
+    seed_both("v2_refused", &img);
 }

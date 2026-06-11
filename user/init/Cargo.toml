@@ -10,6 +10,7 @@ edition = "2021"
 [dependencies]
 ipc = { path = "../../ipc" }
 loader = { path = "../../loader", default-features = false }
+urt = { path = "../../urt" }
 
 [profile.release]
 panic = "abort"

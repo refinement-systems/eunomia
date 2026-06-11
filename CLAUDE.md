@@ -172,6 +172,25 @@ stays deferred).
 
 All MVP milestones (M0–M5) are complete.
 
+### Rev2: the time page (§2.6) — done
+Init reads the PL031 once at boot (new kernel boot caps: slot 4 = RTC
+frame, slot 5 = init's own aspace), publishes `(seq, wall_base_ns,
+cntvct_base, cntfrq)` in a read-only frame funded from its untyped, and
+maps it into storaged and the shell (the address travels in the startup
+blocks: `SD02`/`SH01`). `urt::time` owns the page ABI, the seqlock
+reader (seq is constant zero today; the retry path is host-tested with a
+tearing writer thread, incl. under Miri), and the overflow-safe tick→ns
+conversion (proptested — the naive `Δ·10⁹` u64 form overflows ~5 min
+into uptime at 62.5 MHz). storaged stamps snapshots/mtimes/ticket-TTLs
+with UTC ns; the on-disk format is v3 and pre-v3 images are refused with
+a distinct version error (`StoreError::UnsupportedVersion`), never
+reinterpreted — re-create them with mkfs. Snapshot timestamps are
+clamped per-ref strictly monotone (`max(now, predecessor+1)`, §4.7).
+QEMU invocations pin `-rtc base=utc,clock=host`. End-to-end proof:
+`bash scripts/boot-test.sh` boots the demo, takes two snapshots, and
+asserts sane, strictly ordered ISO-8601 timestamps plus a zero-syscall
+shell `date`.
+
 ### M1 exit criterion (met)
 Booting prints `1234M1 PASS`: the embedded EL0 test program
 (`kernel/src/user.rs`) retypes untyped into kernel objects, builds a second

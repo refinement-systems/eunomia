@@ -52,6 +52,9 @@ pub enum StoreError {
     Io(DevError),
     Format(FormatError),
     NoSuperblock,
+    /// An intact superblock from another format version. Old images are
+    /// re-created with mkfs, never migrated or reinterpreted (§2.6).
+    UnsupportedVersion(u32),
     NoSuchRef,
     NoSuchSnapshot,
     NotAFile,
@@ -81,6 +84,9 @@ impl core::fmt::Display for StoreError {
             StoreError::Io(e) => write!(f, "io: {e}"),
             StoreError::Format(e) => write!(f, "format: {e}"),
             StoreError::NoSuperblock => write!(f, "no valid superblock"),
+            StoreError::UnsupportedVersion(v) => {
+                write!(f, "unsupported format version {v} (re-create the image with mkfs)")
+            }
             StoreError::NoSuchRef => write!(f, "no such ref"),
             StoreError::NoSuchSnapshot => write!(f, "no such snapshot"),
             StoreError::NotAFile => write!(f, "not a file"),
@@ -384,17 +390,32 @@ impl<D: BlockDev> Store<D> {
         let mut buf_b = vec![0u8; SB_SIZE];
         dev.read(SB_A_OFF, &mut buf_a)?;
         dev.read(SB_B_OFF, &mut buf_b)?;
-        let (sb, sb_in_b) = match (Superblock::decode(&buf_a), Superblock::decode(&buf_b)) {
-            (Some(a), Some(b)) => {
+        let decoded = (Superblock::decode_checked(&buf_a), Superblock::decode_checked(&buf_b));
+        let (sb, sb_in_b) = match decoded {
+            (Ok(a), Ok(b)) => {
                 if a.generation >= b.generation {
                     (a, false)
                 } else {
                     (b, true)
                 }
             }
-            (Some(a), None) => (a, false),
-            (None, Some(b)) => (b, true),
-            (None, None) => return Err(StoreError::NoSuperblock),
+            (Ok(a), Err(_)) => (a, false),
+            (Err(_), Ok(b)) => (b, true),
+            // No usable slot. An intact other-version slot is a refusal,
+            // not a recovery case: tick-era timestamp fields are byte-
+            // compatible with nanoseconds, so falling through to
+            // "no superblock" (or worse, mounting) would misread, and the
+            // §2.6 stance — pre-v3 images are re-created with mkfs — is
+            // only real if the user is told that's what happened.
+            (Err(ea), Err(eb)) => {
+                use crate::disk::SbError;
+                return Err(match (ea, eb) {
+                    (SbError::WrongVersion(v), _) | (_, SbError::WrongVersion(v)) => {
+                        StoreError::UnsupportedVersion(v)
+                    }
+                    _ => StoreError::NoSuperblock,
+                });
+            }
         };
         // Geometry chokepoint: the checksum above is integrity, not
         // authenticity — a torn write can't pass it, but anything that can
@@ -566,8 +587,13 @@ impl<D: BlockDev> Store<D> {
     }
 
     /// Snapshot the ref (forces a flush — a snapshot must name a tree
-    /// hash, §4.4). `now` comes from the caller (server-assigned, §4.7);
-    /// timestamps are clamped non-decreasing per ref (§2.6).
+    /// hash, §4.4). `now` is UTC nanoseconds from the caller
+    /// (server-assigned, §4.7) and is clamped per-ref strictly monotone:
+    /// `ts = max(now, predecessor_ts + 1)`. A host clock regressing
+    /// between boots can therefore never make a child snapshot "older"
+    /// than its parent — the clamp protects exactly what retention needs
+    /// (per-ref strict order) and nothing it can't (a wildly wrong RTC
+    /// still skews absolute ages, §2.6/§4.7).
     pub fn snapshot(
         &mut self,
         ref_name: &[u8],
@@ -583,7 +609,7 @@ impl<D: BlockDev> Store<D> {
         let row = SnapRow {
             id,
             root: entry.root,
-            timestamp: now.max(last.map(|(_, t)| t).unwrap_or(0)),
+            timestamp: now.max(last.map(|(_, t)| t.saturating_add(1)).unwrap_or(0)),
             provenance: provenance.to_vec(),
             parent: last.map(|(id, _)| id),
             message: message.to_vec(),
@@ -1558,5 +1584,51 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// §2.6: pre-v3 images are re-created with mkfs, and that stance is
+    /// only mechanical if an intact old-version image is refused with a
+    /// *version* error — tick and nanosecond timestamp fields are
+    /// structurally identical, so nothing else stands between an old
+    /// image and being misread as dates in 1970.
+    #[test]
+    fn old_format_version_is_refused_with_a_version_error() {
+        use crate::disk::{SB_A_OFF, SB_B_OFF};
+
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        store.write(b"main", &p(&["f"]), 0, b"data", 1).unwrap();
+        store.snapshot(b"main", b"t", b"image", disk::CLASS_KEEP, 100).unwrap();
+        let dev = store.into_dev();
+        let mut img = vec![0u8; dev.len() as usize];
+        dev.read(0, &mut img).unwrap();
+        // Re-stamp both slots as format v2 with valid checksums: the
+        // dangerous artifact is intact and plausible, not torn.
+        for off in [SB_A_OFF as usize, SB_B_OFF as usize] {
+            img[off + 8..off + 12].copy_from_slice(&2u32.to_le_bytes());
+            let sum = Hash::of(&img[off..off + disk::SB_BODY]);
+            img[off + disk::SB_BODY..off + disk::SB_BODY + 32].copy_from_slice(sum.as_bytes());
+        }
+        let err = Store::mount(MemDev::from_bytes(img), test_opts())
+            .err()
+            .expect("a v2 image must not mount");
+        assert!(matches!(err, StoreError::UnsupportedVersion(2)), "got {err:?}");
+    }
+
+    /// §4.7: `ts = max(now, predecessor_ts + 1)` — an RTC that regressed
+    /// between boots can never disorder a ref's snapshot log.
+    #[test]
+    fn snapshot_timestamps_are_strictly_monotone_per_ref() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        store.write(b"main", &p(&["f"]), 0, b"x", 1).unwrap();
+        let a = store.snapshot(b"main", b"t", b"first", disk::CLASS_KEEP, 1000).unwrap();
+        // The clock went backwards; order must survive anyway.
+        let b = store.snapshot(b"main", b"t", b"second", disk::CLASS_KEEP, 500).unwrap();
+        // Same instant as the first: still strictly after its parent.
+        let c = store.snapshot(b"main", b"t", b"third", disk::CLASS_KEEP, 1000).unwrap();
+        let rows: Vec<(u64, u64)> =
+            store.snapshots(b"main").map(|r| (r.id, r.timestamp)).collect();
+        assert_eq!(rows, vec![(a, 1000), (b, 1001), (c, 1002)]);
     }
 }

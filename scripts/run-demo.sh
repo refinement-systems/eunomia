@@ -23,6 +23,7 @@ exec qemu-system-aarch64 \
     -machine virt,gic-version=3 \
     -cpu cortex-a72 -m 256M -nographic \
     -serial mon:stdio \
+    -rtc base=utc,clock=host \
     -global virtio-mmio.force-legacy=false \
     -drive if=none,file="$IMG",format=raw,id=hd \
     -device virtio-blk-device,drive=hd \
