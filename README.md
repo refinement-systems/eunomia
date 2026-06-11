@@ -166,7 +166,7 @@ cargo test -p cas                  # storage engine: canonical-form proptests,
                                    #   GC reclamation/pinning/crash suite
 cargo test -p storage-server       # session/handle/capability semantics
 cargo test -p mkfs                 # image build + remount integration
-cargo test --workspace             # everything host-testable
+cargo test --workspace --exclude kernel   # everything host-testable
 cargo +nightly miri test -p cas    # UB check (slow)
 
 bash tools/tla/tla-model-check.sh tla/commit_protocol/CommitProtocol.tla
