@@ -160,6 +160,22 @@ pub extern "C" fn _start() -> ! {
                     send_blocking(SESSION_CHAN, &wire::encode_response(&e).unwrap());
                 }
             }
+            // Drain a pending GC trigger (§4.6: post-rewrite or
+            // watermark) after replying: the foreground op stays fast,
+            // reclamation follows promptly.
+            if server.gc_requested() {
+                use core::fmt::Write;
+                match server.run_gc() {
+                    Ok(s) => {
+                        let _ = write!(
+                            DebugOut,
+                            "[storaged] gc: freed {} objects / {} bytes, {} live\n",
+                            s.freed_objects, s.freed_bytes, s.live_objects
+                        );
+                    }
+                    Err(_) => sys::debug_write(b"[storaged] gc failed\n"),
+                }
+            }
         }
         sys::notif_wait(WAKE_NOTIF);
     }

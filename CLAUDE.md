@@ -85,7 +85,7 @@ bash tools/tla/tla-model-check.sh tla/cap_revocation/CapRevocation.tla
 | **M2** | ✅ Done | virtio-blk; CAS + prolly tree; session protocol; mkfs |
 | **M3** | ✅ Done | ELF loader; spawn-with-caps; shell |
 | **M4** | ✅ Done | Snapshot / rollback demo (MVP) |
-| **M5** | 🔲 Not started | GC + history rewriting |
+| **M5** | ✅ Done | GC + history rewriting |
 
 Both TLA+ models (CapRevocation, CommitProtocol) are complete and
 TLC-checked — the M1/M2 formal gates are cleared. The `cas` crate's
@@ -125,7 +125,25 @@ userspace heap). Remaining debt: streaming WAL replay (mount buffers the
 whole WAL region — mkfs images use a 1 MiB WAL), IRQ-driven virtio
 completion (driver polls), bulk data path (reads are message-bounded).
 
-Remaining milestone: M5 (GC + history rewriting).
+### M5: GC + history rewriting (done)
+On-disk format v2: the superblock references a durable chunk index
+(hash → offset/len/birth-generation + free-extent list) written as a
+self-verifying frame — mount no longer scans, and the sweep is a pure
+metadata edit through the normal A/B flip (crash mid-GC recovers the
+previous commit; crash loop + proptest in `cas/src/store.rs`, mark walk
+in `cas/src/gc.rs`). Freed extents become allocatable only after the
+flip lands. History rewriting: `DeleteSnapshot` (re-points parents;
+tagged snapshots refuse deletion), `SetClass`, `Gc`, `Statfs` wire ops
+gated on `may-rewrite-history`; post-rewrite trigger + crude 20%-free
+watermark arm a GC that storaged drains after replying. Shell built-ins:
+`snapdel keep prune gc df` (retention policy is shell-side; `snap` now
+takes class `auto`). Remaining debt: the tail high-water mark never
+retracts (freed space is reused, the region never visibly shrinks);
+first-fit allocator; no concurrent GC (the server is single-threaded, so
+mark/sweep run inside one request — the §4.6 incremental machinery
+stays deferred).
+
+All MVP milestones (M0–M5) are complete.
 
 ### M1 exit criterion (met)
 Booting prints `1234M1 PASS`: the embedded EL0 test program

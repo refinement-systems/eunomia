@@ -6,6 +6,7 @@
 //!
 //!   ls [path] · cat <path> · write <path> <text> · rm <path>
 //!   snap [msg] · snaps · rollback <id> · sync · run <path> · help
+//!   snapdel <id> · keep <id> · prune <n> · gc · df          (M5)
 
 #![no_std]
 #![no_main]
@@ -105,6 +106,7 @@ fn err_name(e: storage_server::ErrorCode) -> &'static [u8] {
         NoSuchSnapshot => b"no such snapshot",
         BadTicket => b"bad ticket",
         Internal => b"server error",
+        Pinned => b"snapshot pinned by a tag",
     }
 }
 
@@ -165,7 +167,11 @@ fn cmd_snaps() {
             for r in rows {
                 out(b"#");
                 out_num(r.id);
-                out(b"  [");
+                out(match r.class {
+                    0 => b"  keep [",
+                    2 => b"  eph  [",
+                    _ => b"  auto [",
+                });
                 out(&r.provenance);
                 out(b"] ");
                 out(&r.message);
@@ -174,6 +180,80 @@ fn cmd_snaps() {
         }
         r => report(r),
     }
+}
+
+fn cmd_gc() {
+    match request(&Request::Gc { handle: 0 }) {
+        Response::GcReport { live_objects, freed_objects, freed_bytes } => {
+            out(b"gc: freed ");
+            out_num(freed_objects);
+            out(b" objects / ");
+            out_num(freed_bytes);
+            out(b" bytes, ");
+            out_num(live_objects);
+            out(b" live\n");
+        }
+        r => report(r),
+    }
+}
+
+fn cmd_df() {
+    match request(&Request::Statfs { handle: 0 }) {
+        Response::Space { total, used, free } => {
+            out(b"chunk region: ");
+            out_num(used);
+            out(b" used / ");
+            out_num(free);
+            out(b" free of ");
+            out_num(total);
+            out(b" bytes\n");
+        }
+        r => report(r),
+    }
+}
+
+/// Retention policy is shell-side (§4.7: the server stores fields, it
+/// does not interpret policy): keep the newest `n` non-`keep` snapshots,
+/// delete the rest. `keep`-class and tagged rows survive.
+fn cmd_prune(n: u64) {
+    let rows = match request(&Request::ListSnapshots { handle: 0 }) {
+        Response::Snapshots(rows) => rows,
+        r => return report(r),
+    };
+    let candidates: Vec<u64> =
+        rows.iter().filter(|r| r.class != 0).map(|r| r.id).collect();
+    let excess = candidates.len().saturating_sub(n as usize);
+    let mut deleted = 0u64;
+    for &id in &candidates[..excess] {
+        match request(&Request::DeleteSnapshot { handle: 0, snap_id: id }) {
+            Response::Ok => deleted += 1,
+            Response::Err(e) => {
+                out(b"#");
+                out_num(id);
+                out(b": ");
+                out(err_name(e));
+                out(b"\n");
+            }
+            _ => {}
+        }
+    }
+    out(b"pruned ");
+    out_num(deleted);
+    out(b" snapshot(s)\n");
+}
+
+fn parse_u64(arg: &[u8]) -> Option<u64> {
+    if arg.is_empty() {
+        return None;
+    }
+    let mut n = 0u64;
+    for &b in arg {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        n = n * 10 + (b - b'0') as u64;
+    }
+    Some(n)
 }
 
 fn cmd_run(arg: &[u8]) {
@@ -229,28 +309,40 @@ fn dispatch(line: &[u8]) {
     let arg = parts.next().unwrap_or(b"").trim_ascii();
     match cmd {
         b"" => {}
-        b"help" => out(b"ls cat write rm snap snaps rollback sync run help\n"),
+        b"help" => out(
+            b"ls cat write rm sync run\nsnap snaps rollback snapdel keep prune gc df help\n",
+        ),
         b"ls" => cmd_ls(arg),
         b"cat" => cmd_cat(arg),
         b"rm" => report(request(&Request::Unlink { handle: 0, path: parse_path(arg) })),
         b"sync" => report(request(&Request::Sync { handle: 0 })),
+        // class 1 = auto: subject to `prune`; promote survivors via `keep`.
         b"snap" => report(request(&Request::Snapshot {
             handle: 0,
             message: arg.to_vec(),
-            class: 0,
+            class: 1,
         })),
         b"snaps" => cmd_snaps(),
-        b"rollback" => {
-            let mut id = 0u64;
-            for &b in arg {
-                if !b.is_ascii_digit() {
-                    out(b"usage: rollback <id>\n");
-                    return;
-                }
-                id = id * 10 + (b - b'0') as u64;
+        b"rollback" => match parse_u64(arg) {
+            Some(id) => report(request(&Request::Rollback { handle: 0, snap_id: id })),
+            None => out(b"usage: rollback <id>\n"),
+        },
+        b"snapdel" => match parse_u64(arg) {
+            Some(id) => report(request(&Request::DeleteSnapshot { handle: 0, snap_id: id })),
+            None => out(b"usage: snapdel <id>\n"),
+        },
+        b"keep" => match parse_u64(arg) {
+            Some(id) => {
+                report(request(&Request::SetClass { handle: 0, snap_id: id, class: 0 }))
             }
-            report(request(&Request::Rollback { handle: 0, snap_id: id }));
-        }
+            None => out(b"usage: keep <id>\n"),
+        },
+        b"prune" => match parse_u64(arg) {
+            Some(n) => cmd_prune(n),
+            None => out(b"usage: prune <keep-newest-n>\n"),
+        },
+        b"gc" => cmd_gc(),
+        b"df" => cmd_df(),
         b"write" => {
             let mut wa = arg.splitn(2, |&b| b == b' ');
             let path = wa.next().unwrap_or(b"");
