@@ -288,6 +288,150 @@ fn tickets_are_one_shot_with_ttl() {
 }
 
 #[test]
+fn history_rewriting_needs_the_right_and_triggers_gc() {
+    let mut srv = new_server();
+    let root = srv.root_grant(b"main").unwrap();
+    let s = srv.open_session(vec![root]);
+
+    let Response::SnapId(snap) = srv.handle(
+        s,
+        Request::Snapshot { handle: 0, message: b"old".to_vec(), class: 1 },
+        100,
+    ) else {
+        panic!()
+    };
+    assert_eq!(
+        srv.handle(
+            s,
+            Request::Write { handle: 0, path: p(&["top.txt"]), offset: 0, data: vec![9; 64] },
+            101
+        ),
+        Response::Ok
+    );
+    assert_eq!(srv.handle(s, Request::Sync { handle: 0 }, 102), Response::Ok);
+
+    // A handle without may-rewrite-history can't delete snapshots; one
+    // scoped to a subtree can't either (no ref surgery from a chroot).
+    let limited = HandleEntry { rights: R_READ | R_WRITE, ..srv.root_grant(b"main").unwrap() };
+    let s2 = srv.open_session(vec![limited]);
+    assert_eq!(
+        srv.handle(s2, Request::DeleteSnapshot { handle: 0, snap_id: snap }, 103),
+        Response::Err(ErrorCode::Denied)
+    );
+    let Response::Handle(sub) = srv.handle(
+        s,
+        Request::OpenChild { handle: 0, path: p(&["pub"]), rights_mask: 0xFF },
+        104,
+    ) else {
+        panic!()
+    };
+    assert_eq!(
+        srv.handle(s, Request::DeleteSnapshot { handle: sub, snap_id: snap }, 105),
+        Response::Err(ErrorCode::Denied)
+    );
+
+    // Deletion is a small ref-table edit that arms the GC trigger
+    // (§4.6); the reclamation itself happens in the drained cycle.
+    assert!(!srv.gc_requested());
+    assert_eq!(
+        srv.handle(s, Request::DeleteSnapshot { handle: 0, snap_id: snap }, 106),
+        Response::Ok
+    );
+    assert!(srv.gc_requested());
+    let stats = srv.run_gc().unwrap();
+    assert!(stats.freed_objects > 0);
+    assert!(!srv.gc_requested());
+
+    // The deleted snapshot is gone; current state is untouched.
+    assert_eq!(
+        srv.handle(s, Request::Rollback { handle: 0, snap_id: snap }, 107),
+        Response::Err(ErrorCode::NoSuchSnapshot)
+    );
+    assert_eq!(
+        srv.handle(s, Request::Read { handle: 0, path: p(&["top.txt"]), offset: 0, len: 4 }, 108),
+        Response::Data(vec![9; 4])
+    );
+}
+
+#[test]
+fn manual_gc_and_statfs() {
+    let mut srv = new_server();
+    let root = srv.root_grant(b"main").unwrap();
+    let s = srv.open_session(vec![root]);
+
+    let Response::Space { total, used, free } = srv.handle(s, Request::Statfs { handle: 0 }, 10)
+    else {
+        panic!()
+    };
+    assert_eq!(used + free, total);
+
+    // Manual gc needs may-rewrite-history too.
+    let ro = HandleEntry { rights: R_READ, ..srv.root_grant(b"main").unwrap() };
+    let s2 = srv.open_session(vec![ro]);
+    assert_eq!(srv.handle(s2, Request::Gc { handle: 0 }, 11), Response::Err(ErrorCode::Denied));
+
+    let Response::GcReport { live_objects, .. } = srv.handle(s, Request::Gc { handle: 0 }, 12)
+    else {
+        panic!()
+    };
+    assert!(live_objects > 0);
+}
+
+#[test]
+fn watermark_arms_gc_and_reclaim_recovers_space() {
+    // Small store: ~112 KiB chunk region, so a few generations of churn
+    // cross the 20%-free watermark.
+    let opts = StoreOptions { wal_len: 8 * 1024, ..StoreOptions::default() };
+    let mut store = Store::format(MemDev::new(128 * 1024), opts).unwrap();
+    store.create_ref(b"main").unwrap();
+    let mut srv = Server::new(store, 1);
+    let root = srv.root_grant(b"main").unwrap();
+    let s = srv.open_session(vec![root]);
+
+    // Drive churn the way the transport does: drain the trigger after
+    // each reply. The watermark must fire before space runs out, and the
+    // store must keep absorbing the same churn forever afterwards.
+    let mut armed = 0u32;
+    for i in 0..40u32 {
+        let data: Vec<u8> = (0..10_000).map(|j| (j as u8).wrapping_mul(i as u8 + 1)).collect();
+        let w = srv.handle(
+            s,
+            Request::Write { handle: 0, path: p(&["churn"]), offset: 0, data },
+            i as u64,
+        );
+        assert_eq!(w, Response::Ok, "iteration {i}");
+        if srv.gc_requested() {
+            armed += 1;
+            let stats = srv.run_gc().unwrap();
+            assert!(stats.freed_bytes > 0, "iteration {i} reclaimed nothing");
+        }
+        assert_eq!(srv.handle(s, Request::Sync { handle: 0 }, i as u64), Response::Ok);
+        if srv.gc_requested() {
+            armed += 1;
+            srv.run_gc().unwrap();
+        }
+    }
+    assert!(armed >= 3, "watermark armed only {armed} times over 40 generations of churn");
+    let Response::Space { total, free, .. } = srv.handle(s, Request::Statfs { handle: 0 }, 99)
+    else {
+        panic!()
+    };
+    assert!(free * 5 >= total, "GC did not get back above the watermark");
+
+    // Tag pins surface as Pinned.
+    let Response::SnapId(snap) =
+        srv.handle(s, Request::Snapshot { handle: 0, message: vec![], class: 0 }, 100)
+    else {
+        panic!()
+    };
+    srv.store().tag(b"pin", b"main", snap).unwrap();
+    assert_eq!(
+        srv.handle(s, Request::DeleteSnapshot { handle: 0, snap_id: snap }, 101),
+        Response::Err(ErrorCode::Pinned)
+    );
+}
+
+#[test]
 fn session_cleanup_and_audit() {
     let mut srv = new_server();
     let root = srv.root_grant(b"main").unwrap();

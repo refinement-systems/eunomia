@@ -1,12 +1,19 @@
-//! On-disk formats (spec §4.2): superblocks, WAL records, the ref table.
-//! All hand-defined and little-endian — nothing persistent speaks postcard
-//! (§3.7). Decoders are strict and reject trailing bytes.
+//! On-disk formats (spec §4.2): superblocks, WAL records, the ref table,
+//! and the chunk index. All hand-defined and little-endian — nothing
+//! persistent speaks postcard (§3.7). Decoders are strict and reject
+//! trailing bytes.
 //!
 //! Device layout:
 //!   [0,      4096)            superblock slot A
 //!   [4096,   8192)            superblock slot B
 //!   [8192,   8192 + wal_len)  WAL region (wal_len recorded in the SB)
-//!   [chunk_off, dev_len)      chunk store: framed, append-only
+//!   [chunk_off, dev_len)      chunk store: framed chunks + index objects
+//!
+//! Format v2 (M5): the superblock references a durable index object — the
+//! hash → (offset, length, birth generation) map plus the free-extent
+//! list (§4.2 items 3 and 4) — written as an ordinary self-verifying
+//! frame. v1 rebuilt the index by scanning an append-only region; a scan
+//! cannot represent holes, and GC exists to make holes.
 //!
 //! The generation-checksummed A/B superblock flip is the single atomicity
 //! mechanism for the entire system (§4.2).
@@ -22,8 +29,8 @@ pub const SB_B_OFF: u64 = 4096;
 pub const WAL_OFF: u64 = 8192;
 
 const SB_MAGIC: &[u8; 8] = b"EUNOMIA\0";
-const SB_VERSION: u32 = 1;
-const SB_BODY: usize = 88; // checksummed prefix
+const SB_VERSION: u32 = 2;
+const SB_BODY: usize = 96; // checksummed prefix
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Superblock {
@@ -33,6 +40,8 @@ pub struct Superblock {
     pub wal_next_seq: u64, // seq of the first record at/after wal_head
     pub wal_len: u64,
     pub chunk_tail: u64, // byte offset within the chunk region
+    /// Frame offset of the index object within the chunk region.
+    pub index_off: u64,
 }
 
 impl Superblock {
@@ -46,6 +55,7 @@ impl Superblock {
         buf[64..72].copy_from_slice(&self.wal_next_seq.to_le_bytes());
         buf[72..80].copy_from_slice(&self.wal_len.to_le_bytes());
         buf[80..88].copy_from_slice(&self.chunk_tail.to_le_bytes());
+        buf[88..96].copy_from_slice(&self.index_off.to_le_bytes());
         let sum = Hash::of(&buf[..SB_BODY]);
         buf[SB_BODY..SB_BODY + 32].copy_from_slice(sum.as_bytes());
         buf
@@ -70,8 +80,94 @@ impl Superblock {
             wal_next_seq: u64::from_le_bytes(buf[64..72].try_into().unwrap()),
             wal_len: u64::from_le_bytes(buf[72..80].try_into().unwrap()),
             chunk_tail: u64::from_le_bytes(buf[80..88].try_into().unwrap()),
+            index_off: u64::from_le_bytes(buf[88..96].try_into().unwrap()),
         })
     }
+}
+
+// ── Chunk index object (§4.2 items 3–4, durable since format v2) ───────
+
+const INDEX_MAGIC: &[u8; 4] = b"CIDX";
+
+/// One indexed object: `off` is the *data* offset within the chunk region
+/// (the frame header sits CHUNK_HEADER bytes before it). `birth` is the
+/// superblock generation the object was appended under — the GC epoch
+/// hook (§4.2, §4.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexEntry {
+    pub off: u64,
+    pub len: u32,
+    pub birth: u64,
+}
+
+/// Exact payload size for given table sizes (`pad` excluded). The store
+/// sizes the frame's extent with this *before* carving the extent out of
+/// the free list it is about to serialize; the explicit trailing pad
+/// then absorbs the (bounded) estimation slack, so extents fit exactly
+/// and nothing leaks.
+pub fn index_payload_len(entries: usize, free_extents: usize) -> usize {
+    4 + 8 + entries * 52 + 8 + free_extents * 16 + 4
+}
+
+/// Serialize the index map + free-extent list. Both maps iterate in key
+/// order, so the encoding is deterministic.
+pub fn encode_index(
+    entries: &BTreeMap<Hash, IndexEntry>,
+    free: &BTreeMap<u64, u64>,
+    pad: usize,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(index_payload_len(entries.len(), free.len()) + pad);
+    out.extend_from_slice(INDEX_MAGIC);
+    out.extend_from_slice(&(entries.len() as u64).to_le_bytes());
+    for (hash, e) in entries {
+        out.extend_from_slice(hash.as_bytes());
+        out.extend_from_slice(&e.off.to_le_bytes());
+        out.extend_from_slice(&e.len.to_le_bytes());
+        out.extend_from_slice(&e.birth.to_le_bytes());
+    }
+    out.extend_from_slice(&(free.len() as u64).to_le_bytes());
+    for (&off, &len) in free {
+        out.extend_from_slice(&off.to_le_bytes());
+        out.extend_from_slice(&len.to_le_bytes());
+    }
+    out.extend_from_slice(&(pad as u32).to_le_bytes());
+    out.resize(out.len() + pad, 0);
+    debug_assert_eq!(out.len(), index_payload_len(entries.len(), free.len()) + pad);
+    out
+}
+
+#[allow(clippy::type_complexity)]
+pub fn decode_index(
+    buf: &[u8],
+) -> Result<(BTreeMap<Hash, IndexEntry>, BTreeMap<u64, u64>), FormatError> {
+    let mut r = Reader { buf, pos: 0 };
+    if r.take(4)? != INDEX_MAGIC {
+        return Err(FormatError::BadNode("not a chunk index"));
+    }
+    let n = r.u64()?;
+    let mut entries = BTreeMap::new();
+    for _ in 0..n {
+        let hash = r.hash()?;
+        let off = r.u64()?;
+        let len = r.u32()?;
+        let birth = r.u64()?;
+        entries.insert(hash, IndexEntry { off, len, birth });
+    }
+    let nf = r.u64()?;
+    let mut free = BTreeMap::new();
+    for _ in 0..nf {
+        let off = r.u64()?;
+        let len = r.u64()?;
+        free.insert(off, len);
+    }
+    let pad = r.u32()? as usize;
+    if r.take(pad)?.iter().any(|&b| b != 0) {
+        return Err(FormatError::BadNode("nonzero index padding"));
+    }
+    if !r.done() {
+        return Err(FormatError::BadNode("index trailing bytes"));
+    }
+    Ok((entries, free))
 }
 
 // ── WAL records ─────────────────────────────────────────────────────────
@@ -380,15 +476,41 @@ mod tests {
             wal_next_seq: 42,
             wal_len: 65536,
             chunk_tail: 9999,
+            index_off: 4242,
         };
         let buf = sb.encode();
         assert_eq!(Superblock::decode(&buf), Some(sb));
         // Any single-byte corruption in the body must invalidate it.
-        for i in [0usize, 17, 30, 60, 70, 85, 100] {
+        for i in [0usize, 17, 30, 60, 70, 85, 92, 110] {
             let mut torn = buf;
             torn[i] ^= 0xFF;
             assert_eq!(Superblock::decode(&torn), None, "byte {i}");
         }
+    }
+
+    #[test]
+    fn index_roundtrip_and_strictness() {
+        let mut entries = BTreeMap::new();
+        entries.insert(Hash::of(b"a"), IndexEntry { off: 48, len: 100, birth: 1 });
+        entries.insert(Hash::of(b"b"), IndexEntry { off: 196, len: 7, birth: 3 });
+        let mut free = BTreeMap::new();
+        free.insert(300u64, 64u64);
+        for pad in [0usize, 17] {
+            let enc = encode_index(&entries, &free, pad);
+            assert_eq!(enc.len(), index_payload_len(entries.len(), free.len()) + pad);
+            assert_eq!(decode_index(&enc), Ok((entries.clone(), free.clone())));
+
+            assert!(decode_index(&enc[..enc.len() - 1]).is_err());
+            let mut extra = enc.clone();
+            extra.push(0);
+            assert!(decode_index(&extra).is_err());
+        }
+        // Pad bytes must be zero — one encoding per logical index.
+        let mut enc = encode_index(&entries, &free, 8);
+        let n = enc.len();
+        enc[n - 3] = 1;
+        assert!(decode_index(&enc).is_err());
+        assert!(decode_index(b"XIDX").is_err());
     }
 
     #[test]

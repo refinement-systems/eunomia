@@ -12,11 +12,10 @@
 //!   - `tree`     — nested-directory path operations (openat-shaped)
 //!
 //!   - `dev`      — block-device trait; file/mem/crash-injection backends
-//!   - `disk`     — on-disk formats: superblocks, WAL records, ref table
+//!   - `disk`     — on-disk formats: superblocks, WAL, ref table, index
 //!   - `overlay`  — per-ref in-memory overlay (interval maps, §4.3–4.4)
-//!   - `store`    — the engine: WAL + flush + A/B commit + recovery
-//!
-//! Remaining M2+ work items: `gc` (mark-and-sweep, M5).
+//!   - `store`    — the engine: WAL + flush + A/B commit + recovery + GC
+//!   - `gc`       — the mark walk (reachability over the tree, §4.6)
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -26,6 +25,7 @@ pub mod chunk;
 pub mod dev;
 pub mod disk;
 pub mod file;
+pub mod gc;
 pub mod hash;
 pub mod overlay;
 pub mod prolly;

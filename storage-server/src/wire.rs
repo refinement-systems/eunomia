@@ -10,8 +10,10 @@
 use crate::{Request, Response};
 use alloc::vec::Vec;
 
-/// magic 'E', protocol 0x51 (storage), version 1.
-const HEADER: [u8; 3] = [0x45, 0x51, 0x01];
+/// magic 'E', protocol 0x51 (storage), version 2 (v2 added the M5
+/// history-rewriting/GC opcodes; both peers ship from this tree, so no
+/// multi-version negotiation is implemented yet).
+const HEADER: [u8; 3] = [0x45, 0x51, 0x02];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WireError {

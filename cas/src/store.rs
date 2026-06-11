@@ -1,5 +1,5 @@
 //! The storage engine (spec §4.3–4.7): memtable + WAL + flush + the A/B
-//! superblock commit, with crash recovery. This is the code the
+//! superblock commit, with crash recovery and GC. This is the code the
 //! CommitProtocol TLA+ model models; the crash-injection proptest at the
 //! bottom checks the model's headline invariant against the real bytes:
 //! after any crash, every acknowledged write is recoverable from durable
@@ -7,7 +7,15 @@
 //!
 //! Commit is always: fsync chunks (barrier 1) → write new superblock to
 //! the older slot → fsync (barrier 2). Nothing is freed on the write
-//! path, ever; reclamation is GC's job exclusively (M5).
+//! path, ever; reclamation is GC's job exclusively (§4.6): `gc` marks
+//! from the committed root set and sweeps by *removing index entries* —
+//! a pure metadata edit that commits through the ordinary superblock
+//! flip, so a crash anywhere inside GC recovers the previous commit with
+//! nothing lost. Freed extents become allocatable only after the sweep
+//! commit lands (the same rule that forbids overwriting the latest
+//! superblock); until then the durable index still lists the condemned
+//! chunks, and reusing their extents early would let a dedup hit on the
+//! old index resurrect overwritten bytes after a crash.
 //!
 //! MVP simplifications, recorded:
 //!   - Flush rebuilds whole dirty files instead of re-chunking only the
@@ -19,21 +27,23 @@
 //!     flush-the-pinner scheduler arrives with real multi-ref traffic).
 //!   - Oversized writes (record > WAL region) bypass the WAL and commit
 //!     synchronously before acknowledging — same durability contract.
-//!   - The chunk index is rebuilt at mount by scanning the framed chunk
-//!     region (§4.2 allows index format changes as migrations; a durable
-//!     index is one).
+//!   - The allocator is first-fit over a flat extent list and the tail
+//!     high-water mark never retracts (freed space is reusable, but the
+//!     region never visibly shrinks). Fine at MVP scale.
 
 use crate::chunk::ChunkerParams;
 use crate::dev::{BlockDev, DevError};
 use crate::disk::{
-    self, RefEntry, RefTable, SnapRow, Superblock, WalOp, SB_A_OFF, SB_B_OFF, SB_SIZE, WAL_OFF,
+    self, IndexEntry, RefEntry, RefTable, SnapRow, Superblock, WalOp, CHUNK_HEADER, SB_A_OFF,
+    SB_B_OFF, SB_SIZE, WAL_OFF,
 };
 use crate::file::{make_file_entry, read_file};
+use crate::gc;
 use crate::hash::Hash;
 use crate::overlay::{FileState, Overlay, Path};
 use crate::prolly::{Content, Dir, Entry, EntryKind, FormatError, NodeStore};
 use crate::tree;
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -47,6 +57,8 @@ pub enum StoreError {
     NotAFile,
     Corrupt(&'static str),
     NoSpace,
+    /// The snapshot is a tag target; tags are keep-strength pins (§4.7).
+    Pinned,
 }
 
 impl From<DevError> for StoreError {
@@ -72,6 +84,7 @@ impl core::fmt::Display for StoreError {
             StoreError::NotAFile => write!(f, "not a file"),
             StoreError::Corrupt(w) => write!(f, "corrupt store: {w}"),
             StoreError::NoSpace => write!(f, "chunk region full"),
+            StoreError::Pinned => write!(f, "snapshot pinned by a tag"),
         }
     }
 }
@@ -102,9 +115,20 @@ impl Default for StoreOptions {
 struct ChunkStore<D: BlockDev> {
     dev: D,
     chunk_off: u64,
+    /// High-water mark: everything at/after `tail` has never been
+    /// allocated. Space below `tail` is governed by `index` and `free`.
     tail: u64,
     birth_gen: u64,
-    index: BTreeMap<Hash, (u64, u32)>, // hash → (data offset in region, len)
+    index: BTreeMap<Hash, IndexEntry>,
+    /// Committed-free extents (frame offset → byte length), allocatable.
+    free: BTreeMap<u64, u64>,
+    /// Extents freed by uncommitted state (GC sweep, superseded index
+    /// frames). They join `free` only after the next superblock flip:
+    /// the current durable commit still references them.
+    pending_free: Vec<(u64, u64)>,
+    /// Extent of the index frame the *current durable* superblock points
+    /// at; freed (via `pending_free`) when the next commit supersedes it.
+    index_extent: (u64, u64),
     io_error: Option<DevError>,
 }
 
@@ -113,8 +137,112 @@ impl<D: BlockDev> ChunkStore<D> {
         self.dev.len() - self.chunk_off
     }
 
+    /// First-fit from committed-free extents, else bump the tail.
+    fn alloc(&mut self, need: u64) -> Option<u64> {
+        let found = self
+            .free
+            .iter()
+            .find(|(_, &len)| len >= need)
+            .map(|(&off, &len)| (off, len));
+        if let Some((off, len)) = found {
+            self.free.remove(&off);
+            if len > need {
+                self.free.insert(off + need, len - need);
+            }
+            return Some(off);
+        }
+        if self.tail + need <= self.region_len() {
+            let off = self.tail;
+            self.tail += need;
+            return Some(off);
+        }
+        None
+    }
+
+    /// `free` ∪ `pending_free`, adjacent extents merged — the free list
+    /// as the next commit will record it.
+    fn merged_free(&self) -> BTreeMap<u64, u64> {
+        let mut all: Vec<(u64, u64)> = self.free.iter().map(|(&o, &l)| (o, l)).collect();
+        all.extend_from_slice(&self.pending_free);
+        all.sort_unstable();
+        let mut merged: BTreeMap<u64, u64> = BTreeMap::new();
+        let mut cur: Option<(u64, u64)> = None;
+        for (off, len) in all {
+            match cur {
+                Some((coff, clen)) if coff + clen == off => cur = Some((coff, clen + len)),
+                Some((coff, clen)) => {
+                    merged.insert(coff, clen);
+                    cur = Some((off, len));
+                }
+                None => cur = Some((off, len)),
+            }
+        }
+        if let Some((coff, clen)) = cur {
+            merged.insert(coff, clen);
+        }
+        merged
+    }
+
+    fn free_bytes(&self) -> u64 {
+        (self.region_len() - self.tail)
+            + self.free.values().sum::<u64>()
+            + self.pending_free.iter().map(|&(_, l)| l).sum::<u64>()
+    }
+
+    /// Serialize the index + free list and write the frame into space
+    /// that is free in *both* the current durable commit and the new one:
+    /// a committed-free extent (then carved out of the list the frame
+    /// itself records) or the tail. Never a `pending_free` extent — the
+    /// durable commit, including the index frame it points at, must stay
+    /// fully intact until barrier 2.
+    ///
+    /// Sizing knot: the frame records the free list, but carving the
+    /// frame's own extent reshapes that list. Resolved with an upper
+    /// bound — merging only ever coalesces extents and the carve splits
+    /// at most one in two — and explicit padding to make the frame fill
+    /// its extent exactly.
+    ///
+    /// Returns the frame's extent and the free list as recorded in it
+    /// (live after the flip); the caller commits via the superblock.
+    fn write_index_frame(&mut self) -> Result<((u64, u64), BTreeMap<u64, u64>), StoreError> {
+        let bound_extents = self.free.len() + self.pending_free.len() + 1;
+        let need =
+            (CHUNK_HEADER + disk::index_payload_len(self.index.len(), bound_extents)) as u64;
+        let chosen = self
+            .free
+            .iter()
+            .find(|(_, &len)| len >= need)
+            .map(|(&off, &len)| (off, len));
+        let off = match chosen {
+            Some((off, len)) => {
+                self.free.remove(&off);
+                if len > need {
+                    self.free.insert(off + need, len - need);
+                }
+                off
+            }
+            None => {
+                if self.tail + need > self.region_len() {
+                    return Err(StoreError::NoSpace);
+                }
+                let off = self.tail;
+                self.tail += need;
+                off
+            }
+        };
+        let new_free = self.merged_free();
+        let body = disk::index_payload_len(self.index.len(), new_free.len());
+        let pad = need as usize - CHUNK_HEADER - body;
+        let payload = disk::encode_index(&self.index, &new_free, pad);
+        let hash = Hash::of(&payload);
+        let frame = disk::encode_chunk_frame(&payload, self.birth_gen, &hash);
+        debug_assert_eq!(frame.len() as u64, need);
+        self.dev.write(self.chunk_off + off, &frame)?;
+        Ok(((off, need), new_free))
+    }
+
     fn read_object(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
-        let Some(&(off, len)) = self.index.get(hash) else {
+        let Some(&IndexEntry { off, len, .. }) = self.index.get(hash) else {
             return Ok(None);
         };
         let mut buf = vec![0u8; len as usize];
@@ -133,20 +261,30 @@ impl<D: BlockDev> NodeStore for ChunkStore<D> {
     fn put(&mut self, bytes: &[u8]) -> Hash {
         let hash = Hash::of(bytes);
         if self.index.contains_key(&hash) {
-            return hash; // dedup (§4.3); GC resurrection check arrives in M5
-        }
-        let frame = disk::encode_chunk_frame(bytes, self.birth_gen, &hash);
-        if self.tail + frame.len() as u64 > self.region_len() {
-            self.io_error = Some(DevError::Io("chunk region full"));
+            // Dedup (§4.3). The §4.6 resurrection hazard (an index hit on
+            // a chunk the marker has condemned) cannot arise: GC here is
+            // synchronous, and the sweep removes condemned entries before
+            // any subsequent put, so a re-put of condemned content is an
+            // index miss and rewrites the chunk.
             return hash;
         }
-        if let Err(e) = self.dev.write(self.chunk_off + self.tail, &frame) {
+        let frame = disk::encode_chunk_frame(bytes, self.birth_gen, &hash);
+        let Some(off) = self.alloc(frame.len() as u64) else {
+            self.io_error = Some(DevError::Io("chunk region full"));
+            return hash;
+        };
+        if let Err(e) = self.dev.write(self.chunk_off + off, &frame) {
             self.io_error = Some(e);
             return hash;
         }
-        self.index
-            .insert(hash, (self.tail + disk::CHUNK_HEADER as u64, bytes.len() as u32));
-        self.tail += frame.len() as u64;
+        self.index.insert(
+            hash,
+            IndexEntry {
+                off: off + CHUNK_HEADER as u64,
+                len: bytes.len() as u32,
+                birth: self.birth_gen,
+            },
+        );
         hash
     }
 
@@ -197,11 +335,17 @@ impl<D: BlockDev> Store<D> {
             tail: 0,
             birth_gen: 1,
             index: BTreeMap::new(),
+            free: BTreeMap::new(),
+            pending_free: Vec::new(),
+            index_extent: (0, 0),
             io_error: None,
         };
         let table = RefTable::default();
         let rt_hash = chunks.put(&table.encode());
         chunks.io_error.take().map_or(Ok(()), Err)?;
+        let (index_extent, free) = chunks.write_index_frame()?;
+        chunks.free = free;
+        chunks.index_extent = index_extent;
         chunks.dev.flush()?; // barrier 1
 
         let sb = Superblock {
@@ -211,6 +355,7 @@ impl<D: BlockDev> Store<D> {
             wal_next_seq: 1,
             wal_len: opts.wal_len,
             chunk_tail: chunks.tail,
+            index_off: index_extent.0,
         };
         chunks.dev.write(SB_A_OFF, &sb.encode())?;
         chunks.dev.flush()?; // barrier 2
@@ -229,8 +374,8 @@ impl<D: BlockDev> Store<D> {
     }
 
     /// Mount = crash recovery (§4.5): both paths are the same code. Read
-    /// both slots, discard invalid, take the higher generation; rebuild
-    /// the chunk index by scan; replay the WAL tail into overlays.
+    /// both slots, discard invalid, take the higher generation; load the
+    /// durable index it points at; replay the WAL tail into overlays.
     pub fn mount(dev: D, opts: StoreOptions) -> Result<Store<D>, StoreError> {
         let mut buf_a = vec![0u8; SB_SIZE];
         let mut buf_b = vec![0u8; SB_SIZE];
@@ -256,25 +401,44 @@ impl<D: BlockDev> Store<D> {
             tail: sb.chunk_tail,
             birth_gen: sb.generation + 1,
             index: BTreeMap::new(),
+            free: BTreeMap::new(),
+            pending_free: Vec::new(),
+            index_extent: (0, 0),
             io_error: None,
         };
-        // Index rebuild: the committed region is durable and framed; a
-        // malformed frame inside it is real corruption, not a torn tail.
-        let mut pos = 0u64;
-        let mut header = [0u8; disk::CHUNK_HEADER];
-        while pos < sb.chunk_tail {
-            chunks.dev.read(chunk_off + pos, &mut header)?;
-            let Some((len, _birth, hash)) = disk::decode_chunk_header(&header) else {
-                return Err(StoreError::Corrupt("bad chunk frame in committed region"));
-            };
-            chunks
-                .index
-                .insert(hash, (pos + disk::CHUNK_HEADER as u64, len as u32));
-            pos += (disk::CHUNK_HEADER + len) as u64;
+        // The durable index (format v2): a self-verifying frame the
+        // superblock points at. It was covered by barrier 1 of the commit
+        // that won recovery, so a bad frame here is real corruption.
+        let mut header = [0u8; CHUNK_HEADER];
+        chunks.dev.read(chunk_off + sb.index_off, &mut header)?;
+        let Some((ilen, _, ihash)) = disk::decode_chunk_header(&header) else {
+            return Err(StoreError::Corrupt("bad index frame"));
+        };
+        let frame_len = (CHUNK_HEADER + ilen) as u64;
+        if sb.index_off + frame_len > sb.chunk_tail {
+            return Err(StoreError::Corrupt("index frame overruns committed tail"));
         }
-        if pos != sb.chunk_tail {
-            return Err(StoreError::Corrupt("chunk region overruns committed tail"));
+        let mut payload = vec![0u8; ilen];
+        chunks
+            .dev
+            .read(chunk_off + sb.index_off + CHUNK_HEADER as u64, &mut payload)?;
+        if Hash::of(&payload) != ihash {
+            return Err(StoreError::Corrupt("index frame hash mismatch"));
         }
+        let (index, free) = disk::decode_index(&payload)?;
+        for e in index.values() {
+            if e.off < CHUNK_HEADER as u64 || e.off + e.len as u64 > sb.chunk_tail {
+                return Err(StoreError::Corrupt("index entry out of bounds"));
+            }
+        }
+        for (&off, &len) in &free {
+            if off + len > sb.chunk_tail {
+                return Err(StoreError::Corrupt("free extent out of bounds"));
+            }
+        }
+        chunks.index = index;
+        chunks.free = free;
+        chunks.index_extent = (sb.index_off, frame_len);
 
         let rt_bytes = chunks
             .read_object(&sb.ref_table)?
@@ -339,6 +503,11 @@ impl<D: BlockDev> Store<D> {
 
     pub fn refs(&self) -> impl Iterator<Item = (&Vec<u8>, &RefEntry)> {
         self.table.refs.iter()
+    }
+
+    /// Committed superblock generation (advances on every commit).
+    pub fn generation(&self) -> u64 {
+        self.sb.generation
     }
 
     pub fn snapshots(&self, ref_name: &[u8]) -> impl Iterator<Item = &SnapRow> {
@@ -723,6 +892,13 @@ impl<D: BlockDev> Store<D> {
     pub fn commit(&mut self) -> Result<(), StoreError> {
         let rt_hash = self.chunks.put(&self.table.encode());
         self.check_io()?;
+        // The index frame this commit supersedes becomes free once the
+        // flip lands; record it in the new frame's free list now. (On a
+        // failed commit it may be pushed again next time — merged_free
+        // dedups identical extents.)
+        let old_index_extent = self.chunks.index_extent;
+        self.chunks.pending_free.push(old_index_extent);
+        let (new_index_extent, new_free) = self.chunks.write_index_frame()?;
         self.chunks.dev.flush()?; // barrier 1: no SB may reference non-durable chunks
 
         while let Some(rec) = self.wal_records.front() {
@@ -749,6 +925,7 @@ impl<D: BlockDev> Store<D> {
             wal_next_seq,
             wal_len: self.opts.wal_len,
             chunk_tail: self.chunks.tail,
+            index_off: new_index_extent.0,
         };
         // Always alternate; never overwrite the current latest commit.
         let target = if self.sb_in_b { SB_A_OFF } else { SB_B_OFF };
@@ -757,6 +934,11 @@ impl<D: BlockDev> Store<D> {
         self.sb = new_sb;
         self.sb_in_b = !self.sb_in_b;
         self.chunks.birth_gen = self.sb.generation + 1;
+        // The flip landed: extents freed by this commit (GC sweep, the
+        // superseded index frame) are now committed-free and reusable.
+        self.chunks.free = new_free;
+        self.chunks.pending_free.clear();
+        self.chunks.index_extent = new_index_extent;
         Ok(())
     }
 
@@ -772,6 +954,123 @@ impl<D: BlockDev> Store<D> {
         }
         self.commit()
     }
+
+    // ── GC and history rewriting (§4.6–4.7, M5) ─────────────────────
+
+    /// Mark-and-sweep GC. Marks from the committed root set (every ref
+    /// head and snapshot root; tags name snapshot IDs, so their targets
+    /// are already covered), sweeps by removing index entries whose birth
+    /// generation predates the epoch, and commits the new index + free
+    /// list through the ordinary superblock flip. The sweep is pure
+    /// metadata until that flip: a crash anywhere inside GC recovers the
+    /// previous commit, losing reclamation work but never data.
+    pub fn gc(&mut self) -> Result<GcStats, StoreError> {
+        // Flush + commit first: the committed ref table then equals the
+        // working table and the WAL is empty, so the committed root set
+        // is the complete root set.
+        self.sync_all()?;
+        // Chunks born at/after the epoch are live by fiat (§4.6). In this
+        // synchronous cycle none can appear between mark and sweep, but
+        // the check is the stated contract, not an optimization.
+        let epoch = self.chunks.birth_gen;
+        let mut live: BTreeSet<Hash> = BTreeSet::new();
+        live.insert(self.sb.ref_table);
+        let mut roots: Vec<Hash> = self.table.refs.values().map(|r| r.root).collect();
+        roots.extend(self.table.snaps.values().map(|s| s.root));
+        for root in roots {
+            gc::mark(&self.chunks, &root, &mut live)?;
+        }
+
+        let condemned: Vec<(Hash, IndexEntry)> = self
+            .chunks
+            .index
+            .iter()
+            .filter(|(h, e)| !live.contains(h) && e.birth < epoch)
+            .map(|(h, e)| (*h, *e))
+            .collect();
+        let mut freed_bytes = 0u64;
+        for (hash, e) in &condemned {
+            self.chunks.index.remove(hash);
+            let frame_len = e.len as u64 + CHUNK_HEADER as u64;
+            self.chunks
+                .pending_free
+                .push((e.off - CHUNK_HEADER as u64, frame_len));
+            freed_bytes += frame_len;
+        }
+        self.commit()?;
+        Ok(GcStats {
+            live_objects: self.chunks.index.len() as u64,
+            freed_objects: condemned.len() as u64,
+            freed_bytes,
+        })
+    }
+
+    /// Chunk-region space accounting — what the watermark trigger and a
+    /// `df` builtin read.
+    pub fn space(&self) -> SpaceInfo {
+        let total = self.chunks.region_len();
+        let free = self.chunks.free_bytes();
+        SpaceInfo { total, used: total - free, free }
+    }
+
+    /// History rewriting (§4.6): drop one snapshot row, re-pointing
+    /// children's advisory parent past it (§4.7). Tag targets are
+    /// keep-strength pins and refuse deletion. The newly unreachable
+    /// mass is reclaimed by the next GC, not here — this op is O(small).
+    pub fn delete_snapshot(&mut self, ref_name: &[u8], snap_id: u64) -> Result<(), StoreError> {
+        let key = (ref_name.to_vec(), snap_id);
+        let row = self.table.snaps.get(&key).ok_or(StoreError::NoSuchSnapshot)?;
+        if self
+            .table
+            .tags
+            .values()
+            .any(|(r, s)| r.as_slice() == ref_name && *s == snap_id)
+        {
+            return Err(StoreError::Pinned);
+        }
+        let new_parent = row.parent;
+        self.table.snaps.remove(&key);
+        let range = (ref_name.to_vec(), 0)..(ref_name.to_vec(), u64::MAX);
+        for (_, r) in self.table.snaps.range_mut(range) {
+            if r.parent == Some(snap_id) {
+                r.parent = new_parent;
+            }
+        }
+        self.commit()
+    }
+
+    /// Retention-class edit (§4.7): the "mark survivors `keep`, run the
+    /// policy" flow is this plus `delete_snapshot`, policy in userspace.
+    pub fn set_snapshot_class(
+        &mut self,
+        ref_name: &[u8],
+        snap_id: u64,
+        class: u8,
+    ) -> Result<(), StoreError> {
+        if class > disk::CLASS_EPHEMERAL {
+            return Err(StoreError::Format(FormatError::BadEntry("bad retention class")));
+        }
+        self.table
+            .snaps
+            .get_mut(&(ref_name.to_vec(), snap_id))
+            .ok_or(StoreError::NoSuchSnapshot)?
+            .class = class;
+        self.commit()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GcStats {
+    pub live_objects: u64,
+    pub freed_objects: u64,
+    pub freed_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpaceInfo {
+    pub total: u64,
+    pub used: u64,
+    pub free: u64,
 }
 
 #[cfg(test)]
@@ -920,16 +1219,190 @@ mod tests {
         buf
     }
 
+    #[test]
+    fn gc_reclaims_superseded_roots_and_reuses_space() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+
+        // Churn: each iteration supersedes the previous root and file
+        // chunks; without reclamation `used` grows without bound, with it
+        // the footprint stays flat (freed extents get reused).
+        let mut used_after_first = 0;
+        for i in 0..10u8 {
+            let data: Vec<u8> = (0..20_000).map(|j| (j as u8).wrapping_add(i)).collect();
+            store.write(b"main", &p(&["churn"]), 0, &data, i as u64).unwrap();
+            store.sync_ref(b"main").unwrap();
+            let stats = store.gc().unwrap();
+            if i == 0 {
+                used_after_first = store.space().used;
+                assert!(stats.live_objects > 0);
+            } else {
+                assert!(stats.freed_objects > 0, "iteration {i} freed nothing");
+            }
+        }
+        assert!(
+            store.space().used < used_after_first * 3,
+            "space not reused: used {} vs first-iteration {}",
+            store.space().used,
+            used_after_first
+        );
+
+        // The store still works and survives a remount with its free list.
+        let expect: Vec<u8> = (0..20_000).map(|j| (j as u8).wrapping_add(9)).collect();
+        assert_eq!(store.read(b"main", &p(&["churn"])).unwrap().unwrap(), expect);
+        let store2 = Store::mount(store.into_dev(), test_opts()).unwrap();
+        assert_eq!(store2.read(b"main", &p(&["churn"])).unwrap().unwrap(), expect);
+    }
+
+    #[test]
+    fn snapshots_pin_data_until_deleted() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        let old: Vec<u8> = (0..30_000).map(|j| (j % 251) as u8).collect();
+        store.write(b"main", &p(&["data"]), 0, &old, 1).unwrap();
+        let snap = store.snapshot(b"main", b"t", b"v1", disk::CLASS_AUTO, 10).unwrap();
+        let new: Vec<u8> = (0..30_000).map(|j| (j % 13) as u8).collect();
+        store.write(b"main", &p(&["data"]), 0, &new, 2).unwrap();
+        store.sync_ref(b"main").unwrap();
+
+        // The snapshot pins the old root: GC must keep it readable.
+        store.gc().unwrap();
+        let root = store.snapshot_root(b"main", snap).unwrap();
+        assert_eq!(store.read_at_root(&root, &p(&["data"])).unwrap().unwrap(), old);
+
+        // Dropping the snapshot is a ref-table edit; the next GC reclaims
+        // the now-unreachable mass (§4.6 "history rewriting").
+        let used_before = store.space().used;
+        store.delete_snapshot(b"main", snap).unwrap();
+        let stats = store.gc().unwrap();
+        assert!(stats.freed_objects > 0);
+        assert!(store.space().used < used_before);
+        assert!(matches!(
+            store.snapshot_root(b"main", snap),
+            Err(StoreError::NoSuchSnapshot)
+        ));
+        assert_eq!(store.read(b"main", &p(&["data"])).unwrap().unwrap(), new);
+    }
+
+    #[test]
+    fn canonical_roots_shared_across_snapshots_survive_partial_delete() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        store.write(b"main", &p(&["f"]), 0, &[7u8; 5000], 1).unwrap();
+        // Two snapshots of unchanged content share one root (§4.7: same
+        // root for different events is normal under canonical trees).
+        let s1 = store.snapshot(b"main", b"t", b"a", disk::CLASS_AUTO, 10).unwrap();
+        let s2 = store.snapshot(b"main", b"t", b"b", disk::CLASS_AUTO, 11).unwrap();
+        store.write(b"main", &p(&["f"]), 0, &[9u8; 5000], 2).unwrap();
+        store.sync_ref(b"main").unwrap();
+
+        store.delete_snapshot(b"main", s1).unwrap();
+        store.gc().unwrap();
+        // s2 still pins the shared root.
+        let root = store.snapshot_root(b"main", s2).unwrap();
+        assert_eq!(store.read_at_root(&root, &p(&["f"])).unwrap().unwrap(), [7u8; 5000]);
+
+        store.delete_snapshot(b"main", s2).unwrap();
+        let stats = store.gc().unwrap();
+        assert!(stats.freed_objects > 0);
+    }
+
+    #[test]
+    fn delete_snapshot_repoints_parents_and_respects_tag_pins() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        store.write(b"main", &p(&["f"]), 0, b"1", 1).unwrap();
+        let s1 = store.snapshot(b"main", b"t", b"", disk::CLASS_AUTO, 10).unwrap();
+        store.write(b"main", &p(&["f"]), 0, b"2", 2).unwrap();
+        let s2 = store.snapshot(b"main", b"t", b"", disk::CLASS_AUTO, 20).unwrap();
+        store.write(b"main", &p(&["f"]), 0, b"3", 3).unwrap();
+        let s3 = store.snapshot(b"main", b"t", b"", disk::CLASS_AUTO, 30).unwrap();
+
+        // Prune the middle: the child re-points to the grandparent (§4.7).
+        store.delete_snapshot(b"main", s2).unwrap();
+        let rows: Vec<(u64, Option<u64>)> =
+            store.snapshots(b"main").map(|r| (r.id, r.parent)).collect();
+        assert_eq!(rows, vec![(s1, None), (s3, Some(s1))]);
+
+        // Tags are keep-strength pins.
+        store.tag(b"release", b"main", s1).unwrap();
+        assert!(matches!(
+            store.delete_snapshot(b"main", s1),
+            Err(StoreError::Pinned)
+        ));
+
+        // Retention class is an editable row field (§4.7).
+        store.set_snapshot_class(b"main", s3, disk::CLASS_KEEP).unwrap();
+        assert_eq!(
+            store.snapshots(b"main").find(|r| r.id == s3).unwrap().class,
+            disk::CLASS_KEEP
+        );
+    }
+
+    #[test]
+    fn crash_mid_gc_loses_no_data() {
+        // Base state: a snapshot pinning old content, current head content,
+        // and a deleted file whose chunks are reclaimable garbage.
+        let mut store = Store::format(CrashDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        store.write(b"main", &p(&["keepme"]), 0, b"pinned by snap", 1).unwrap();
+        let snap = store.snapshot(b"main", b"t", b"", disk::CLASS_KEEP, 10).unwrap();
+        store.write(b"main", &p(&["keepme"]), 0, b"current state!", 2).unwrap();
+        store.write(b"main", &p(&["junk"]), 0, &[0xAB; 3000], 3).unwrap();
+        store.sync_all().unwrap();
+        store.unlink(b"main", &p(&["junk"]), 4).unwrap();
+        store.sync_all().unwrap();
+        let base = store_snapshot_bytes(&store);
+
+        // Cut power at every point inside the GC cycle (both commits,
+        // the sweep, the index writes). Whatever survives must mount and
+        // serve every piece of live data (M5 exit criterion).
+        for fail_at in 0..24u64 {
+            let mut dev = CrashDev::new(1 << 20);
+            dev.write(0, &base).unwrap();
+            dev.flush().unwrap();
+            let mut store = Store::mount(dev, test_opts()).unwrap();
+            store.dev_mut().set_fail_after(fail_at);
+            let _ = store.gc();
+            let mut dev = store.into_dev();
+            dev.clear_fail();
+            dev.crash(fail_at.wrapping_mul(0x9E3779B97F4A7C15));
+
+            let mut rec = Store::mount(dev, test_opts()).unwrap();
+            let check = |s: &Store<CrashDev>| {
+                assert_eq!(
+                    s.read(b"main", &p(&["keepme"])).unwrap().unwrap(),
+                    b"current state!",
+                    "fail_at={fail_at}"
+                );
+                let root = s.snapshot_root(b"main", snap).unwrap();
+                assert_eq!(
+                    s.read_at_root(&root, &p(&["keepme"])).unwrap().unwrap(),
+                    b"pinned by snap",
+                    "fail_at={fail_at}"
+                );
+                assert_eq!(s.read(b"main", &p(&["junk"])).unwrap(), None);
+            };
+            check(&rec);
+            // A clean GC after recovery converges and leaves data intact.
+            rec.gc().unwrap();
+            check(&rec);
+        }
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
         /// The CommitProtocol headline invariant against real bytes: after
         /// a crash at an arbitrary point (power cut mid-operation, torn
         /// unflushed writes), every acknowledged mutation is recoverable.
         /// At most the single in-flight unacked mutation is ambiguous.
+        /// Selectors 12–15 mix in maintenance ops (sync, snapshot,
+        /// snapshot deletion, GC) so the crash point can land anywhere in
+        /// the GC cycle too — none of them may change logical state.
         #[test]
         fn crash_recovery_preserves_acked_state(
             ops in proptest::collection::vec(
-                (0u8..12, 0u64..400, proptest::collection::vec(any::<u8>(), 1..96), any::<bool>()),
+                (0u8..16, 0u64..400, proptest::collection::vec(any::<u8>(), 1..96), any::<bool>()),
                 1..50,
             ),
             fail_at in 4u64..600,
@@ -947,6 +1420,28 @@ mod tests {
 
             let dirs = ["d1", "d2"];
             for (sel, off, data, is_unlink) in &ops {
+                if *sel >= 12 {
+                    let r = match sel {
+                        12 => store.sync_all(),
+                        13 => store
+                            .snapshot(b"main", b"prop", b"", disk::CLASS_AUTO, *off)
+                            .map(|_| ()),
+                        14 => {
+                            let oldest = store.snapshots(b"main").next().map(|r| r.id);
+                            match oldest {
+                                Some(id) => store.delete_snapshot(b"main", id),
+                                None => Ok(()),
+                            }
+                        }
+                        _ => store.gc().map(|_| ()),
+                    };
+                    // Maintenance never changes logical content, so a
+                    // power cut inside one is unambiguous for the model.
+                    if r.is_err() {
+                        break;
+                    }
+                    continue;
+                }
                 let path = if sel % 2 == 0 {
                     p(&[&format!("f{}", sel % 4)])
                 } else {

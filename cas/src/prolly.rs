@@ -444,6 +444,45 @@ impl Dir {
     }
 }
 
+/// One stored node, shallowly parsed — the GC mark walk (§4.6) needs the
+/// raw child hashes of internal nodes, which `Dir::load` flattens away.
+#[derive(Debug)]
+pub enum NodeRefs {
+    /// Internal node: child node hashes.
+    Children(Vec<Hash>),
+    /// Leaf node: entries (whose `Content` may reference chunk lists and
+    /// child directory roots).
+    Entries(Vec<Entry>),
+}
+
+pub fn parse_node(bytes: &[u8]) -> Result<NodeRefs, FormatError> {
+    let mut r = Reader { buf: bytes, pos: 0 };
+    let level = r.u8()?;
+    let count = r.u32()? as usize;
+    if count > MAX_NODE_ENTRIES {
+        return Err(FormatError::BadNode("node too wide"));
+    }
+    let refs = if level == 0 {
+        let mut entries = Vec::with_capacity(count);
+        for _ in 0..count {
+            entries.push(decode_entry(&mut r)?);
+        }
+        NodeRefs::Entries(entries)
+    } else {
+        let mut children = Vec::with_capacity(count);
+        for _ in 0..count {
+            let key_len = r.u8()? as usize;
+            r.take(key_len)?;
+            children.push(r.hash()?);
+        }
+        NodeRefs::Children(children)
+    };
+    if !r.done() {
+        return Err(FormatError::BadNode("trailing bytes"));
+    }
+    Ok(refs)
+}
+
 fn load_node(
     store: &impl NodeStore,
     hash: &Hash,

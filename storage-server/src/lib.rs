@@ -110,6 +110,15 @@ pub enum Request {
     /// Size of a file (None response = absent).
     Stat { handle: HandleId, path: TreePath },
     EnumerateSession,
+    /// History rewriting (§4.6–4.7): drop one snapshot row. Sets the
+    /// post-rewrite GC trigger; the reclamation itself is asynchronous.
+    DeleteSnapshot { handle: HandleId, snap_id: u64 },
+    /// Edit a snapshot's retention class (the "mark survivors keep" flow).
+    SetClass { handle: HandleId, snap_id: u64, class: u8 },
+    /// Run a GC cycle now (the manual trigger).
+    Gc { handle: HandleId },
+    /// Chunk-region space accounting.
+    Statfs { handle: HandleId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +151,8 @@ pub enum Response {
     Ticket([u8; 16]),
     SessionDump(Vec<(HandleId, String)>),
     Err(ErrorCode),
+    GcReport { live_objects: u64, freed_objects: u64, freed_bytes: u64 },
+    Space { total: u64, used: u64, free: u64 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,6 +168,8 @@ pub enum ErrorCode {
     NoSuchSnapshot,
     BadTicket,
     Internal,
+    /// The snapshot is a tag target; tags are keep-strength pins (§4.7).
+    Pinned,
 }
 
 // ── Server ──────────────────────────────────────────────────────────────
@@ -173,6 +186,13 @@ pub struct Server<D: BlockDev> {
     tickets: BTreeMap<[u8; 16], PendingTicket>,
     ticket_seq: u64,
     ticket_seed: u64,
+    /// GC requested by a trigger (§4.6): a history-rewriting op, or the
+    /// space watermark. The transport drains it after replying, so the
+    /// foreground op stays O(small) and reclamation follows promptly.
+    gc_requested: bool,
+    /// Generation at the last completed GC — the watermark re-arms only
+    /// after new commits, so a full-but-idle store doesn't thrash GC.
+    gc_done_gen: u64,
 }
 
 impl<D: BlockDev> Server<D> {
@@ -184,11 +204,26 @@ impl<D: BlockDev> Server<D> {
             tickets: BTreeMap::new(),
             ticket_seq: 0,
             ticket_seed,
+            gc_requested: false,
+            gc_done_gen: 0,
         }
     }
 
     pub fn store(&mut self) -> &mut Store<D> {
         &mut self.store
+    }
+
+    pub fn gc_requested(&self) -> bool {
+        self.gc_requested
+    }
+
+    /// Run a GC cycle now — the manual `gc` request, or the transport
+    /// draining a pending trigger.
+    pub fn run_gc(&mut self) -> Result<cas::store::GcStats, StoreError> {
+        self.gc_requested = false;
+        let stats = self.store.gc()?;
+        self.gc_done_gen = self.store.generation();
+        Ok(stats)
     }
 
     /// Open a session pre-populated with grants — the delegation-along-
@@ -233,10 +268,18 @@ impl<D: BlockDev> Server<D> {
     }
 
     pub fn handle(&mut self, session: SessionId, req: Request, now: u64) -> Response {
-        match self.dispatch(session, req, now) {
+        let resp = match self.dispatch(session, req, now) {
             Ok(resp) => resp,
             Err(e) => Response::Err(e),
+        };
+        // The crude space watermark (§4.6): below ~20% free, request a
+        // cycle — unless GC already ran at this generation and this is
+        // simply how full the store is.
+        let sp = self.store.space();
+        if sp.free * 5 < sp.total && self.store.generation() != self.gc_done_gen {
+            self.gc_requested = true;
         }
+        resp
     }
 
     /// Validate handle liveness (generation check — lazy mass revocation,
@@ -472,6 +515,9 @@ impl<D: BlockDev> Server<D> {
                 self.store
                     .rollback(&name.clone(), snap_id)
                     .map_err(store_err)?;
+                // Post-rewrite trigger (§4.6): the abandoned head (unless
+                // snapshotted) just became garbage.
+                self.gc_requested = true;
                 Ok(Response::Ok)
             }
             Request::RevokeRef { handle } => {
@@ -541,7 +587,54 @@ impl<D: BlockDev> Server<D> {
                 dump.sort();
                 Ok(Response::SessionDump(dump))
             }
+            Request::DeleteSnapshot { handle, snap_id } => {
+                let name = self.rewrite_target(session, handle)?;
+                self.store.delete_snapshot(&name, snap_id).map_err(store_err)?;
+                // Post-rewrite trigger (§4.6): reclamation follows
+                // promptly while this op stays O(small).
+                self.gc_requested = true;
+                Ok(Response::Ok)
+            }
+            Request::SetClass { handle, snap_id, class } => {
+                let name = self.rewrite_target(session, handle)?;
+                self.store
+                    .set_snapshot_class(&name, snap_id, class)
+                    .map_err(store_err)?;
+                Ok(Response::Ok)
+            }
+            Request::Gc { handle } => {
+                self.rewrite_target(session, handle)?;
+                let stats = self.run_gc().map_err(store_err)?;
+                Ok(Response::GcReport {
+                    live_objects: stats.live_objects,
+                    freed_objects: stats.freed_objects,
+                    freed_bytes: stats.freed_bytes,
+                })
+            }
+            Request::Statfs { handle } => {
+                self.lookup(session, handle, 0)?;
+                let sp = self.store.space();
+                Ok(Response::Space { total: sp.total, used: sp.used, free: sp.free })
+            }
         }
+    }
+
+    /// Common gate for history rewriting: a live ref handle with the
+    /// `may-rewrite-history` right, at the ref root (surgery from a
+    /// subtree view is not a thing). Returns the ref name.
+    fn rewrite_target(
+        &self,
+        session: SessionId,
+        handle: HandleId,
+    ) -> Result<Vec<u8>, ErrorCode> {
+        let e = self.lookup(session, handle, R_REWRITE_HISTORY)?;
+        let HandleTarget::Ref { name, subtree, .. } = &e.target else {
+            return Err(ErrorCode::ReadOnly);
+        };
+        if !subtree.is_empty() {
+            return Err(ErrorCode::Denied);
+        }
+        Ok(name.clone())
     }
 
     fn resolve_ref_dir(&self, ref_name: &[u8], path: &TreePath) -> Result<(), ErrorCode> {
@@ -603,6 +696,7 @@ fn store_err(e: StoreError) -> ErrorCode {
         StoreError::NoSuchSnapshot => ErrorCode::NoSuchSnapshot,
         StoreError::NotAFile => ErrorCode::BadPath,
         StoreError::Format(_) => ErrorCode::BadPath,
+        StoreError::Pinned => ErrorCode::Pinned,
         _ => ErrorCode::Internal,
     }
 }

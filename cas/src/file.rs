@@ -50,23 +50,12 @@ pub fn read_file(
         }
         Content::ChunkList(hash) => {
             let list = store.get(hash).ok_or(FormatError::MissingNode(*hash))?;
-            if list.len() < 5 || list[0] != CHUNK_LIST_MAGIC {
-                return Err(FormatError::BadNode("not a chunk list"));
-            }
-            let count = u32::from_le_bytes(list[1..5].try_into().unwrap()) as usize;
-            if list.len() != 5 + count * 36 {
-                return Err(FormatError::BadNode("chunk list length mismatch"));
-            }
             let mut out = Vec::new();
-            for i in 0..count {
-                let off = 5 + i * 36;
-                let chunk_hash = Hash::from_bytes(list[off..off + 32].try_into().unwrap());
-                let chunk_len =
-                    u32::from_le_bytes(list[off + 32..off + 36].try_into().unwrap()) as usize;
+            for (chunk_hash, chunk_len) in chunk_list_entries(&list)? {
                 let chunk = store
                     .get(&chunk_hash)
                     .ok_or(FormatError::MissingNode(chunk_hash))?;
-                if chunk.len() != chunk_len {
+                if chunk.len() != chunk_len as usize {
                     return Err(FormatError::BadNode("chunk length mismatch"));
                 }
                 out.extend_from_slice(&chunk);
@@ -78,6 +67,26 @@ pub fn read_file(
         }
         Content::DirRoot(_) => Err(FormatError::BadEntry("not a file")),
     }
+}
+
+/// Parse a chunk-list object into (chunk hash, chunk length) pairs.
+/// Shared by the read path and the GC mark walk (§4.6).
+pub fn chunk_list_entries(list: &[u8]) -> Result<Vec<(Hash, u32)>, FormatError> {
+    if list.len() < 5 || list[0] != CHUNK_LIST_MAGIC {
+        return Err(FormatError::BadNode("not a chunk list"));
+    }
+    let count = u32::from_le_bytes(list[1..5].try_into().unwrap()) as usize;
+    if list.len() != 5 + count * 36 {
+        return Err(FormatError::BadNode("chunk list length mismatch"));
+    }
+    let mut out = Vec::with_capacity(count);
+    for i in 0..count {
+        let off = 5 + i * 36;
+        let chunk_hash = Hash::from_bytes(list[off..off + 32].try_into().unwrap());
+        let chunk_len = u32::from_le_bytes(list[off + 32..off + 36].try_into().unwrap());
+        out.push((chunk_hash, chunk_len));
+    }
+    Ok(out)
 }
 
 /// Build a complete, validated file entry from raw content.
