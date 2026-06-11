@@ -61,6 +61,34 @@ impl Superblock {
         buf
     }
 
+    /// Geometry chokepoint (fuzzing findings, MNT-1). The body checksum is
+    /// integrity, not authenticity: it proves the slot was written whole,
+    /// not that this code wrote it, so every offset/length field is
+    /// untrusted until checked here against the device length — the one
+    /// ground truth mount has that no field in the block can vouch for.
+    /// Checked arithmetic throughout: a wrapping sum that passes a bound is
+    /// the same failure shape as OVL-1/ELF-1. After this returns Ok,
+    /// downstream code may trust that the WAL region, the committed chunk
+    /// region, and the index frame header all lie within the device.
+    pub fn validate_geometry(&self, dev_len: u64) -> Result<(), &'static str> {
+        let chunk_off = WAL_OFF
+            .checked_add(self.wal_len)
+            .filter(|&o| o <= dev_len)
+            .ok_or("wal region exceeds device")?;
+        if self.wal_head > self.wal_len {
+            return Err("wal head beyond wal region");
+        }
+        chunk_off
+            .checked_add(self.chunk_tail)
+            .filter(|&e| e <= dev_len)
+            .ok_or("committed chunk region exceeds device")?;
+        self.index_off
+            .checked_add(CHUNK_HEADER as u64)
+            .filter(|&e| e <= self.chunk_tail)
+            .ok_or("index frame outside committed region")?;
+        Ok(())
+    }
+
     /// None = torn or never written; recovery discards it (§4.5).
     pub fn decode(buf: &[u8]) -> Option<Superblock> {
         if buf.len() != SB_SIZE || &buf[0..8] != SB_MAGIC {

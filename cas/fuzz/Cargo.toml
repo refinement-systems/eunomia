@@ -86,3 +86,10 @@ path = "fuzz_targets/mount_recovery.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "mount_reseal"
+path = "fuzz_targets/mount_reseal.rs"
+test = false
+doc = false
+bench = false

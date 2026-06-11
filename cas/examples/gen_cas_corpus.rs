@@ -206,6 +206,13 @@ fn dump<D: BlockDev>(dev: &D) -> Vec<u8> {
 }
 
 fn mount_recovery_seeds() {
+    // mount_reseal mounts the same kind of whole images, just re-sealed
+    // after mutation — the same seeds start both warm.
+    let seed_both = |name: &str, bytes: &[u8]| {
+        write_seed("mount_recovery", name, bytes);
+        write_seed("mount_reseal", name, bytes);
+    };
+
     // A clean, committed image with a nested dir, a chunked file, and a
     // snapshot — the consistency pass walks all of it.
     let mut store = Store::format(MemDev::new(32 * 1024), small_opts()).unwrap();
@@ -215,14 +222,14 @@ fn mount_recovery_seeds() {
     store.write(b"main", &vec![b"data".to_vec(), b"big".to_vec()], 0, &big, 2).unwrap();
     store.sync_all().unwrap();
     store.snapshot(b"main", b"gen", b"v1", cas::disk::CLASS_KEEP, 100).unwrap();
-    write_seed("mount_recovery", "clean", &dump(&store.into_dev()));
+    seed_both("clean", &dump(&store.into_dev()));
 
     // An image with an acked-but-unflushed write living only in the WAL —
     // mount must replay it. (No sync after the write.)
     let mut store = Store::format(MemDev::new(32 * 1024), small_opts()).unwrap();
     store.create_ref(b"main").unwrap();
     store.write(b"main", &vec![b"pending".to_vec()], 0, b"unflushed", 1).unwrap();
-    write_seed("mount_recovery", "wal_pending", &dump(&store.into_dev()));
+    seed_both("wal_pending", &dump(&store.into_dev()));
 
     // Torn images straight out of the crash device: durable state plus a
     // random kept/dropped/torn subset of unflushed writes (§4.5).
@@ -234,6 +241,6 @@ fn mount_recovery_seeds() {
         store.write(b"main", &vec![b"b".to_vec()], 0, b"in flight", 2).unwrap();
         let mut dev = store.into_dev();
         dev.crash(seed);
-        write_seed("mount_recovery", &format!("torn_{seed:x}"), &dump(&dev));
+        seed_both(&format!("torn_{seed:x}"), &dump(&dev));
     }
 }

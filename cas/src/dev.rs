@@ -43,6 +43,17 @@ pub trait BlockDev {
     fn len(&self) -> u64;
 }
 
+/// Bounds-check an access against `len` without trusting `offset` —
+/// `offset + buf.len()` may wrap u64, and OutOfRange (the device's own
+/// contract) must cover that case too, not a trap. Returns the usize range.
+fn access_range(offset: u64, access_len: usize, len: u64) -> DevResult<core::ops::Range<usize>> {
+    let end = offset
+        .checked_add(access_len as u64)
+        .filter(|&e| e <= len)
+        .ok_or(DevError::OutOfRange)?;
+    Ok(offset as usize..end as usize)
+}
+
 /// Plain in-memory device (no crash modeling) for fast tests.
 pub struct MemDev {
     data: RefCell<Vec<u8>>,
@@ -64,23 +75,15 @@ impl MemDev {
 impl BlockDev for MemDev {
     fn read(&self, offset: u64, buf: &mut [u8]) -> DevResult<()> {
         let data = self.data.borrow();
-        let start = offset as usize;
-        let end = start + buf.len();
-        if end > data.len() {
-            return Err(DevError::OutOfRange);
-        }
-        buf.copy_from_slice(&data[start..end]);
+        let range = access_range(offset, buf.len(), data.len() as u64)?;
+        buf.copy_from_slice(&data[range]);
         Ok(())
     }
 
     fn write(&mut self, offset: u64, data: &[u8]) -> DevResult<()> {
         let mut d = self.data.borrow_mut();
-        let start = offset as usize;
-        let end = start + data.len();
-        if end > d.len() {
-            return Err(DevError::OutOfRange);
-        }
-        d[start..end].copy_from_slice(data);
+        let range = access_range(offset, data.len(), d.len() as u64)?;
+        d[range].copy_from_slice(data);
         Ok(())
     }
 
@@ -221,24 +224,16 @@ impl CrashDev {
 impl BlockDev for CrashDev {
     fn read(&self, offset: u64, buf: &mut [u8]) -> DevResult<()> {
         let cur = self.current.borrow();
-        let start = offset as usize;
-        let end = start + buf.len();
-        if end > cur.len() {
-            return Err(DevError::OutOfRange);
-        }
-        buf.copy_from_slice(&cur[start..end]);
+        let range = access_range(offset, buf.len(), cur.len() as u64)?;
+        buf.copy_from_slice(&cur[range]);
         Ok(())
     }
 
     fn write(&mut self, offset: u64, data: &[u8]) -> DevResult<()> {
         self.check_fail()?;
         let mut cur = self.current.borrow_mut();
-        let start = offset as usize;
-        let end = start + data.len();
-        if end > cur.len() {
-            return Err(DevError::OutOfRange);
-        }
-        cur[start..end].copy_from_slice(data);
+        let range = access_range(offset, data.len(), cur.len() as u64)?;
+        cur[range].copy_from_slice(data);
         self.pending.push((offset, data.to_vec()));
         Ok(())
     }

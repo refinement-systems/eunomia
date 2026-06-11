@@ -396,13 +396,29 @@ impl<D: BlockDev> Store<D> {
             (None, Some(b)) => (b, true),
             (None, None) => return Err(StoreError::NoSuperblock),
         };
+        // Geometry chokepoint: the checksum above is integrity, not
+        // authenticity — a torn write can't pass it, but anything that can
+        // place bytes on the device can re-seal it. Validate every
+        // offset/length field against the device length before the first
+        // use; honest code never writes out-of-device geometry, so a
+        // violation is corruption or forgery, never a slot to silently
+        // fall back from. (MNT-1, fuzzing findings.)
+        sb.validate_geometry(dev.len()).map_err(StoreError::Corrupt)?;
+        // Geometry is not the only forgeable scalar: `generation` feeds
+        // `birth_gen = generation + 1` here and `generation + 1` at every
+        // commit. u64::MAX is 2^64 commits past honest — reject it rather
+        // than overflow the derive (found by `mount_reseal`).
+        let birth_gen = sb
+            .generation
+            .checked_add(1)
+            .ok_or(StoreError::Corrupt("superblock generation exhausted"))?;
 
         let chunk_off = WAL_OFF + sb.wal_len;
         let mut chunks = ChunkStore {
             dev,
             chunk_off,
             tail: sb.chunk_tail,
-            birth_gen: sb.generation + 1,
+            birth_gen,
             index: BTreeMap::new(),
             free: BTreeMap::new(),
             pending_free: Vec::new(),
@@ -417,8 +433,16 @@ impl<D: BlockDev> Store<D> {
         let Some((ilen, _, ihash)) = disk::decode_chunk_header(&header) else {
             return Err(StoreError::Corrupt("bad index frame"));
         };
+        // `chunk_tail` is geometry-validated above, so this gate bounds
+        // `ilen` (and with it the allocation below) by the real device
+        // length — checked, because index_off + frame_len wrapping past an
+        // honest tail is exactly the OVL-1 shape.
         let frame_len = (CHUNK_HEADER + ilen) as u64;
-        if sb.index_off + frame_len > sb.chunk_tail {
+        if sb
+            .index_off
+            .checked_add(frame_len)
+            .is_none_or(|end| end > sb.chunk_tail)
+        {
             return Err(StoreError::Corrupt("index frame overruns committed tail"));
         }
         let mut payload = vec![0u8; ilen];
@@ -430,12 +454,13 @@ impl<D: BlockDev> Store<D> {
         }
         let (index, free) = disk::decode_index(&payload)?;
         for e in index.values() {
-            if e.off < CHUNK_HEADER as u64 || e.off + e.len as u64 > sb.chunk_tail {
+            let end = e.off.checked_add(e.len as u64);
+            if e.off < CHUNK_HEADER as u64 || end.is_none_or(|end| end > sb.chunk_tail) {
                 return Err(StoreError::Corrupt("index entry out of bounds"));
             }
         }
         for (&off, &len) in &free {
-            if off + len > sb.chunk_tail {
+            if off.checked_add(len).is_none_or(|end| end > sb.chunk_tail) {
                 return Err(StoreError::Corrupt("free extent out of bounds"));
             }
         }
@@ -470,6 +495,19 @@ impl<D: BlockDev> Store<D> {
             if rseq != seq {
                 break;
             }
+            // Mirror of the pre-WAL gate in Store::write (OVL-1): no image
+            // this code produced contains such a record — write rejects the
+            // extent before logging — and a torn write can't fake one (the
+            // record checksum covers the whole payload). So this is forgery
+            // or corruption, not an unacked tail: reject loudly.
+            if let WalOp::Write { offset, data, .. } = &op {
+                if offset
+                    .checked_add(data.len() as u64)
+                    .is_none_or(|end| end > store.chunks.region_len())
+                {
+                    return Err(StoreError::Corrupt("wal record extent out of range"));
+                }
+            }
             store.apply_to_overlay(&op);
             store.wal_records.push_back(RecMeta {
                 seq,
@@ -477,8 +515,14 @@ impl<D: BlockDev> Store<D> {
                 ref_name: op.ref_name().to_vec(),
                 flushed: false,
             });
-            off += rlen as u64;
-            seq += 1;
+            off += rlen as u64; // bounded: decode_record only matched because
+                                // off + rlen <= wal.len()
+            // An honest seq counter never nears u64::MAX (2^64 records); a
+            // re-sealed `wal_next_seq` there overflows the increment. Same
+            // forgery, same loud rejection as the extent check above.
+            seq = seq
+                .checked_add(1)
+                .ok_or(StoreError::Corrupt("wal sequence exhausted"))?;
         }
         store.wal_tail = off;
         store.wal_seq = seq;

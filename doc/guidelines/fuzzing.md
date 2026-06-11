@@ -7,7 +7,7 @@ One fuzz crate lives next to each library crate it exercises:
 
 | Crate | Fuzz crate | Targets |
 |-------|------------|---------|
-| `cas` | `cas/fuzz` | `tlv_entry`, `tree_node`, `index_frame`, `superblock`, `superblock_fixup`, `wal_replay_scan`, `wal_replay_scan_fixup`, `chunker`, `mount_recovery` |
+| `cas` | `cas/fuzz` | `tlv_entry`, `tree_node`, `index_frame`, `superblock`, `superblock_fixup`, `wal_replay_scan`, `wal_replay_scan_fixup`, `chunker`, `mount_recovery`, `mount_reseal` |
 | `storage-server` | `storage-server/fuzz` | `request_dispatch`, `structured_request` |
 | `loader` | `loader/fuzz` | `elf_parse` |
 
@@ -71,6 +71,17 @@ moves keep coverage from plateauing at "checksum mismatch":
 image to the fake block device. Mount must return `Ok`/`Err`, never panic,
 never read out of bounds; on `Ok` a cheap consistency pass walks the refs.
 It is seeded with mkfs-style minimal images and crash-injection artifacts.
+
+`mount_reseal` is the same property with both moves applied at once:
+`reseal_image` recomputes every checksum and content hash mount verifies
+(both superblock slots, the index frame, the ref-table object, the WAL
+chain) without repairing any geometry field — the disk-writing adversary,
+played honestly. The checksum is integrity, not authenticity, so this is
+not a stronger-than-real attacker; it is what any restored backup or copied
+image could contain. Mount's contract under this target is total — `Ok` or
+`Err` over arbitrary device contents, sealed or not — with no threat-model
+carve-out (see MNT-1 in `../results/1_fuzzing-findings.md` for the finding
+that motivated it).
 
 ## Corpus
 

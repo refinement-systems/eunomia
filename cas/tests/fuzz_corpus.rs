@@ -109,12 +109,17 @@ fn mount_recovery() {
     if cfg!(miri) {
         return; // whole-image hashing under Miri is too slow
     }
-    for data in corpus_files("mount_recovery") {
-        let dev = MemDev::from_bytes(data);
-        if let Ok(store) = Store::mount(dev, StoreOptions::default()) {
-            let refs: Vec<Vec<u8>> = store.refs().map(|(n, _)| n.clone()).collect();
-            for name in &refs {
-                let _ = store.list(name, &Vec::new());
+    // The mount_reseal corpus is replayed raw (its re-seal helper is
+    // fuzzing-feature-only) — same weakening as the superblock/wal `_fixup`
+    // corpora above, and still the full total-mount property.
+    for target in ["mount_recovery", "mount_reseal"] {
+        for data in corpus_files(target) {
+            let dev = MemDev::from_bytes(data);
+            if let Ok(store) = Store::mount(dev, StoreOptions::default()) {
+                let refs: Vec<Vec<u8>> = store.refs().map(|(n, _)| n.clone()).collect();
+                for name in &refs {
+                    let _ = store.list(name, &Vec::new());
+                }
             }
         }
     }

@@ -12,11 +12,13 @@
 //! property — adversarial input the crash-injection proptest never tries.
 //! Seed this target with mkfs-built minimal images and crash artifacts.
 //!
-//! Note on allocation: mount sizes a buffer from the index frame's length
-//! header before checking it against the real device length, so a valid
-//! superblock pointing at a frame that claims a huge length is a
-//! length-driven allocation. Run with a low `-rss_limit_mb`; an RSS kill
-//! is a finding ("allocation must be bounded by remaining input length").
+//! Note on allocation: every mount-time allocation is sized by a field
+//! that `Superblock::validate_geometry` has already bounded by the real
+//! device length (MNT-1, fuzzing findings) — but only the `mount_reseal`
+//! sibling can actually drive those fields, since this target's mutations
+//! die at the superblock checksum. Run both with a low `-malloc_limit_mb`;
+//! an allocation kill is a finding ("allocation must be bounded by
+//! remaining input length").
 use libfuzzer_sys::fuzz_target;
 
 use cas::dev::MemDev;
