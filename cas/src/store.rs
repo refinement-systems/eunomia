@@ -1405,7 +1405,11 @@ mod tests {
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(64))]
+        // Miri: a few cases cover the same paths; native keeps the full sweep.
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 64 },
+            ..ProptestConfig::default()
+        })]
         /// The CommitProtocol headline invariant against real bytes: after
         /// a crash at an arbitrary point (power cut mid-operation, torn
         /// unflushed writes), every acknowledged mutation is recoverable.

@@ -759,6 +759,11 @@ mod tests {
     }
 
     proptest! {
+        // Miri: a few cases cover the same paths; native keeps the full sweep.
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 256 },
+            ..ProptestConfig::default()
+        })]
         /// §4.1: same logical contents ⇒ same root, regardless of edit
         /// order and regardless of churn (inserts later removed).
         #[test]

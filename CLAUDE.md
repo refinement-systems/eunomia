@@ -60,9 +60,13 @@ cargo build -p cas -p storage-server -p mkfs ...
 # Run tests for cas (primary proptest target)
 cargo test -p cas
 
-# Run with Miri — budget hours, not minutes: the proptest suites hash with
-# blake3 (interpreted, no SIMD under Miri) and case counts are not reduced
-# under cfg(miri). Scope with --test / test-name filters for a quick UB check.
+# Run with Miri. The proptest suites drop to 4 cases under cfg(miri) —
+# blake3 is interpreted (no SIMD), so native-scale case counts would take
+# hours; even reduced, this sweep runs ~25 min. Quickest useful UB pass
+# (regression tests + every committed fuzz seed, ~30 s for all 3 crates):
+#   MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri test \
+#     -p cas -p loader -p storage-server \
+#     --test fuzz_regressions --test fuzz_corpus
 cargo +nightly miri test -p cas
 ```
 

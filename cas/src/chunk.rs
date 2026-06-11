@@ -226,6 +226,11 @@ mod tests {
     }
 
     proptest! {
+        // Miri: a few cases cover the same paths; native keeps the full sweep.
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 256 },
+            ..ProptestConfig::default()
+        })]
         #[test]
         fn chunks_concatenate_to_input(data in proptest::collection::vec(any::<u8>(), 0..8192)) {
             let mut out = Vec::new();

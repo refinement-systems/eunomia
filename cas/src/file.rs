@@ -117,6 +117,11 @@ mod tests {
     const TEST_PARAMS: ChunkerParams = ChunkerParams { min: 64, avg: 256, max: 1024 };
 
     proptest! {
+        // Miri: a few cases cover the same paths; native keeps the full sweep.
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 256 },
+            ..ProptestConfig::default()
+        })]
         #[test]
         fn file_roundtrip(data in proptest::collection::vec(any::<u8>(), 0..16384)) {
             let mut store = MemStore::new();

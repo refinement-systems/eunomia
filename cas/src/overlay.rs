@@ -199,6 +199,11 @@ mod tests {
     }
 
     proptest! {
+        // Miri: a few cases cover the same paths; native keeps the full sweep.
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 256 },
+            ..ProptestConfig::default()
+        })]
         /// The interval map agrees with a naive byte-array model.
         #[test]
         fn interval_map_matches_model(
