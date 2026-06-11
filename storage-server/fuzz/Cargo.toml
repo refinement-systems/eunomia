@@ -1,0 +1,37 @@
+# cargo-fuzz harnesses for the storage server's untrusted-input seams: the
+# request dispatch entry the real server loop uses, and the typed-message
+# encoder/decoder round-trip. Standalone workspace.
+[package]
+name = "storage-server-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+cas = { path = "../../cas" }
+storage-server = { path = "..", features = ["std", "serde", "fuzzing"] }
+
+[profile.release]
+debug = true
+debug-assertions = true
+overflow-checks = true
+
+[workspace]
+
+[[bin]]
+name = "request_dispatch"
+path = "fuzz_targets/request_dispatch.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "structured_request"
+path = "fuzz_targets/structured_request.rs"
+test = false
+doc = false
+bench = false

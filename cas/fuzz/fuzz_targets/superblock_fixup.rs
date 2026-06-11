@@ -1,0 +1,26 @@
+#![no_main]
+//! Superblock decode *behind* the integrity gate. A mutation fuzzer can
+//! never forge the body checksum, so without help it explores the
+//! "checksum mismatch → None" branch forever and the field-extraction code
+//! is never reached. `fixup_superblock_checksum` re-seals magic + version +
+//! checksum over the mutated body, so the fuzzer's edits land on the
+//! decoded fields. On a successful decode we also confirm the result is
+//! stable: re-encoding it and decoding again yields the same superblock.
+use libfuzzer_sys::fuzz_target;
+
+use cas::disk::{Superblock, SB_SIZE};
+use cas::fuzz_support::fixup_superblock_checksum;
+
+fuzz_target!(|data: &[u8]| {
+    let mut block = [0u8; SB_SIZE];
+    let n = data.len().min(SB_SIZE);
+    block[..n].copy_from_slice(&data[..n]);
+    fixup_superblock_checksum(&mut block);
+    if let Some(sb) = Superblock::decode(&block) {
+        assert_eq!(
+            Superblock::decode(&sb.encode()),
+            Some(sb),
+            "superblock decode is not round-trip stable",
+        );
+    }
+});

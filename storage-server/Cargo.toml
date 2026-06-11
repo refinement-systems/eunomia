@@ -9,9 +9,13 @@ edition.workspace = true
 default = ["std", "serde"]
 std = ["cas/std"]
 serde = ["dep:serde", "dep:postcard"]
+# Derives `Arbitrary` on the wire message types for the structured
+# (typed-input) fuzz target. Never enabled in normal builds.
+fuzzing = ["dep:arbitrary"]
 
 [dependencies]
 ipc  = { path = "../ipc" }
 cas  = { path = "../cas", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"], optional = true }
 postcard = { version = "1", default-features = false, features = ["alloc"], optional = true }
+arbitrary = { version = "1", features = ["derive"], optional = true }

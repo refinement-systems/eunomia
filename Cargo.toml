@@ -12,6 +12,14 @@ members = [
     "mkfs",
     "urt",
 ]
+# cargo-fuzz crates are standalone workspaces (own target dir, own nightly
+# profile with debug-assertions/overflow-checks forced on); keep them out
+# of the host workspace so a plain `cargo build` never pulls libfuzzer.
+exclude = [
+    "cas/fuzz",
+    "storage-server/fuzz",
+    "loader/fuzz",
+]
 
 [workspace.package]
 version = "0.1.0"

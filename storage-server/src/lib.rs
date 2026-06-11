@@ -88,6 +88,7 @@ impl Session {
 /// are the only bearer tokens and are one-shot with a TTL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
 pub enum Request {
     Read { handle: HandleId, path: TreePath, offset: u64, len: u32 },
     Write { handle: HandleId, path: TreePath, offset: u64, data: Vec<u8> },

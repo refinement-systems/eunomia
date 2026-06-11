@@ -20,6 +20,8 @@ mkfs/            Host-side disk image builder; reuses cas crate (§7)
 tla/             TLA+ formal specifications (must check before M2)
 tools/tla/       Scripts: tla-check.sh (SANY), tla-model-check.sh (TLC)
 doc/spec/        Design documents
+doc/results/     Implementation and research results.
+doc/guidelines/  Additional guidelines
 ```
 
 ---
@@ -73,6 +75,25 @@ bash tools/tla/tla-check.sh tla/cap_revocation/CapRevocation.tla
 bash tools/tla/tla-model-check.sh tla/commit_protocol/CommitProtocol.tla
 bash tools/tla/tla-model-check.sh tla/cap_revocation/CapRevocation.tla
 ```
+
+### Fuzzing (cargo-fuzz, host)
+
+Harnesses live in `cas/fuzz`, `storage-server/fuzz`, `loader/fuzz` (each a
+standalone workspace, excluded from the host workspace). Needs nightly +
+`cargo install cargo-fuzz`. See `doc/guidelines/fuzzing.md`; findings in
+`doc/results/1_fuzzing-findings.md`.
+
+```sh
+scripts/fuzz.sh smoke              # replay committed corpus through every target
+scripts/fuzz.sh hunt 300           # time-boxed hunt per target
+cargo run -p cas --example gen_cas_corpus   # regenerate that crate's seed corpus
+```
+
+The committed corpus is replayed by `cargo test` (`--test fuzz_corpus`); run
+that test under Miri with `MIRIFLAGS=-Zmiri-disable-isolation` to UB-check
+every seed (the replay reads files, which Miri isolation otherwise blocks).
+`cas`/`storage-server` gain a `fuzzing` feature (fuzz-only `fuzz_support`
+helpers / `Arbitrary` derives); never enable it in normal builds.
 
 ---
 

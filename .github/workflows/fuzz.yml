@@ -1,0 +1,64 @@
+name: fuzz
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Nightly longer hunt (06:00 UTC).
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds per target for the hunt job"
+        default: "300"
+
+jobs:
+  # Cheap guarantee on every PR: the committed corpus and the regression
+  # reproducers replay through the decoders even where fuzzing doesn't run.
+  # Stable toolchain, no cargo-fuzz needed.
+  replay-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Replay corpus + regression reproducers
+        run: |
+          cargo test -p cas -p storage-server -p loader \
+            --test fuzz_corpus --test fuzz_regressions
+
+  # Per-PR smoke: build every target and replay its corpus (libFuzzer
+  # -runs=0). Catches a harness that stopped compiling or a seed that
+  # started crashing, in ~a couple of minutes.
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@cargo-fuzz
+      - name: Smoke (corpus replay only)
+        run: ./scripts/fuzz.sh smoke
+
+  # Scheduled / manual longer hunt. Surfaces new findings; uploads any
+  # crash artifacts for triage. Does not gate PRs.
+  hunt:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@cargo-fuzz
+      - name: Hunt
+        run: ./scripts/fuzz.sh hunt "${{ github.event.inputs.seconds || '300' }}"
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: "**/fuzz/artifacts/**"
+          if-no-files-found: ignore

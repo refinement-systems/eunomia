@@ -1,0 +1,88 @@
+# cargo-fuzz harnesses for the cas on-disk + content-addressed formats.
+# Standalone workspace (see the empty [workspace] table): own target dir,
+# own profile. Run with: cargo +nightly fuzz run <target>
+[package]
+name = "cas-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+cas = { path = "..", features = ["std", "fuzzing"] }
+
+# Arithmetic on untrusted lengths must trap, not wrap; a length-driven
+# allocation that survives because nothing panicked is still an OOM
+# primitive. Keep both checks on, and debug info for readable crash traces.
+[profile.release]
+debug = true
+debug-assertions = true
+overflow-checks = true
+
+[workspace]
+
+[[bin]]
+name = "tlv_entry"
+path = "fuzz_targets/tlv_entry.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tree_node"
+path = "fuzz_targets/tree_node.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "index_frame"
+path = "fuzz_targets/index_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "superblock"
+path = "fuzz_targets/superblock.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "superblock_fixup"
+path = "fuzz_targets/superblock_fixup.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wal_replay_scan"
+path = "fuzz_targets/wal_replay_scan.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wal_replay_scan_fixup"
+path = "fuzz_targets/wal_replay_scan_fixup.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chunker"
+path = "fuzz_targets/chunker.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mount_recovery"
+path = "fuzz_targets/mount_recovery.rs"
+test = false
+doc = false
+bench = false

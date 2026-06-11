@@ -177,7 +177,7 @@ fn validate_entry(e: &Entry) -> Result<(), FormatError> {
     Ok(())
 }
 
-fn encode_entry(e: &Entry, out: &mut Vec<u8>) {
+pub(crate) fn encode_entry(e: &Entry, out: &mut Vec<u8>) {
     out.push(e.name.len() as u8);
     out.extend_from_slice(&e.name);
     out.push(match e.kind {
@@ -255,7 +255,7 @@ impl<'a> Reader<'a> {
     }
 }
 
-fn decode_entry(r: &mut Reader) -> Result<Entry, FormatError> {
+pub(crate) fn decode_entry(r: &mut Reader) -> Result<Entry, FormatError> {
     let name_len = r.u8()? as usize;
     let name = r.take(name_len)?.to_vec();
     let kind = match r.u8()? {

@@ -1,0 +1,29 @@
+# cargo-fuzz harness for the ELF64 loader. Binaries are data in the
+# versioned store, so anyone with write access to a path feeds bytes to this
+# parser. Standalone workspace.
+[package]
+name = "loader-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+loader = { path = "..", features = ["std"] }
+
+[profile.release]
+debug = true
+debug-assertions = true
+overflow-checks = true
+
+[workspace]
+
+[[bin]]
+name = "elf_parse"
+path = "fuzz_targets/elf_parse.rs"
+test = false
+doc = false
+bench = false

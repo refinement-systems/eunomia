@@ -30,4 +30,11 @@ pub mod hash;
 pub mod overlay;
 pub mod prolly;
 pub mod store;
+pub mod tlv;
 pub mod tree;
+
+/// Fuzz-only buffer mutators (checksum/chain re-sealing). Compiled only
+/// under the `fuzzing` feature so the forgery helpers never reach a real
+/// build (spec §6: decoders are cargo-fuzz targets on the host).
+#[cfg(feature = "fuzzing")]
+pub mod fuzz_support;

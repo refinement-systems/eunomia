@@ -28,9 +28,9 @@ pub const SB_A_OFF: u64 = 0;
 pub const SB_B_OFF: u64 = 4096;
 pub const WAL_OFF: u64 = 8192;
 
-const SB_MAGIC: &[u8; 8] = b"EUNOMIA\0";
-const SB_VERSION: u32 = 2;
-const SB_BODY: usize = 96; // checksummed prefix
+pub(crate) const SB_MAGIC: &[u8; 8] = b"EUNOMIA\0";
+pub(crate) const SB_VERSION: u32 = 2;
+pub(crate) const SB_BODY: usize = 96; // checksummed prefix
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Superblock {
@@ -172,7 +172,7 @@ pub fn decode_index(
 
 // ── WAL records ─────────────────────────────────────────────────────────
 
-const WAL_MAGIC: &[u8; 4] = b"WREC";
+pub(crate) const WAL_MAGIC: &[u8; 4] = b"WREC";
 pub const WAL_HEADER: usize = 4 + 8 + 4 + 32;
 
 /// A logged mutation. Replay must be deterministic, so server-assigned

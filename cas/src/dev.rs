@@ -52,6 +52,13 @@ impl MemDev {
     pub fn new(len: usize) -> MemDev {
         MemDev { data: RefCell::new(vec![0; len]) }
     }
+
+    /// Wrap an existing byte buffer as a device (the device length is the
+    /// buffer length). Used to present arbitrary fuzz input as a whole
+    /// image to `Store::mount`.
+    pub fn from_bytes(data: Vec<u8>) -> MemDev {
+        MemDev { data: RefCell::new(data) }
+    }
 }
 
 impl BlockDev for MemDev {

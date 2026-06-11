@@ -29,7 +29,7 @@ cd cas && cargo +nightly fuzz run mount_recovery -- -max_total_time=120
 
 Each fuzz crate's profile forces `debug-assertions` and `overflow-checks`
 on, so arithmetic on an untrusted length/offset **traps** rather than
-wrapping — that is how the two findings in `fuzzing-findings.md` surface.
+wrapping — that is how the two findings in `../results/1_fuzzing-findings.md` surface.
 Run with a low `-malloc_limit_mb` (the `hunt` mode sets 128) so a
 length-field-driven allocation becomes a reportable crash rather than a
 silent OOM.
