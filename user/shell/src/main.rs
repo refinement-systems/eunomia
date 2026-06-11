@@ -107,6 +107,7 @@ fn err_name(e: storage_server::ErrorCode) -> &'static [u8] {
         BadTicket => b"bad ticket",
         Internal => b"server error",
         Pinned => b"snapshot pinned by a tag",
+        BadOffset => b"bad offset",
     }
 }
 

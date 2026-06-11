@@ -1,9 +1,10 @@
 # Fuzzing findings
 
-Findings surfaced while standing up the cargo-fuzz harnesses. Fixing them is
-out of scope for the fuzzing work (only the harnesses were in scope), so they
-are recorded here and pinned by `#[should_panic]` regression reproducers that
-fail the moment the code is hardened.
+Findings surfaced while standing up the cargo-fuzz harnesses. They were
+initially recorded here unfixed (only the harnesses were in scope) and pinned
+by `#[should_panic]` reproducers; **both are now fixed**, and the reproducers
+were flipped into positive regression tests that assert the hardened behavior
+(rejection, not panic).
 
 Both confirmed findings are the same class the harness profile is built to
 catch: **arithmetic on an untrusted length/offset** that traps under
@@ -27,11 +28,15 @@ A client holding a write handle can crash the server with a single message:
 `off + data.len()`. With `overflow-checks` on this panics; in a release build
 without them it wraps to a tiny `end` and silently corrupts the interval map.
 
-Repro: `cas/tests/fuzz_regressions.rs::ovl1_write_offset_overflow_panics`.
-Suggested fix direction: reject `offset.checked_add(len)` overflow (and any
-write whose extent exceeds a sane per-file cap) before it reaches the WAL —
-an un-appliable acked record would poison every future replay, so the check
-belongs alongside `validate_mutation_path`.
+**Fixed:** `Store::write` now rejects the write before it reaches the WAL
+(an un-appliable acked record would poison every future replay, so the check
+sits alongside `validate_mutation_path`): a `u64`-overflowing
+`offset + data.len()` *and* any extent beyond the chunk-region capacity
+(which could never flush, and would force `FileOverlay::apply` to materialize
+the whole extent) return the new `StoreError::WriteOutOfRange`, surfaced on
+the wire as `ErrorCode::BadOffset`. Regression tests:
+`cas/tests/fuzz_regressions.rs::ovl1_*` and, end to end,
+`storage-server/tests/fuzz_regressions.rs::ovl1_dispatch_write_offset_overflow_rejected`.
 
 ---
 
@@ -50,10 +55,12 @@ constants with unchecked `usize`/`u64` arithmetic. A header with
 `e_phoff = u64::MAX` makes `u32le(bytes, e_phoff)` compute `off + 4` and
 overflow. Program images are data in the store, so this is untrusted input.
 
-Repro: `loader/tests/fuzz_regressions.rs::elf1_phoff_overflow_panics`.
-Suggested fix direction: do the offset math with `checked_add` and treat
-overflow (and any `ph`/`phoff` beyond `bytes.len()`) as
-`Err(ElfError::Truncated)`.
+**Fixed:** the read helpers (`u16le`/`u32le`/`u64le`) do their end-offset
+math with `checked_add`, and `parse` computes each program-header offset
+with checked mul/add and bounds the whole entry against `bytes.len()` before
+reading any field; overflow or out-of-bounds is `Err(ElfError::Truncated)`.
+Regression test:
+`loader/tests/fuzz_regressions.rs::elf1_phoff_overflow_rejected`.
 
 ---
 
@@ -73,3 +80,10 @@ checksum after setting `chunk_tail` huge). That is outside the seeded
 raw-image threat model this target covers, so no harness asserts it; noted
 here so a future hardening pass (bound `ilen` by remaining device length
 before allocating) and a possible `mount` re-seal target have the context.
+
+The same boundary applies to the OVL-1 fix: `Store::write` guarantees no
+out-of-range `Write` record is ever *written*, so mount-time WAL replay
+(which applies records to overlays without re-validating extents) only sees
+sane records from any image this code produced. A forged WAL record with a
+re-sealed checksum could still panic replay — same out-of-model territory as
+the superblock case above, same future re-seal target.

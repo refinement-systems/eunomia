@@ -36,20 +36,25 @@ pub struct Image<'a> {
     pub bytes: &'a [u8],
 }
 
+// `off` comes from untrusted header fields: the end offset needs checked
+// math, not just the slice bounds check (ELF-1, fuzzing findings).
 fn u16le(b: &[u8], off: usize) -> Result<u16, ElfError> {
-    b.get(off..off + 2)
+    off.checked_add(2)
+        .and_then(|end| b.get(off..end))
         .map(|s| u16::from_le_bytes([s[0], s[1]]))
         .ok_or(ElfError::Truncated)
 }
 
 fn u32le(b: &[u8], off: usize) -> Result<u32, ElfError> {
-    b.get(off..off + 4)
+    off.checked_add(4)
+        .and_then(|end| b.get(off..end))
         .map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
         .ok_or(ElfError::Truncated)
 }
 
 fn u64le(b: &[u8], off: usize) -> Result<u64, ElfError> {
-    b.get(off..off + 8)
+    off.checked_add(8)
+        .and_then(|end| b.get(off..end))
         .map(|s| u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]))
         .ok_or(ElfError::Truncated)
 }
@@ -86,7 +91,17 @@ pub fn parse(bytes: &[u8]) -> Result<Image<'_>, ElfError> {
         MAX_SEGMENTS];
     let mut n = 0;
     for i in 0..phnum {
-        let ph = phoff + i * phentsize;
+        // Checked: `e_phoff` is untrusted, so `ph` (and the `ph + k` field
+        // offsets below) must not wrap. Bounding the whole entry up front
+        // keeps the later `ph + k` additions overflow-free (k < phentsize).
+        let ph = i
+            .checked_mul(phentsize)
+            .and_then(|o| phoff.checked_add(o))
+            .ok_or(ElfError::Truncated)?;
+        let ph_end = ph.checked_add(phentsize).ok_or(ElfError::Truncated)?;
+        if ph_end > bytes.len() {
+            return Err(ElfError::Truncated);
+        }
         let p_type = u32le(bytes, ph)?;
         if p_type != 1 {
             continue; // PT_LOAD only

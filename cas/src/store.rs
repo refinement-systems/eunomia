@@ -59,6 +59,8 @@ pub enum StoreError {
     NoSpace,
     /// The snapshot is a tag target; tags are keep-strength pins (§4.7).
     Pinned,
+    /// Write extent overflows u64 or exceeds the chunk region capacity.
+    WriteOutOfRange,
 }
 
 impl From<DevError> for StoreError {
@@ -85,6 +87,7 @@ impl core::fmt::Display for StoreError {
             StoreError::Corrupt(w) => write!(f, "corrupt store: {w}"),
             StoreError::NoSpace => write!(f, "chunk region full"),
             StoreError::Pinned => write!(f, "snapshot pinned by a tag"),
+            StoreError::WriteOutOfRange => write!(f, "write extent out of range"),
         }
     }
 }
@@ -621,6 +624,17 @@ impl<D: BlockDev> Store<D> {
         mtime: u64,
     ) -> Result<(), StoreError> {
         self.validate_mutation_path(ref_name, path)?;
+        // Same pre-WAL rule as validate_mutation_path: an acked record that
+        // cannot apply would poison every future replay. A u64-overflowing
+        // extent wraps the overlay's interval math, and an extent beyond the
+        // chunk region can never flush (dedup aside) — and would force apply()
+        // to materialize the whole extent in memory. (OVL-1, fuzzing findings.)
+        let end = offset
+            .checked_add(data.len() as u64)
+            .ok_or(StoreError::WriteOutOfRange)?;
+        if end > self.chunks.region_len() {
+            return Err(StoreError::WriteOutOfRange);
+        }
         let op = WalOp::Write {
             ref_name: ref_name.to_vec(),
             path: path.clone(),

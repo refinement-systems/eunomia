@@ -171,6 +171,8 @@ pub enum ErrorCode {
     Internal,
     /// The snapshot is a tag target; tags are keep-strength pins (§4.7).
     Pinned,
+    /// Write offset/length out of range (overflow or beyond store capacity).
+    BadOffset,
 }
 
 // ── Server ──────────────────────────────────────────────────────────────
@@ -698,6 +700,7 @@ fn store_err(e: StoreError) -> ErrorCode {
         StoreError::NotAFile => ErrorCode::BadPath,
         StoreError::Format(_) => ErrorCode::BadPath,
         StoreError::Pinned => ErrorCode::Pinned,
+        StoreError::WriteOutOfRange => ErrorCode::BadOffset,
         _ => ErrorCode::Internal,
     }
 }

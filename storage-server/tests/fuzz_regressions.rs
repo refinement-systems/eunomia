@@ -1,16 +1,13 @@
-//! Regression reproducer for a finding surfaced by storage-server/fuzz.
+//! Regression test for a finding surfaced by storage-server/fuzz.
 //!
-//! Documents a *currently unfixed* finding (fixing is out of scope for the
-//! fuzzing work). Written `#[should_panic]` so it passes today by asserting
-//! the bug still bites, and fails the moment it is fixed. The root cause
-//! lives in cas (`cas/tests/fuzz_regressions.rs::ovl1_*`); this is the
-//! end-to-end view that makes the security claim concrete. See
-//! doc/results/1_fuzzing-findings.md.
+//! The root cause lives in cas (`cas/tests/fuzz_regressions.rs::ovl1_*`);
+//! this is the end-to-end view that makes the security claim concrete.
+//! See doc/results/1_fuzzing-findings.md.
 
 use cas::chunk::ChunkerParams;
 use cas::dev::MemDev;
 use cas::store::{Store, StoreOptions};
-use storage_server::{wire, Request, Server, SessionId};
+use storage_server::{wire, ErrorCode, Request, Response, Server, SessionId};
 
 fn fresh() -> (Server<MemDev>, SessionId) {
     let opts = StoreOptions {
@@ -26,17 +23,20 @@ fn fresh() -> (Server<MemDev>, SessionId) {
     (server, session)
 }
 
-/// FINDING OVL-1 (unfixed), end to end: a client holding a write handle
-/// crashes the server with one `Write` whose `offset` is near u64::MAX —
-/// the request decodes, dispatch passes the rights check, and the store's
-/// overlay overflows `off + data.len()`. When fixed, dispatch should turn
-/// this into an error `Response`; flip this test to assert that.
+/// FINDING OVL-1 (fixed), end to end: a client holding a write handle used
+/// to crash the server with one `Write` whose `offset` is near u64::MAX —
+/// the request decoded, dispatch passed the rights check, and the store's
+/// overlay overflowed `off + data.len()`. Dispatch now turns it into an
+/// error `Response` and the server keeps serving.
 #[test]
-#[should_panic(expected = "overflow")]
-fn ovl1_dispatch_write_offset_overflow_panics() {
+fn ovl1_dispatch_write_offset_overflow_rejected() {
     let (mut server, session) = fresh();
     let req = Request::Write { handle: 0, path: vec![b"f".to_vec()], offset: u64::MAX, data: vec![1] };
     let bytes = wire::encode_request(&req).unwrap();
     let decoded = wire::decode_request(&bytes).unwrap();
-    let _ = server.handle(session, decoded, 1_000);
+    let resp = server.handle(session, decoded, 1_000);
+    assert_eq!(resp, Response::Err(ErrorCode::BadOffset));
+    // The server must survive: a sane write on the same session succeeds.
+    let ok = Request::Write { handle: 0, path: vec![b"f".to_vec()], offset: 0, data: b"hello".to_vec() };
+    assert_eq!(server.handle(session, ok, 1_001), Response::Ok);
 }
