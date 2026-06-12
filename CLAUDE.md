@@ -217,7 +217,15 @@ ChannelFireSafe (every live channel's peer-closed binding names a live
 notification, so teardown fires a live object even after the lineage is
 revoked), RefCountSound, ReclaimedReleased — TLC-checked (252 states).
 Each spec holds the other's variables constant, so TSpec leaves the
-799k-state revocation proof untouched.
+799k-state revocation proof untouched. The kernel side already satisfies
+this: `cspace::delete` fires `endpoint_cap_dropped` (peer-closed) before
+`obj_unref`, and the binding holds a notification refcount, so a revoke
+that tears the whole channel down fires each surviving peer's binding
+into a still-live object. The runtime witness is M1 EL0 step 6
+(`scripts/m1-test.sh`): a channel carved from a sub-untyped, both ends'
+peer-closed bound to a notification funded from a *separate* untyped,
+revoke the sub-untyped, assert both bindings fired and the notification
+outlived the channel.
 
 Userspace half (the shell's reclaim-on-exit loop) is now done. Two kernel
 mechanisms the §5.1 spawn design needed land with it: `retype` can carve a
@@ -245,15 +253,21 @@ the server to accept a second session, §2.4) and no time-page grant yet
 it does).
 
 ### M1 exit criterion (met)
-Booting prints `12345M1 PASS`: the embedded EL0 test program
-(`kernel/src/user.rs`) retypes untyped into kernel objects, builds a second
-thread's cspace explicitly, exchanges a message + derived cap over a
-channel with notification-driven waiting, then revokes the parent cap and
-verifies both the received copy, a queued in-flight cap, AND the on-exit
-binding cap in the second thread's TCB died; a timer object signals a
-bound notification; the rebound on-exit binding delivers the child's
-death notice and read_report returns exited(42) (§5.1, the thread-report
-batch). The embedded user program is an M1
+Booting prints `123456M1 PASS` (`bash scripts/m1-test.sh` builds the
+`m1-test` feature, boots it, and asserts the full marker line): the
+embedded EL0 test program (`kernel/src/user.rs`) retypes untyped into
+kernel objects, builds a second thread's cspace explicitly, exchanges a
+message + derived cap over a channel with notification-driven waiting,
+then revokes the parent cap and verifies both the received copy, a queued
+in-flight cap, AND the on-exit binding cap in the second thread's TCB
+died; a timer object signals a bound notification; the rebound on-exit
+binding delivers the child's death notice and read_report returns
+exited(42) (§5.1, the thread-report batch); finally it builds a throwaway
+channel from a carved sub-untyped, binds both ends' peer-closed events to
+a separately-funded notification, and revokes the sub-untyped — the
+runtime witness for §3.3 whole-object teardown (every endpoint's
+peer-closed binding fires before reclamation; the notification survives;
+the dead endpoint caps then error). The embedded user program is an M1
 scaffold, replaced by real binaries at M3 — it must not call into kernel
 .text (EL0 execute-never), hence `opt-level = 1` for dev and care with
 non-`#[inline(always)]` helpers in user.rs.
