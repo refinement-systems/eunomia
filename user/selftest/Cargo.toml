@@ -9,6 +9,7 @@ edition = "2021"
 
 [dependencies]
 ipc = { path = "../../ipc" }
+urt = { path = "../../urt" }
 
 [profile.release]
 panic = "abort"

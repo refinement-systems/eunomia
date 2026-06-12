@@ -1,13 +1,17 @@
 //! A spawn/reclaim test subject. Its whole world arrives via the §5.1
 //! startup convention: a bootstrap channel in cspace slot 0 whose first
-//! queued message is `"ST01"` + a one-byte mode. The mode selects how the
-//! program terminates, so one binary witnesses every path the parent's
-//! reclaim loop must handle:
+//! queued message is `"ST01"` + a one-byte mode + the time-page VA the
+//! parent mapped in (§2.6). The mode selects how the program terminates,
+//! so one binary witnesses every path the parent's reclaim loop must
+//! handle:
 //!
 //!   mode 0xFF → fault (wild store to an unmapped address): suspended, not
 //!               destroyed (§5.3); the parent reads `faulted(...)`.
 //!   mode 0xFE → panic: the runtime panic handler exits with STATUS_PANIC
 //!               (U2), so the parent reads `panicked`, not `exited(254)`.
+//!   mode 0xFD → read the granted time page and confirm a sane UTC clock,
+//!               printing `time-ok` / `time-bad`; proves the shell→child
+//!               time grant (§2.6) arrived and works, then exits(0).
 //!   otherwise → `thread_exit(mode)`: the parent reads `exited(mode)`.
 //!
 //! It also probes its own `.bss` before writing it. `.bss` is never copied
@@ -23,6 +27,12 @@
 use ipc::sys;
 
 const BOOT_CHAN: u32 = 0;
+
+/// 2020-01-01T00:00:00Z in UTC nanoseconds. A clock reading below this
+/// means the time grant never arrived (page absent → 0) or is garbage —
+/// init refuses to boot with an RTC older than this, so a real grant is
+/// always well past it (§2.6).
+const RTC_MIN_SANE_NS: i64 = 1_577_836_800_000_000_000;
 
 /// Uninitialised .bss probe. Read before any write (below), so it reflects
 /// the frame's state at spawn, not ours.
@@ -65,7 +75,30 @@ pub extern "C" fn _start() -> ! {
         }
         sys::yield_now();
     };
-    let mode = if len >= 5 && &buf[..4] == b"ST01" { buf[4] } else { 0 };
+    let is_block = len >= 5 && &buf[..4] == b"ST01";
+    let mode = if is_block { buf[4] } else { 0 };
+    // The "time" grant (§2.6): the parent mapped the read-only time page
+    // into us and put its VA in the block. Attach so `urt::time` can read
+    // the clock. Absent (short block) → no clock, mode 0xFD reports it.
+    if is_block && len >= 13 {
+        let time_va = u64::from_le_bytes(buf[5..13].try_into().unwrap());
+        // Safety: the shell established this VA as a live read-only mapping
+        // of the time page before queueing the block; it outlives us.
+        unsafe { urt::time::attach(time_va as usize) };
+    }
+
+    if mode == 0xFD {
+        // Read the granted clock and check it is a sane post-2020 UTC time:
+        // the seqlock read + tick→ns math working in a spawned child, not
+        // just in the shell, is the witness that the grant truly arrived.
+        let ok = urt::time::page().is_some() && urt::time::now_utc_ns() > RTC_MIN_SANE_NS;
+        sys::debug_write(if ok {
+            b"[selftest] time-ok\n"
+        } else {
+            b"[selftest] time-bad\n"
+        });
+        sys::thread_exit(0);
+    }
 
     if mode == 0xFF {
         sys::debug_write(b"[selftest] faulting\n");

@@ -246,11 +246,15 @@ and recycles its slot window. `bash scripts/spawn-test.sh` is the proof
 (same genre as the M1 revocation test): `runloop bin/selftest 100`
 (slots 56/56, no leak), exit-status propagation, and the fault demo —
 `faulted(translation, 0xdead0000)` then a clean re-spawn — with no
-BSS-LEAK (retype re-zeroes reused frames). Scope cut held: children get
-stdin/stdout via the console; no storage-session delegation (that needs
-the server to accept a second session, §2.4) and no time-page grant yet
-(the shell holds no time-frame cap — follows the init→shell pattern when
-it does).
+BSS-LEAK (retype re-zeroes reused frames). The shell also grants each
+child the **time page** (§2.6): init installs a read-only time-frame cap
+in shell cspace slot 5, the shell maps a fresh copy into every child's
+aspace and passes the VA in the ST01 block (the init→shell grant, one hop
+further), and unmaps it before the reap revoke that frees the child
+aspace (§2.5 ordering). `spawn-test.sh` step 6 proves it: `run
+bin/selftest 253` reads a sane UTC clock (`time-ok`). Scope cut held:
+children get stdin/stdout via the console; no storage-session delegation
+(that needs the server to accept a second session, §2.4).
 
 ### M1 exit criterion (met)
 Booting prints `123456M1 PASS` (`bash scripts/m1-test.sh` builds the
