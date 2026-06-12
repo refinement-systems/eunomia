@@ -18,8 +18,12 @@
 //!      with no caps) and reports the verdict over the channel.
 //!   5. T1 checks attenuation held, exercises a timer object, then reaps
 //!      T2: the post-revoke rebound on-exit binding fires at T2's
-//!      thread_exit(42), and read_report returns exited(42). Prints
-//!      "M1 PASS".
+//!      thread_exit(42), and read_report returns exited(42).
+//!   6. T1 builds a throwaway channel from a carved sub-untyped, binds
+//!      both ends' peer-closed events to a separately-funded
+//!      notification, and revokes the sub-untyped: whole-object teardown
+//!      fires every peer-closed binding before reclamation and the
+//!      notification survives (§3.3). Prints "M1 PASS".
 //!
 //! Constraints: everything reachable from EL0 must live in `.user_text`
 //! (helpers force-inlined, no panicking ops, no core::fmt, no implicit
@@ -40,6 +44,10 @@ const RIGHT_WRITE: u64 = 2;
 // path; the scaffold's own allocations start above them.
 const UNTYPED: u64 = 0;
 const SELF_TCB: u64 = 1;
+// Boot slot 2 is a second untyped (DRAM above the EL0 window). The §3.3
+// teardown test funds its notification here so the notification's funder
+// is distinct from the channel's — revoking the channel must not reach it.
+const UNTYPED2: u64 = 2;
 const N1: u64 = 6;
 const N2: u64 = 7;
 const CHAN_A: u64 = 8;
@@ -53,6 +61,12 @@ const TIMER: u64 = 15;
 const EXIT_BIND1: u64 = 16;
 const EXIT_BIND2: u64 = 17;
 const TCB2_WEAK: u64 = 18;
+// §3.3 channel whole-object teardown (K4) — a self-contained scenario on
+// fresh slots, independent of the channel above.
+const UA: u64 = 19; // sub-untyped funding the channel ("untyped A")
+const PC_NOTIF: u64 = 20; // peer-closed notification, funded from UNTYPED2
+const PC_CHAN_A: u64 = 21;
+const PC_CHAN_B: u64 = 22;
 
 // T2 (cspace2) slot map.
 const T2_CHAN: u64 = 0;
@@ -71,6 +85,10 @@ const T2_EXIT_STATUS: u64 = 42;
 // N2 bits.
 const BIT_B_READABLE: u64 = 1 << 0;
 const BIT_GO: u64 = 1 << 2;
+// PC_NOTIF bits (§3.3 teardown test) — a separate object, so low bits
+// are free again. One bit per endpoint's peer-closed binding.
+const BIT_PC_A: u64 = 1 << 0;
+const BIT_PC_B: u64 = 1 << 1;
 
 #[inline(always)]
 unsafe fn sys(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 {
@@ -248,6 +266,10 @@ const OBJ_THREAD: u64 = 1;
 const OBJ_CHANNEL: u64 = 2;
 const OBJ_NOTIF: u64 = 3;
 const OBJ_TIMER: u64 = 4;
+const OBJ_UNTYPED: u64 = 7;
+
+// chan_bind event index for the peer-closed signal (§3.3).
+const EV_PEER_CLOSED: u64 = 2;
 
 pub const USER_STACK_TOP: u64 = crate::mmu::USER_BASE + crate::mmu::USER_SIZE;
 pub const T2_STACK_TOP: u64 = USER_STACK_TOP - 0x1_0000;
@@ -361,6 +383,36 @@ pub extern "C" fn user_main(_arg: u64) -> ! {
             exit();
         }
         putc(b'5'); // marker: exit report delivered, read, and gated
+
+        // ── Channel whole-object teardown (§3.3, K4) ──────────────────
+        // Build a channel from a freshly carved sub-untyped UA and bind
+        // BOTH endpoints' peer-closed events to one notification funded
+        // from a SEPARATE untyped (UNTYPED2). Revoking UA tears the whole
+        // channel down at once — the §3.5 case where a session's funder
+        // dies — so every endpoint's peer-closed binding must fire before
+        // the channel's memory is reclaimed, and the separately-funded
+        // notification must outlive the channel to receive both signals
+        // ("teardown always signals", §3.3). This is the runtime witness
+        // for the CapRevocation TSpec's ChannelFireSafe property.
+        check(retype(UNTYPED, OBJ_UNTYPED, 0x10000, UA, 0), b'H');
+        check(retype(UNTYPED2, OBJ_NOTIF, 0, PC_NOTIF, 0), b'I');
+        check(retype(UA, OBJ_CHANNEL, 4, PC_CHAN_A, PC_CHAN_B), b'J');
+        check(chan_bind(PC_CHAN_A, EV_PEER_CLOSED, PC_NOTIF, BIT_PC_A), b'K');
+        check(chan_bind(PC_CHAN_B, EV_PEER_CLOSED, PC_NOTIF, BIT_PC_B), b'L');
+        check(cap_revoke(UA), b'M');
+        // Both fires land in one word: T1 never blocked, so the bits
+        // accumulate and the first wait returns the whole word.
+        let pc = wait_for(PC_NOTIF, BIT_PC_A | BIT_PC_B, b'N');
+        // The torn-down endpoint caps are now dead — a send errors out
+        // (§3.3 "afterward a dead endpoint cap yields error returns").
+        let no_caps: [u32; 4] = [SLOT_NONE; 4];
+        if pc & (BIT_PC_A | BIT_PC_B) != (BIT_PC_A | BIT_PC_B)
+            || chan_send(PC_CHAN_A, &PING, &no_caps) >= 0
+        {
+            debug_write(&MSG_FAIL);
+            exit();
+        }
+        putc(b'6'); // marker: whole-object teardown fired every peer-closed
 
         debug_write(&MSG_PASS);
         exit();
