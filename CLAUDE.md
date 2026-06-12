@@ -191,7 +191,7 @@ QEMU invocations pin `-rtc base=utc,clock=host`. End-to-end proof:
 asserts sane, strictly ordered ISO-8601 timestamps plus a zero-syscall
 shell `date`.
 
-### Rev2: thread reports (§5.1) — kernel half done
+### Rev2: thread reports (§5.1) — done
 TCBs carry on-exit/on-fault binding slots (real CDT-visible CapSlots —
 notification caps move in via `thread_bind`, revoke sees through them)
 and a preallocated terminal report record (running → exited(status) |
@@ -202,9 +202,31 @@ carry both — `Rights::THREAD_ALL`). Thread destruction produces no
 report (destruction is the parent acting, not the thread dying). The
 CapRevocation TLA+ model covers the binding slots (Bind/ThreadExit/
 ThreadFault actions; FireSafe + ReportMonotone properties) — TLC-checked.
-Remaining (userspace half): the shell's reclaim-on-exit loop — bind,
-wait, read_report, revoke the child's untyped, reset the watermark,
-reuse spawn slots.
+
+Userspace half (the shell's reclaim-on-exit loop) is now done. Two kernel
+mechanisms the §5.1 spawn design needed land with it: `retype` can carve a
+child-sized **sub-untyped** (`OBJ_UNTYPED`, §2.3 page-aligned sub-range,
+phys-read stripped) and `untyped_reset` (nr 23) zeroes a carved untyped's
+watermark once `revoke` has emptied it (§2.5). The CapRevocation model
+already covers both at its abstraction (sub-untyped carve = a `Copy`-style
+CDT-child derivation; reset's precondition *is* the modeled `Retype` guard
+`Descendants(c) = {}`), so its invariants are undisturbed. `urt::slots` is
+a host-tested cspace-slot free-list; `urt::spawn` owns the canonical loop
+(`SpawnRec::arm` binds exit/fault before start; `SpawnRec::reap` does
+`read_report` strictly before `revoke`+`reset`, asserted — the report
+lives in the TCB the revoke kills). The shell carves one persistent event
+notification + one reusable donation untyped from its pool (slots 3/4),
+spawns each child as a single CDT subtree under the donation, multiplexes
+exit/fault on one notification word (the first real §3.6 bit-group scan),
+and recycles its slot window. `bash scripts/spawn-test.sh` is the proof
+(same genre as the M1 revocation test): `runloop bin/selftest 100`
+(slots 56/56, no leak), exit-status propagation, and the fault demo —
+`faulted(translation, 0xdead0000)` then a clean re-spawn — with no
+BSS-LEAK (retype re-zeroes reused frames). Scope cut held: children get
+stdin/stdout via the console; no storage-session delegation (that needs
+the server to accept a second session, §2.4) and no time-page grant yet
+(the shell holds no time-frame cap — follows the init→shell pattern when
+it does).
 
 ### M1 exit criterion (met)
 Booting prints `12345M1 PASS`: the embedded EL0 test program

@@ -24,6 +24,13 @@ pub enum ObjType {
     Frame,
     /// param = table-pool pages (pool-at-creation, §2.5).
     Aspace,
+    /// A sub-range untyped (§2.3: untyped derivations are page-aligned
+    /// sub-ranges). param = bytes, rounded up to a page. The carved cap
+    /// is a CDT child of the parent untyped with its own watermark, so a
+    /// whole subtree of objects can be retyped from it and reclaimed as a
+    /// unit by `revoke(child) + reset(child)` — the per-spawn donation a
+    /// parent funds for one child (§5.1).
+    Untyped,
 }
 
 impl ObjType {
@@ -36,13 +43,14 @@ impl ObjType {
             4 => ObjType::Timer,
             5 => ObjType::Frame,
             6 => ObjType::Aspace,
+            7 => ObjType::Untyped,
             _ => return None,
         })
     }
 
     fn align(self) -> u64 {
         match self {
-            ObjType::Frame | ObjType::Aspace => 4096,
+            ObjType::Frame | ObjType::Aspace | ObjType::Untyped => 4096,
             _ => 16,
         }
     }
@@ -113,6 +121,14 @@ pub unsafe fn retype(
             }
             crate::aspace::AspaceObj::bytes_for(param)
         }
+        ObjType::Untyped => {
+            // param is bytes; round up to a page so the carved range is
+            // page-aligned at both ends (§2.3). 0 is meaningless.
+            if param == 0 {
+                return Err(RetypeError::BadArg);
+            }
+            (param as usize).next_multiple_of(4096)
+        }
     } as u64;
 
     let align = ty.align();
@@ -159,6 +175,7 @@ pub unsafe fn retype(
             crate::aspace::AspaceObj::init(p, param);
             CapKind::Aspace(p)
         }
+        ObjType::Untyped => CapKind::Untyped { base: start, size: bytes, watermark: 0 },
     };
 
     (*ut_slot).cap.kind = CapKind::Untyped {
@@ -169,10 +186,14 @@ pub unsafe fn retype(
     // Frames inherit the untyped's rights so phys-read (§2.5) flows only
     // from boot untypeds along explicit grants; threads carry the full
     // §2.3 thread-rights set on the creator cap (attenuation strips from
-    // here); other kernel objects get the ordinary full mask.
+    // here); other kernel objects get the ordinary full mask. A carved
+    // sub-untyped inherits read/write but never phys-read: a spawn pool
+    // funds child memory, not DMA authority — stripping here keeps phys
+    // off ordinary derivation chains (§2.5) by construction.
     let rights = match ty {
         ObjType::Frame => (*ut_slot).cap.rights,
         ObjType::Thread => Rights::THREAD_ALL,
+        ObjType::Untyped => (*ut_slot).cap.rights.masked(Rights::READ | Rights::WRITE),
         _ => Rights::ALL,
     };
     (*dst).cap = Cap { kind, rights };
@@ -190,11 +211,13 @@ pub unsafe fn retype(
     Ok(())
 }
 
-/// Reset the watermark once exclusivity is proven.
+/// Reset the watermark once exclusivity is proven — the second half of the
+/// reclaim primitive (§2.5: "reclaiming the range is revoke(untyped) then
+/// watermark reset"). A parent reuses one child-sized donation across many
+/// spawns this way (§5.1); the next retype re-zeroes the frames it carves.
 ///
 /// pre:  ut_slot holds an Untyped cap with no CDT children (caller revoked).
 /// post: watermark = 0; the whole range is reusable.
-#[allow(dead_code)] // syscall surface arrives with M2 (driver memory churn)
 pub unsafe fn reset(ut_slot: *mut CapSlot) -> Result<(), RetypeError> {
     let CapKind::Untyped { base, size, .. } = (*ut_slot).cap.kind else {
         return Err(RetypeError::NotUntyped);

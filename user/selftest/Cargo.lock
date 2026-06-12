@@ -3,27 +3,11 @@
 version = 4
 
 [[package]]
-name = "init"
-version = "0.1.0"
-dependencies = [
- "ipc",
- "loader",
- "urt",
-]
-
-[[package]]
 name = "ipc"
 version = "0.1.0"
 
 [[package]]
-name = "loader"
-version = "0.1.0"
-dependencies = [
- "ipc",
-]
-
-[[package]]
-name = "urt"
+name = "selftest"
 version = "0.1.0"
 dependencies = [
  "ipc",
