@@ -1,0 +1,73 @@
+name: ci
+
+# Phase 4 of the process-caps plan: rerun the formal models and the host
+# test suite on every PR, and boot the system under QEMU to run the §5.1
+# spawn/reclaim exit criterion. Fuzzing has its own workflow (fuzz.yml).
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  # Host unit + integration tests for every workspace crate except the
+  # kernel (no_std / bare-metal aarch64 — it can't build for the host).
+  # Covers the slot-allocator (urt), the monotone rights-mask attenuation
+  # (storage-server sessions), the CAS canonical-form proptests, the wire
+  # decoders, the ELF parser, and the rest.
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test (workspace minus kernel)
+        run: cargo test --workspace --exclude kernel
+
+  # Rerun the TLA+ proofs. Both the CapRevocation safety model (incl. the
+  # §3.3 channel whole-object teardown TSpec) and the CommitProtocol model
+  # must come back clean — the M1/M2 formal gates, re-checked on every PR.
+  model:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Fetch TLA+ tools (tla2tools.jar)
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/tla2tools.jar" \
+            https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
+      - name: Model-check CapRevocation (+ teardown) and CommitProtocol
+        # find-tla-tools.sh honours a pre-set JAVA + TLA_TOOLS instead of
+        # probing for the macOS Toolbox, so the same scripts run here.
+        env:
+          JAVA: java
+          TLA_TOOLS: ${{ runner.temp }}/tla2tools.jar
+        run: |
+          bash tools/tla/tla-model-check.sh tla/cap_revocation/CapRevocation.tla
+          bash tools/tla/tla-model-check.sh tla/cap_revocation/CapRevocation.tla CapRevocation_Teardown.cfg
+          bash tools/tla/tla-model-check.sh tla/commit_protocol/CommitProtocol.tla
+
+  # The §5.1 exit criterion: boot the real system under QEMU and drive the
+  # shell through the burn regression (spawn/wait/reclaim 100x), status
+  # propagation, the wild-pointer fault demo + re-spawn, the panic path,
+  # and the time grant. Also runs the M1 cap-mechanism EL0 test. Needs a
+  # nightly toolchain with rust-src for the kernel's build-std.
+  on-os:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+      - name: Install QEMU (aarch64 system emulation)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-arm
+      - name: M1 cap-mechanism test (caps/CDT, revoke, reports, teardown)
+        run: bash scripts/m1-test.sh
+      - name: Spawn/reclaim burn loop + fault / panic / time demo
+        run: bash scripts/spawn-test.sh

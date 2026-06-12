@@ -14,6 +14,14 @@
 # Source this file to export TLA_TOOLS (tlatools plugin dir) and JAVA (bundled java binary).
 # Works when sourced from bash/zsh; return 1 on failure so callers can set -e.
 
+# CI / non-macOS override: if the caller already exported both a classpath
+# (a downloaded tla2tools.jar, or any dir holding tlc2.TLC) and a java
+# binary, trust them and skip the macOS Toolbox probe below. This is how the
+# CI `model` job runs TLC on Linux without the Toolbox installed.
+if [ -n "${TLA_TOOLS:-}" ] && [ -n "${JAVA:-}" ]; then
+  export TLA_TOOLS JAVA
+  return 0 2>/dev/null || exit 0
+fi
 
 _APP="/Applications/TLA+ Toolbox.app"
 
