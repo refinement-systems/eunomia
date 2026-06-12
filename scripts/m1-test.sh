@@ -31,6 +31,7 @@ KERNEL="$ROOT/target/aarch64-unknown-none-softfloat/debug/kernel"
 qemu-system-aarch64 \
     -machine virt,gic-version=3 \
     -cpu cortex-a72 -m 256M -nographic \
+    -nic none \
     -serial mon:stdio \
     -rtc base=utc,clock=host \
     -kernel "$KERNEL" \
