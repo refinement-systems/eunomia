@@ -39,6 +39,7 @@ fn main() {
     let root = manifest.parent().unwrap();
     for dep in [
         "user/hello",
+        "user/selftest",
         "user/init",
         "user/storaged",
         "user/shell",
@@ -55,6 +56,7 @@ fn main() {
 
     let user_target = root.join("target").join("user");
     let hello = build_user(root, &user_target, "hello", "hello", &[]);
+    let selftest = build_user(root, &user_target, "selftest", "selftest", &[]);
     let storaged = build_user(root, &user_target, "storaged", "storaged", &[]);
     let shell = build_user(root, &user_target, "shell", "ushell", &[]);
     let init = build_user(
@@ -67,6 +69,9 @@ fn main() {
             ("SHELL_ELF_PATH", shell.display().to_string()),
         ],
     );
-    let _ = hello; // placed into the demo disk image by scripts/run-demo.sh
+    // hello + selftest are placed into the demo disk image by the scripts
+    // (scripts/run-demo.sh, scripts/spawn-test.sh); they are loaded from the
+    // store at runtime, not embedded in the kernel.
+    let _ = (hello, selftest);
     println!("cargo:rustc-env=INIT_ELF_PATH={}", init.display());
 }

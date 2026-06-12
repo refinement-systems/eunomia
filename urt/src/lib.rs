@@ -11,7 +11,13 @@
 
 #![no_std]
 
+pub mod slots;
 pub mod time;
+
+// The spawn-lifecycle helper issues syscalls, so it only exists on the
+// bare-metal target; `slots` is pure bookkeeping and host-tested.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub mod spawn;
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;

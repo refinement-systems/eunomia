@@ -24,6 +24,9 @@ pub const OBJ_NOTIF: u64 = 3;
 pub const OBJ_TIMER: u64 = 4;
 pub const OBJ_FRAME: u64 = 5;
 pub const OBJ_ASPACE: u64 = 6;
+/// A carved sub-range untyped (§2.3); retype param is bytes. The per-spawn
+/// donation a parent funds for one child (§5.1).
+pub const OBJ_UNTYPED: u64 = 7;
 
 pub const RIGHT_READ: u64 = 1;
 pub const RIGHT_WRITE: u64 = 2;
@@ -212,6 +215,14 @@ pub fn thread_start_as(tcb: u32, cspace: u32, aspace: u32, entry: u64, sp: u64, 
 /// DmaPool is the only legitimate caller.
 pub fn frame_paddr(frame: u32) -> i64 {
     unsafe { syscall(19, frame as u64, 0, 0, 0, 0, 0) }
+}
+
+/// Reset a carved untyped's watermark to 0 so its range can be reused
+/// (§2.5). Pairs with `cap_revoke`: revoke deletes every object carved
+/// from the untyped, then reset reclaims the bytes. Fails with ERR_STATE
+/// if the untyped still has live children (revoke first).
+pub fn untyped_reset(ut: u32) -> i64 {
+    unsafe { syscall(23, ut as u64, 0, 0, 0, 0, 0) }
 }
 
 /// Non-blocking console byte (scaffold until the userspace UART driver).

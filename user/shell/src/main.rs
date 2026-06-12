@@ -3,10 +3,18 @@
 //! World (built by init, §5.1): slot 0 = bootstrap channel (first message
 //! is the "SH01" startup block carrying the time-page address, §2.6),
 //! slot 1 = storage session (handle 0 = main ref root, full rights),
-//! slot 2 = untyped for spawning, slots 8+ free for the spawner.
+//! slot 2 = untyped pool for spawning. The shell carves slot 3 (a
+//! persistent event notification) and slot 4 (a reusable child donation
+//! untyped) from the pool, and keeps slots 8.. as a recyclable cap window.
+//!
+//! `run`/`runloop` spawn a child from the store and reclaim it on exit
+//! (§5.1): one donation untyped per child, the whole subtree revoked and
+//! the donation reset between spawns — so a process can be run, watched to
+//! completion (exit *or* fault), reaped, and its memory and slots reused.
 //!
 //!   ls [path] · cat <path> · write <path> <text> · rm <path>
-//!   snap [msg] · snaps · rollback <id> · sync · run <path> · help
+//!   snap [msg] · snaps · rollback <id> · sync · help
+//!   run <path> [mode] · runloop <path> <count>          (§5.1 spawn/reap)
 //!   snapdel <id> · keep <id> · prune <n> · gc · df          (M5)
 //!   date                                              (time page, §2.6)
 
@@ -18,16 +26,45 @@ extern crate alloc;
 use alloc::vec::Vec;
 use ipc::sys;
 use storage_server::{wire, DirEnt, Request, Response};
+use urt::slots::SlotAlloc;
+use urt::spawn::{Exit, SpawnRec};
 
 #[global_allocator]
 static HEAP: urt::Heap<{ 1024 * 1024 }> = urt::Heap::new();
 
+// Shell cspace (built by init, §5.1): slot 0 = bootstrap channel, slot 1 =
+// storage session, slot 2 = the untyped pool for spawning. The shell carves
+// two persistent objects from the pool at startup and keeps slots 8.. as a
+// recyclable window for per-child object caps.
 const BOOT_CHAN: u32 = 0;
 const STORE_CHAN: u32 = 1;
-const UNTYPED: u32 = 2;
+const POOL: u32 = 2;
+/// Persistent event notification: the shell's wait point and the target of
+/// every child's on-exit/on-fault bindings (§3.6). Carved once; survives
+/// each child's revoke (it descends from the pool, not the donation).
+const EVENT_NOTIF: u32 = 3;
+/// The reusable per-child donation untyped (§5.1). One child's worth of
+/// memory; `revoke` + `reset` reclaims it between spawns (§2.5).
+const DONATION: u32 = 4;
 const SPAWN_BASE: u32 = 8;
-const RUN_CHAN_A: u32 = 4;
-const RUN_CHAN_B: u32 = 5;
+const SPAWN_CAP: usize = 56; // slots 8..64
+
+/// One child's memory: aspace pool + stack + segments + bootstrap channel,
+/// with generous slack. The pool (slot 2) is ~100 MiB, and only this one
+/// donation is ever outstanding, so 4 MiB costs nothing and never runs short.
+const DONATION_BYTES: u64 = 4 * 1024 * 1024;
+const CHILD_CSPACE_SLOTS: u64 = 8;
+/// Children run below the shell so a blocked-shell, running-child handoff is
+/// the common case, and the §5.4 ceiling keeps a child from outranking us.
+const CHILD_PRIO: u64 = 3;
+
+/// Notification bits the kernel raises for this child (§5.1). Distinct so
+/// the notification *word* tells exit from fault before `read_report` does —
+/// the §3.6 bit-group scan, here doing real multiplexing for the first time.
+/// A console-readable source would slot in as a third bit once the console
+/// is a channel rather than a syscall.
+const EXIT_BIT: u64 = 1 << 0;
+const FAULT_BIT: u64 = 1 << 1;
 
 fn out(s: &[u8]) {
     sys::debug_write(s);
@@ -327,61 +364,254 @@ fn parse_u64(arg: &[u8]) -> Option<u64> {
     Some(n)
 }
 
-fn cmd_run(arg: &[u8]) {
-    let Some(image) = read_file(arg) else {
+/// Lowercase hex, no leading zeros (faulting addresses).
+fn out_hex(n: u64) {
+    let mut d = [0u8; 16];
+    let mut v = n;
+    for i in (0..16).rev() {
+        d[i] = b"0123456789abcdef"[(v & 0xF) as usize];
+        v >>= 4;
+    }
+    let start = d.iter().position(|&c| c != b'0').unwrap_or(15);
+    out(&d[start..]);
+}
+
+/// Classify a fault from ESR_EL1 (§5.3): the EC names the kind of abort,
+/// the low data-fault-status bits name why. Enough to print
+/// `faulted(translation, …)` for the wild-pointer demo without a full ESR
+/// table.
+fn fault_class(esr: u64) -> &'static [u8] {
+    let ec = (esr >> 26) & 0x3F;
+    match ec {
+        // Instruction / data abort from a lower EL.
+        0x20 | 0x21 | 0x24 | 0x25 => match esr & 0x3C {
+            0x00 => b"address-size",
+            0x04 => b"translation",
+            0x08 => b"access-flag",
+            0x0C => b"permission",
+            _ => b"abort",
+        },
+        _ => b"exception",
+    }
+}
+
+fn print_exit(e: Exit) {
+    match e {
+        Exit::Exited(status) => {
+            out(b"exited(");
+            out_num(status);
+            out(b")\n");
+        }
+        Exit::Faulted { esr, far } => {
+            out(b"faulted(");
+            out(fault_class(esr));
+            out(b", 0x");
+            out_hex(far);
+            out(b")\n");
+        }
+    }
+}
+
+/// The slots one spawn consumes from the recyclable window — allocated up
+/// front, returned as a unit once the child is reaped (or aborted).
+struct SpawnSlots {
+    range: u32,  // [range, range+span): aspace, tcb, cspace, frames, stack
+    span: u32,
+    chan_a: u32, // shell's bootstrap endpoint
+    chan_b: u32, // child's endpoint (moved into the child's cspace)
+    scratch: u32, // staging slot for the moved-in notification copies
+}
+
+#[derive(Clone, Copy)]
+enum RunErr {
+    NoSlots,
+    BadElf,
+    Carve,
+    Start,
+}
+
+/// Owns the recyclable slot window and drives the §5.1 spawn/reap loop. One
+/// child outstanding at a time (the shell is single-threaded), so a single
+/// donation untyped, reused, is the whole resource story.
+struct Spawner {
+    slots: SlotAlloc<1>,
+}
+
+impl Spawner {
+    fn new() -> Spawner {
+        Spawner { slots: SlotAlloc::new(SPAWN_BASE, SPAWN_CAP) }
+    }
+
+    /// Spawn `image` with startup mode `mode`, wait for it to terminate,
+    /// read its report, then reclaim every resource it held. Returns how it
+    /// terminated. The donation untyped and the slot window come back clean
+    /// for the next call — this is the whole burn fix.
+    fn run_once(&mut self, image: &[u8], mode: u8) -> Result<Exit, RunErr> {
+        let img = loader::elf::parse(image).map_err(|_| RunErr::BadElf)?;
+        // Loader slot layout: aspace, tcb, cspace, one frame per segment,
+        // stack frame (loader/spawn.rs).
+        let span = 3 + img.nsegments as u32 + 1;
+        let s = SpawnSlots {
+            range: self.slots.alloc_range(span).ok_or(RunErr::NoSlots)?,
+            span,
+            chan_a: self.slots.alloc().ok_or(RunErr::NoSlots)?,
+            chan_b: self.slots.alloc().ok_or(RunErr::NoSlots)?,
+            scratch: self.slots.alloc().ok_or(RunErr::NoSlots)?,
+        };
+        let exit = self.spawn_inner(image, mode, &s);
+        // Whether it ran to completion or aborted mid-setup, the donation is
+        // now empty (reap revoked it, or abort below did) and these slots
+        // with it — return the window to the free list.
+        self.free_slots(&s);
+        exit
+    }
+
+    fn spawn_inner(&mut self, image: &[u8], mode: u8, s: &SpawnSlots) -> Result<Exit, RunErr> {
+        // Bootstrap channel and every child object descend from DONATION, so
+        // the child is one CDT subtree teardown collapses in one revoke.
+        if sys::retype(DONATION, sys::OBJ_CHANNEL, 4, s.chan_a, s.chan_b) < 0 {
+            self.scrub();
+            return Err(RunErr::Carve);
+        }
+        let prepared = match loader::spawn::prepare(image, DONATION, s.range, CHILD_CSPACE_SLOTS) {
+            Ok(p) => p,
+            Err(_) => {
+                self.scrub();
+                return Err(RunErr::BadElf);
+            }
+        };
+        // Explicit child world (§5.1): bootstrap endpoint in slot 0, startup
+        // block ("ST01" + mode) queued before the child runs.
+        sys::cap_install(prepared.cspace_slot, s.chan_b, 0);
+        let block = [b'S', b'T', b'0', b'1', mode];
+        sys::chan_send(s.chan_a, &block, None);
+
+        let rec = SpawnRec {
+            donation: DONATION,
+            main_thread: prepared.tcb_slot,
+            exit_bit: EXIT_BIT,
+            fault_bit: FAULT_BIT,
+        };
+        // Bind before start, so a child that exits immediately still raises
+        // the bit — the lost-wakeup discipline (§3.6).
+        if rec.arm(EVENT_NOTIF, s.scratch) < 0 {
+            self.scrub();
+            return Err(RunErr::Carve);
+        }
+        if loader::spawn::start(&prepared, CHILD_PRIO).is_err() {
+            self.scrub();
+            return Err(RunErr::Start);
+        }
+
+        // Block on the bit group until this child terminates (exit | fault).
+        loop {
+            let word = sys::notif_wait(EVENT_NOTIF);
+            if word >= 0 && rec.terminated(word as u64) {
+                break;
+            }
+            sys::yield_now();
+        }
+        // read_report strictly before revoke (§5.1) — enforced inside reap.
+        Ok(rec.reap())
+    }
+
+    /// Collapse a partially-built child and reset the donation (the abort
+    /// counterpart of reap). Safe with nothing carved: revoke of a
+    /// childless untyped is a no-op.
+    fn scrub(&self) {
+        sys::cap_revoke(DONATION);
+        let _ = sys::untyped_reset(DONATION);
+    }
+
+    fn free_slots(&mut self, s: &SpawnSlots) {
+        self.slots.free_range(s.range, s.span);
+        self.slots.free(s.chan_a);
+        self.slots.free(s.chan_b);
+        self.slots.free(s.scratch);
+    }
+
+    fn available(&self) -> usize {
+        self.slots.available()
+    }
+}
+
+fn run_err(e: RunErr) {
+    out(match e {
+        RunErr::NoSlots => b"error: out of spawn slots\n" as &[u8],
+        RunErr::BadElf => b"error: bad ELF\n",
+        RunErr::Carve => b"error: resource carve failed\n",
+        RunErr::Start => b"error: start failed\n",
+    });
+}
+
+fn cmd_run(sp: &mut Spawner, arg: &[u8]) {
+    let mut parts = arg.splitn(2, |&b| b == b' ');
+    let path = parts.next().unwrap_or(b"");
+    let mode = parts.next().and_then(parse_u64).unwrap_or(0) as u8;
+
+    let Some(image) = read_file(path) else {
         out(b"error: not found\n");
         return;
     };
     out(b"loaded ");
     out_num(image.len() as u64);
     out(b" bytes from the store\n");
-
-    if sys::retype(UNTYPED, sys::OBJ_CHANNEL, 4, RUN_CHAN_A, RUN_CHAN_B) < 0 {
-        out(b"error: channel\n");
-        return;
+    match sp.run_once(&image, mode) {
+        Ok(exit) => print_exit(exit),
+        Err(e) => run_err(e),
     }
-    let prepared = match loader::spawn::prepare(&image, UNTYPED, SPAWN_BASE, 8) {
-        Ok(p) => p,
-        Err(_) => {
-            out(b"error: bad ELF\n");
-            sys::cap_delete(RUN_CHAN_A);
-            sys::cap_delete(RUN_CHAN_B);
-            return;
-        }
-    };
-    // Explicit child world (§5.1): startup block queued, bootstrap
-    // channel in slot 0.
-    sys::chan_send(RUN_CHAN_A, b"startup:hello", None);
-    sys::cap_install(prepared.cspace_slot, RUN_CHAN_B, 0);
-    if loader::spawn::start(&prepared, 4).is_err() {
-        out(b"error: start\n");
-        return;
-    }
-    let mut buf = [0u8; 256];
-    loop {
-        let (len, _) = sys::chan_recv(RUN_CHAN_A, buf.as_mut_ptr(), None);
-        if len >= 0 {
-            out(b"child replied: ");
-            out(&buf[..len as usize]);
-            out(b"\n");
-            break;
-        }
-        sys::yield_now();
-    }
-    sys::cap_delete(RUN_CHAN_A);
-    // Child slots stay allocated (no slot reuse in the MVP shell): each
-    // `run` uses fresh spawn slots only if we rotated them — accept one
-    // run per boot for the demo.
 }
 
-fn dispatch(line: &[u8]) {
+/// The burn-fix witness: spawn / wait / reclaim a trivial child `n` times in
+/// one boot. Un-reclaimed slots die after the first spawn (the window is far
+/// smaller than `n`), so a run that reaches `n/n` *is* slot recycling — and
+/// the free count returning to its start proves nothing leaked.
+fn cmd_runloop(sp: &mut Spawner, arg: &[u8]) {
+    let mut parts = arg.splitn(2, |&b| b == b' ');
+    let path = parts.next().unwrap_or(b"");
+    let Some(n) = parts.next().and_then(parse_u64) else {
+        out(b"usage: runloop <path> <count>\n");
+        return;
+    };
+    let Some(image) = read_file(path) else {
+        out(b"error: not found\n");
+        return;
+    };
+    let before = sp.available();
+    let mut ok = 0u64;
+    for _ in 0..n {
+        match sp.run_once(&image, 0) {
+            Ok(Exit::Exited(0)) => ok += 1,
+            Ok(other) => {
+                out(b"unexpected: ");
+                print_exit(other);
+                break;
+            }
+            Err(e) => {
+                run_err(e);
+                break;
+            }
+        }
+    }
+    out(b"runloop: ");
+    out_num(ok);
+    out(b"/");
+    out_num(n);
+    out(b" ok, slots ");
+    out_num(sp.available() as u64);
+    out(b"/");
+    out_num(before as u64);
+    out(b"\n");
+}
+
+fn dispatch(sp: &mut Spawner, line: &[u8]) {
     let mut parts = line.splitn(2, |&b| b == b' ');
     let cmd = parts.next().unwrap_or(b"");
     let arg = parts.next().unwrap_or(b"").trim_ascii();
     match cmd {
         b"" => {}
         b"help" => out(
-            b"ls cat write rm sync run date\nsnap snaps rollback snapdel keep prune gc df help\n",
+            b"ls cat write rm sync run runloop date\nsnap snaps rollback snapdel keep prune gc df help\n",
         ),
         b"date" => cmd_date(),
         b"ls" => cmd_ls(arg),
@@ -426,7 +656,8 @@ fn dispatch(line: &[u8]) {
                 data: text.to_vec(),
             }));
         }
-        b"run" => cmd_run(arg),
+        b"run" => cmd_run(sp, arg),
+        b"runloop" => cmd_runloop(sp, arg),
         _ => out(b"unknown command (try help)\n"),
     }
 }
@@ -446,6 +677,18 @@ pub extern "C" fn _start() -> ! {
         unsafe { urt::time::attach(time_va as usize) };
     }
 
+    // Carve the two persistent spawn objects from the pool (slot 2): the
+    // event notification every child's death will signal, and one reusable
+    // child-sized donation untyped (§5.1). Both sit in pool memory the
+    // per-child reclaim never touches.
+    if sys::retype(POOL, sys::OBJ_NOTIF, 0, EVENT_NOTIF, 0) < 0
+        || sys::retype(POOL, sys::OBJ_UNTYPED, DONATION_BYTES, DONATION, 0) < 0
+    {
+        out(b"[shell] FATAL: could not carve spawn objects\n");
+        sys::exit();
+    }
+    let mut spawner = Spawner::new();
+
     out(b"\nEunomia shell - type help\n");
     let mut line = [0u8; 200];
     let mut len = 0usize;
@@ -459,7 +702,7 @@ pub extern "C" fn _start() -> ! {
         match c as u8 {
             b'\r' | b'\n' => {
                 out(b"\n");
-                dispatch(line[..len].trim_ascii());
+                dispatch(&mut spawner, line[..len].trim_ascii());
                 len = 0;
                 out(b"eunomia> ");
             }

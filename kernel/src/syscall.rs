@@ -601,6 +601,22 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
             (*frame).x[2] = v2;
             Some(code)
         }
+        // untyped_reset(ut_slot) — watermark back to 0 once the caller has
+        // revoked every object carved from it (§2.5). Pairs with
+        // cap_revoke for per-spawn donation reuse (§5.1); refuses while
+        // CDT children remain so a live object can never be reused under.
+        23 => {
+            let s = cur_slot(a[0]);
+            if s.is_null() || (*s).cap.is_empty() {
+                return Some(ERR_BADSLOT);
+            }
+            Some(match untyped::reset(s) {
+                Ok(()) => 0,
+                Err(RetypeError::NotUntyped) => ERR_TYPE,
+                // reset's only other failure is "still has children".
+                Err(_) => ERR_STATE,
+            })
+        }
         // thread_exit(status) — the only voluntary stop (§5.1). The
         // kernel records the status, so a child can neither lie about
         // nor forget its own death; the on-exit binding fires here.

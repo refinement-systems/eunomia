@@ -148,7 +148,9 @@ pub extern "C" fn _start() -> ! {
     check(spawn::start(&sd, 5).map_or(-1, |_| 0), b"start storaged");
 
     // ── shell ───────────────────────────────────────────────────────
-    let sh = match spawn::prepare(SHELL_ELF, UNTYPED, SH_SPAWN_BASE, 16) {
+    // 64-slot cspace: slots 0-4 are wired below / carved by the shell, and
+    // 8.. is the shell's recyclable spawn window (§5.1 reclaim loop).
+    let sh = match spawn::prepare(SHELL_ELF, UNTYPED, SH_SPAWN_BASE, 64) {
         Ok(p) => p,
         Err(_) => {
             sys::debug_write(b"[init] FAILED: prepare shell\n");
