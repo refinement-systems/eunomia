@@ -8,7 +8,7 @@ members = [
     "storage-server",
     "virtio-blk",
     "loader",
-    "shell",
+    "scratchpad",
     "mkfs",
     "urt",
 ]
