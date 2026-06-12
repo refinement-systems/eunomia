@@ -1,0 +1,10 @@
+[package]
+name = "scratchpad"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+
+# cfg(kani) is injected by cargo-kani; teach plain cargo it's expected.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }

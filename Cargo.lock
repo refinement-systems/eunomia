@@ -481,6 +481,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "scratchpad"
+version = "0.1.0"
+
+[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -527,13 +531,6 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
-]
-
-[[package]]
-name = "shell"
-version = "0.1.0"
-dependencies = [
- "ipc",
 ]
 
 [[package]]

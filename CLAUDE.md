@@ -15,7 +15,10 @@ cas/             CAS primitives: chunker, prolly tree, commit protocol (§4)
 storage-server/  Userspace storage server process (§4)
 virtio-blk/      Virtio-blk driver, written against dma-pool (§2.5)
 loader/          ELF loader / program spawner (§5)
-shell/           Command-line shell with built-ins for the demo (§7)
+user/            Real userspace binaries (init, shell, storaged, …) — own
+                 mini-workspaces, built by kernel/build.rs (§5, §7)
+scratchpad/      Host-side scratchpad for verification-tool experiments
+                 (currently the Kani demo proof, §6)
 mkfs/            Host-side disk image builder; reuses cas crate (§7)
 tla/             TLA+ formal specifications (must check before M2)
 tools/tla/       Scripts: tla-check.sh (SANY), tla-model-check.sh (TLC)
