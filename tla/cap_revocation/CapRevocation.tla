@@ -7,6 +7,13 @@
 \* slots holding notification caps, copy/send/receive/revoke/retype/
 \* bind/thread-death.
 \*
+\* Two specifications share this module and its variables. Spec is the CDT
+\* revocation model (the bulk below). TSpec is the §3.3 channel
+\* whole-object teardown model — peer-closed bindings and their firing —
+\* checked by CapRevocation_Teardown.cfg; see its own header further down.
+\* Each spec keeps the other's variables constant, so they do not multiply
+\* each other's state space.
+\*
 \* Key properties checked:
 \*   - MoveSemantics: at every instant a live cap has exactly one owner —
 \*     a process cspace, a queue slot, or a TCB binding slot, never two
@@ -31,6 +38,15 @@
 \*   - ReportMonotone (action property): the terminal report transitions
 \*     at most once, running -> exited | faulted (§5.1).
 \*
+\* TSpec properties (§3.3 channel teardown):
+\*   - ChannelFireSafe: every peer-closed binding on a live channel names a
+\*     live notification — the teardown firing signals a live object, never
+\*     a freed one, even when the notification's whole cap lineage was
+\*     revoked (the channel's hold keeps it alive).
+\*   - RefCountSound: a notification is alive iff a cap or a channel hold
+\*     references it — the refcount discipline the kernel maintains.
+\*   - ReclaimedReleased: a reclaimed channel holds no notification.
+\*
 \* Modeling notes:
 \*   - Revoke is atomic here. The kernel walk is preemptible/restartable;
 \*     its postcondition (no live descendants on completion) is what this
@@ -46,12 +62,13 @@
 \*     (§3.4 move semantics; the kernel caller duplicates first to keep
 \*     access). Kernel rebind = delete-the-displaced-cap + bind; single-
 \*     cap delete (children re-parent one level up) preserves LiveParent
-\*     by construction and is not modeled, matching channel destruction
-\*     (which deletes queued caps the same way) being unmodeled.
+\*     by construction and is not modeled. Channel destruction's queued-cap
+\*     cleanup is the same shape and likewise unmodeled here; its NEW
+\*     content — peer-closed firing under whole-object teardown — is the
+\*     separate TSpec at the foot of this file (§3.3).
 \*   - Thread destruction deletes binding caps with ordinary CDT cleanup
 \*     and produces no report and no firing — destruction is the parent
-\*     acting, not the thread dying (§5.1). Container teardown, like
-\*     channel destruction, is not modeled.
+\*     acting, not the thread dying (§5.1).
 
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
@@ -60,12 +77,16 @@ CONSTANTS
     Procs,      \* set of process IDs
     Channels,   \* set of channel IDs
     Threads,    \* set of TCB IDs (each carrying exit/fault binding slots)
+    Notifs,     \* notification object IDs (TSpec; §3.3 channel teardown)
     QueueDepth, \* per-channel queue capacity (donated at creation, §3.2)
     NULL        \* null/empty sentinel (model value)
 
 MaxCapsPerMsg == 4  \* spec §3.1: 4 cap slots per message
 
 BindKinds == {"exit", "fault"}  \* the two fixed TCB binding slots (§5.1)
+
+Ends     == {0, 1}  \* the two channel endpoints (TSpec)
+MaxNCaps == 2       \* bound on outstanding caps per notification (TSpec)
 
 VARIABLES
     live,       \* SUBSET CapIds — allocated cap slots
@@ -74,9 +95,20 @@ VARIABLES
     queues,     \* Channels -> Seq(SUBSET CapIds)  (in-flight cap sets)
     bindings,   \* Threads -> [BindKinds -> CapIds \cup {NULL}]
     treport,    \* Threads -> {"running", "exited", "faulted"}  (§5.1)
-    revoked     \* SUBSET CapIds — ghost: revoked ids not yet reused
+    revoked,    \* SUBSET CapIds — ghost: revoked ids not yet reused
+    \* --- TSpec only (channel teardown, §3.3); constant under Spec -------
+    nlive,      \* SUBSET Notifs — alive notification objects
+    ncaps,      \* Notifs -> 0..MaxNCaps  (outstanding caps per notif)
+    pcbind,     \* Channels -> [Ends -> Notifs \cup {NULL}]  (peer-closed)
+    eopen       \* Channels -> [Ends -> BOOLEAN]  (endpoint has a live cap)
 
-vars == <<live, parent, cspaces, queues, bindings, treport, revoked>>
+\* The revocation half (Spec) and the channel-teardown half (TSpec) carry
+\* disjoint variables; each half holds the other's constant, so neither
+\* multiplies the other's state space (Spec stays the 799k-state proof).
+crVars == <<live, parent, cspaces, queues, bindings, treport, revoked>>
+tdVars == <<nlive, ncaps, pcbind, eopen>>
+vars   == <<live, parent, cspaces, queues, bindings, treport, revoked,
+            nlive, ncaps, pcbind, eopen>>
 
 \* All descendants of cap in the CDT (recursive). Dead caps have parent
 \* NULL, so the walk only ever finds live caps.
@@ -96,6 +128,11 @@ Init ==
     /\ bindings = [t \in Threads |-> [k \in BindKinds |-> NULL]]
     /\ treport  = [t \in Threads |-> "running"]
     /\ revoked  = {}
+    \* TSpec variables — constant under Spec, evolving under TSpec.
+    /\ nlive    = {}
+    /\ ncaps    = [n \in Notifs |-> 0]
+    /\ pcbind   = [ch \in Channels |-> [e \in Ends |-> NULL]]
+    /\ eopen    = [ch \in Channels |-> [e \in Ends |-> TRUE]]
 
 \* --- Actions -----------------------------------------------------------
 
@@ -191,14 +228,15 @@ Retype(p, c) ==
     /\ UNCHANGED <<queues, bindings, treport>>
 
 Next ==
-    \/ \E p \in Procs, s, d \in CapIds : Copy(p, s, d)
-    \/ \E p \in Procs, ch \in Channels, cs \in (SUBSET CapIds) : Send(p, ch, cs)
-    \/ \E p \in Procs, ch \in Channels : Receive(p, ch)
-    \/ \E p \in Procs, t \in Threads, k \in BindKinds, c \in CapIds : Bind(p, t, k, c)
-    \/ \E t \in Threads : ThreadExit(t)
-    \/ \E t \in Threads : ThreadFault(t)
-    \/ \E c \in CapIds : Revoke(c)
-    \/ \E p \in Procs, c \in CapIds : Retype(p, c)
+    /\ \/ \E p \in Procs, s, d \in CapIds : Copy(p, s, d)
+       \/ \E p \in Procs, ch \in Channels, cs \in (SUBSET CapIds) : Send(p, ch, cs)
+       \/ \E p \in Procs, ch \in Channels : Receive(p, ch)
+       \/ \E p \in Procs, t \in Threads, k \in BindKinds, c \in CapIds : Bind(p, t, k, c)
+       \/ \E t \in Threads : ThreadExit(t)
+       \/ \E t \in Threads : ThreadFault(t)
+       \/ \E c \in CapIds : Revoke(c)
+       \/ \E p \in Procs, c \in CapIds : Retype(p, c)
+    /\ UNCHANGED tdVars
 
 Spec == Init /\ [][Next]_vars
 
@@ -256,5 +294,148 @@ RevokedDead == revoked \cap live = {}
 ReportMonotone ==
     [][\A t \in Threads :
         treport[t] /= "running" => treport'[t] = treport[t]]_vars
+
+\* =======================================================================
+\* Channel whole-object teardown and peer-closed firing (§3.3) — TSpec
+\* =======================================================================
+\* The §3.3 teardown rule: deleting one endpoint fires the surviving
+\* peer's peer-closed binding, and destroying the whole object at once —
+\* its backing untyped revoked — fires EVERY endpoint's binding before
+\* reclamation, each firing naming a LIVE notification, never a freed one.
+\*
+\* Modeled as a self-contained second spec (TSpec, checked by
+\* CapRevocation_Teardown.cfg) because channel peer-closed bindings use a
+\* DIFFERENT lifetime mechanism than the TCB exit/fault slots above. The
+\* TCB slots are CDT-visible: `bind` MOVES the cap in, and revocation sees
+\* through the slot (the FireSafe story). Channel `bind` instead bumps the
+\* notification OBJECT's refcount and leaves the binder's cap in place, so
+\* revocation does NOT see through the slot: the notification "outlives the
+\* channel if separately funded" (§3.3), and — the property that makes the
+\* firing safe — a notification whose entire cap lineage is revoked stays
+\* alive as long as a channel still holds it. That is a refcount
+\* discipline, modeled here with explicit notification objects (`nlive`),
+\* their cap counts (`ncaps`), and the channel holds (`pcbind`). Each half
+\* holds the other's variables constant, so TSpec costs the revocation
+\* proof nothing and vice versa.
+
+\* Channel holds on a notification = the non-NULL peer-closed slots naming
+\* it; a hold keeps the object alive independent of any cap (the refcount).
+Holds(n) ==
+    Cardinality({ce \in Channels \X Ends : pcbind[ce[1]][ce[2]] = n})
+HoldsExcept(n, ch) ==
+    Cardinality({ce \in Channels \X Ends :
+                    ce[1] /= ch /\ pcbind[ce[1]][ce[2]] = n})
+\* A channel is reclaimed once BOTH endpoint caps are gone; until then it
+\* is alive and its holds stand.
+ChanAlive(ch) == eopen[ch][0] \/ eopen[ch][1]
+
+\* A fresh notification object: one cap, no holds. An id is reusable only
+\* once fully dead (no caps, no holds), mirroring revoked-slot reuse above.
+NewNotif(n) ==
+    /\ n \notin nlive
+    /\ ncaps[n] = 0
+    /\ Holds(n) = 0
+    /\ nlive' = nlive \cup {n}
+    /\ ncaps' = [ncaps EXCEPT ![n] = 1]
+    /\ UNCHANGED <<pcbind, eopen>>
+
+\* Mint another cap to a live notification — it is "separately funded".
+NotifCopy(n) ==
+    /\ n \in nlive
+    /\ ncaps[n] < MaxNCaps
+    /\ ncaps' = [ncaps EXCEPT ![n] = @ + 1]
+    /\ UNCHANGED <<nlive, pcbind, eopen>>
+
+\* Delete one cap; the object dies when its last reference (cap or hold) is
+\* gone.
+NotifDropCap(n) ==
+    /\ n \in nlive
+    /\ ncaps[n] > 0
+    /\ ncaps' = [ncaps EXCEPT ![n] = @ - 1]
+    /\ nlive' = IF (ncaps[n] - 1) + Holds(n) = 0 THEN nlive \ {n} ELSE nlive
+    /\ UNCHANGED <<pcbind, eopen>>
+
+\* Revoke a notification's WHOLE cap lineage at once (§2.2). The object
+\* survives iff a channel still holds it — the refcount-keeps-alive
+\* property that makes a teardown firing safe after the holder's caps die.
+RevokeNotif(n) ==
+    /\ n \in nlive
+    /\ ncaps[n] > 0
+    /\ ncaps' = [ncaps EXCEPT ![n] = 0]
+    /\ nlive' = IF Holds(n) = 0 THEN nlive \ {n} ELSE nlive
+    /\ UNCHANGED <<pcbind, eopen>>
+
+\* Configure an endpoint's peer-closed binding (§3.6): the channel takes a
+\* hold on a live notification. Bind through a live endpoint cap into a
+\* free slot; the binder keeps its own cap (refcount bump, not a move).
+ChanBindPC(ch, e, n) ==
+    /\ ChanAlive(ch)
+    /\ eopen[ch][e]
+    /\ pcbind[ch][e] = NULL
+    /\ n \in nlive
+    /\ pcbind' = [pcbind EXCEPT ![ch][e] = n]
+    /\ UNCHANGED <<nlive, ncaps, eopen>>
+
+\* The last cap of endpoint e is deleted (a single close, or one step of a
+\* whole-object teardown when the channel's backing untyped is revoked).
+\* The kernel fires the OTHER end's peer-closed binding here; by
+\* ChannelFireSafe that binding (if set) names a live notification — and a
+\* still-open OR already-closed peer's binding stands until reclamation, so
+\* whole-object teardown fires both ends. When this close empties the
+\* second endpoint the channel is reclaimed: holds release, and a
+\* notification kept alive only by those holds dies. The firing reads this
+\* step's pre-state; reclamation is its post-state — fire precedes reclaim.
+CloseEndpoint(ch, e) ==
+    /\ ChanAlive(ch)
+    /\ eopen[ch][e]
+    /\ eopen' = [eopen EXCEPT ![ch][e] = FALSE]
+    /\ IF ~eopen[ch][1 - e]            \* peer already closed → reclaim
+       THEN /\ pcbind' = [pcbind EXCEPT ![ch] = [x \in Ends |-> NULL]]
+            /\ nlive'  = nlive \ {n \in nlive :
+                            ncaps[n] = 0 /\ HoldsExcept(n, ch) = 0}
+       ELSE UNCHANGED <<pcbind, nlive>>
+    /\ UNCHANGED ncaps
+
+TNext ==
+    /\ \/ \E n \in Notifs : NewNotif(n)
+       \/ \E n \in Notifs : NotifCopy(n)
+       \/ \E n \in Notifs : NotifDropCap(n)
+       \/ \E n \in Notifs : RevokeNotif(n)
+       \/ \E ch \in Channels, e \in Ends, n \in Notifs : ChanBindPC(ch, e, n)
+       \/ \E ch \in Channels, e \in Ends : CloseEndpoint(ch, e)
+    /\ UNCHANGED crVars
+
+TSpec == Init /\ [][TNext]_vars
+
+\* --- TSpec invariants --------------------------------------------------
+
+TTypeOK ==
+    /\ nlive \subseteq Notifs
+    /\ ncaps  \in [Notifs -> 0..MaxNCaps]
+    /\ pcbind \in [Channels -> [Ends -> Notifs \cup {NULL}]]
+    /\ eopen  \in [Channels -> [Ends -> BOOLEAN]]
+
+\* The refcount discipline: a notification is alive iff it has a reference
+\* — a cap OR a channel hold. The inductive invariant the per-action
+\* nlive updates must preserve; a slip that freed a still-referenced object
+\* (or leaked a zero-referenced one) breaks it. ChannelFireSafe below is
+\* its §3.3 corollary, named separately because it is the property the
+\* teardown firing relies on.
+RefCountSound ==
+    \A n \in Notifs : (n \in nlive) <=> (ncaps[n] + Holds(n) > 0)
+
+\* §3.3 firing safety: every peer-closed binding on a not-yet-reclaimed
+\* channel names a LIVE notification, so the firing at close / whole-object
+\* teardown signals a live object, never a freed one. Holds across
+\* RevokeNotif precisely because the channel's own hold keeps the
+\* notification alive.
+ChannelFireSafe ==
+    \A ch \in Channels, e \in Ends :
+        (ChanAlive(ch) /\ pcbind[ch][e] /= NULL) => pcbind[ch][e] \in nlive
+
+\* No hold outlives reclamation: a reclaimed channel pins no notification.
+ReclaimedReleased ==
+    \A ch \in Channels :
+        ~ChanAlive(ch) => \A e \in Ends : pcbind[ch][e] = NULL
 
 ====

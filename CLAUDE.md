@@ -80,6 +80,11 @@ bash tools/tla/tla-check.sh tla/cap_revocation/CapRevocation.tla
 # Model check (run before M2 and M1 implementations respectively)
 bash tools/tla/tla-model-check.sh tla/commit_protocol/CommitProtocol.tla
 bash tools/tla/tla-model-check.sh tla/cap_revocation/CapRevocation.tla
+
+# CapRevocation.tla carries a SECOND spec (TSpec) for §3.3 channel
+# whole-object teardown; check it with its own config (fast, ~1s):
+bash tools/tla/tla-model-check.sh tla/cap_revocation/CapRevocation.tla \
+  CapRevocation_Teardown.cfg
 ```
 
 ### Fuzzing (cargo-fuzz, host)
@@ -202,6 +207,17 @@ carry both — `Rights::THREAD_ALL`). Thread destruction produces no
 report (destruction is the parent acting, not the thread dying). The
 CapRevocation TLA+ model covers the binding slots (Bind/ThreadExit/
 ThreadFault actions; FireSafe + ReportMonotone properties) — TLC-checked.
+The §3.3 channel side rides in the same file as a second spec, `TSpec`
+(config `CapRevocation_Teardown.cfg`): channel peer-closed bindings are
+refcounted, not CDT-visible (the kernel `bind` bumps the notification's
+object refcount and leaves the binder's cap in place, unlike the
+move-in TCB slots), so whole-object teardown firing safety is a refcount
+discipline — modeled with explicit notification objects. Properties:
+ChannelFireSafe (every live channel's peer-closed binding names a live
+notification, so teardown fires a live object even after the lineage is
+revoked), RefCountSound, ReclaimedReleased — TLC-checked (252 states).
+Each spec holds the other's variables constant, so TSpec leaves the
+799k-state revocation proof untouched.
 
 Userspace half (the shell's reclaim-on-exit loop) is now done. Two kernel
 mechanisms the §5.1 spawn design needed land with it: `retype` can carve a
