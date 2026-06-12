@@ -9,10 +9,25 @@
 //! `maybe_switch` copies frames between the stack and TCBs on a context
 //! switch, so the asm restore path never needs to know which thread won.
 
-use crate::cspace::{CSpaceObj, ObjHeader};
+use crate::cspace::{CapKind, CapSlot, CSpaceObj, ObjHeader};
 use core::ptr;
 
 pub const NUM_PRIOS: usize = 32;
+
+pub const BIND_EXIT: usize = 0;
+pub const BIND_FAULT: usize = 1;
+
+/// The terminal report record (§5.1), preallocated in the TCB so death
+/// delivery never allocates (§3.6). One transition ever: Running →
+/// Exited | Faulted — suspend-on-fault means no second fault, and a
+/// halted thread never runs again, but `report_terminal` guards anyway
+/// so the state machine doesn't depend on scheduler invariants.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Report {
+    Running,
+    Exited(u64),
+    Faulted { cause: u64, far: u64 },
+}
 
 /// Saved EL0 register state. Layout is known to the exception asm:
 /// x0..x30 at byte offsets 8*i, then sp_el0, elr, spsr. 272 bytes,
@@ -62,6 +77,14 @@ pub struct Tcb {
     /// one queue, disambiguated by `state`).
     pub qnext: *mut Tcb,
     pub wait_notif: *mut crate::notification::NotifObj,
+    pub report: Report,
+    /// on-exit / on-fault binding slots (§5.1): real, CDT-visible cap
+    /// slots holding moved-in notification caps, exactly like channel
+    /// queue slots — so revoking the notification's lineage sees through
+    /// the TCB and empties the slot, and a thread-death firing can only
+    /// ever find a live object or an empty slot, never a freed one.
+    pub bind_slots: [CapSlot; 2],
+    pub bind_bits: [u64; 2],
 }
 
 impl Tcb {
@@ -76,6 +99,9 @@ impl Tcb {
             aspace: ptr::null_mut(),
             qnext: ptr::null_mut(),
             wait_notif: ptr::null_mut(),
+            report: Report::Running,
+            bind_slots: [CapSlot::empty(), CapSlot::empty()],
+            bind_bits: [0, 0],
         }
     }
 
@@ -221,6 +247,48 @@ pub unsafe fn activate_aspace(t: *mut Tcb) {
     core::arch::asm!("msr ttbr0_el1, {v}", "isb", v = in(reg) ttbr);
 }
 
+/// Record the terminal report and fire the matching binding (§5.1).
+/// pre:  r is Exited or Faulted; the caller has already moved t out of
+///       Running (Halted / Faulted).
+/// post: first call wins — the record holds r and the binding fired
+///       exactly once; later calls are no-ops. An empty binding slot is
+///       one the holder never configured or one revoke already cleared:
+///       signaling nothing is a no-op (§5.1). A non-empty slot's cap
+///       holds a ref, so the notification it names is necessarily live.
+pub unsafe fn report_terminal(t: *mut Tcb, r: Report) {
+    if (*t).report != Report::Running {
+        return;
+    }
+    (*t).report = r;
+    let which = match r {
+        Report::Exited(_) => BIND_EXIT,
+        Report::Faulted { .. } => BIND_FAULT,
+        Report::Running => return,
+    };
+    let slot = ptr::addr_of_mut!((*t).bind_slots[which]);
+    if let CapKind::Notification(n) = (*slot).cap.kind {
+        crate::notification::signal(n, (*t).bind_bits[which]);
+    }
+}
+
+/// Configure a binding slot (holder-configured, §3.6): the caller's
+/// notification cap MOVES into the TCB slot (§3.4 — duplicate first to
+/// keep access), preserving its CDT position so revocation sees it.
+/// Rebinding deletes the displaced cap; a null src just unbinds.
+///
+/// pre:  which < 2; notif_src is null or a slot holding a notification
+///       cap owned by the caller.
+pub unsafe fn bind(t: *mut Tcb, which: usize, notif_src: *mut CapSlot, bits: u64) {
+    let slot = ptr::addr_of_mut!((*t).bind_slots[which]);
+    if !(*slot).cap.is_empty() {
+        crate::cspace::delete(slot);
+    }
+    (*t).bind_bits[which] = bits;
+    if !notif_src.is_null() {
+        crate::cspace::slot_move(notif_src, slot);
+    }
+}
+
 /// pre:  refs == 0 (last cap gone).
 /// post: t off every queue and never scheduled again. If t is CURRENT the
 ///       exception exit path will switch away; the TCB memory stays valid
@@ -229,6 +297,14 @@ pub unsafe fn activate_aspace(t: *mut Tcb) {
 pub unsafe fn destroy_tcb(t: *mut Tcb) {
     unqueue(t);
     (*t).state = ThreadState::Halted;
+    // Binding caps die with the TCB by ordinary CDT cleanup, exactly as
+    // queued caps die with their channel (§3.4).
+    for i in 0..2 {
+        let s = ptr::addr_of_mut!((*t).bind_slots[i]);
+        if !(*s).cap.is_empty() {
+            crate::cspace::delete(s);
+        }
+    }
     if !(*t).cspace.is_null() {
         crate::cspace::unref_cspace((*t).cspace);
         (*t).cspace = ptr::null_mut();

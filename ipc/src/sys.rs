@@ -39,6 +39,10 @@ pub const EV_READABLE: u64 = 0;
 pub const EV_WRITABLE: u64 = 1;
 pub const EV_PEER_CLOSED: u64 = 2;
 
+/// TCB binding slots (§5.1).
+pub const BIND_EXIT: u64 = 0;
+pub const BIND_FAULT: u64 = 1;
+
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 mod imp {
     #[inline(always)]
@@ -183,4 +187,11 @@ pub fn frame_paddr(frame: u32) -> i64 {
 /// Non-blocking console byte (scaffold until the userspace UART driver).
 pub fn debug_getc() -> i64 {
     unsafe { syscall(20, 0, 0, 0, 0, 0, 0) }
+}
+
+/// Configure a thread's on-exit / on-fault binding slot (§5.1). The
+/// notification cap MOVES into the TCB (duplicate first to keep access);
+/// `notif` = SLOT_NONE unbinds.
+pub fn thread_bind(tcb: u32, which: u64, notif: u32, bits: u64) -> i64 {
+    unsafe { syscall(21, tcb as u64, which, notif as u64, bits, 0, 0) }
 }

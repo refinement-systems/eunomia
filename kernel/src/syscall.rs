@@ -538,6 +538,41 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
             Some(b) => b as i64,
             None => ERR_EMPTY,
         }),
+        // thread_bind(tcb_slot, which, notif_slot, bits) — configure the
+        // on-exit / on-fault slot (§5.1). The notif cap moves into the
+        // TCB's CDT-visible slot; notif_slot = SLOT_NONE unbinds. A child
+        // holds no cap to its own threads, so it can neither silence nor
+        // forge its own death notice.
+        21 => {
+            let ts = cur_slot(a[0]);
+            if ts.is_null() {
+                return Some(ERR_BADSLOT);
+            }
+            let CapKind::Thread(t) = (*ts).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            if a[1] > 1 {
+                return Some(ERR_ARG);
+            }
+            let ns = if a[2] == SLOT_NONE as u64 {
+                ptr::null_mut()
+            } else {
+                let ns = cur_slot(a[2]);
+                if ns.is_null() {
+                    return Some(ERR_BADSLOT);
+                }
+                let CapKind::Notification(_) = (*ns).cap.kind else {
+                    return Some(ERR_TYPE);
+                };
+                // The kernel will signal through this cap (§3.6).
+                if !(*ns).cap.rights.has(Rights::WRITE) {
+                    return Some(ERR_PERM);
+                }
+                ns
+            };
+            thread::bind(t, a[1] as usize, ns, a[3]);
+            Some(0)
+        }
         // exit
         15 => {
             let t = thread::current();
