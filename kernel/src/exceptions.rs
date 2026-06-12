@@ -186,6 +186,7 @@ extern "C" fn handle_el0_sync(frame: *mut TrapFrame) {
             use core::fmt::Write;
             let mut uart = crate::uart::Uart::new();
             let t = crate::thread::current();
+            let far = read_far();
             let _ = writeln!(
                 uart,
                 "\n[FAULT] thread {:p}: ESR={:#x} EC={:#04x} ELR={:#x} FAR={:#x}",
@@ -193,9 +194,15 @@ extern "C" fn handle_el0_sync(frame: *mut TrapFrame) {
                 esr,
                 esr_ec(esr),
                 (*frame).elr,
-                read_far()
+                far
             );
             (*t).state = crate::thread::ThreadState::Faulted;
+            // The registers are already saved by this entry; the record
+            // is the rest of the report (§5.1, §5.3).
+            crate::thread::report_terminal(
+                t,
+                crate::thread::Report::Faulted { cause: esr, far },
+            );
             crate::thread::maybe_switch(frame, false);
         },
     }

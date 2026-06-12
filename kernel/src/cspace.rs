@@ -33,7 +33,17 @@ impl Rights {
     /// only on boot-created device/DMA caps — ALL deliberately excludes
     /// it so ordinary derivation chains can never reach a PA.
     pub const PHYS: u8 = 1 << 2;
+    /// bind-reports (§2.3): configure a thread's on-exit/on-fault
+    /// binding slots (§5.1).
+    pub const BIND_REPORTS: u8 = 1 << 3;
+    /// read-report (§2.3): read a thread's terminal report record;
+    /// later also the debugger's register access (deferred, §8).
+    pub const READ_REPORT: u8 = 1 << 4;
     pub const ALL: Rights = Rights(0b11);
+    /// The creator's thread cap (§2.3 thread bits; kill is deliberately
+    /// not on the list — destruction is resource ancestry, §2.2).
+    pub const THREAD_ALL: Rights =
+        Rights(Rights::READ | Rights::WRITE | Rights::BIND_REPORTS | Rights::READ_REPORT);
 
     pub fn has(self, bits: u8) -> bool {
         self.0 & bits == bits

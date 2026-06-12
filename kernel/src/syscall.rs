@@ -538,12 +538,79 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
             Some(b) => b as i64,
             None => ERR_EMPTY,
         }),
-        // exit
+        // thread_bind(tcb_slot, which, notif_slot, bits) — configure the
+        // on-exit / on-fault slot (§5.1). The notif cap moves into the
+        // TCB's CDT-visible slot; notif_slot = SLOT_NONE unbinds. A child
+        // holds no cap to its own threads, so it can neither silence nor
+        // forge its own death notice.
+        21 => {
+            let ts = cur_slot(a[0]);
+            if ts.is_null() {
+                return Some(ERR_BADSLOT);
+            }
+            let CapKind::Thread(t) = (*ts).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            // bind-reports gates slot configuration (§2.3): a supervisor
+            // holds it; an attenuated observer does not.
+            if !(*ts).cap.rights.has(Rights::BIND_REPORTS) {
+                return Some(ERR_PERM);
+            }
+            if a[1] > 1 {
+                return Some(ERR_ARG);
+            }
+            let ns = if a[2] == SLOT_NONE as u64 {
+                ptr::null_mut()
+            } else {
+                let ns = cur_slot(a[2]);
+                if ns.is_null() {
+                    return Some(ERR_BADSLOT);
+                }
+                let CapKind::Notification(_) = (*ns).cap.kind else {
+                    return Some(ERR_TYPE);
+                };
+                // The kernel will signal through this cap (§3.6).
+                if !(*ns).cap.rights.has(Rights::WRITE) {
+                    return Some(ERR_PERM);
+                }
+                ns
+            };
+            thread::bind(t, a[1] as usize, ns, a[3]);
+            Some(0)
+        }
+        // read_report(tcb_slot) → x0 = 0 running | 1 exited | 2 faulted,
+        // x1 = status / cause, x2 = faulting address (§5.1).
+        22 => {
+            let ts = cur_slot(a[0]);
+            if ts.is_null() {
+                return Some(ERR_BADSLOT);
+            }
+            let CapKind::Thread(t) = (*ts).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            // read-report gates the read (§2.3).
+            if !(*ts).cap.rights.has(Rights::READ_REPORT) {
+                return Some(ERR_PERM);
+            }
+            let (code, v1, v2) = match (*t).report {
+                thread::Report::Running => (0, 0, 0),
+                thread::Report::Exited(status) => (1, status, 0),
+                thread::Report::Faulted { cause, far } => (2, cause, far),
+            };
+            (*frame).x[1] = v1;
+            (*frame).x[2] = v2;
+            Some(code)
+        }
+        // thread_exit(status) — the only voluntary stop (§5.1). The
+        // kernel records the status, so a child can neither lie about
+        // nor forget its own death; the on-exit binding fires here.
         15 => {
             let t = thread::current();
             (*t).state = ThreadState::Halted;
-            // maybe_switch at exception exit picks someone else.
-            Some(0)
+            thread::report_terminal(t, thread::Report::Exited(a[0]));
+            // maybe_switch at exception exit picks someone else; the
+            // dead frame is never restored, so there is no x0 to write.
+            None
         }
         _ => Some(ERR_ARG),
     }

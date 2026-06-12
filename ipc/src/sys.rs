@@ -34,10 +34,18 @@ pub const PERM_X: u64 = 2;
 pub const PERM_DEVICE: u64 = 4;
 
 pub const RIGHT_PHYS: u64 = 4;
+/// Thread rights (§2.3): configure on-exit/on-fault binding slots.
+pub const RIGHT_BIND_REPORTS: u64 = 8;
+/// Thread rights (§2.3): read the terminal report record.
+pub const RIGHT_READ_REPORT: u64 = 16;
 
 pub const EV_READABLE: u64 = 0;
 pub const EV_WRITABLE: u64 = 1;
 pub const EV_PEER_CLOSED: u64 = 2;
+
+/// TCB binding slots (§5.1).
+pub const BIND_EXIT: u64 = 0;
+pub const BIND_FAULT: u64 = 1;
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 mod imp {
@@ -73,6 +81,22 @@ mod imp {
         );
         (ret as i64, ret2)
     }
+
+    #[inline(always)]
+    pub unsafe fn syscall3(nr: u64, a0: u64) -> (i64, u64, u64) {
+        let ret: u64;
+        let ret2: u64;
+        let ret3: u64;
+        core::arch::asm!(
+            "svc #0",
+            inout("x0") a0 => ret,
+            out("x1") ret2,
+            out("x2") ret3,
+            in("x7") nr,
+            options(nostack),
+        );
+        (ret as i64, ret2, ret3)
+    }
 }
 
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
@@ -86,9 +110,13 @@ mod imp {
     pub unsafe fn syscall2(_: u64, _: u64, _: u64, _: u64, _: u64) -> (i64, u64) {
         unreachable!("Eunomia syscall on a non-Eunomia target")
     }
+
+    pub unsafe fn syscall3(_: u64, _: u64) -> (i64, u64, u64) {
+        unreachable!("Eunomia syscall on a non-Eunomia target")
+    }
 }
 
-use imp::{syscall, syscall2};
+use imp::{syscall, syscall2, syscall3};
 
 pub fn debug_putc(c: u8) {
     unsafe { syscall(0, c as u64, 0, 0, 0, 0, 0) };
@@ -149,13 +177,19 @@ pub fn timer_arm(timer: u32, notif: u32, bits: u64, delta: u64) -> i64 {
     unsafe { syscall(14, timer as u64, notif as u64, bits, delta, 0, 0) }
 }
 
-pub fn exit() -> ! {
+/// The only voluntary stop (§5.1): the kernel records the status — a
+/// child can neither lie about nor forget its own death.
+pub fn thread_exit(status: u64) -> ! {
     unsafe {
-        syscall(15, 0, 0, 0, 0, 0, 0);
+        syscall(15, status, 0, 0, 0, 0, 0);
     }
     loop {
         core::hint::spin_loop();
     }
+}
+
+pub fn exit() -> ! {
+    thread_exit(0)
 }
 
 pub fn map(aspace: u32, frame: u32, va: u64, perms: u64) -> i64 {
@@ -183,4 +217,22 @@ pub fn frame_paddr(frame: u32) -> i64 {
 /// Non-blocking console byte (scaffold until the userspace UART driver).
 pub fn debug_getc() -> i64 {
     unsafe { syscall(20, 0, 0, 0, 0, 0, 0) }
+}
+
+/// Configure a thread's on-exit / on-fault binding slot (§5.1). The
+/// notification cap MOVES into the TCB (duplicate first to keep access);
+/// `notif` = SLOT_NONE unbinds.
+pub fn thread_bind(tcb: u32, which: u64, notif: u32, bits: u64) -> i64 {
+    unsafe { syscall(21, tcb as u64, which, notif as u64, bits, 0, 0) }
+}
+
+/// Terminal report states returned by `read_report` (§5.1).
+pub const REPORT_RUNNING: i64 = 0;
+pub const REPORT_EXITED: i64 = 1;
+pub const REPORT_FAULTED: i64 = 2;
+
+/// Read a thread's terminal report record (§5.1). Returns
+/// (state, status-or-cause, faulting-address); negative state = error.
+pub fn read_report(tcb: u32) -> (i64, u64, u64) {
+    unsafe { syscall3(22, tcb as u64) }
 }
