@@ -6,6 +6,8 @@
 //!
 //!   mode 0xFF → fault (wild store to an unmapped address): suspended, not
 //!               destroyed (§5.3); the parent reads `faulted(...)`.
+//!   mode 0xFE → panic: the runtime panic handler exits with STATUS_PANIC
+//!               (U2), so the parent reads `panicked`, not `exited(254)`.
 //!   otherwise → `thread_exit(mode)`: the parent reads `exited(mode)`.
 //!
 //! It also probes its own `.bss` before writing it. `.bss` is never copied
@@ -74,11 +76,18 @@ pub extern "C" fn _start() -> ! {
             core::hint::spin_loop();
         }
     }
+    if mode == 0xFE {
+        // Orderly panic: exercises the runtime panic path (U2). The handler
+        // exits with STATUS_PANIC, so the parent reads that, not exited(254)
+        // — a panic can't pass for a clean stop.
+        sys::debug_write(b"[selftest] panicking\n");
+        panic!("selftest mode 0xFE");
+    }
     sys::thread_exit(mode as u64)
 }
 
 #[panic_handler]
 fn on_panic(_: &core::panic::PanicInfo) -> ! {
     sys::debug_write(b"[selftest] PANIC\n");
-    sys::exit()
+    sys::thread_exit(sys::STATUS_PANIC)
 }

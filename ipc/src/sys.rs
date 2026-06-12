@@ -242,6 +242,18 @@ pub const REPORT_RUNNING: i64 = 0;
 pub const REPORT_EXITED: i64 = 1;
 pub const REPORT_FAULTED: i64 = 2;
 
+/// Reserved terminal exit status: the process stopped through its panic
+/// handler rather than an orderly `thread_exit(status)` (urt convention,
+/// §5.1). A faulting thread is `REPORT_FAULTED`, but a Rust `panic!`
+/// unwinds to the handler and exits normally — without a reserved status
+/// it would be indistinguishable from `thread_exit(0)`, and a child could
+/// disguise a crash as clean success. The kernel records whatever status
+/// the child passes, so this only works because every urt panic handler
+/// agrees to pass *this* value and no well-behaved child returns it
+/// deliberately (it sits at the top of the u64 range, out of the small
+/// statuses real programs use).
+pub const STATUS_PANIC: u64 = u64::MAX;
+
 /// Read a thread's terminal report record (§5.1). Returns
 /// (state, status-or-cause, faulting-address); negative state = error.
 pub fn read_report(tcb: u32) -> (i64, u64, u64) {
