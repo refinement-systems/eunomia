@@ -52,6 +52,7 @@ const SEND2: u64 = 14;
 const TIMER: u64 = 15;
 const EXIT_BIND1: u64 = 16;
 const EXIT_BIND2: u64 = 17;
+const TCB2_WEAK: u64 = 18;
 
 // T2 (cspace2) slot map.
 const T2_CHAN: u64 = 0;
@@ -349,7 +350,17 @@ pub extern "C" fn user_main(_arg: u64) -> ! {
             debug_write(&MSG_FAIL);
             exit();
         }
-        putc(b'5'); // marker: exit report delivered and read
+        // Attenuation gates the report surface (§2.3): a thread cap
+        // copy without bind-reports/read-report can neither configure
+        // the slots nor read the record.
+        check(cap_copy(TCB2, TCB2_WEAK, RIGHT_READ | RIGHT_WRITE), b'!');
+        let r_bind = thread_bind(TCB2_WEAK, 0, SLOT_NONE as u64, 0);
+        let (r_weak, _, _) = read_report(TCB2_WEAK);
+        if r_bind >= 0 || r_weak >= 0 {
+            debug_write(&MSG_FAIL);
+            exit();
+        }
+        putc(b'5'); // marker: exit report delivered, read, and gated
 
         debug_write(&MSG_PASS);
         exit();

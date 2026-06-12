@@ -167,10 +167,12 @@ pub unsafe fn retype(
         watermark: end - base,
     };
     // Frames inherit the untyped's rights so phys-read (§2.5) flows only
-    // from boot untypeds along explicit grants; kernel objects get the
-    // ordinary full mask.
+    // from boot untypeds along explicit grants; threads carry the full
+    // §2.3 thread-rights set on the creator cap (attenuation strips from
+    // here); other kernel objects get the ordinary full mask.
     let rights = match ty {
         ObjType::Frame => (*ut_slot).cap.rights,
+        ObjType::Thread => Rights::THREAD_ALL,
         _ => Rights::ALL,
     };
     (*dst).cap = Cap { kind, rights };

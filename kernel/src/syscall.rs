@@ -551,6 +551,11 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
             let CapKind::Thread(t) = (*ts).cap.kind else {
                 return Some(ERR_TYPE);
             };
+            // bind-reports gates slot configuration (§2.3): a supervisor
+            // holds it; an attenuated observer does not.
+            if !(*ts).cap.rights.has(Rights::BIND_REPORTS) {
+                return Some(ERR_PERM);
+            }
             if a[1] > 1 {
                 return Some(ERR_ARG);
             }
@@ -583,6 +588,10 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
             let CapKind::Thread(t) = (*ts).cap.kind else {
                 return Some(ERR_TYPE);
             };
+            // read-report gates the read (§2.3).
+            if !(*ts).cap.rights.has(Rights::READ_REPORT) {
+                return Some(ERR_PERM);
+            }
             let (code, v1, v2) = match (*t).report {
                 thread::Report::Running => (0, 0, 0),
                 thread::Report::Exited(status) => (1, status, 0),

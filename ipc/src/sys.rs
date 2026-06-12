@@ -34,6 +34,10 @@ pub const PERM_X: u64 = 2;
 pub const PERM_DEVICE: u64 = 4;
 
 pub const RIGHT_PHYS: u64 = 4;
+/// Thread rights (§2.3): configure on-exit/on-fault binding slots.
+pub const RIGHT_BIND_REPORTS: u64 = 8;
+/// Thread rights (§2.3): read the terminal report record.
+pub const RIGHT_READ_REPORT: u64 = 16;
 
 pub const EV_READABLE: u64 = 0;
 pub const EV_WRITABLE: u64 = 1;

@@ -127,7 +127,8 @@ pub extern "C" fn kernel_main() -> ! {
             (*init_aspace).hdr.refs += 1;
         }
 
-        // Slot 1: init's own thread cap.
+        // Slot 1: init's own thread cap (creator-grade: the §2.3 thread
+        // bits, like any retyped TCB's first cap).
         (*init).cspace = root;
         (*root).hdr.refs += 1;
         (*init).priority = 16;
@@ -135,7 +136,7 @@ pub extern "C" fn kernel_main() -> ! {
         let slot1 = CSpaceObj::slot(root, 1);
         (*slot1).cap = Cap {
             kind: CapKind::Thread(init),
-            rights: Rights::ALL,
+            rights: Rights::THREAD_ALL,
         };
 
         // Idle: EL0 WFI loop in the identity window, priority 0 (§5.4).
