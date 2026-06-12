@@ -64,23 +64,28 @@ pub enum RetypeError {
     BadArg,
 }
 
-/// Carve one object of `ty` (sized by `param`: slot count for cspaces,
-/// per-direction queue depth for channels) out of the untyped cap in
-/// `ut_slot`, installing the new cap in `dst`. Channels mint two endpoint
-/// caps: end A in `dst`, end B in `dst2` (both CDT children of the
-/// untyped); `dst2` is ignored for every other type.
+/// Geometry of a carved object: the placed range and its size. Pure output
+/// of [`carve`]; the int→ptr conversion that turns `start` into an object
+/// pointer is the caller's job (plan §2.3 — the one sanctioned boundary).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Carve {
+    pub start: u64,
+    pub end: u64,
+    pub bytes: u64,
+}
+
+/// Slot-state half of retype's validation: `ut_slot` must hold an Untyped
+/// cap, `dst` (and `dst2` for channels) must be empty and detached. Runs
+/// before [`carve`], so the error precedence is NotUntyped → DestOccupied →
+/// (BadArg | NoMemory).
 ///
-/// pre:  ut_slot holds an Untyped cap; dst (and dst2 for channels) is
-///       empty and detached.
-/// post: watermark advanced; dst holds a cap to the initialised object,
-///       CDT child of ut_slot; object refs == caps installed.
-pub unsafe fn retype(
+/// post: returns the untyped's `(base, size, watermark)` unchanged.
+pub unsafe fn retype_check(
     ut_slot: *mut CapSlot,
     ty: ObjType,
-    param: u64,
     dst: *mut CapSlot,
     dst2: *mut CapSlot,
-) -> Result<(), RetypeError> {
+) -> Result<(u64, u64, u64), RetypeError> {
     let CapKind::Untyped { base, size, watermark } = (*ut_slot).cap.kind else {
         return Err(RetypeError::NotUntyped);
     };
@@ -92,7 +97,22 @@ pub unsafe fn retype(
             return Err(RetypeError::DestOccupied);
         }
     }
+    Ok((base, size, watermark))
+}
 
+/// Pure placement arithmetic: object size from `(ty, param)`, alignment,
+/// watermark bump, bounds against `[base, base + size)`. No pointers — Kani
+/// verifies it exhaustively over all inputs (plan §4.2). The
+/// `next_multiple_of` / `base + watermark + align - 1` / `base + size`
+/// arithmetic is preserved verbatim, including its overflow exposure
+/// (plan §7.1): hardening it is §4.2's job, not this split's.
+pub fn carve(
+    base: u64,
+    size: u64,
+    watermark: u64,
+    ty: ObjType,
+    param: u64,
+) -> Result<Carve, RetypeError> {
     let bytes = match ty {
         ObjType::CSpace => {
             if param == 0 || param > 1024 {
@@ -137,47 +157,30 @@ pub unsafe fn retype(
     if end > base + size {
         return Err(RetypeError::NoMemory);
     }
+    Ok(Carve { start, end, bytes })
+}
 
-    let kind = match ty {
-        ObjType::CSpace => {
-            let p = start as *mut CSpaceObj;
-            CSpaceObj::init(p, param as u32);
-            CapKind::CSpace(p)
-        }
-        ObjType::Thread => {
-            let p = start as *mut crate::thread::Tcb;
-            crate::thread::Tcb::init(p);
-            CapKind::Thread(p)
-        }
-        ObjType::Channel => {
-            let p = start as *mut crate::channel::Channel;
-            crate::channel::Channel::init(p, param as u32);
-            CapKind::Channel(p, cspace::ChanEnd::A)
-        }
-        ObjType::Notification => {
-            let p = start as *mut crate::notification::NotifObj;
-            crate::notification::NotifObj::init(p);
-            CapKind::Notification(p)
-        }
-        ObjType::Timer => {
-            let p = start as *mut crate::timer::TimerObj;
-            crate::timer::TimerObj::init(p);
-            CapKind::Timer(p)
-        }
-        ObjType::Frame => {
-            // Zeroed: frames flow into fresh address spaces; leaking prior
-            // contents across processes would break confinement.
-            core::ptr::write_bytes(start as *mut u8, 0, bytes as usize);
-            CapKind::Frame { base: start, pages: param, mapping: None }
-        }
-        ObjType::Aspace => {
-            let p = start as *mut crate::aspace::AspaceObj;
-            crate::aspace::AspaceObj::init(p, param);
-            CapKind::Aspace(p)
-        }
-        ObjType::Untyped => CapKind::Untyped { base: start, size: bytes, watermark: 0 },
+/// Install half: advance the untyped's watermark, set the new cap's rights
+/// per the inheritance table, link it as a CDT child, and run the channel
+/// two-endpoint dance. All checks already passed; this is infallible.
+///
+/// pre:  `ut_slot` still holds the Untyped cap [`retype_check`] returned;
+///       `kind` was built at `carve.start`; `end == carve.end`.
+/// post: watermark = `end - base`; dst holds the cap; object refs == caps
+///       installed (1, or 2 for channels).
+pub unsafe fn retype_install(
+    ut_slot: *mut CapSlot,
+    ty: ObjType,
+    kind: CapKind,
+    end: u64,
+    dst: *mut CapSlot,
+    dst2: *mut CapSlot,
+) {
+    let CapKind::Untyped { base, size, .. } = (*ut_slot).cap.kind else {
+        // Unreachable: retype_check established this and nothing mutates
+        // ut_slot's kind between check and install.
+        return;
     };
-
     (*ut_slot).cap.kind = CapKind::Untyped {
         base,
         size,
@@ -204,10 +207,79 @@ pub unsafe fn retype(
             kind: CapKind::Channel(ch, cspace::ChanEnd::B),
             rights: Rights::ALL,
         };
-        (*(ch as *mut crate::cspace::ObjHeader)).refs += 1;
+        (*ch.cast::<crate::cspace::ObjHeader>()).refs += 1;
         cspace::cdt_insert_child(ut_slot, dst2);
         crate::channel::endpoint_cap_added(ch, cspace::ChanEnd::B);
     }
+}
+
+/// Carve one object of `ty` (sized by `param`: slot count for cspaces,
+/// per-direction queue depth for channels) out of the untyped cap in
+/// `ut_slot`, installing the new cap in `dst`. Channels mint two endpoint
+/// caps: end A in `dst`, end B in `dst2` (both CDT children of the
+/// untyped); `dst2` is ignored for every other type.
+///
+/// pre:  ut_slot holds an Untyped cap; dst (and dst2 for channels) is
+///       empty and detached.
+/// post: watermark advanced; dst holds a cap to the initialised object,
+///       CDT child of ut_slot; object refs == caps installed.
+///
+/// This is the seam of plan §2.3: validation ([`retype_check`]) and
+/// placement ([`carve`]) are pure/host-verifiable; the `start as *mut T`
+/// object construction below is the one sanctioned int→ptr boundary, kept
+/// in the kernel where CBMC never sees it. Object init runs against the
+/// carved range exactly as before — byte-identical behavior.
+pub unsafe fn retype(
+    ut_slot: *mut CapSlot,
+    ty: ObjType,
+    param: u64,
+    dst: *mut CapSlot,
+    dst2: *mut CapSlot,
+) -> Result<(), RetypeError> {
+    let (base, size, watermark) = retype_check(ut_slot, ty, dst, dst2)?;
+    let c = carve(base, size, watermark, ty, param)?;
+
+    let kind = match ty {
+        ObjType::CSpace => {
+            let p = c.start as *mut CSpaceObj;
+            CSpaceObj::init(p, param as u32);
+            CapKind::CSpace(p)
+        }
+        ObjType::Thread => {
+            let p = c.start as *mut crate::thread::Tcb;
+            crate::thread::Tcb::init(p);
+            CapKind::Thread(p)
+        }
+        ObjType::Channel => {
+            let p = c.start as *mut crate::channel::Channel;
+            crate::channel::Channel::init(p, param as u32);
+            CapKind::Channel(p, cspace::ChanEnd::A)
+        }
+        ObjType::Notification => {
+            let p = c.start as *mut crate::notification::NotifObj;
+            crate::notification::NotifObj::init(p);
+            CapKind::Notification(p)
+        }
+        ObjType::Timer => {
+            let p = c.start as *mut crate::timer::TimerObj;
+            crate::timer::TimerObj::init(p);
+            CapKind::Timer(p)
+        }
+        ObjType::Frame => {
+            // Zeroed: frames flow into fresh address spaces; leaking prior
+            // contents across processes would break confinement.
+            core::ptr::write_bytes(c.start as *mut u8, 0, c.bytes as usize);
+            CapKind::Frame { base: c.start, pages: param, mapping: None }
+        }
+        ObjType::Aspace => {
+            let p = c.start as *mut crate::aspace::AspaceObj;
+            crate::aspace::AspaceObj::init(p, param);
+            CapKind::Aspace(p)
+        }
+        ObjType::Untyped => CapKind::Untyped { base: c.start, size: c.bytes, watermark: 0 },
+    };
+
+    retype_install(ut_slot, ty, kind, c.end, dst, dst2);
     Ok(())
 }
 
