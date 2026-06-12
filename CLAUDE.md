@@ -320,6 +320,24 @@ non-`#[inline(always)]` helpers in user.rs.
 
 The IPC crate (`ipc/`) is the first serious Loom/Shuttle target (§3.5).
 
+### Continuous integration
+
+`.github/workflows/ci.yml` runs on every PR and push to main:
+- **host-tests** — `cargo test --workspace --exclude kernel` (the kernel is
+  bare-metal and can't host-build): the `urt` slot-allocator + heap, the
+  monotone rights-mask attenuation (`storage-server` sessions), the CAS
+  canonical-form proptests, the wire decoders, the ELF parser, etc.
+- **model** — reruns the TLA+ proofs (CapRevocation, its §3.3 teardown
+  TSpec, and CommitProtocol) on Linux. `tools/tla/find-tla-tools.sh` honours
+  a pre-set `JAVA` + `TLA_TOOLS`, so CI points it at a downloaded
+  `tla2tools.jar`; locally it still finds the macOS Toolbox.
+- **on-os** — boots the system under QEMU and runs the §5.1 exit criterion
+  (`scripts/spawn-test.sh`: the 100× burn loop, status propagation, the
+  wild-pointer fault demo + re-spawn, the panic path, the time grant) plus
+  the M1 cap-mechanism EL0 test (`scripts/m1-test.sh`).
+
+`.github/workflows/fuzz.yml` is separate (corpus replay per PR; nightly hunt).
+
 ---
 
 ## Kernel source map (`kernel/src/`)
