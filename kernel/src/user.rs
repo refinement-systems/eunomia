@@ -12,10 +12,13 @@
 //!      the cap works by signaling through it.
 //!   3. T1 queues a second message with another derived cap in flight,
 //!      then revokes the parent: the revoke must destroy T2's received
-//!      cap AND the queued in-flight cap (§2.2).
+//!      cap AND the queued in-flight cap AND the on-exit binding cap
+//!      bound into T2's TCB before start (§2.2, §5.1).
 //!   4. T2 verifies both deaths (signal fails; the queued message arrives
 //!      with no caps) and reports the verdict over the channel.
-//!   5. T1 checks attenuation held, exercises a timer object, and prints
+//!   5. T1 checks attenuation held, exercises a timer object, then reaps
+//!      T2: the post-revoke rebound on-exit binding fires at T2's
+//!      thread_exit(42), and read_report returns exited(42). Prints
 //!      "M1 PASS".
 //!
 //! Constraints: everything reachable from EL0 must live in `.user_text`
@@ -47,6 +50,8 @@ const N2_COPY: u64 = 12;
 const SEND1: u64 = 13;
 const SEND2: u64 = 14;
 const TIMER: u64 = 15;
+const EXIT_BIND1: u64 = 16;
+const EXIT_BIND2: u64 = 17;
 
 // T2 (cspace2) slot map.
 const T2_CHAN: u64 = 0;
@@ -59,6 +64,9 @@ const BIT_CAP_PROOF: u64 = 1 << 1;
 const BIT_A_READABLE: u64 = 1 << 3;
 const BIT_TIMER: u64 = 1 << 5;
 const BIT_SELF_TEST: u64 = 1 << 6;
+const BIT_CHILD_EXIT: u64 = 1 << 7;
+
+const T2_EXIT_STATUS: u64 = 42;
 // N2 bits.
 const BIT_B_READABLE: u64 = 1 << 0;
 const BIT_GO: u64 = 1 << 2;
@@ -162,11 +170,37 @@ unsafe fn timer_arm(timer: u64, notif: u64, bits: u64, delta: u64) -> i64 {
 }
 
 #[inline(always)]
-unsafe fn exit() -> ! {
-    sys(15, 0, 0, 0, 0, 0, 0);
+unsafe fn thread_exit(status: u64) -> ! {
+    sys(15, status, 0, 0, 0, 0, 0);
     loop {
         asm!("nop");
     }
+}
+
+#[inline(always)]
+unsafe fn exit() -> ! {
+    thread_exit(0)
+}
+
+#[inline(always)]
+unsafe fn thread_bind(tcb: u64, which: u64, notif: u64, bits: u64) -> i64 {
+    sys(21, tcb, which, notif, bits, 0, 0)
+}
+
+#[inline(always)]
+unsafe fn read_report(tcb: u64) -> (i64, u64, u64) {
+    let ret: u64;
+    let r1: u64;
+    let r2: u64;
+    asm!(
+        "svc #0",
+        inout("x0") tcb => ret,
+        out("x1") r1,
+        out("x2") r2,
+        in("x7") 22u64,
+        options(nostack),
+    );
+    (ret as i64, r1, r2)
 }
 
 /// Abort the test with a tagged error marker: "E<tag>!".
@@ -237,6 +271,11 @@ pub extern "C" fn user_main(_arg: u64) -> ! {
         check(cap_copy(N2, N2_COPY, RIGHT_READ), b'h');
         check(cap_install(CSPACE2, CHAN_B, T2_CHAN), b'i');
         check(cap_install(CSPACE2, N2_COPY, T2_NOTIF), b'j');
+        // The canonical parent move (§5.1): bind on-exit before start.
+        // This first binding is derived from N1, so the step-3 revoke
+        // must reach through the TCB slot and clear it.
+        check(cap_copy(N1, EXIT_BIND1, RIGHT_WRITE), b'h');
+        check(thread_bind(TCB2, 0, EXIT_BIND1, BIT_CHILD_EXIT), b'i');
         check(
             thread_start(
                 TCB2,
@@ -264,13 +303,20 @@ pub extern "C" fn user_main(_arg: u64) -> ! {
         check(cap_copy(N1, SEND2, RIGHT_WRITE), b'o');
         check(chan_send(CHAN_A, &MORE, &caps2), b'p');
         check(cap_revoke(N1), b'q');
+        // The revoke just cleared T2's on-exit binding through the TCB
+        // slot (it held an N1 descendant). Rebind with a fresh copy while
+        // T2 is still parked waiting for GO, so its death notice fires.
+        check(cap_copy(N1, EXIT_BIND2, RIGHT_WRITE), b'q');
+        check(thread_bind(TCB2, 0, EXIT_BIND2, BIT_CHILD_EXIT), b'q');
         check(notif_signal(N2, BIT_GO), b'r');
 
         // T2 reports its verdict over the channel (A-readable → N1 bit).
         // The verdict is the message LENGTH (1 = pass, 2 = fail): the
         // payload is never read back, keeping non-inlined core calls out
         // of EL0 code (everything in kernel .text is EL0 execute-never).
-        wait_for(N1, BIT_A_READABLE, b's');
+        // T2's exit can land in any of the remaining waits' words, so
+        // accumulate across them (a wait consumes the whole word).
+        let mut seen = wait_for(N1, BIT_A_READABLE, b's');
         let mut buf = MaybeUninit::<[u8; 256]>::uninit();
         let no_dests: [u32; 4] = [SLOT_NONE; 4];
         let (len, mask) = chan_recv(CHAN_A, buf.as_mut_ptr() as *mut u8, &no_dests);
@@ -284,13 +330,26 @@ pub extern "C" fn user_main(_arg: u64) -> ! {
         // The revoked parent cap itself must still work (revoke deletes
         // descendants, not the cap).
         check(notif_signal(N1, BIT_SELF_TEST), b'u');
-        wait_for(N1, BIT_SELF_TEST, b'v');
+        seen |= wait_for(N1, BIT_SELF_TEST, b'v');
 
         // Timer object: deadline signals a bound notification (§2.6).
         check(retype(UNTYPED, OBJ_TIMER, 0, TIMER, 0), b'w');
         check(timer_arm(TIMER, N1, BIT_TIMER, 1_250_000), b'x'); // ~20ms @62.5MHz
-        wait_for(N1, BIT_TIMER, b'y');
+        seen |= wait_for(N1, BIT_TIMER, b'y');
         putc(b'4'); // marker: timer fired
+
+        // Reap T2 (§5.1): the rebound on-exit binding delivers the death
+        // notice, and the report — recorded by the kernel, not claimed
+        // by the child — must read exited(42).
+        if seen & BIT_CHILD_EXIT == 0 {
+            wait_for(N1, BIT_CHILD_EXIT, b'z');
+        }
+        let (state, status, _) = read_report(TCB2);
+        if state != 1 || status != T2_EXIT_STATUS {
+            debug_write(&MSG_FAIL);
+            exit();
+        }
+        putc(b'5'); // marker: exit report delivered and read
 
         debug_write(&MSG_PASS);
         exit();
@@ -332,7 +391,7 @@ pub extern "C" fn user_thread2(_arg: u64) -> ! {
             chan_send(T2_CHAN, &VERDICT_FAIL, &no_caps)
         };
         check(r, b'G');
-        exit();
+        thread_exit(T2_EXIT_STATUS);
     }
 }
 

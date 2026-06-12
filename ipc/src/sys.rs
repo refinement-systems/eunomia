@@ -77,6 +77,22 @@ mod imp {
         );
         (ret as i64, ret2)
     }
+
+    #[inline(always)]
+    pub unsafe fn syscall3(nr: u64, a0: u64) -> (i64, u64, u64) {
+        let ret: u64;
+        let ret2: u64;
+        let ret3: u64;
+        core::arch::asm!(
+            "svc #0",
+            inout("x0") a0 => ret,
+            out("x1") ret2,
+            out("x2") ret3,
+            in("x7") nr,
+            options(nostack),
+        );
+        (ret as i64, ret2, ret3)
+    }
 }
 
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
@@ -90,9 +106,13 @@ mod imp {
     pub unsafe fn syscall2(_: u64, _: u64, _: u64, _: u64, _: u64) -> (i64, u64) {
         unreachable!("Eunomia syscall on a non-Eunomia target")
     }
+
+    pub unsafe fn syscall3(_: u64, _: u64) -> (i64, u64, u64) {
+        unreachable!("Eunomia syscall on a non-Eunomia target")
+    }
 }
 
-use imp::{syscall, syscall2};
+use imp::{syscall, syscall2, syscall3};
 
 pub fn debug_putc(c: u8) {
     unsafe { syscall(0, c as u64, 0, 0, 0, 0, 0) };
@@ -153,13 +173,19 @@ pub fn timer_arm(timer: u32, notif: u32, bits: u64, delta: u64) -> i64 {
     unsafe { syscall(14, timer as u64, notif as u64, bits, delta, 0, 0) }
 }
 
-pub fn exit() -> ! {
+/// The only voluntary stop (§5.1): the kernel records the status — a
+/// child can neither lie about nor forget its own death.
+pub fn thread_exit(status: u64) -> ! {
     unsafe {
-        syscall(15, 0, 0, 0, 0, 0, 0);
+        syscall(15, status, 0, 0, 0, 0, 0);
     }
     loop {
         core::hint::spin_loop();
     }
+}
+
+pub fn exit() -> ! {
+    thread_exit(0)
 }
 
 pub fn map(aspace: u32, frame: u32, va: u64, perms: u64) -> i64 {
@@ -194,4 +220,15 @@ pub fn debug_getc() -> i64 {
 /// `notif` = SLOT_NONE unbinds.
 pub fn thread_bind(tcb: u32, which: u64, notif: u32, bits: u64) -> i64 {
     unsafe { syscall(21, tcb as u64, which, notif as u64, bits, 0, 0) }
+}
+
+/// Terminal report states returned by `read_report` (§5.1).
+pub const REPORT_RUNNING: i64 = 0;
+pub const REPORT_EXITED: i64 = 1;
+pub const REPORT_FAULTED: i64 = 2;
+
+/// Read a thread's terminal report record (§5.1). Returns
+/// (state, status-or-cause, faulting-address); negative state = error.
+pub fn read_report(tcb: u32) -> (i64, u64, u64) {
+    unsafe { syscall3(22, tcb as u64) }
 }

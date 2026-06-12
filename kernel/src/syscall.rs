@@ -573,12 +573,35 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
             thread::bind(t, a[1] as usize, ns, a[3]);
             Some(0)
         }
-        // exit
+        // read_report(tcb_slot) → x0 = 0 running | 1 exited | 2 faulted,
+        // x1 = status / cause, x2 = faulting address (§5.1).
+        22 => {
+            let ts = cur_slot(a[0]);
+            if ts.is_null() {
+                return Some(ERR_BADSLOT);
+            }
+            let CapKind::Thread(t) = (*ts).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            let (code, v1, v2) = match (*t).report {
+                thread::Report::Running => (0, 0, 0),
+                thread::Report::Exited(status) => (1, status, 0),
+                thread::Report::Faulted { cause, far } => (2, cause, far),
+            };
+            (*frame).x[1] = v1;
+            (*frame).x[2] = v2;
+            Some(code)
+        }
+        // thread_exit(status) — the only voluntary stop (§5.1). The
+        // kernel records the status, so a child can neither lie about
+        // nor forget its own death; the on-exit binding fires here.
         15 => {
             let t = thread::current();
             (*t).state = ThreadState::Halted;
-            // maybe_switch at exception exit picks someone else.
-            Some(0)
+            thread::report_terminal(t, thread::Report::Exited(a[0]));
+            // maybe_switch at exception exit picks someone else; the
+            // dead frame is never restored, so there is no x0 to write.
+            None
         }
         _ => Some(ERR_ARG),
     }

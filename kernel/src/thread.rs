@@ -294,6 +294,11 @@ pub unsafe fn bind(t: *mut Tcb, which: usize, notif_src: *mut CapSlot, bits: u64
 ///       exception exit path will switch away; the TCB memory stays valid
 ///       until its donor untyped is revoked and reset, which requires
 ///       deleting this very cap chain first — so no dangling CURRENT.
+///
+/// Destroying a still-running thread produces NO report and fires
+/// nothing: destruction is the parent acting, not the thread dying, and
+/// the parent needs no letter about its own revoke (§5.1). The record
+/// only ever transitions on the thread's own exit or fault.
 pub unsafe fn destroy_tcb(t: *mut Tcb) {
     unqueue(t);
     (*t).state = ThreadState::Halted;
