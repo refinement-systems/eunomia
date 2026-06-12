@@ -3,7 +3,8 @@
 //! World (built by init, §5.1): slot 0 = bootstrap channel (first message
 //! is the "SH01" startup block carrying the time-page address, §2.6),
 //! slot 1 = storage session (handle 0 = main ref root, full rights),
-//! slot 2 = untyped pool for spawning. The shell carves slot 3 (a
+//! slot 2 = untyped pool for spawning, slot 5 = a read-only time-frame
+//! cap the shell re-grants to children. The shell carves slot 3 (a
 //! persistent event notification) and slot 4 (a reusable child donation
 //! untyped) from the pool, and keeps slots 8.. as a recyclable cap window.
 //!
@@ -33,9 +34,10 @@ use urt::spawn::{Exit, SpawnRec};
 static HEAP: urt::Heap<{ 1024 * 1024 }> = urt::Heap::new();
 
 // Shell cspace (built by init, §5.1): slot 0 = bootstrap channel, slot 1 =
-// storage session, slot 2 = the untyped pool for spawning. The shell carves
-// two persistent objects from the pool at startup and keeps slots 8.. as a
-// recyclable window for per-child object caps.
+// storage session, slot 2 = the untyped pool for spawning, slot 5 = a
+// read-only time cap re-granted per child. The shell carves two persistent
+// objects from the pool at startup and keeps slots 8.. as a recyclable
+// window for per-child object caps.
 const BOOT_CHAN: u32 = 0;
 const STORE_CHAN: u32 = 1;
 const POOL: u32 = 2;
@@ -46,6 +48,11 @@ const EVENT_NOTIF: u32 = 3;
 /// The reusable per-child donation untyped (§5.1). One child's worth of
 /// memory; `revoke` + `reset` reclaims it between spawns (§2.5).
 const DONATION: u32 = 4;
+/// Read-only time-frame cap (granted by init, §2.6). The shell maps a
+/// fresh copy into each child's aspace so children can read the clock —
+/// the init→shell time grant, one hop further. Lives in pool memory the
+/// per-child reclaim never touches.
+const SH_TIME: u32 = 5;
 const SPAWN_BASE: u32 = 8;
 const SPAWN_CAP: usize = 56; // slots 8..64
 
@@ -57,6 +64,10 @@ const CHILD_CSPACE_SLOTS: u64 = 8;
 /// Children run below the shell so a blocked-shell, running-child handoff is
 /// the common case, and the §5.4 ceiling keeps a child from outranking us.
 const CHILD_PRIO: u64 = 3;
+/// Where the time page lands in each child's aspace (init's convention,
+/// §2.6). Above the ELF (0x8000_0000) and stack (~0x9000_0000); the VA
+/// still travels in the ST01 block — never assumed.
+const CHILD_TIME_VA: u64 = 0xA300_0000;
 
 /// Notification bits the kernel raises for this child (§5.1). Distinct so
 /// the notification *word* tells exit from fault before `read_report` does —
@@ -423,6 +434,7 @@ struct SpawnSlots {
     chan_a: u32, // shell's bootstrap endpoint
     chan_b: u32, // child's endpoint (moved into the child's cspace)
     scratch: u32, // staging slot for the moved-in notification copies
+    time_copy: u32, // per-child read-only time-page copy (mapped into it)
 }
 
 #[derive(Clone, Copy)]
@@ -460,6 +472,7 @@ impl Spawner {
             chan_a: self.slots.alloc().ok_or(RunErr::NoSlots)?,
             chan_b: self.slots.alloc().ok_or(RunErr::NoSlots)?,
             scratch: self.slots.alloc().ok_or(RunErr::NoSlots)?,
+            time_copy: self.slots.alloc().ok_or(RunErr::NoSlots)?,
         };
         let exit = self.spawn_inner(image, mode, &s);
         // Whether it ran to completion or aborted mid-setup, the donation is
@@ -473,20 +486,34 @@ impl Spawner {
         // Bootstrap channel and every child object descend from DONATION, so
         // the child is one CDT subtree teardown collapses in one revoke.
         if sys::retype(DONATION, sys::OBJ_CHANNEL, 4, s.chan_a, s.chan_b) < 0 {
-            self.scrub();
+            self.scrub(s.time_copy);
             return Err(RunErr::Carve);
         }
         let prepared = match loader::spawn::prepare(image, DONATION, s.range, CHILD_CSPACE_SLOTS) {
             Ok(p) => p,
             Err(_) => {
-                self.scrub();
+                self.scrub(s.time_copy);
                 return Err(RunErr::BadElf);
             }
         };
+        // The "time" grant (§5.1, §2.6): a fresh read-only copy of our time
+        // cap, mapped read-only into the child's aspace at CHILD_TIME_VA. The
+        // copy lives OUTSIDE the donation, so `scrub`/`reap` must delete it
+        // first — the unmap has to precede the revoke that frees the aspace
+        // it points into (§2.5 one-mapping-per-cap).
+        if sys::cap_copy(SH_TIME, s.time_copy, sys::RIGHT_READ) < 0
+            || sys::map(prepared.aspace_slot, s.time_copy, CHILD_TIME_VA, 0) < 0
+        {
+            self.scrub(s.time_copy);
+            return Err(RunErr::Carve);
+        }
         // Explicit child world (§5.1): bootstrap endpoint in slot 0, startup
-        // block ("ST01" + mode) queued before the child runs.
+        // block ("ST01" + mode + time-page VA) queued before the child runs.
         sys::cap_install(prepared.cspace_slot, s.chan_b, 0);
-        let block = [b'S', b'T', b'0', b'1', mode];
+        let mut block = [0u8; 13];
+        block[..4].copy_from_slice(b"ST01");
+        block[4] = mode;
+        block[5..13].copy_from_slice(&CHILD_TIME_VA.to_le_bytes());
         sys::chan_send(s.chan_a, &block, None);
 
         let rec = SpawnRec {
@@ -498,11 +525,11 @@ impl Spawner {
         // Bind before start, so a child that exits immediately still raises
         // the bit — the lost-wakeup discipline (§3.6).
         if rec.arm(EVENT_NOTIF, s.scratch) < 0 {
-            self.scrub();
+            self.scrub(s.time_copy);
             return Err(RunErr::Carve);
         }
         if loader::spawn::start(&prepared, CHILD_PRIO).is_err() {
-            self.scrub();
+            self.scrub(s.time_copy);
             return Err(RunErr::Start);
         }
 
@@ -514,14 +541,18 @@ impl Spawner {
             }
             sys::yield_now();
         }
-        // read_report strictly before revoke (§5.1) — enforced inside reap.
+        // Unmap the time grant before reap's revoke frees the child aspace
+        // (§2.5), then read_report strictly before revoke (enforced in reap).
+        let _ = sys::cap_delete(s.time_copy);
         Ok(rec.reap())
     }
 
     /// Collapse a partially-built child and reset the donation (the abort
-    /// counterpart of reap). Safe with nothing carved: revoke of a
-    /// childless untyped is a no-op.
-    fn scrub(&self) {
+    /// counterpart of reap). Drops the time grant first (its mapping points
+    /// into the aspace the revoke frees, §2.5); harmless if never granted.
+    /// Safe with nothing carved: revoke of a childless untyped is a no-op.
+    fn scrub(&self, time_copy: u32) {
+        let _ = sys::cap_delete(time_copy);
         sys::cap_revoke(DONATION);
         let _ = sys::untyped_reset(DONATION);
     }
@@ -531,6 +562,7 @@ impl Spawner {
         self.slots.free(s.chan_a);
         self.slots.free(s.chan_b);
         self.slots.free(s.scratch);
+        self.slots.free(s.time_copy);
     }
 
     fn available(&self) -> usize {

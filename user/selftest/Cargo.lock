@@ -11,4 +11,12 @@ name = "selftest"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "urt",
+]
+
+[[package]]
+name = "urt"
+version = "0.1.0"
+dependencies = [
+ "ipc",
 ]

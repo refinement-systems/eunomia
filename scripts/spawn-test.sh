@@ -17,6 +17,11 @@
 #      its runtime handler exits with the reserved STATUS_PANIC, and the
 #      parent reads 'panicked' — NOT exited(254). A crash can't pass for a
 #      clean stop. A following run bin/selftest 9 reclaims as cleanly again.
+#   6. run bin/selftest 253      — the time grant (§2.6, S1): the shell maps
+#      the read-only time page into the child and passes its VA in the
+#      startup block; the child reads a sane UTC clock (time-ok). The
+#      init→shell time grant, one hop further (shell→child). run 11 after
+#      proves the donation reclaims with the time copy unmapped first.
 #
 # Asserts no BSS-LEAK (retype re-zeroes reused frames) and no UNEXPECTED
 # PANIC (the one deliberate selftest panic aside) anywhere in the run.
@@ -102,6 +107,16 @@ wait_for 'panicked' 30
 printf 'run bin/selftest 9\r' >&3
 wait_for 'exited(9)' 30
 
+# 6. Time grant (§2.6, S1): the shell maps the read-only time page into the
+#    child and passes its VA in the startup block; the child reads a sane
+#    UTC clock — the init→shell time grant, one hop further (shell→child).
+#    A following run reclaims cleanly (the time copy is unmapped before the
+#    revoke that frees the child aspace).
+printf 'run bin/selftest 253\r' >&3
+wait_for 'time-ok' 30
+printf 'run bin/selftest 11\r' >&3
+wait_for 'exited(11)' 30
+
 kill "$QPID" 2>/dev/null || true
 wait "$QPID" 2>/dev/null || true
 trap - EXIT
@@ -133,6 +148,15 @@ if grep -q 'exited(254)' "$LOG"; then
     echo "SPAWN TEST FAIL: a panic surfaced as exited(254) — the reserved status leaked through" >&2
     fail=1
 fi
+# The child must read its granted time page (§2.6 shell→child grant).
+if grep -q 'time-bad' "$LOG"; then
+    echo "SPAWN TEST FAIL: a child could not read its time grant" >&2
+    fail=1
+fi
+if ! grep -q 'time-ok' "$LOG"; then
+    echo "SPAWN TEST FAIL: child did not confirm the time grant (S1)" >&2
+    fail=1
+fi
 # The loop's own slot accounting must close: free count back to its start.
 if ! grep -q 'runloop: 100/100 ok, slots 56/56' "$LOG"; then
     echo "SPAWN TEST FAIL: spawn slots leaked across the loop (expected 56/56)" >&2
@@ -146,4 +170,5 @@ echo "  runloop 100/100, slots fully reclaimed"
 echo "  exit(42) and exit(7) statuses propagated"
 echo "  fault demo: faulted(translation, 0xdead0000) then a clean re-spawn"
 echo "  panic demo: panicked (reserved status), not exited(254), then a clean re-spawn"
+echo "  time grant: child read its mapped time page (time-ok) then a clean re-spawn"
 echo "  no BSS-LEAK (retype re-zeroes reused frames), no unexpected PANIC"

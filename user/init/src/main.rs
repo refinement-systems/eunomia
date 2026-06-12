@@ -36,6 +36,9 @@ const TIME_FRAME: u32 = 14;
 const TIME_SD: u32 = 15;
 const TIME_SH: u32 = 16;
 const SD_NOTIF: u32 = 17;
+/// A second read-only time copy for the shell — installed into its cspace
+/// (not just mapped), so the shell can re-grant the page to its children.
+const TIME_SH_CHILD: u32 = 18;
 const SD_SPAWN_BASE: u32 = 20;
 const SH_SPAWN_BASE: u32 = 40;
 
@@ -148,8 +151,9 @@ pub extern "C" fn _start() -> ! {
     check(spawn::start(&sd, 5).map_or(-1, |_| 0), b"start storaged");
 
     // ── shell ───────────────────────────────────────────────────────
-    // 64-slot cspace: slots 0-4 are wired below / carved by the shell, and
-    // 8.. is the shell's recyclable spawn window (§5.1 reclaim loop).
+    // 64-slot cspace: slots 0-4 are wired below / carved by the shell,
+    // slot 5 is the re-grantable time cap, and 8.. is the shell's
+    // recyclable spawn window (§5.1 reclaim loop).
     let sh = match spawn::prepare(SHELL_ELF, UNTYPED, SH_SPAWN_BASE, 64) {
         Ok(p) => p,
         Err(_) => {
@@ -159,6 +163,11 @@ pub extern "C" fn _start() -> ! {
     };
     check(sys::cap_copy(TIME_FRAME, TIME_SH, RIGHT_READ), b"time sh copy");
     check(sys::map(sh.aspace_slot, TIME_SH, TIME_VA, 0), b"time sh map");
+    // Re-grantable copy in the shell's cspace slot 5: the shell holds a
+    // read-only time cap it can copy and map into each child it spawns,
+    // extending the §2.6 time grant one hop (init→shell→child, §5.1).
+    check(sys::cap_copy(TIME_FRAME, TIME_SH_CHILD, RIGHT_READ), b"time child copy");
+    check(sys::cap_install(sh.cspace_slot, TIME_SH_CHILD, 5), b"time child install");
 
     let mut sh_config = [0u8; 12];
     sh_config[..4].copy_from_slice(b"SH01");
