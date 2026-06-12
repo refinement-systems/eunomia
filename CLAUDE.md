@@ -191,6 +191,21 @@ QEMU invocations pin `-rtc base=utc,clock=host`. End-to-end proof:
 asserts sane, strictly ordered ISO-8601 timestamps plus a zero-syscall
 shell `date`.
 
+### Rev2: thread reports (§5.1) — kernel half done
+TCBs carry on-exit/on-fault binding slots (real CDT-visible CapSlots —
+notification caps move in via `thread_bind`, revoke sees through them)
+and a preallocated terminal report record (running → exited(status) |
+faulted(cause, far), one transition ever). `thread_exit(status)` (nr 15,
+status now recorded) and `read_report` (nr 22) complete the surface;
+`bind-reports`/`read-report` rights bits gate them (creator thread caps
+carry both — `Rights::THREAD_ALL`). Thread destruction produces no
+report (destruction is the parent acting, not the thread dying). The
+CapRevocation TLA+ model covers the binding slots (Bind/ThreadExit/
+ThreadFault actions; FireSafe + ReportMonotone properties) — TLC-checked.
+Remaining (userspace half): the shell's reclaim-on-exit loop — bind,
+wait, read_report, revoke the child's untyped, reset the watermark,
+reuse spawn slots.
+
 ### M1 exit criterion (met)
 Booting prints `12345M1 PASS`: the embedded EL0 test program
 (`kernel/src/user.rs`) retypes untyped into kernel objects, builds a second
