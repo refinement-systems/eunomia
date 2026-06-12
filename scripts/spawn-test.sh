@@ -13,9 +13,13 @@
 #   4. run bin/selftest 7        — ...and then spawns ANOTHER program, which
 #      exits(7): the burn fix witnessed in the same breath as the fault, the
 #      donation reused after a faulted child as cleanly as after an exited one.
+#   5. run bin/selftest 254      — the panic path (§5.1 U2): the child panics,
+#      its runtime handler exits with the reserved STATUS_PANIC, and the
+#      parent reads 'panicked' — NOT exited(254). A crash can't pass for a
+#      clean stop. A following run bin/selftest 9 reclaims as cleanly again.
 #
-# Asserts no BSS-LEAK (retype re-zeroes reused frames) and no kernel/shell
-# PANIC anywhere in the run.
+# Asserts no BSS-LEAK (retype re-zeroes reused frames) and no UNEXPECTED
+# PANIC (the one deliberate selftest panic aside) anywhere in the run.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -90,6 +94,14 @@ wait_for 'faulted(translation, 0xdead0000)' 30
 printf 'run bin/selftest 7\r' >&3
 wait_for 'exited(7)' 30
 
+# 5. Panic path (U2): a child that panics exits with the reserved status,
+#    so the parent reads 'panicked', NOT exited(254) — a crash can't pass
+#    for a clean stop. The donation reclaims as cleanly as after a fault.
+printf 'run bin/selftest 254\r' >&3
+wait_for 'panicked' 30
+printf 'run bin/selftest 9\r' >&3
+wait_for 'exited(9)' 30
+
 kill "$QPID" 2>/dev/null || true
 wait "$QPID" 2>/dev/null || true
 trap - EXIT
@@ -99,9 +111,26 @@ if grep -q 'BSS-LEAK' "$LOG"; then
     echo "SPAWN TEST FAIL: a child observed a non-zero .bss — retype did not re-zero a reused frame" >&2
     fail=1
 fi
-if grep -q 'PANIC' "$LOG"; then
-    echo "SPAWN TEST FAIL: a PANIC appeared in the run" >&2
-    grep -n 'PANIC' "$LOG" >&2
+# Infrastructure must not panic. The deliberate panic-path test (mode 254)
+# prints exactly one '[selftest] PANIC'; any other PANIC — kernel, shell,
+# storaged, or selftest panicking when it shouldn't — is a real failure.
+if grep 'PANIC' "$LOG" | grep -qv '\[selftest\] PANIC'; then
+    echo "SPAWN TEST FAIL: an unexpected PANIC appeared in the run" >&2
+    grep -n 'PANIC' "$LOG" | grep -v '\[selftest\] PANIC' >&2
+    fail=1
+fi
+sel_panics=$(grep -c '\[selftest\] PANIC' "$LOG" || true)
+if [ "${sel_panics:-0}" -ne 1 ]; then
+    echo "SPAWN TEST FAIL: expected exactly one deliberate selftest panic, saw ${sel_panics:-0}" >&2
+    fail=1
+fi
+# The parent must observe the reserved panic status, not exited(254).
+if ! grep -q 'panicked' "$LOG"; then
+    echo "SPAWN TEST FAIL: parent did not read 'panicked' — panic status not propagated (U2)" >&2
+    fail=1
+fi
+if grep -q 'exited(254)' "$LOG"; then
+    echo "SPAWN TEST FAIL: a panic surfaced as exited(254) — the reserved status leaked through" >&2
     fail=1
 fi
 # The loop's own slot accounting must close: free count back to its start.
@@ -116,4 +145,5 @@ echo "SPAWN TEST PASS:"
 echo "  runloop 100/100, slots fully reclaimed"
 echo "  exit(42) and exit(7) statuses propagated"
 echo "  fault demo: faulted(translation, 0xdead0000) then a clean re-spawn"
-echo "  no BSS-LEAK (retype re-zeroes reused frames), no PANIC"
+echo "  panic demo: panicked (reserved status), not exited(254), then a clean re-spawn"
+echo "  no BSS-LEAK (retype re-zeroes reused frames), no unexpected PANIC"

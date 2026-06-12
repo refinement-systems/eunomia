@@ -201,5 +201,5 @@ impl core::fmt::Write for DebugOut {
 fn on_panic(info: &core::panic::PanicInfo) -> ! {
     use core::fmt::Write;
     let _ = write!(DebugOut, "[storaged] PANIC: {info}\n");
-    sys::exit()
+    sys::thread_exit(sys::STATUS_PANIC)
 }

@@ -37,5 +37,5 @@ pub extern "C" fn _start() -> ! {
 #[panic_handler]
 fn on_panic(_: &core::panic::PanicInfo) -> ! {
     sys::debug_write(b"[hello] PANIC\n");
-    sys::exit()
+    sys::thread_exit(sys::STATUS_PANIC)
 }

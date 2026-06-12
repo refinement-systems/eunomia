@@ -397,6 +397,9 @@ fn fault_class(esr: u64) -> &'static [u8] {
 
 fn print_exit(e: Exit) {
     match e {
+        // A panic surfaces as a normal exit carrying the reserved status
+        // (§5.1, U2); name it rather than print exited(18446744073709551615).
+        Exit::Exited(sys::STATUS_PANIC) => out(b"panicked\n"),
         Exit::Exited(status) => {
             out(b"exited(");
             out_num(status);
@@ -725,5 +728,5 @@ pub extern "C" fn _start() -> ! {
 #[panic_handler]
 fn on_panic(_: &core::panic::PanicInfo) -> ! {
     out(b"[shell] PANIC\n");
-    sys::exit()
+    sys::thread_exit(sys::STATUS_PANIC)
 }

@@ -21,6 +21,16 @@
 //!     TCB the revoke destroys: read after revoke and the cap is gone, the
 //!     status lost silently. `reap` does both in the one correct order and
 //!     asserts it, so a caller cannot get it wrong by reordering two lines.
+//!
+//! What a parent reaps is the **main thread's** terminal report: a process's
+//! status *is* its main thread's status. `thread_exit` ends one thread, not
+//! a process — there is no Unix exit-kills-all here. A multithreaded child's
+//! other threads keep running until the parent's `revoke(donation)` collapses
+//! the whole subtree; the parent decides when the process is over, not any
+//! one thread. A main thread that panics rather than exiting cleanly stops
+//! through the runtime panic handler, which exits with `sys::STATUS_PANIC`
+//! (the runtime exit path, §5.1) — so `Exit::Exited(STATUS_PANIC)` is a
+//! crash, distinct from any status a child passes deliberately.
 
 use ipc::sys;
 
