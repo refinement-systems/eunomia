@@ -143,7 +143,19 @@ jobs:
           # only lowers the "N of M cover properties satisfied" tally. So fail
           # here if any harness reported N < M (a cover went UNREACHABLE, meaning
           # an over-constraining `assume` may have made a proof vacuous).
-          if grep -hE 'cover properties satisfied' kani-*.log \
+          #
+          # Two distinct fail-closed modes, kept distinct so the message is not
+          # misleading (review-2 rec. #5, doc/results/17_kani-findings-14.md): an
+          # ABSENT tally — grep matches zero lines, i.e. a Kani output-format
+          # change or a log that never wrote — is not the same as a cover that
+          # went UNREACHABLE. The `|| true` keeps a zero-match grep from tripping
+          # `pipefail`/`-e` before the explicit emptiness check below.
+          covers=$(grep -hE 'cover properties satisfied' kani-*.log || true)
+          if [ -z "$covers" ]; then
+            echo "::error::no 'cover properties satisfied' lines in the kani logs — Kani's output format may have changed or a log failed to write; the vacuity guard could not run (rec #5)"
+            exit 1
+          fi
+          if printf '%s\n' "$covers" \
                | awk '{ if ($2 != $4) { print "UNREACHABLE cover: " $0; bad=1 } } END { exit bad+0 }'; then
             echo "all kani::cover! checkpoints satisfied"
           else
