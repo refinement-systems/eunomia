@@ -1,11 +1,13 @@
-//! Kernel-side address-space walker (spec §2.5). The `AspaceObj` data type,
-//! the `PAGE`/`USER_VA_*`/`PERM_*` constants, `MapError`, and `bytes_for`
-//! live in [`kcore::aspace`] (re-exported below); everything here is the
-//! architectural half the verified core deliberately excludes — table-walk
-//! by physical address, the descriptor bit assembly, ASID assignment, and
-//! the TLBI/DSB maintenance. It stays free functions over `*mut AspaceObj`
-//! (inherent impls cannot span the crate boundary) until the phase-5 rewrite
-//! that makes the walker itself Kani-verifiable (plan §2.4).
+//! Kernel-side address-space shell (spec §2.5). The walker itself — table
+//! allocation, `map`/`unmap`, the read-only lookup, the descriptor bit
+//! assembly, the VA-index arithmetic — now lives in [`kcore::aspace`] as safe
+//! Rust over the table pool as an indexed slice (plan §2.4), so Kani verifies
+//! it (§4.5). What stays here is the irreducibly architectural half: ASID
+//! assignment, the boot kernel-L1 copy, `ttbr0`, and the **one sanctioned
+//! int→pointer boundary** — building the `&mut [[u64; 512]]` slice views over
+//! the `AspaceObj`'s physical L1/pool addresses so the kcore walker can drive
+//! them. The TLBI/DSB maintenance the walker needs is the `KernelEnv` `Env`
+//! impl (`kernel/src/env.rs`); the kcore walker calls it through the seam.
 //!
 //! Layout of one process's view:
 //!   L1[0]   device GiB        — shared kernel entry, EL1-only
@@ -19,21 +21,22 @@
 
 pub use kcore::aspace::*;
 
+use crate::env::KernelEnv;
 use core::ptr;
 
-const DESC_TABLE: u64 = 0b11;
-const DESC_PAGE: u64 = 0b11;
-const AF: u64 = 1 << 10;
-const UXN: u64 = 1 << 54;
-const PXN: u64 = 1 << 53;
-const SH_INNER: u64 = 0b11 << 8;
-const SH_NONE: u64 = 0b00 << 8;
-const AP_EL0_RW: u64 = 0b01 << 6;
-const AP_EL0_RO: u64 = 0b11 << 6;
-const ATTR_NORMAL: u64 = 0 << 2; // MAIR Attr0 (mmu.rs)
-const ATTR_DEVICE: u64 = 1 << 2; // MAIR Attr1: device nGnRnE
-
 static mut NEXT_ASID: u16 = 1;
+
+// ── the int→pointer boundary (plan §2.2 rule 2): the L1 table and the table
+//    pool are 512-entry u64 tables laid out contiguously after the AspaceObj
+//    header (`init`), disjoint from the header itself, so these slice views
+//    never alias `*this`'s other fields. This is the one place a PA becomes a
+//    pointer; the walker logic they feed is pure kcore. ──────────────────────
+unsafe fn l1_view(this: *mut AspaceObj) -> &'static mut [u64; 512] {
+    &mut *((*this).l1 as *mut [u64; 512])
+}
+unsafe fn pool_view(this: *mut AspaceObj) -> &'static mut [[u64; 512]] {
+    core::slice::from_raw_parts_mut((*this).pool_base as *mut [u64; 512], (*this).pool_pages as usize)
+}
 
 /// pre:  `this` points at bytes_for(pool_pages) of 4 KiB-aligned writable
 ///       memory.
@@ -69,38 +72,9 @@ pub unsafe fn ttbr0(this: *mut AspaceObj) -> u64 {
     (*this).l1 | ((*this).asid as u64) << 48
 }
 
-unsafe fn alloc_table(this: *mut AspaceObj) -> Result<u64, MapError> {
-    if (*this).pool_used == (*this).pool_pages {
-        return Err(MapError::NeedMemory);
-    }
-    let pa = (*this).pool_base + (*this).pool_used * PAGE;
-    (*this).pool_used += 1;
-    ptr::write_bytes(pa as *mut u8, 0, PAGE as usize);
-    Ok(pa)
-}
-
-/// Walk (allocating intermediate tables) to the L3 slot for `va`.
-unsafe fn l3_slot(this: *mut AspaceObj, va: u64) -> Result<*mut u64, MapError> {
-    let l1_idx = (va >> 30) & 0x1FF;
-    let l2_idx = (va >> 21) & 0x1FF;
-    let l3_idx = (va >> 12) & 0x1FF;
-    let l1e = ((*this).l1 as *mut u64).add(l1_idx as usize);
-    if *l1e == 0 {
-        *l1e = alloc_table(this)? | DESC_TABLE;
-    }
-    let l2 = (*l1e & 0x0000_FFFF_FFFF_F000) as *mut u64;
-    let l2e = l2.add(l2_idx as usize);
-    if *l2e == 0 {
-        *l2e = alloc_table(this)? | DESC_TABLE;
-    }
-    let l3 = (*l2e & 0x0000_FFFF_FFFF_F000) as *mut u64;
-    Ok(l3.add(l3_idx as usize))
-}
-
-/// Map `pages` frames starting at `pa` to `va` with EL0 permissions.
-///
-/// pre:  va page-aligned, in [USER_VA_BASE, USER_VA_END).
-/// post: PTEs installed; no TLB shootdown needed (they were invalid).
+/// Map `pages` frames starting at `pa` to `va` with EL0 permissions. Thin
+/// shell over [`kcore::aspace::map_in`]: build the slice views, thread the
+/// pool high-water mark in/out, let the verified walker do the work.
 pub unsafe fn map(
     this: *mut AspaceObj,
     pa: u64,
@@ -108,88 +82,38 @@ pub unsafe fn map(
     pages: u64,
     perms: u64,
 ) -> Result<(), MapError> {
-    if va % PAGE != 0
-        || va < USER_VA_BASE
-        || va.saturating_add(pages * PAGE) > USER_VA_END
-    {
-        return Err(MapError::BadVa);
-    }
-    let ap = if perms & PERM_W != 0 { AP_EL0_RW } else { AP_EL0_RO };
-    let xn = if perms & PERM_X != 0 { 0 } else { UXN };
-    let (attr, sh) = if perms & PERM_DEVICE != 0 {
-        (ATTR_DEVICE, SH_NONE)
-    } else {
-        (ATTR_NORMAL, SH_INNER)
+    let base = (*this).pool_base;
+    let mut used = (*this).pool_used;
+    let mut env = KernelEnv;
+    let r = {
+        let l1 = l1_view(this);
+        let pool = pool_view(this);
+        kcore::aspace::map_in(l1, pool, &mut used, base, pa, va, pages, perms, &mut env)
     };
-    let attrs = DESC_PAGE | AF | sh | attr | ap | xn | PXN;
-    // First pass: nothing may already be mapped (no silent remap).
-    for i in 0..pages {
-        let slot = l3_slot(this, va + i * PAGE)?;
-        if *slot != 0 {
-            return Err(MapError::AlreadyMapped);
-        }
-    }
-    for i in 0..pages {
-        let slot = l3_slot(this, va + i * PAGE)?;
-        *slot = (pa + i * PAGE) | attrs;
-    }
-    core::arch::asm!("dsb ishst");
-    Ok(())
+    (*this).pool_used = used;
+    r
 }
 
-/// Read-only walk: the L3 slot for `va` if every level exists.
-unsafe fn l3_lookup(this: *mut AspaceObj, va: u64) -> Option<*mut u64> {
-    let l1e = ((*this).l1 as *mut u64).add(((va >> 30) & 0x1FF) as usize);
-    if *l1e & DESC_TABLE != DESC_TABLE {
-        return None;
-    }
-    let l2 = (*l1e & 0x0000_FFFF_FFFF_F000) as *mut u64;
-    let l2e = l2.add(((va >> 21) & 0x1FF) as usize);
-    if *l2e & DESC_TABLE != DESC_TABLE {
-        return None;
-    }
-    let l3 = (*l2e & 0x0000_FFFF_FFFF_F000) as *mut u64;
-    Some(l3.add(((va >> 12) & 0x1FF) as usize))
-}
-
-/// Unmap (frame-cap deletion path). Invalidates by ASID+VA.
+/// Unmap (frame-cap deletion path). The verified walker clears the leaves and
+/// drives the per-page TLBI + trailing barrier through `KernelEnv`.
 pub unsafe fn unmap(this: *mut AspaceObj, va: u64, pages: u64) {
-    for i in 0..pages {
-        let page_va = va + i * PAGE;
-        if let Some(slot) = l3_lookup(this, page_va) {
-            *slot = 0;
-            // TLBI VAE1: [63:48] ASID, [43:0] VA[55:12].
-            let arg = (((*this).asid as u64) << 48) | ((page_va >> 12) & 0xFFF_FFFF_FFFF);
-            core::arch::asm!("tlbi vae1, {v}", v = in(reg) arg);
-        }
-    }
-    core::arch::asm!("dsb ish", "isb");
+    let base = (*this).pool_base;
+    let asid = (*this).asid;
+    let mut env = KernelEnv;
+    let l1 = l1_view(this);
+    let pool = pool_view(this);
+    kcore::aspace::unmap_in(l1, pool, base, asid, va, pages, &mut env);
 }
 
-/// Is [va, va+len) fully mapped (and writable, if asked)? Used by the
-/// syscall layer to validate user pointers before the kernel
-/// dereferences them through the process's own translation.
+/// Is [va, va+len) fully mapped (and writable, if asked)? Used by the syscall
+/// layer to validate user pointers before the kernel dereferences them
+/// through the process's own translation.
 pub unsafe fn range_mapped(this: *mut AspaceObj, va: u64, len: u64, write: bool) -> bool {
-    if len == 0 {
-        return va >= USER_VA_BASE && va < USER_VA_END;
-    }
-    let Some(end) = va.checked_add(len) else { return false };
-    if va < USER_VA_BASE || end > USER_VA_END {
-        return false;
-    }
-    let mut page = va & !(PAGE - 1);
-    while page < end {
-        match l3_lookup(this, page) {
-            Some(slot) if *slot != 0 => {
-                if write && (*slot >> 6) & 0b11 != 0b01 {
-                    return false;
-                }
-            }
-            _ => return false,
-        }
-        page += PAGE;
-    }
-    true
+    let base = (*this).pool_base;
+    let l1: &[u64; 512] = &*((*this).l1 as *const [u64; 512]);
+    let pool: &[[u64; 512]] =
+        core::slice::from_raw_parts((*this).pool_base as *const [u64; 512], (*this).pool_pages as usize);
+    kcore::aspace::range_mapped_in(l1, pool, base, va, len, write)
 }
 
 /// pre: refs == 0. The memory (tables included) returns to the donor

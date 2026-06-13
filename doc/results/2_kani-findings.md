@@ -92,9 +92,12 @@ found two (UO-1, UO-2) — both carve-arithmetic overflows predicted by plan
 its notes (DN-5, the DN-4 refinement, and the harness-cost lesson) are in
 `doc/results/4_kani-findings-3.md`. The §4.4 notification + thread-report suite
 found no defects; its notes (DN-6 and the DN-4 reappearance in `destroy_tcb`)
-are in `doc/results/5_kani-findings-4.md`. Every Kani-found bug gets a
-minimized regression harness kept forever (like a fuzz seed), a fix PR, and a
-row in the relevant findings file.
+are in `doc/results/5_kani-findings-4.md`. The §4.5 aspace suite (the §2.4
+walker rewrite) found one — AS-1, a `PERM_DEVICE | PERM_X` executable-MMIO gap,
+confirmed and fixed alongside the harness; its notes (DN-7, the QEMU gate) are
+in `doc/results/6_kani-findings_6.md`. Every Kani-found bug gets a minimized
+regression harness kept forever (like a fuzz seed), a fix PR, and a row in the
+relevant findings file.
 
 | ID | Date | Harness | Bounds | Severity | Description | Status | Fix PR |
 |----|------|---------|--------|----------|-------------|--------|--------|

@@ -47,6 +47,22 @@ pub trait Env {
     /// ghost impl logs it. The phase-5 seam.
     unsafe fn aspace_destroy(&mut self, asp: *mut AspaceObj);
 
+    /// The TLB/barrier hooks the slice-indexed page-table walker
+    /// ([`crate::aspace`]) calls (the §2.2 rule-3 `Hal` seam, landed as Env
+    /// methods per the phase note above). The kernel implements them with the
+    /// real `tlbi`/`dsb`/`isb`; the ghost impl records them so a harness can
+    /// assert exactly which pages were invalidated.
+    ///
+    /// Invalidate the TLB entry for `va` in address space `asid`
+    /// (per cleared page in `aspace::unmap_in`).
+    unsafe fn tlb_invalidate_page(&mut self, asid: u16, va: u64);
+    /// Ordering barrier after installing new (previously-invalid) mappings —
+    /// no TLB shootdown needed, just a store barrier (`dsb ishst`).
+    unsafe fn barrier_after_map(&mut self);
+    /// Completion barrier after a batch of unmaps + their TLBIs
+    /// (`dsb ish; isb`).
+    unsafe fn barrier_after_unmap(&mut self);
+
     /// Head of the armed-timer list. The list *logic* (insert/unlink/expiry
     /// sweep) lives in [`crate::timer`]; only the anchor is environment
     /// state — a kernel static (`ARMED_HEAD`), a ghost field — because the
