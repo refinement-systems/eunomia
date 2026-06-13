@@ -229,7 +229,11 @@ pub unsafe fn unref_cspace<E: Env>(cs: *mut CSpaceObj, env: &mut E) {
 
 /// pre:  cspace refs == 0.
 /// post: every cap the cspace still held is deleted (their objects unref'd).
-unsafe fn destroy_cspace<E: Env>(cs: *mut CSpaceObj, env: &mut E) {
+///
+/// `pub(crate)` so the proof harness can drive the resident-teardown loop
+/// directly (plan §4.1 `check_destroy_cspace`); it has no callers outside
+/// this crate.
+pub(crate) unsafe fn destroy_cspace<E: Env>(cs: *mut CSpaceObj, env: &mut E) {
     for i in 0..(*cs).num_slots {
         let s = CSpaceObj::slot(cs, i);
         if !(*s).cap.is_empty() {

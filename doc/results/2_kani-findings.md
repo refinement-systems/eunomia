@@ -40,22 +40,41 @@ the current spec; each is revisited only if the spec changes.
   "object destroyed exactly when refs hits zero" assertion would produce
   spurious counterexamples and is deliberately **not** used. (Plan §7 item 4
   adjacent.)
-- **DN-4 — `delete`'s recursive teardown is a CBMC tractability wall.**
-  `delete` dispatches through `obj_unref`, whose `match` is on a cap kind
-  read from slot memory; CBMC does not constant-fold it, so every arm is
-  explored — including `destroy_cspace`/`destroy_channel`, which loop over
-  (symbolic) slot counts and recurse back into `delete`. Deleting a
-  **notification** cap stays tractable (its `destroy_notif` has no loops/
-  recursion): `check_revoke` (≈193 s) and the concrete `check_delete_reparent`
-  (≈2.5 s) both verify. But a single delete of a frame, channel, or cspace
-  cap — or a nondet CDT shape layered on a delete — unrolls the recursive
-  teardown into a formula that blows past the CI budget (many minutes). So
-  the frame-unmap / peer-closed-fire-order / container-teardown behaviours
-  are **not** Kani proofs; they are covered by the TLC-checked `CapRevocation`
-  TSpec, the `delete` source order, and the QEMU suites (`m1-test.sh` step 6,
-  `spawn-test.sh` reclaim loop) — see `kcore/src/proofs/teardown.rs`. Lifting
-  the wall (e.g. `-Z stubbing` the `destroy_*` recursion, or a function
-  contract on `obj_unref`) is deferred future work, not an unsound bound.
+- **DN-4 — `delete`'s recursive teardown CBMC wall — RESOLVED (`-Z stubbing`).**
+  `delete` dispatches through `obj_unref`, whose `match` is on a cap kind read
+  from slot memory; CBMC does not constant-fold it, so when a `delete` is the
+  *top-level* entry every arm is explored — including `destroy_cspace` /
+  `destroy_channel` / `destroy_tcb`, which loop over slot counts and recurse
+  back into `delete`. This bites even a concrete `Frame` cap: the discriminant
+  is symbolic once stored to and reloaded from a slot, so the recursion unrolls
+  into a formula that never finishes unwinding (`check_delete_frame` without
+  stubs did not complete in 420 s). The original entry deferred frame-unmap,
+  fire-order, and container teardown to the TSpec + QEMU as a result.
+
+  These are now **real Kani proofs**, split so each piece is tractable and the
+  two compose (see `kcore/src/proofs/teardown.rs`):
+  - **Teardown bodies, by direct call** (entry is the destructor, no top-level
+    `obj_unref` → no recursion blowup): `check_destroy_cspace` (≈2.2 s, a dying
+    cspace deletes every resident), alongside the already-existing
+    `check_destroy_channel` (§4.3) and `check_thread_teardown` (§4.4) — the same
+    structural pattern.
+  - **`delete`/`obj_unref` dispatch, with the recursive arms stubbed** to
+    no-ops (`teardown::stub`, enabled by `-Z stubbing` on the kcore CI run):
+    `check_delete_frame` (≈9.1 s — the §2.5 mapped-frame `aspace_unmap` +
+    `unref_aspace`, whose logic lives in `delete` itself and calls none of the
+    stubbed destructors) and `check_delete_cspace` (≈1.1 s — the
+    `CapKind::CSpace => destroy_cspace` routing + refcount-to-zero). Stubbing
+    removes only the recursion CBMC cannot prune cheaply; the bodies it would
+    re-derive are the direct proofs above. Generic-fn stubbing was confirmed
+    working under cargo-kani 0.67.0; enabling `-Z stubbing` did not regress the
+    non-stubbed harnesses (`check_revoke`, `check_delete_reparent` re-verified).
+
+  Fire-before-reclaim on a real `delete` remains `check_teardown_fire_safe`
+  (§4.3, TSpec `ChannelFireSafe`; DN-2 for the universal claim). The residual,
+  stated honestly: **deeply nested** container teardown (a container whose
+  resident is itself a live container → multi-level recursion) stays TSpec +
+  QEMU-covered (`spawn-test.sh` reclaim loop); the proofs here cover one level
+  of recursion with leaf (notification) residents.
 
 - **DN-3 — the CDT is a forest, not a single tree.** The kernel installs
   several parentless root caps directly (the boot caps in `kernel/src/main.rs`:
@@ -125,6 +144,9 @@ machine (cargo-kani 0.67.0); CI runners differ but the ratios hold.
 | negatives (×4) | minimal | <2 s each |
 | `check_revoke` | `World` (28 slots) | ~193 s |
 | `check_delete_reparent` | concrete 3-node | ~3 s |
+| `check_destroy_cspace` | `World`, 2 notif residents | ~2 s |
+| `check_delete_frame` | `World`, stubbed destructors | ~9 s |
+| `check_delete_cspace` | `World`, stubbed destructors | ~1 s |
 | `check_cdt_transition_system` | bare pool, K=2 | ~131 s (K=3 ≈ 297 s) |
 
 A 6-slot pool put `check_cdt_insert_child` at ~387 s (over budget); 4 slots —
