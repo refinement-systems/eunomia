@@ -19,7 +19,9 @@ use crate::env::KernelEnv;
 use kcore::cspace::CapSlot;
 use core::ptr;
 
-pub const NUM_PRIOS: usize = 32;
+// Canonical definition lives in kcore::sysabi (shared with the syscall
+// decoder's priority-range check, plan §2.5).
+pub use kcore::sysabi::NUM_PRIOS;
 
 /// See [`kcore::thread::report_terminal`].
 pub unsafe fn report_terminal(t: *mut Tcb, r: Report) {

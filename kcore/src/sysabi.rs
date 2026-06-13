@@ -1,0 +1,165 @@
+//! Syscall ABI decode + validation (spec §3.7, plan §2.5). The pure half of
+//! `kernel/src/syscall.rs`: turn the raw register file `(nr, a[0..6])` into a
+//! typed [`Sys`] value, performing every check that needs **no** capability or
+//! thread state — `ObjType` totality, the message-length cap before
+//! `channel::send`'s `as u16` truncation, the event/which/priority ranges. The
+//! kernel consumes the `Sys` value and does the capability lookup, rights
+//! checks, user-pointer validation, and the operation itself (all of which
+//! need live state and stay kernel-side).
+//!
+//! `decode` is **total**: for any `(nr, a) : u64⁷` it returns `Ok(Sys)` or
+//! `Err(SysError)`, never panics, never overflows, never UB — an unknown
+//! `nr` is an error, never a crash (spec §3.7). This makes "no
+//! user-controlled value reaches kernel arithmetic unvalidated" a checked
+//! property (`kcore::proofs::sysabi`) rather than a review convention.
+//!
+//! No pointers, no `unsafe`, no kernel dependencies — pure data.
+
+use crate::channel::MSG_PAYLOAD;
+use crate::untyped::ObjType;
+
+/// Scheduler priority levels. Canonical home (the kernel's ready-queue array
+/// and this decoder's range check share it); `kernel::thread` re-exports it.
+pub const NUM_PRIOS: usize = 32;
+
+/// A decoded, shape-validated syscall. Slot indices stay `u64` — the
+/// cspace-size bound is `CSpaceObj::slot`'s job at *use* time (kernel
+/// `cur_slot`), so error codes and ordering for bad slots are unchanged.
+/// Fields that decode *does* validate are stored in their narrowed form
+/// (`ObjType`, `event`/`which : usize`, `prio : u8`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sys {
+    DebugPutc { ch: u64 },
+    DebugWrite { ptr: u64, len: u64 },
+    Yield,
+    Retype { ut: u64, ty: ObjType, param: u64, dst: u64, dst2: u64 },
+    CapCopy { src: u64, dst: u64, mask: u64 },
+    CapDelete { slot: u64 },
+    CapRevoke { slot: u64 },
+    CapInstall { cs: u64, src: u64, dst_index: u64 },
+    ChanSend { chan: u64, buf: u64, len: u64, caps: u64 },
+    ChanRecv { chan: u64, buf: u64, dests: u64 },
+    ChanBind { chan: u64, event: usize, notif: u64, bits: u64 },
+    NotifSignal { slot: u64, bits: u64 },
+    NotifWait { slot: u64 },
+    ThreadStart { tcb: u64, cspace: u64, entry: u64, sp: u64, prio: u8, arg: u64 },
+    TimerArm { timer: u64, notif: u64, bits: u64, delta: u64 },
+    ThreadExit { status: u64 },
+    Map { aspace: u64, frame: u64, va: u64, perms: u64 },
+    FrameWrite { frame: u64, off: u64, buf: u64, len: u64 },
+    ThreadStartAs { tcb: u64, cspace: u64, aspace: u64, entry: u64, sp: u64, prio: u8 },
+    FramePaddr { slot: u64 },
+    DebugGetc,
+    ThreadBind { tcb: u64, which: usize, notif: u64, bits: u64 },
+    ReadReport { tcb: u64 },
+    UntypedReset { slot: u64 },
+}
+
+/// A decode-time validation failure. The kernel maps every variant to
+/// `ERR_ARG` (the code each of these conditions already returns), so the
+/// observable errno is unchanged for well-formed-but-rejected requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SysError {
+    UnknownCall,
+    BadObjType,
+    MsgTooLong,
+    BadEvent,
+    BadWhich,
+    BadPrio,
+}
+
+fn decode_prio(raw: u64) -> Result<u8, SysError> {
+    let prio = (raw & 0xFF) as u8;
+    if prio as usize >= NUM_PRIOS {
+        return Err(SysError::BadPrio);
+    }
+    Ok(prio)
+}
+
+/// Decode the register file into a typed syscall (plan §2.5). `nr` is x7;
+/// `a` is x0..x5 (the kernel's trap-frame read — six argument registers).
+pub fn decode(nr: u64, a: [u64; 6]) -> Result<Sys, SysError> {
+    Ok(match nr {
+        0 => Sys::DebugPutc { ch: a[0] },
+        1 => Sys::DebugWrite { ptr: a[0], len: a[1] },
+        2 => Sys::Yield,
+        3 => {
+            let ty = ObjType::from_u64(a[1]).ok_or(SysError::BadObjType)?;
+            Sys::Retype { ut: a[0], ty, param: a[2], dst: a[3], dst2: a[4] }
+        }
+        4 => Sys::CapCopy { src: a[0], dst: a[1], mask: a[2] },
+        5 => Sys::CapDelete { slot: a[0] },
+        6 => Sys::CapRevoke { slot: a[0] },
+        7 => Sys::CapInstall { cs: a[0], src: a[1], dst_index: a[2] },
+        8 => {
+            // Length is capped here, before channel::send truncates it `as u16`.
+            if a[2] > MSG_PAYLOAD as u64 {
+                return Err(SysError::MsgTooLong);
+            }
+            Sys::ChanSend { chan: a[0], buf: a[1], len: a[2], caps: a[3] }
+        }
+        9 => Sys::ChanRecv { chan: a[0], buf: a[1], dests: a[2] },
+        10 => {
+            if a[1] > 2 {
+                return Err(SysError::BadEvent);
+            }
+            Sys::ChanBind { chan: a[0], event: a[1] as usize, notif: a[2], bits: a[3] }
+        }
+        11 => Sys::NotifSignal { slot: a[0], bits: a[1] },
+        12 => Sys::NotifWait { slot: a[0] },
+        13 => {
+            let prio = decode_prio(a[4])?;
+            Sys::ThreadStart { tcb: a[0], cspace: a[1], entry: a[2], sp: a[3], prio, arg: a[5] }
+        }
+        14 => Sys::TimerArm { timer: a[0], notif: a[1], bits: a[2], delta: a[3] },
+        15 => Sys::ThreadExit { status: a[0] },
+        16 => Sys::Map { aspace: a[0], frame: a[1], va: a[2], perms: a[3] },
+        17 => Sys::FrameWrite { frame: a[0], off: a[1], buf: a[2], len: a[3] },
+        18 => {
+            let prio = decode_prio(a[5])?;
+            Sys::ThreadStartAs { tcb: a[0], cspace: a[1], aspace: a[2], entry: a[3], sp: a[4], prio }
+        }
+        19 => Sys::FramePaddr { slot: a[0] },
+        20 => Sys::DebugGetc,
+        21 => {
+            if a[1] > 1 {
+                return Err(SysError::BadWhich);
+            }
+            Sys::ThreadBind { tcb: a[0], which: a[1] as usize, notif: a[2], bits: a[3] }
+        }
+        22 => Sys::ReadReport { tcb: a[0] },
+        23 => Sys::UntypedReset { slot: a[0] },
+        _ => return Err(SysError::UnknownCall),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_calls_decode() {
+        assert_eq!(decode(0, [b'x' as u64, 0, 0, 0, 0, 0]), Ok(Sys::DebugPutc { ch: b'x' as u64 }));
+        assert_eq!(decode(2, [0; 6]), Ok(Sys::Yield));
+        assert_eq!(
+            decode(8, [1, 0x1000, MSG_PAYLOAD as u64, 0, 0, 0]),
+            Ok(Sys::ChanSend { chan: 1, buf: 0x1000, len: MSG_PAYLOAD as u64, caps: 0 })
+        );
+    }
+
+    #[test]
+    fn validation_rejects() {
+        assert_eq!(decode(99, [0; 6]), Err(SysError::UnknownCall));
+        assert_eq!(decode(3, [0, 99, 0, 0, 0, 0]), Err(SysError::BadObjType)); // bad ObjType
+        assert_eq!(decode(8, [0, 0, MSG_PAYLOAD as u64 + 1, 0, 0, 0]), Err(SysError::MsgTooLong));
+        assert_eq!(decode(10, [0, 3, 0, 0, 0, 0]), Err(SysError::BadEvent)); // event > 2
+        assert_eq!(decode(21, [0, 2, 0, 0, 0, 0]), Err(SysError::BadWhich)); // which > 1
+        assert_eq!(decode(13, [0, 0, 0, 0, NUM_PRIOS as u64, 0]), Err(SysError::BadPrio));
+    }
+
+    #[test]
+    fn prio_is_masked_then_bounded() {
+        // Low byte < NUM_PRIOS decodes; the high bits are ignored.
+        assert_eq!(decode(13, [0, 0, 0, 0, 0xFF00 | 5, 0]), Ok(Sys::ThreadStart { tcb: 0, cspace: 0, entry: 0, sp: 0, prio: 5, arg: 0 }));
+    }
+}
