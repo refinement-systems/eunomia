@@ -14,6 +14,14 @@
 //! those bodies a second time through the dispatch. A harness whose pool holds
 //! only leaf (notification) caps stubs these purely to prune the infeasible
 //! arms — the behaviour is unchanged, only the formula shrinks.
+//!
+//! These no-ops are not *silent*: each records a `GhostEvent` for the
+//! destructor arm `obj_unref` dispatched to (review-2 rec. 3, finding part 12),
+//! so a `check_delete_*` harness asserts the routing (`count(DestroyCspace(p))
+//! == 1`) rather than trusting the one-line `match` arm by source inspection —
+//! the same way `check_delete_frame` already witnesses its `AspaceUnmap`. The
+//! hook is a proof-only `Env` method (`Env::ghost_destroy_*`, `#[cfg(kani)]`),
+//! the only handle to harness state these *generic* stubs have.
 
 #![cfg(kani)]
 
@@ -22,6 +30,12 @@ use crate::cspace::CSpaceObj;
 use crate::env::Env;
 use crate::thread::Tcb;
 
-pub unsafe fn no_destroy_cspace<E: Env>(_cs: *mut CSpaceObj, _env: &mut E) {}
-pub unsafe fn no_destroy_channel<E: Env>(_ch: *mut Channel, _env: &mut E) {}
-pub unsafe fn no_destroy_tcb<E: Env>(_t: *mut Tcb, _env: &mut E) {}
+pub unsafe fn no_destroy_cspace<E: Env>(cs: *mut CSpaceObj, env: &mut E) {
+    env.ghost_destroy_cspace(cs);
+}
+pub unsafe fn no_destroy_channel<E: Env>(ch: *mut Channel, env: &mut E) {
+    env.ghost_destroy_channel(ch);
+}
+pub unsafe fn no_destroy_tcb<E: Env>(t: *mut Tcb, env: &mut E) {
+    env.ghost_destroy_tcb(t);
+}

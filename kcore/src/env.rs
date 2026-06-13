@@ -18,6 +18,10 @@
 //! call-site-compatible with what is here today.
 
 use crate::aspace::AspaceObj;
+#[cfg(kani)]
+use crate::channel::Channel;
+#[cfg(kani)]
+use crate::cspace::CSpaceObj;
 use crate::thread::Tcb;
 use crate::timer::TimerObj;
 
@@ -69,4 +73,21 @@ pub trait Env {
     /// kernel has no global pool and the proofs own their state explicitly.
     unsafe fn timer_armed_head(&mut self) -> *mut TimerObj;
     unsafe fn set_timer_armed_head(&mut self, head: *mut TimerObj);
+
+    /// Proof-only DN-4 routing witnesses. The bounded teardown harnesses stub
+    /// the recursive container destructors (`destroy_cspace`/`destroy_channel`/
+    /// `destroy_tcb`) to no-ops so a top-level `delete` stays tractable under
+    /// CBMC; these hooks let the no-op stub record *which* destructor arm
+    /// `obj_unref` dispatched to, so `check_delete_cspace`/`_channel`/`_tcb`
+    /// assert the routing instead of trusting source inspection (review-2
+    /// rec. 3, `doc/results/14_kani-review-2.md` / `15_kani-findings-12.md`).
+    /// The kernel `Env` and the real destructors never call them; default
+    /// no-ops, `GhostEnv` overrides to log. `#[cfg(kani)]` so they never reach
+    /// the production trait surface.
+    #[cfg(kani)]
+    unsafe fn ghost_destroy_cspace(&mut self, _cs: *mut CSpaceObj) {}
+    #[cfg(kani)]
+    unsafe fn ghost_destroy_channel(&mut self, _ch: *mut Channel) {}
+    #[cfg(kani)]
+    unsafe fn ghost_destroy_tcb(&mut self, _t: *mut Tcb) {}
 }

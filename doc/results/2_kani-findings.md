@@ -76,6 +76,13 @@ the current spec; each is revisited only if the spec changes.
   QEMU-covered (`spawn-test.sh` reclaim loop); the proofs here cover one level
   of recursion with leaf (notification) residents.
 
+  *Routing now witnessed (review-2 rec. 3, `15_kani-findings-12.md`):* the
+  stubs are no longer silent — each records a `GhostEvent` for the destructor
+  arm `obj_unref` dispatched to, so `check_delete_cspace` and the new
+  `check_delete_channel`/`check_delete_tcb` analogs *assert* the dispatch
+  reached the right teardown (the way `check_delete_frame` already witnesses its
+  `AspaceUnmap`), closing the one-level dispatch's last source-only seam.
+
 - **DN-12 — destructive ops don't fit a *nondet multi-step* transition
   harness (post-DN-4).** Closing DN-4 made *single concrete* `delete`s
   tractable, but **not** K independent nondet deletes: putting `delete`/`revoke`

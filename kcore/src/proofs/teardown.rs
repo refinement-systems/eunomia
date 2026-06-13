@@ -46,7 +46,7 @@ use super::bounds::POOL_SLOTS;
 use super::ghost::{GhostEnv, GhostEvent};
 use super::wf::{cdt_wf, refcount_sound};
 use super::world::{BarePool, World};
-use crate::cspace::{self, Cap, CapKind, Rights};
+use crate::cspace::{self, Cap, CapKind, ChanEnd, Rights};
 use crate::thread::BIND_EXIT;
 
 #[kani::proof]
@@ -245,5 +245,69 @@ fn check_delete_cspace() {
         // refs hit zero → obj_unref took the zero-ref branch and, cs1 being a
         // cspace, the only feasible arm is destroy_cspace (stubbed here).
         assert!((*cs1).hdr.refs == 0);
+        // And the routing is *witnessed*, not inferred: the stub recorded that
+        // obj_unref reached the cspace teardown arm exactly once (review-2
+        // rec. 3 — the DN-4 ghost witness).
+        assert!(w.env.count(GhostEvent::DestroyCspace(cs1)) == 1);
+    }
+}
+
+/// `check_delete_channel` (review-2 rec. 3, the channel analog of
+/// `check_delete_cspace`): deleting the last cap to a channel drops its
+/// refcount to zero and routes through `CapKind::Channel(p, _) =>
+/// destroy_channel(p)`. `destroy_channel` is stubbed (DN-4); the body is the
+/// real proof `check_destroy_channel` (§4.3). The cap is end A's last cap, so
+/// `delete` first fires the peer-closed event (`endpoint_cap_dropped`,
+/// `end_caps[A]`: 1→0) into end B's binding — null here, a no-op — before
+/// `obj_unref`; the ghost witness then confirms the routing reached
+/// `destroy_channel`.
+#[kani::proof]
+#[kani::unwind(6)]
+#[kani::stub(crate::cspace::destroy_cspace, super::stubs::no_destroy_cspace)]
+#[kani::stub(crate::channel::destroy_channel, super::stubs::no_destroy_channel)]
+#[kani::stub(crate::thread::destroy_tcb, super::stubs::no_destroy_tcb)]
+fn check_delete_channel() {
+    let mut w = World::new();
+    unsafe {
+        let ch = w.channel();
+        (*ch).hdr.refs = 1; // the cap under test is the last ref
+        (*ch).end_caps[0] = 1; // end A's last cap → peer-closed fires (no binding)
+        let s = w.cspace_slot(0, 0);
+        (*s).cap = Cap { kind: CapKind::Channel(ch, ChanEnd::A), rights: Rights::ALL };
+
+        cspace::delete(s, &mut w.env);
+
+        assert!((*s).cap.is_empty());
+        assert!((*s).parent.is_null());
+        assert!((*ch).hdr.refs == 0);
+        assert!(w.env.count(GhostEvent::DestroyChannel(ch)) == 1);
+    }
+}
+
+/// `check_delete_tcb` (review-2 rec. 3, the TCB analog): deleting the last
+/// thread cap drops the TCB refcount to zero and routes through
+/// `CapKind::Thread(p) => destroy_tcb(p)`. `destroy_tcb` is stubbed (DN-4); the
+/// body is the real proof `check_thread_teardown` (§4.4). A Thread cap takes no
+/// channel/frame side path in `delete`, so the ghost witness is the whole
+/// observable routing.
+#[kani::proof]
+#[kani::unwind(6)]
+#[kani::stub(crate::cspace::destroy_cspace, super::stubs::no_destroy_cspace)]
+#[kani::stub(crate::channel::destroy_channel, super::stubs::no_destroy_channel)]
+#[kani::stub(crate::thread::destroy_tcb, super::stubs::no_destroy_tcb)]
+fn check_delete_tcb() {
+    let mut w = World::new();
+    unsafe {
+        let t = w.tcb(0);
+        (*t).hdr.refs = 1; // World::new zeroes tcb refs; the cap is the last ref
+        let s = w.cspace_slot(0, 0);
+        (*s).cap = Cap { kind: CapKind::Thread(t), rights: Rights::ALL };
+
+        cspace::delete(s, &mut w.env);
+
+        assert!((*s).cap.is_empty());
+        assert!((*s).parent.is_null());
+        assert!((*t).hdr.refs == 0);
+        assert!(w.env.count(GhostEvent::DestroyTcb(t)) == 1);
     }
 }
