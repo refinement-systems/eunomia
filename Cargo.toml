@@ -11,6 +11,7 @@ members = [
     "loader",
     "mkfs",
     "urt",
+    "scratchpad",
 ]
 # cargo-fuzz crates are standalone workspaces (own target dir, own nightly
 # profile with debug-assertions/overflow-checks forced on); keep them out
