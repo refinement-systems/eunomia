@@ -1,7 +1,7 @@
 # Kani verification findings — part 6 (§4.6 syscall decode + the §2.5 split)
 
 Continuation of `doc/results/2_kani-findings.md` (§4.1) through
-`6_kani-findings_6.md` (§4.5) for the syscall-ABI suite (plan
+`6_kani-findings-5.md` (§4.5) for the syscall-ABI suite (plan
 `doc/plans/0_kani-rewrite.md` §4.6). Harnesses live in
 `kcore/src/proofs/sysabi.rs` under `#[cfg(kani)]` and run via `cargo kani -p
 kcore` (CI job `kani`, pinned cargo-kani **0.67.0**). The standing caveat, the
