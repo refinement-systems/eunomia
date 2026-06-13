@@ -13,7 +13,12 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+pub mod header;
 pub mod sys;
+
+/// Kani harnesses (plan §4.7), compiled only under `cargo kani`.
+#[cfg(kani)]
+mod proofs;
 
 // ── Milestone M1 work items ──────────────────────────────────────────────────
 
