@@ -8,7 +8,12 @@ touching any component. Section numbers below refer to that document.
 ## Workspace layout
 
 ```
-kernel/          AArch64 bare-metal microkernel (aarch64-unknown-none)
+kernel/          AArch64 bare-metal microkernel (aarch64-unknown-none) —
+                 the architectural shell over kcore (boot, MMU, GIC, sched)
+kcore/           Host-buildable kernel object core: cspace/CDT, untyped,
+                 channels, notifications, thread/timer objects, aspace data;
+                 Kani-verified (§6, doc/plans/0_kani-rewrite.md). no_std,
+                 zero deps; the kernel links it, hardware behind the Env seam
 ipc/             Async IPC crate — shared by all userspace servers (§3.5)
 dma-pool/        DMA buffer pool — the only place PAs are visible (§2.5)
 cas/             CAS primitives: chunker, prolly tree, commit protocol (§4)
@@ -71,6 +76,21 @@ cargo test -p cas
 #     -p cas -p loader -p storage-server \
 #     --test fuzz_regressions --test fuzz_corpus
 cargo +nightly miri test -p cas
+```
+
+### Kani (kernel object core, host)
+
+cargo-kani is **pinned at 0.67.0** (CI installs that exact version; upgrades
+are deliberate PRs that re-run the suite). Run from the repo root — never
+inside `kernel/`, whose `.cargo/config.toml` forces the bare-metal target
+Kani can't drive. The CDT/teardown suite runs in a few minutes; the
+nondet-shape harnesses dominate (`doc/results/2_kani-findings.md` tracks
+per-harness times and the bounds).
+
+```sh
+cargo kani -p kcore                                  # full proof suite
+cargo kani -p kcore --harness check_revoke           # one harness
+cargo test -p kcore                                  # wf predicates as unit tests
 ```
 
 ### TLA+ specs
@@ -315,13 +335,25 @@ non-`#[inline(always)]` helpers in user.rs.
 | Tool | Scope | When |
 |------|-------|------|
 | TLA+ / TLC | commit protocol, cap revocation | Before respective milestone |
-| Verus | cspace/CDT ops, kernel allocator | Written in Verus dialect from day one |
-| Kani | kernel data-structure invariants | During kernel development |
+| Kani | kernel object core (`kcore`): cspace/CDT, untyped, refcounts | During kernel development |
+| ~~Verus~~ | (superseded — see note) | — |
 | Loom / Shuttle | IPC crate, userspace servers | During M1+ development |
 | Miri + proptest | everything; chunker + prolly tree esp. | Continuous |
 | cargo-fuzz | IPC decoder, postcard payloads | From M1 |
 
 The IPC crate (`ipc/`) is the first serious Loom/Shuttle target (§3.5).
+
+**Deviation from the §6 spec table (`doc/plans/0_kani-rewrite.md`).** The spec
+assigned cspace/CDT and the allocator to **Verus** ("written in Verus dialect
+from day one"); that did not happen — the kernel predated any verification
+tooling. Per the Kani rewrite plan, **Kani is the mechanized tier for the
+kernel implementation**: the object machinery was extracted into the
+host-buildable `kcore` crate and the §4.1 CDT suite re-checks the
+CapRevocation TLA+ invariants on the real code (`cargo kani -p kcore`). The
+rewrite's shape (explicit `wf()` predicates, the `Env` hardware seam, no
+int→ptr in the core) is also what a later Verus port would need, so Verus is
+preserved as an option, not foreclosed. Findings and bounds:
+`doc/results/2_kani-findings.md`.
 
 ### Continuous integration
 
@@ -338,6 +370,13 @@ The IPC crate (`ipc/`) is the first serious Loom/Shuttle target (§3.5).
   (`scripts/spawn-test.sh`: the 100× burn loop, status propagation, the
   wild-pointer fault demo + re-spawn, the panic path, the time grant) plus
   the M1 cap-mechanism EL0 test (`scripts/m1-test.sh`).
+- **kani** — `cargo kani -p kcore` (pinned cargo-kani 0.67.0, cached with its
+  CBMC backend): the §4.1 CDT/teardown proof suite, re-checking the
+  CapRevocation invariants on the real code. No `--harness` filter, so a new
+  harness gates automatically.
+- **layering** — greps `kcore/src` for the §2.2 violations CBMC can't model
+  (`asm!`/`global_asm!`, `as *mut`/`as *const`); kcore uses `.cast()` for
+  every pointer-to-pointer conversion.
 
 `.github/workflows/fuzz.yml` is separate (corpus replay per PR; nightly hunt).
 

@@ -107,6 +107,7 @@ machine (cargo-kani 0.67.0); CI runners differ but the ratios hold.
 | negatives (×4) | minimal | <2 s each |
 | `check_revoke` | `World` (28 slots) | ~193 s |
 | `check_delete_reparent` | concrete 3-node | ~3 s |
+| `check_cdt_transition_system` | bare pool, K=2 | ~131 s (K=3 ≈ 297 s) |
 
 A 6-slot pool put `check_cdt_insert_child` at ~387 s (over budget); 4 slots —
 which is exactly TLA `CapIds` — brings the nondet-shape harnesses well under
