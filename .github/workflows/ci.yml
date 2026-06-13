@@ -23,6 +23,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo test (workspace minus kernel)
         run: cargo test --workspace --exclude kernel
+      - name: exhaustive CDT replays (cheap depth — continuous regression guard)
+        # The mini-TLC replays (kcore::proofs::exhaustive) are #[ignore]d so the
+        # deep depths stay off the per-PR path (scripts/deep-verify.sh / the
+        # kani-deep job). Run them here at depth 3 — milliseconds-to-~0.2 s — so
+        # the CDT-algebra composition AND the revoke-through-queue/TCB-bind-slot
+        # coverage are exercised on every PR, not only by hand.
+        run: EXHAUSTIVE_DEPTH=3 CROSS_HOME_DEPTH=3 cargo test -p kcore exhaustive -- --ignored --nocapture
 
   # Rerun the TLA+ proofs. Both the CapRevocation safety model (incl. the
   # §3.3 channel whole-object teardown TSpec) and the CommitProtocol model

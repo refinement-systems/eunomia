@@ -105,23 +105,28 @@ division, a large symbolic free-list, or `Vec`-parsing) must be bounded,
 made concrete, or scoped to another tier and documented — never left to hang.
 
 **Deep, off-CI supplements (`scripts/deep-verify.sh`, ⚠ HEAVY — run
-sparingly).** Not part of `cargo test`, CI, or the per-PR Kani job; recommended
-in `doc/results/14_kani-review-2.md`. Two checks the per-PR suite can't afford:
-- `bash scripts/deep-verify.sh replay` — the "mini-TLC": an exhaustive
-  plain-Rust enumeration of **every** CDT op sequence (derive/move/delete/
-  **revoke**) up to `EXHAUSTIVE_DEPTH` (default 5 ≈ 100M sequences, ~15 s),
-  asserting `cdt_wf` + the refcount census after each step. This is the
-  multi-op composition coverage CBMC OOMs on (finding DN-12) and the only check
-  that exercises `revoke` over all reachable shapes. It is an `#[ignore]`d
-  `kcore` test (`proofs::exhaustive`); run directly with
-  `EXHAUSTIVE_DEPTH=6 cargo test -p kcore --release exhaustive_cdt_replay -- --ignored --nocapture`.
-- `bash scripts/deep-verify.sh kani` — the additive transition harness at K=4
-  (the `KANI_DEEP` compile knob widens `bounds::K_STEPS`; CI stays at K=3 for
-  budget). Tens of minutes or OOM — expected off-CI. Widening object-count
-  bounds (`POOL_SLOTS` etc.) is a separate manual edit (bump the
-  `#[kani::unwind]` literals in lockstep — see `kcore/src/proofs/bounds.rs`).
+sparingly).** The "more exhaustive" tier from `doc/results/14_kani-review-2.md`.
+The per-PR `ci.yml` runs the replays at a *cheap* depth (`host-tests`) and Kani
+at TLC-scale bounds; this script runs them much deeper / wider, and the
+`kani-deep.yml` workflow runs it weekly (and on `workflow_dispatch`).
+- `bash scripts/deep-verify.sh replay` — the "mini-TLC" host tests
+  (`kcore::proofs::exhaustive`, `#[ignore]`d): exhaustive plain-Rust enumeration
+  of **every** CDT op sequence (derive/move/delete/**revoke**), asserting
+  `cdt_wf` + the refcount census (+ `chan_wf`) after each step — the multi-op
+  composition coverage CBMC OOMs on (DN-12). Two tests:
+  `exhaustive_cdt_replay` (BarePool, all reachable trees, `EXHAUSTIVE_DEPTH`
+  default 5) and `exhaustive_cross_home_replay` (World; the only check of
+  **revoke seen through a channel-queue slot AND a TCB binding slot** over all
+  shapes, `CROSS_HOME_DEPTH` default 4). CI runs both at depth 3.
+- `bash scripts/deep-verify.sh kani` — the composition CDT harnesses
+  (`check_cdt_transition_system`, `check_delete_step`) at **widened bounds**
+  (`POOL_SLOTS` 4→6, transition K 3→4) via the `kani_deep` cargo feature; their
+  `#[kani::unwind]` literals switch with the feature through `cfg_attr`. Tens of
+  minutes or OOM — expected off-CI. Only those two carry the cfg_attr unwind, so
+  only those two are run under the feature (see `kcore/src/proofs/bounds.rs`).
 On macOS the Bash-tool timeout does not reap a detached `cargo kani`'s solver
-children, so guard a run with `sleep N; pkill -9 cbmc kissat cadical`.
+children, so guard a run with `sleep N; pkill -9 cbmc kissat cadical` (the
+script installs an exit trap that does this).
 
 ### TLA+ specs
 
