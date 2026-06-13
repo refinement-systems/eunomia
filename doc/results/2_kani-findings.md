@@ -108,6 +108,22 @@ the current spec; each is revisited only if the spec changes.
   spawns a spurious unreachable sub-cover; use `==`.) Full write-up:
   `doc/results/11_kani-findings-9.md`.
 
+- **DN-14 — `-Z function-contracts` can't `modifies` the cap-algebra teardown
+  (review rec. #6 spike).** Function contracts verify on kcore's *value-level*
+  refcount discipline — `unref_cspace`, whose modified object is a direct pointer
+  parameter, proves under `proof_for_contract` (~0.3 s). But on `delete` they hit
+  a wall: `delete` writes the **designated object's** header (via `obj_unref`,
+  through the cap's *embedded* pointer) and the CDT neighbours at runtime-
+  determined addresses, none nameable as a `modifies` place from `delete`'s
+  signature — `contract_delete_leaf` fails `Check that h->refs is assignable` even
+  for an isolated leaf. So contract-replacement of the `delete`↔`obj_unref`
+  recursion (the route to residuals 1–2) is blocked at cargo-kani 0.67.0, and a
+  `revoke` `loop_invariant` can't even be `cfg_attr`-gated (custom attrs on a loop
+  *expression* are unstable). The standing instrument for those residuals stays
+  the exhaustive plain-Rust replay (DN-12, `proofs::exhaustive`). The spike is
+  preserved behind the `kani_contracts` feature (`deep-verify.sh contracts`),
+  inert in every other build. Full write-up: `doc/results/18_kani-findings-15.md`.
+
 - **DN-3 — the CDT is a forest, not a single tree.** The kernel installs
   several parentless root caps directly (the boot caps in `kernel/src/main.rs`:
   the untyped, device/RTC frames, the init aspace), so there is no unique
