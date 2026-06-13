@@ -476,9 +476,11 @@ confirmed bugs until a counterexample or proof says so:
 Extend `.github/workflows/ci.yml` with a fourth job:
 
 - **kani** — `cargo kani -p kcore` (and `-p urt -p ipc …` as phases land),
-  pinned cargo-kani version installed via `cargo install --locked
-  cargo-kani --version <pin>` + `cargo kani setup` (cached); runs on every
-  PR and push to main, parallel to `host-tests` / `model` / `on-os`.
+  pinned Kani installed via `cargo install --locked kani-verifier
+  --version <pin>` (the crate that ships the `cargo-kani`/`kani` binaries —
+  there is no `cargo-kani` crate on crates.io) + `cargo kani setup` (cached);
+  runs on every PR and push to main, parallel to `host-tests` / `model` /
+  `on-os`.
 - Budget: each harness ≤ ~5 min solver time, whole job ≤ ~30 min. A
   harness that outgrows the budget is split or has its bound documented
   and reduced — never silently skipped (the §6 no-silent-caps discipline).
