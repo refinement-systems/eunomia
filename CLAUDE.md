@@ -103,6 +103,23 @@ cargo kani -p cas -Z stubbing                        # cas superblock (blake3 st
 A harness that does not terminate (CBMC blow-up — e.g. symbolic `u128`
 division, a large symbolic free-list, or `Vec`-parsing) must be bounded,
 made concrete, or scoped to another tier and documented — never left to hang.
+
+**Deep, off-CI supplements (`scripts/deep-verify.sh`, ⚠ HEAVY — run
+sparingly).** Not part of `cargo test`, CI, or the per-PR Kani job; recommended
+in `doc/results/14_kani-review-2.md`. Two checks the per-PR suite can't afford:
+- `bash scripts/deep-verify.sh replay` — the "mini-TLC": an exhaustive
+  plain-Rust enumeration of **every** CDT op sequence (derive/move/delete/
+  **revoke**) up to `EXHAUSTIVE_DEPTH` (default 5 ≈ 100M sequences, ~15 s),
+  asserting `cdt_wf` + the refcount census after each step. This is the
+  multi-op composition coverage CBMC OOMs on (finding DN-12) and the only check
+  that exercises `revoke` over all reachable shapes. It is an `#[ignore]`d
+  `kcore` test (`proofs::exhaustive`); run directly with
+  `EXHAUSTIVE_DEPTH=6 cargo test -p kcore --release exhaustive_cdt_replay -- --ignored --nocapture`.
+- `bash scripts/deep-verify.sh kani` — the additive transition harness at K=4
+  (the `KANI_DEEP` compile knob widens `bounds::K_STEPS`; CI stays at K=3 for
+  budget). Tens of minutes or OOM — expected off-CI. Widening object-count
+  bounds (`POOL_SLOTS` etc.) is a separate manual edit (bump the
+  `#[kani::unwind]` literals in lockstep — see `kcore/src/proofs/bounds.rs`).
 On macOS the Bash-tool timeout does not reap a detached `cargo kani`'s solver
 children, so guard a run with `sleep N; pkill -9 cbmc kissat cadical`.
 

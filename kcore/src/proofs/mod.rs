@@ -15,6 +15,10 @@
 pub mod bounds;
 #[cfg(kani)]
 pub mod aspace;
+// Heavy host-side exhaustive replay (the "mini-TLC"), `#[ignore]`d — fills the
+// multi-op composition gap CBMC OOMs on (DN-12). Not a Kani harness.
+#[cfg(test)]
+mod exhaustive;
 #[cfg(kani)]
 pub mod channel;
 #[cfg(kani)]

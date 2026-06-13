@@ -56,9 +56,10 @@ use crate::cspace::{self, Cap, CapKind, Rights};
 
 /// Op-sequence length for the additive harness. Raised from 2 → 3 (review
 /// `9_kani-review.md` rec. #2 / §3 "4–6 steps" policy): K = 3 interleaves
-/// three derive/move ops over the pool. Raising further is a one-line change,
+/// three derive/move ops over the pool. Sourced from [`super::bounds::K_STEPS`]
+/// so the `KANI_DEEP` knob (and any future bump) is a one-line change there,
 /// bounded by the per-harness CI budget (~5 min, plan §3, §8).
-const K: usize = 3;
+const K: usize = super::bounds::K_STEPS;
 
 fn notif_cap(n: *mut crate::notification::NotifObj) -> Cap {
     Cap { kind: CapKind::Notification(n), rights: Rights::ALL }
