@@ -18,7 +18,7 @@
 
 use crate::cspace::{self, Cap, CapKind, CapSlot, CSpaceObj, Rights};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjType {
     CSpace,
     Thread,

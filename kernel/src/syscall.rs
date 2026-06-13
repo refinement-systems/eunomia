@@ -12,10 +12,11 @@ use crate::channel::{self, ChanError, MSG_CAPS, MSG_PAYLOAD};
 use crate::cspace::{self, CapKind, CapSlot, CSpaceObj, Rights};
 use crate::mmu::{USER_BASE, USER_SIZE};
 use crate::notification;
-use crate::thread::{self, ThreadState, TrapFrame, NUM_PRIOS};
+use crate::thread::{self, ThreadState, TrapFrame};
 use crate::timer;
 use crate::untyped::{self, ObjType, RetypeError};
 use core::ptr;
+use kcore::sysabi::{self, Sys, SysError};
 
 pub const ERR_BADSLOT: i64 = -1;
 pub const ERR_TYPE: i64 = -2;
@@ -102,8 +103,19 @@ unsafe fn resolve_cap_list(
     Ok(())
 }
 
+/// Map a decode-time validation failure to the legacy errno. Every such
+/// condition returned `ERR_ARG` in the pre-split dispatch, so the observable
+/// code is unchanged (plan §2.5).
+fn errno_of(_e: SysError) -> i64 {
+    ERR_ARG
+}
+
 /// Returns Some(result for x0), or None when the thread blocked (its x0
 /// will be written by whoever wakes it).
+///
+/// The pure decode + argument validation lives in [`kcore::sysabi::decode`]
+/// (plan §2.5); this consumes the typed [`Sys`] and does the capability
+/// lookup, rights checks, user-pointer validation, and the operation.
 pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
     let nr = (*frame).x[7];
     let a = [
@@ -114,29 +126,37 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
         (*frame).x[4],
         (*frame).x[5],
     ];
-    match nr {
-        // debug_putc(ch)
-        0 => {
+    match sysabi::decode(nr, a) {
+        Ok(sys) => execute(sys, frame),
+        Err(e) => Some(errno_of(e)),
+    }
+}
+
+/// Execute a decoded syscall against live kernel state. Each arm is the
+/// pre-split dispatch arm with argument extraction removed (now done by
+/// `decode`); the capability lookup (`cur_slot`), rights checks, user-range
+/// validation, and operation are unchanged.
+unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
+    match sys {
+        Sys::DebugPutc { ch } => {
             use core::fmt::Write;
             let mut uart = crate::uart::Uart::new();
-            let _ = uart.write_char(a[0] as u8 as char);
+            let _ = uart.write_char(ch as u8 as char);
             Some(0)
         }
-        // debug_write(ptr, len)
-        1 => {
-            if !user_range_ok(a[0], a[1]) || a[1] > 1024 {
+        Sys::DebugWrite { ptr, len } => {
+            if !user_range_ok(ptr, len) || len > 1024 {
                 return Some(ERR_FAULT);
             }
             use core::fmt::Write;
             let mut uart = crate::uart::Uart::new();
-            for i in 0..a[1] {
-                let b = ((a[0] + i) as *const u8).read();
+            for i in 0..len {
+                let b = ((ptr + i) as *const u8).read();
                 let _ = uart.write_char(b as char);
             }
             Some(0)
         }
-        // yield
-        2 => {
+        Sys::Yield => {
             // Set our own return value before the frame may be swapped for
             // the incoming thread's — writing x0 after the switch would
             // clobber the winner's register state.
@@ -144,18 +164,14 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
             thread::maybe_switch(frame, true);
             None
         }
-        // retype(ut_slot, ty, param, dst_slot, dst2_slot)
-        3 => {
-            let ut = cur_slot(a[0]);
-            let dst = cur_slot(a[3]);
+        Sys::Retype { ut, ty, param, dst, dst2 } => {
+            let ut = cur_slot(ut);
+            let dst = cur_slot(dst);
             if ut.is_null() || dst.is_null() {
                 return Some(ERR_BADSLOT);
             }
-            let Some(ty) = ObjType::from_u64(a[1]) else {
-                return Some(ERR_ARG);
-            };
             let dst2 = if ty == ObjType::Channel {
-                let d2 = cur_slot(a[4]);
+                let d2 = cur_slot(dst2);
                 if d2.is_null() {
                     return Some(ERR_BADSLOT);
                 }
@@ -163,7 +179,7 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
             } else {
                 ptr::null_mut()
             };
-            Some(match untyped::retype(ut, ty, a[2], dst, dst2) {
+            Some(match untyped::retype(ut, ty, param, dst, dst2) {
                 Ok(()) => 0,
                 Err(RetypeError::NotUntyped) => ERR_TYPE,
                 Err(RetypeError::DestOccupied) => ERR_NOSLOT,
@@ -171,51 +187,49 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
                 Err(RetypeError::BadArg) => ERR_ARG,
             })
         }
-        // cap_copy(src, dst, rights_mask) — derive, monotone (§2.3)
-        4 => {
-            let src = cur_slot(a[0]);
-            let dst = cur_slot(a[1]);
+        // cap_copy — derive, monotone (§2.3)
+        Sys::CapCopy { src, dst, mask } => {
+            let src = cur_slot(src);
+            let dst = cur_slot(dst);
             if src.is_null() || dst.is_null() {
                 return Some(ERR_BADSLOT);
             }
-            Some(match cspace::derive(src, dst, a[2] as u8) {
+            Some(match cspace::derive(src, dst, mask as u8) {
                 Ok(()) => 0,
                 Err(()) => ERR_NOSLOT,
             })
         }
-        // cap_delete(slot)
-        5 => {
-            let s = cur_slot(a[0]);
+        Sys::CapDelete { slot } => {
+            let s = cur_slot(slot);
             if s.is_null() || (*s).cap.is_empty() {
                 return Some(ERR_BADSLOT);
             }
             cspace::delete(s);
             Some(0)
         }
-        // cap_revoke(slot)
-        6 => {
-            let s = cur_slot(a[0]);
+        Sys::CapRevoke { slot } => {
+            let s = cur_slot(slot);
             if s.is_null() || (*s).cap.is_empty() {
                 return Some(ERR_BADSLOT);
             }
             cspace::revoke(s);
             Some(0)
         }
-        // cap_install(cspace_cap_slot, src_slot, dst_index) — move a cap
-        // into another cspace (explicit child-cspace construction, §5.1).
-        7 => {
-            let cs_slot = cur_slot(a[0]);
-            let src = cur_slot(a[1]);
+        // cap_install — move a cap into another cspace (explicit child-cspace
+        // construction, §5.1).
+        Sys::CapInstall { cs, src, dst_index } => {
+            let cs_slot = cur_slot(cs);
+            let src = cur_slot(src);
             if cs_slot.is_null() || src.is_null() || (*src).cap.is_empty() {
                 return Some(ERR_BADSLOT);
             }
             let CapKind::CSpace(cs) = (*cs_slot).cap.kind else {
                 return Some(ERR_TYPE);
             };
-            if a[2] > u32::MAX as u64 {
+            if dst_index > u32::MAX as u64 {
                 return Some(ERR_ARG);
             }
-            let dst = CSpaceObj::slot(cs, a[2] as u32);
+            let dst = CSpaceObj::slot(cs, dst_index as u32);
             if dst.is_null() {
                 return Some(ERR_BADSLOT);
             }
@@ -225,9 +239,10 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
             cspace::slot_move(src, dst);
             Some(0)
         }
-        // chan_send(chan_slot, buf, len, cap_list_ptr)
-        8 => {
-            let s = cur_slot(a[0]);
+        // chan_send: `len` is already <= MSG_PAYLOAD (decode), so the
+        // `data.len() as u16` inside channel::send is lossless.
+        Sys::ChanSend { chan, buf, len, caps } => {
+            let s = cur_slot(chan);
             if s.is_null() {
                 return Some(ERR_BADSLOT);
             }
@@ -237,27 +252,24 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
             if !(*s).cap.rights.has(Rights::WRITE) {
                 return Some(ERR_PERM);
             }
-            if a[2] > MSG_PAYLOAD as u64 {
-                return Some(ERR_ARG);
-            }
-            if !user_range_ok(a[1], a[2]) {
+            if !user_range_ok(buf, len) {
                 return Some(ERR_FAULT);
             }
-            let data = core::slice::from_raw_parts(a[1] as *const u8, a[2] as usize);
-            let mut caps = [ptr::null_mut(); MSG_CAPS];
-            if let Err(e) = resolve_cap_list(a[3], &mut caps, true) {
+            let data = core::slice::from_raw_parts(buf as *const u8, len as usize);
+            let mut capslots = [ptr::null_mut(); MSG_CAPS];
+            if let Err(e) = resolve_cap_list(caps, &mut capslots, true) {
                 return Some(e);
             }
-            Some(match channel::send(ch, end, data, &caps) {
+            Some(match channel::send(ch, end, data, &capslots) {
                 Ok(()) => 0,
                 Err(ChanError::Full) => ERR_FULL,
                 Err(ChanError::PeerClosed) => ERR_CLOSED,
                 Err(_) => ERR_ARG,
             })
         }
-        // chan_recv(chan_slot, buf[256], dest_list_ptr) → x0=len, x1=mask
-        9 => {
-            let s = cur_slot(a[0]);
+        // chan_recv → x0=len, x1=mask
+        Sys::ChanRecv { chan, buf, dests } => {
+            let s = cur_slot(chan);
             if s.is_null() {
                 return Some(ERR_BADSLOT);
             }
@@ -267,20 +279,20 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
             if !(*s).cap.rights.has(Rights::READ) {
                 return Some(ERR_PERM);
             }
-            if !user_range_ok(a[1], MSG_PAYLOAD as u64) {
+            if !user_range_ok(buf, MSG_PAYLOAD as u64) {
                 return Some(ERR_FAULT);
             }
-            if !user_range_writable(a[1], MSG_PAYLOAD as u64) {
+            if !user_range_writable(buf, MSG_PAYLOAD as u64) {
                 return Some(ERR_FAULT);
             }
-            let mut dests = [ptr::null_mut(); MSG_CAPS];
-            if let Err(e) = resolve_cap_list(a[2], &mut dests, false) {
+            let mut destslots = [ptr::null_mut(); MSG_CAPS];
+            if let Err(e) = resolve_cap_list(dests, &mut destslots, false) {
                 return Some(e);
             }
-            let mut buf = [0u8; MSG_PAYLOAD];
-            match channel::recv(ch, end, &mut buf, &dests) {
+            let mut rbuf = [0u8; MSG_PAYLOAD];
+            match channel::recv(ch, end, &mut rbuf, &destslots) {
                 Ok((len, mask)) => {
-                    core::ptr::copy_nonoverlapping(buf.as_ptr(), a[1] as *mut u8, len);
+                    core::ptr::copy_nonoverlapping(rbuf.as_ptr(), buf as *mut u8, len);
                     (*frame).x[1] = mask as u64;
                     Some(len as i64)
                 }
@@ -289,10 +301,10 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
                 Err(_) => Some(ERR_ARG),
             }
         }
-        // chan_bind(chan_slot, event, notif_slot, bits)
-        10 => {
-            let s = cur_slot(a[0]);
-            let ns = cur_slot(a[2]);
+        // chan_bind: `event` is already <= 2 (decode).
+        Sys::ChanBind { chan, event, notif, bits } => {
+            let s = cur_slot(chan);
+            let ns = cur_slot(notif);
             if s.is_null() || ns.is_null() {
                 return Some(ERR_BADSLOT);
             }
@@ -305,15 +317,11 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
             if !(*ns).cap.rights.has(Rights::WRITE) {
                 return Some(ERR_PERM);
             }
-            if a[1] > 2 {
-                return Some(ERR_ARG);
-            }
-            channel::bind(ch, end, a[1] as usize, n, a[3]);
+            channel::bind(ch, end, event, n, bits);
             Some(0)
         }
-        // notif_signal(slot, bits)
-        11 => {
-            let s = cur_slot(a[0]);
+        Sys::NotifSignal { slot, bits } => {
+            let s = cur_slot(slot);
             if s.is_null() {
                 return Some(ERR_BADSLOT);
             }
@@ -323,12 +331,12 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
             if !(*s).cap.rights.has(Rights::WRITE) {
                 return Some(ERR_PERM);
             }
-            notification::signal(n, a[1]);
+            notification::signal(n, bits);
             Some(0)
         }
-        // notif_wait(slot) → accumulated word
-        12 => {
-            let s = cur_slot(a[0]);
+        // notif_wait → accumulated word
+        Sys::NotifWait { slot } => {
+            let s = cur_slot(slot);
             if s.is_null() {
                 return Some(ERR_BADSLOT);
             }
@@ -343,10 +351,10 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
                 None => None, // blocked; signal() writes x0 on wake
             }
         }
-        // thread_start(tcb_slot, cspace_slot, entry, sp, prio, arg)
-        13 => {
-            let ts = cur_slot(a[0]);
-            let cs_slot = cur_slot(a[1]);
+        // thread_start: `prio` is already masked + < NUM_PRIOS (decode).
+        Sys::ThreadStart { tcb, cspace, entry, sp, prio, arg } => {
+            let ts = cur_slot(tcb);
+            let cs_slot = cur_slot(cspace);
             if ts.is_null() || cs_slot.is_null() {
                 return Some(ERR_BADSLOT);
             }
@@ -359,35 +367,61 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
             if (*t).state != ThreadState::Inactive {
                 return Some(ERR_STATE);
             }
-            if !user_range_ok(a[2], 4) || !user_range_ok(a[3], 0) {
+            if !user_range_ok(entry, 4) || !user_range_ok(sp, 0) {
                 return Some(ERR_FAULT);
-            }
-            let prio = a[4] & 0xFF;
-            if prio as usize >= NUM_PRIOS {
-                return Some(ERR_ARG);
             }
             // Spawner's priority is the ceiling (§5.4 maximum-controlled
             // priority): the lattice stays monotone.
-            if prio > (*thread::current()).priority as u64 {
+            if prio > (*thread::current()).priority {
                 return Some(ERR_PERM);
             }
             (*cs).hdr.refs += 1;
             (*t).cspace = cs;
-            (*t).priority = prio as u8;
+            (*t).priority = prio;
             (*t).frame = TrapFrame::zeroed();
-            (*t).frame.elr = a[2];
-            (*t).frame.sp_el0 = a[3];
+            (*t).frame.elr = entry;
+            (*t).frame.sp_el0 = sp;
             (*t).frame.spsr = 0; // EL0t, interrupts enabled
-            (*t).frame.x[0] = a[5];
+            (*t).frame.x[0] = arg;
             thread::enqueue(t);
             Some(0)
         }
-        // map(aspace_slot, frame_slot, va, perms) — §2.5: the mapping
-        // lives in the frame cap; mapping an already-mapped cap fails
-        // (copy the cap to map the frame twice).
-        16 => {
-            let asp_slot = cur_slot(a[0]);
-            let fr_slot = cur_slot(a[1]);
+        // timer_arm
+        Sys::TimerArm { timer, notif, bits, delta } => {
+            let ts = cur_slot(timer);
+            let ns = cur_slot(notif);
+            if ts.is_null() || ns.is_null() {
+                return Some(ERR_BADSLOT);
+            }
+            let CapKind::Timer(t) = (*ts).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            let CapKind::Notification(n) = (*ns).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            if !(*ns).cap.rights.has(Rights::WRITE) {
+                return Some(ERR_PERM);
+            }
+            timer::arm(t, n, bits, timer::counter().saturating_add(delta));
+            Some(0)
+        }
+        // thread_exit — the only voluntary stop (§5.1). The kernel records
+        // the status, so a child can neither lie about nor forget its own
+        // death; the on-exit binding fires here.
+        Sys::ThreadExit { status } => {
+            let t = thread::current();
+            (*t).state = ThreadState::Halted;
+            thread::report_terminal(t, thread::Report::Exited(status));
+            // maybe_switch at exception exit picks someone else; the dead
+            // frame is never restored, so there is no x0 to write.
+            None
+        }
+        // map(aspace, frame, va, perms) — §2.5: the mapping lives in the
+        // frame cap; mapping an already-mapped cap fails (copy the cap to
+        // map the frame twice).
+        Sys::Map { aspace, frame: fr, va, perms } => {
+            let asp_slot = cur_slot(aspace);
+            let fr_slot = cur_slot(fr);
             if asp_slot.is_null() || fr_slot.is_null() {
                 return Some(ERR_BADSLOT);
             }
@@ -403,23 +437,18 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
             if mapping.is_some() {
                 return Some(ERR_STATE);
             }
-            let perms = a[3];
             // Monotone: an RO frame cap cannot become writable memory.
-            if perms & crate::aspace::PERM_W != 0 && !(*fr_slot).cap.rights.has(Rights::WRITE)
-            {
+            if perms & crate::aspace::PERM_W != 0 && !(*fr_slot).cap.rights.has(Rights::WRITE) {
                 return Some(ERR_PERM);
             }
             // Device mappings only via phys-capable caps (§2.5).
-            if perms & crate::aspace::PERM_DEVICE != 0
-                && !(*fr_slot).cap.rights.has(Rights::PHYS)
-            {
+            if perms & crate::aspace::PERM_DEVICE != 0 && !(*fr_slot).cap.rights.has(Rights::PHYS) {
                 return Some(ERR_PERM);
             }
-            match crate::aspace::map(asp, base, a[2], pages, perms) {
+            match crate::aspace::map(asp, base, va, pages, perms) {
                 Ok(()) => {
                     (*asp).hdr.refs += 1;
-                    (*fr_slot).cap.kind =
-                        CapKind::Frame { base, pages, mapping: Some((asp, a[2])) };
+                    (*fr_slot).cap.kind = CapKind::Frame { base, pages, mapping: Some((asp, va)) };
                     Some(0)
                 }
                 Err(crate::aspace::MapError::NeedMemory) => Some(ERR_NOMEM),
@@ -427,11 +456,11 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
                 Err(_) => Some(ERR_ARG),
             }
         }
-        // frame_write(frame_slot, offset, buf, len) — spawn-time program
-        // loading: the kernel copies caller bytes into the (unmapped or
-        // mapped) frame through the identity map.
-        17 => {
-            let fr_slot = cur_slot(a[0]);
+        // frame_write(frame, offset, buf, len) — spawn-time program loading.
+        // The offset+len overflow / bounds check stays here: it is against the
+        // frame cap's `pages` (live state) and is already panic-safe.
+        Sys::FrameWrite { frame: fr, off, buf, len } => {
+            let fr_slot = cur_slot(fr);
             if fr_slot.is_null() {
                 return Some(ERR_BADSLOT);
             }
@@ -441,25 +470,20 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
             if !(*fr_slot).cap.rights.has(Rights::WRITE) {
                 return Some(ERR_PERM);
             }
-            let (off, len) = (a[1], a[3]);
             if off.checked_add(len).is_none_or(|end| end > pages * 4096) {
                 return Some(ERR_ARG);
             }
-            if !user_range_ok(a[2], len) {
+            if !user_range_ok(buf, len) {
                 return Some(ERR_FAULT);
             }
-            core::ptr::copy_nonoverlapping(
-                a[2] as *const u8,
-                (base + off) as *mut u8,
-                len as usize,
-            );
+            core::ptr::copy_nonoverlapping(buf as *const u8, (base + off) as *mut u8, len as usize);
             Some(0)
         }
-        // thread_start_as(tcb_slot, cspace_slot, aspace_slot, entry, sp, prio)
-        18 => {
-            let ts = cur_slot(a[0]);
-            let cs_slot = cur_slot(a[1]);
-            let asp_slot = cur_slot(a[2]);
+        // thread_start_as: `prio` already masked + < NUM_PRIOS (decode).
+        Sys::ThreadStartAs { tcb, cspace, aspace, entry, sp, prio } => {
+            let ts = cur_slot(tcb);
+            let cs_slot = cur_slot(cspace);
+            let asp_slot = cur_slot(aspace);
             if ts.is_null() || cs_slot.is_null() || asp_slot.is_null() {
                 return Some(ERR_BADSLOT);
             }
@@ -475,52 +499,29 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
             if (*t).state != ThreadState::Inactive {
                 return Some(ERR_STATE);
             }
-            let prio = a[5] & 0xFF;
-            if prio as usize >= NUM_PRIOS {
-                return Some(ERR_ARG);
-            }
-            if prio > (*thread::current()).priority as u64 {
+            if prio > (*thread::current()).priority {
                 return Some(ERR_PERM);
             }
             // Entry/SP live in the child's aspace, not the caller's.
-            if !crate::aspace::range_mapped(asp, a[3], 4, false) {
+            if !crate::aspace::range_mapped(asp, entry, 4, false) {
                 return Some(ERR_FAULT);
             }
             (*cs).hdr.refs += 1;
             (*asp).hdr.refs += 1;
             (*t).cspace = cs;
             (*t).aspace = asp;
-            (*t).priority = prio as u8;
+            (*t).priority = prio;
             (*t).frame = TrapFrame::zeroed();
-            (*t).frame.elr = a[3];
-            (*t).frame.sp_el0 = a[4];
+            (*t).frame.elr = entry;
+            (*t).frame.sp_el0 = sp;
             (*t).frame.spsr = 0;
             thread::enqueue(t);
             Some(0)
         }
-        // timer_arm(timer_slot, notif_slot, bits, delta_counter_ticks)
-        14 => {
-            let ts = cur_slot(a[0]);
-            let ns = cur_slot(a[1]);
-            if ts.is_null() || ns.is_null() {
-                return Some(ERR_BADSLOT);
-            }
-            let CapKind::Timer(t) = (*ts).cap.kind else {
-                return Some(ERR_TYPE);
-            };
-            let CapKind::Notification(n) = (*ns).cap.kind else {
-                return Some(ERR_TYPE);
-            };
-            if !(*ns).cap.rights.has(Rights::WRITE) {
-                return Some(ERR_PERM);
-            }
-            timer::arm(t, n, a[2], timer::counter().saturating_add(a[3]));
-            Some(0)
-        }
-        // frame_paddr(frame_slot) → PA. Gated on the phys-read bit
-        // (§2.5): only the DmaPool holder's caps carry it.
-        19 => {
-            let s = cur_slot(a[0]);
+        // frame_paddr → PA. Gated on the phys-read bit (§2.5): only the
+        // DmaPool holder's caps carry it.
+        Sys::FramePaddr { slot } => {
+            let s = cur_slot(slot);
             if s.is_null() {
                 return Some(ERR_BADSLOT);
             }
@@ -532,37 +533,34 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
             }
             Some(base as i64)
         }
-        // debug_getc() → byte, or ERR_EMPTY. Scaffold console input until
-        // the userspace UART driver exists (§7).
-        20 => Some(match crate::uart::getc() {
+        // debug_getc → byte, or ERR_EMPTY. Scaffold console input until the
+        // userspace UART driver exists (§7).
+        Sys::DebugGetc => Some(match crate::uart::getc() {
             Some(b) => b as i64,
             None => ERR_EMPTY,
         }),
-        // thread_bind(tcb_slot, which, notif_slot, bits) — configure the
-        // on-exit / on-fault slot (§5.1). The notif cap moves into the
-        // TCB's CDT-visible slot; notif_slot = SLOT_NONE unbinds. A child
-        // holds no cap to its own threads, so it can neither silence nor
-        // forge its own death notice.
-        21 => {
-            let ts = cur_slot(a[0]);
+        // thread_bind(tcb, which, notif, bits) — configure the on-exit /
+        // on-fault slot (§5.1). `which` is already <= 1 (decode). The notif
+        // cap moves into the TCB's CDT-visible slot; notif = SLOT_NONE
+        // unbinds. A child holds no cap to its own threads, so it can neither
+        // silence nor forge its own death notice.
+        Sys::ThreadBind { tcb, which, notif, bits } => {
+            let ts = cur_slot(tcb);
             if ts.is_null() {
                 return Some(ERR_BADSLOT);
             }
             let CapKind::Thread(t) = (*ts).cap.kind else {
                 return Some(ERR_TYPE);
             };
-            // bind-reports gates slot configuration (§2.3): a supervisor
-            // holds it; an attenuated observer does not.
+            // bind-reports gates slot configuration (§2.3): a supervisor holds
+            // it; an attenuated observer does not.
             if !(*ts).cap.rights.has(Rights::BIND_REPORTS) {
                 return Some(ERR_PERM);
             }
-            if a[1] > 1 {
-                return Some(ERR_ARG);
-            }
-            let ns = if a[2] == SLOT_NONE as u64 {
+            let ns = if notif == SLOT_NONE as u64 {
                 ptr::null_mut()
             } else {
-                let ns = cur_slot(a[2]);
+                let ns = cur_slot(notif);
                 if ns.is_null() {
                     return Some(ERR_BADSLOT);
                 }
@@ -575,13 +573,13 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
                 }
                 ns
             };
-            thread::bind(t, a[1] as usize, ns, a[3]);
+            thread::bind(t, which, ns, bits);
             Some(0)
         }
-        // read_report(tcb_slot) → x0 = 0 running | 1 exited | 2 faulted,
+        // read_report(tcb) → x0 = 0 running | 1 exited | 2 faulted,
         // x1 = status / cause, x2 = faulting address (§5.1).
-        22 => {
-            let ts = cur_slot(a[0]);
+        Sys::ReadReport { tcb } => {
+            let ts = cur_slot(tcb);
             if ts.is_null() {
                 return Some(ERR_BADSLOT);
             }
@@ -601,12 +599,12 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
             (*frame).x[2] = v2;
             Some(code)
         }
-        // untyped_reset(ut_slot) — watermark back to 0 once the caller has
-        // revoked every object carved from it (§2.5). Pairs with
-        // cap_revoke for per-spawn donation reuse (§5.1); refuses while
-        // CDT children remain so a live object can never be reused under.
-        23 => {
-            let s = cur_slot(a[0]);
+        // untyped_reset(ut) — watermark back to 0 once the caller has revoked
+        // every object carved from it (§2.5). Pairs with cap_revoke for
+        // per-spawn donation reuse (§5.1); refuses while CDT children remain
+        // so a live object can never be reused under.
+        Sys::UntypedReset { slot } => {
+            let s = cur_slot(slot);
             if s.is_null() || (*s).cap.is_empty() {
                 return Some(ERR_BADSLOT);
             }
@@ -617,17 +615,5 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
                 Err(_) => ERR_STATE,
             })
         }
-        // thread_exit(status) — the only voluntary stop (§5.1). The
-        // kernel records the status, so a child can neither lie about
-        // nor forget its own death; the on-exit binding fires here.
-        15 => {
-            let t = thread::current();
-            (*t).state = ThreadState::Halted;
-            thread::report_terminal(t, thread::Report::Exited(a[0]));
-            // maybe_switch at exception exit picks someone else; the
-            // dead frame is never restored, so there is no x0 to write.
-            None
-        }
-        _ => Some(ERR_ARG),
     }
 }

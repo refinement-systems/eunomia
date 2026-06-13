@@ -95,9 +95,12 @@ found no defects; its notes (DN-6 and the DN-4 reappearance in `destroy_tcb`)
 are in `doc/results/5_kani-findings-4.md`. The §4.5 aspace suite (the §2.4
 walker rewrite) found one — AS-1, a `PERM_DEVICE | PERM_X` executable-MMIO gap,
 confirmed and fixed alongside the harness; its notes (DN-7, the QEMU gate) are
-in `doc/results/6_kani-findings_6.md`. Every Kani-found bug gets a minimized
-regression harness kept forever (like a fuzz seed), a fix PR, and a row in the
-relevant findings file.
+in `doc/results/6_kani-findings_6.md`. The §4.6 syscall-decode suite (the §2.5
+split into `kcore::sysabi`) found no defects — it makes the existing argument
+validations checkable; its notes (DN-8 the 6-register ABI, DN-9 the benign
+decode-first error precedence) are in `doc/results/7_kani-findings-6.md`. Every
+Kani-found bug gets a minimized regression harness kept forever (like a fuzz
+seed), a fix PR, and a row in the relevant findings file.
 
 | ID | Date | Harness | Bounds | Severity | Description | Status | Fix PR |
 |----|------|---------|--------|----------|-------------|--------|--------|
