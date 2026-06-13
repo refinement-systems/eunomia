@@ -3,41 +3,46 @@
 //! revoke must reach (cspace slots, in-flight channel queue slots, TCB
 //! binding slots).
 //!
-//! ## CBMC tractability limit (finding DN-4)
+//! ## CBMC tractability limit and how DN-4 is closed (`-Z stubbing`)
 //!
 //! `delete` dispatches through `obj_unref`, whose `match` on the cap kind is
-//! read from slot memory. CBMC does not constant-fold that kind, so it
-//! explores *every* arm — including the recursive container teardowns
-//! `destroy_cspace` / `destroy_channel`, which loop over (symbolic) slot
-//! counts and recurse back into `delete`. For a deleted **notification** cap
-//! the feasible teardown (`destroy_notif`) has no loops and no recursion, so
-//! a *concrete* scenario stays tractable (`check_revoke` ≈ 193 s,
-//! `check_delete_reparent` below). But deleting a frame, channel, or cspace
-//! cap — or adding a nondet CDT shape on top of a delete — unrolls the
-//! recursive teardown into an intractable formula (> many minutes), past the
-//! CI budget (plan §8). The harnesses for those specific behaviours are
-//! therefore **not** Kani proofs here; what covers them instead:
+//! read from slot memory. CBMC does not constant-fold that kind, so when a
+//! `delete` is the *top-level* entry it explores *every* arm — including the
+//! recursive container teardowns `destroy_cspace` / `destroy_channel` /
+//! `destroy_tcb`, which loop over slot counts and recurse back into `delete`.
+//! Even a concrete `Frame` cap triggers this (the discriminant is symbolic
+//! once stored to and reloaded from a slot), unrolling a formula that never
+//! finishes within the CI budget (plan §8).
 //!
-//! - **frame-unmap-on-delete (§2.5)** — the `delete` source (the
-//!   `Frame { mapping: Some(..) }` branch calling `aspace_unmap` +
-//!   `unref_aspace`) and `scripts/spawn-test.sh`, which maps and unmaps the
-//!   per-child time-page frame on every spawn/reclaim cycle in QEMU.
-//! - **fire-before-reclaim / `ChannelFireSafe` (TSpec, DN-2)** — the
-//!   TLC-checked `CapRevocation` TSpec, the source order in `cspace::delete`
-//!   (peer-closed fires before `obj_unref`), and the `m1-test.sh` step-6
-//!   runtime witness.
-//! - **container teardown + armed-timer disarm** — `scripts/spawn-test.sh`
-//!   (the reclaim loop tears down each child's cspace/threads) and the
-//!   source. `check_revoke` already exercises the `delete` path end to end.
+//! The closure (finding DN-4, `doc/results/2_kani-findings.md`) splits the
+//! obligation into two real Kani proofs that compose:
 //!
-//! Lifting this limit (e.g. `-Z stubbing` the `destroy_*` recursion, or a
-//! function-contract on `obj_unref`) is recorded as future work in the
-//! findings doc rather than worked around with an unsound bound.
+//! - **the teardown bodies, proven by direct calls** (no top-level
+//!   `obj_unref`, so no recursion blowup): `check_destroy_cspace` here
+//!   (a dying cspace deletes every resident), `check_destroy_channel` (§4.3),
+//!   and `check_thread_teardown` (§4.4). These are the structural analog of
+//!   one another and run in seconds.
+//! - **the `delete`/`obj_unref` dispatch, proven with the recursive arms
+//!   stubbed** to no-ops (the [`stub`] module): `check_delete_frame` (the
+//!   §2.5 mapped-frame unmap + aspace unref, whose frame-specific logic lives
+//!   in `delete` itself and calls none of the stubbed teardowns) and
+//!   `check_delete_cspace` (the `CapKind::CSpace => destroy_cspace` routing).
+//!   Stubbing cuts only the recursion CBMC cannot prune cheaply; the bodies it
+//!   would have re-derived are the direct proofs above.
+//!
+//! Fire-before-reclaim ordering on a real `delete` is the separate
+//! `check_teardown_fire_safe` (§4.3, TSpec `ChannelFireSafe`); the `delete`
+//! source order (peer-closed before `obj_unref`) and `m1-test.sh` step 6 back
+//! the universal claim (DN-2). The remaining honest residual is **deeply
+//! nested** container teardown (a container whose resident is itself a live
+//! container → multi-level `delete → destroy_* → delete`), which stays
+//! TSpec + QEMU covered (`spawn-test.sh` reclaim loop); the proofs here cover
+//! one level of recursion with leaf (notification) residents.
 
 #![cfg(kani)]
 
 use super::bounds::POOL_SLOTS;
-use super::ghost::GhostEnv;
+use super::ghost::{GhostEnv, GhostEvent};
 use super::wf::{cdt_wf, refcount_sound};
 use super::world::{BarePool, World};
 use crate::cspace::{self, Cap, CapKind, Rights};
@@ -130,5 +135,137 @@ fn check_delete_reparent() {
         let slots = pool.slot_ptrs();
         let _ = POOL_SLOTS;
         assert!(cdt_wf(&slots));
+    }
+}
+
+/// No-op stubs for the recursive container teardowns (finding DN-4). When a
+/// `delete` is the *top-level* entry, CBMC reads the deleted cap's kind from
+/// slot memory as a symbolic discriminant and unrolls *every* `obj_unref`
+/// match arm — including the `delete↔destroy_cspace↔destroy_channel↔
+/// destroy_tcb` recursion — before the solver can prune the infeasible ones,
+/// which never finishes unwinding within the CI budget. Stubbing these three
+/// recursion-causing teardowns to no-ops cuts the unrolling. The teardown
+/// bodies themselves stay *really* proven by the direct-call harnesses
+/// (`check_destroy_cspace` here, `check_destroy_channel` in §4.3,
+/// `check_thread_teardown` in §4.4), so the only thing a stubbed harness
+/// gives up is re-proving those bodies a second time through the dispatch.
+#[cfg(kani)]
+mod stub {
+    use crate::channel::Channel;
+    use crate::cspace::CSpaceObj;
+    use crate::env::Env;
+    use crate::thread::Tcb;
+
+    pub unsafe fn no_destroy_cspace<E: Env>(_cs: *mut CSpaceObj, _env: &mut E) {}
+    pub unsafe fn no_destroy_channel<E: Env>(_ch: *mut Channel, _env: &mut E) {}
+    pub unsafe fn no_destroy_tcb<E: Env>(_t: *mut Tcb, _env: &mut E) {}
+}
+
+/// `check_delete_frame` (plan §4.1, §2.5): deleting a *mapped* frame cap
+/// unmaps it and drops the aspace reference the mapping held — the one
+/// revocation story for shared memory. The frame-specific logic lives in
+/// `delete` itself (the `CapKind::Frame { mapping: Some(..) }` branch →
+/// `aspace_unmap` + `unref_aspace`); `obj_unref(Frame)` is a no-op and calls
+/// none of the stubbed teardowns, so the stubs only neutralize the infeasible
+/// recursion arms (DN-4) without weakening what the frame path proves.
+#[kani::proof]
+#[kani::unwind(6)]
+#[kani::stub(crate::cspace::destroy_cspace, stub::no_destroy_cspace)]
+#[kani::stub(crate::channel::destroy_channel, stub::no_destroy_channel)]
+#[kani::stub(crate::thread::destroy_tcb, stub::no_destroy_tcb)]
+fn check_delete_frame() {
+    let mut w = World::new();
+    unsafe {
+        let asp = w.aspace(0);
+        (*asp).hdr.refs = 1; // the mapping holds the only reference
+        let va: u64 = 0x4800_0000;
+        let pages: u64 = 1;
+        let s = w.cspace_slot(0, 0);
+        (*s).cap = Cap {
+            kind: CapKind::Frame { base: 0x4000_0000, pages, mapping: Some((asp, va)) },
+            rights: Rights::ALL,
+        };
+
+        cspace::delete(s, &mut w.env);
+
+        assert!((*s).cap.is_empty());
+        assert!((*s).parent.is_null());
+        // The unmap fired exactly once with the cap's own (asp, va, pages)…
+        assert!(w.env.count(GhostEvent::AspaceUnmap(asp, va, pages)) == 1);
+        // …the aspace ref dropped to zero, so it was destroyed once…
+        assert!((*asp).hdr.refs == 0);
+        assert!(w.env.count(GhostEvent::AspaceDestroy(asp)) == 1);
+        // …and the unmap preceded the destroy (§2.5 ordering).
+        assert!(w.env.ordered_before(
+            GhostEvent::AspaceUnmap(asp, va, pages),
+            GhostEvent::AspaceDestroy(asp),
+        ));
+    }
+}
+
+/// `check_destroy_cspace` (plan §4.1): a dying cspace deletes every resident
+/// cap, releasing each designated object's refcount — "a dying cspace deletes
+/// all residents." Residents are notification caps (loop/recursion-free
+/// teardown), so the `destroy_cspace` scan over `CS_SLOTS` stays tractable,
+/// the same shape that made `check_destroy_channel` (§4.3) tractable. Empty
+/// slots (1, 3) exercise the skip path. Drives `destroy_cspace` directly.
+#[kani::proof]
+#[kani::unwind(6)]
+fn check_destroy_cspace() {
+    let mut w = World::new();
+    unsafe {
+        let cs = w.cspace(1);
+        let n0 = w.notif(0);
+        let n1 = w.notif(1);
+        let s0 = w.cspace_slot(1, 0);
+        let s2 = w.cspace_slot(1, 2);
+        let cap = |n| Cap { kind: CapKind::Notification(n), rights: Rights::ALL };
+        (*s0).cap = cap(n0);
+        (*s2).cap = cap(n1);
+        (*n0).hdr.refs = 1;
+        (*n1).hdr.refs = 1;
+
+        cspace::destroy_cspace(cs, &mut w.env);
+
+        // Every resident emptied…
+        assert!((*s0).cap.is_empty());
+        assert!((*s2).cap.is_empty());
+        // …and each notification's only ref released → object destroyed.
+        assert!((*n0).hdr.refs == 0);
+        assert!((*n1).hdr.refs == 0);
+    }
+}
+
+/// `check_delete_cspace` (plan §4.1): the `obj_unref` *dispatch* DN-4 flagged,
+/// on real code. Deleting the last cap to a cspace must drop its refcount to
+/// zero and route through the `CapKind::CSpace(p) => destroy_cspace(p)` match
+/// arm. `destroy_cspace` is stubbed (DN-4: the live recursion is what makes a
+/// `delete` entry intractable), so this proves the *routing* — `obj_unref`
+/// finds the header, decrements to zero, and reaches the cspace teardown arm —
+/// while the teardown *body* (residents emptied, their objects unref'd) is the
+/// real proof `check_destroy_cspace` above. The two compose: a real
+/// `delete`-of-a-cspace-cap is "dispatch reaches destroy_cspace" ∘ "destroy_cspace
+/// tears down residents", each a Kani proof.
+#[kani::proof]
+#[kani::unwind(6)]
+#[kani::stub(crate::cspace::destroy_cspace, stub::no_destroy_cspace)]
+#[kani::stub(crate::channel::destroy_channel, stub::no_destroy_channel)]
+#[kani::stub(crate::thread::destroy_tcb, stub::no_destroy_tcb)]
+fn check_delete_cspace() {
+    let mut w = World::new();
+    unsafe {
+        let cs1 = w.cspace(1);
+        // The cap under test: cspace(0) slot 0 holds the last ref to cs1.
+        let s = w.cspace_slot(0, 0);
+        (*s).cap = Cap { kind: CapKind::CSpace(cs1), rights: Rights::ALL };
+        (*cs1).hdr.refs = 1;
+
+        cspace::delete(s, &mut w.env);
+
+        assert!((*s).cap.is_empty()); // cap deleted, CDT detached
+        assert!((*s).parent.is_null());
+        // refs hit zero → obj_unref took the zero-ref branch and, cs1 being a
+        // cspace, the only feasible arm is destroy_cspace (stubbed here).
+        assert!((*cs1).hdr.refs == 0);
     }
 }

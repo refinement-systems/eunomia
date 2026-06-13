@@ -113,7 +113,10 @@ jobs:
         # (The scratchpad toolchain-smoke proof is retired — the real kcore +
         #  host-side suites are the smoke test now, plan §8.)
         run: |
-          cargo kani -p kcore
+          # -Z stubbing: the §4.1 teardown harnesses stub the recursive
+          # container destructors (destroy_cspace/channel/tcb) so a top-level
+          # `delete` stays tractable — finding DN-4, doc/results/2_kani-findings.md.
+          cargo kani -Z stubbing -p kcore
           # §4.7 host-side targets. cas's superblock-decode harness stubs the
           # blake3 hash, so cas runs with -Z stubbing (harmless for the rest).
           cargo kani -p urt -p ipc -p dma-pool
