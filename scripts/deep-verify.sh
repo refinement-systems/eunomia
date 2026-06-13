@@ -35,7 +35,17 @@
 #            and the World/channel/notif/aspace families keep fixed bounds by
 #            design (a wider bound only slows a concrete scenario).
 #
-#   all      replay then kani (default).
+#   contracts  EXPLORATORY `-Z function-contracts` research spike (review rec. #6,
+#              doc/results/18_kani-findings-15.md) on the `cspace::obj_unref`/
+#              `delete` recursion seam, behind the `kani_contracts` feature.
+#              NON-GATING: one harness is EXPECTED to fail (it documents the
+#              modifies-clause wall). Unstable Kani surface; kept off every
+#              automated path — run by hand only.
+#                - contract_unref_cspace_refcount — baseline, VERIFIES
+#                - contract_delete_leaf           — FAILS (the wall; the finding)
+#
+#   all      replay then kani (default; does NOT include the exploratory
+#            contracts spike).
 #
 # Env knobs:
 #   EXHAUSTIVE_DEPTH   BarePool replay length      (default 5)
@@ -98,11 +108,51 @@ run_kani() {
   return "$fail"
 }
 
+run_contracts() {
+  banner "function-contracts spike (--features kani_contracts) — review rec. #6"
+  if ! command -v cargo-kani >/dev/null 2>&1; then
+    echo "cargo-kani not installed (pin: 0.67.0). See CLAUDE.md. Skipping." >&2
+    return 0
+  fi
+  trap 'pkill -9 cbmc kissat cadical 2>/dev/null || true' EXIT INT TERM
+
+  # EXPLORATORY / NON-GATING (DN-14, doc/results/18_kani-findings-15.md): the
+  # `-Z function-contracts` research spike on the `obj_unref`/`delete` recursion
+  # seam. One harness is EXPECTED to fail — it documents a wall — so this mode
+  # never fails the script; it prints the per-harness verdict for the record.
+  echo "Expected: contract_unref_cspace_refcount VERIFIES (function-contracts"
+  echo "work on the refcount discipline); contract_delete_leaf FAILS with a"
+  echo "modifies-clause violation (the designated-object write is not nameable"
+  echo "from delete's signature) — that failure IS the finding."
+
+  local TO=()
+  if command -v timeout >/dev/null 2>&1; then TO=(timeout "$DEEP_TIMEOUT")
+  elif command -v gtimeout >/dev/null 2>&1; then TO=(gtimeout "$DEEP_TIMEOUT")
+  else echo "(no timeout(1) found — running without a per-harness wall cap)"; fi
+
+  local harnesses=(contract_unref_cspace_refcount contract_delete_leaf)
+  for h in "${harnesses[@]}"; do
+    banner "contracts: $h"
+    # `${TO[@]+...}`: bash-3.2-safe expansion of a possibly-empty array under
+    # `set -u` (macOS ships bash 3.2; an empty `"${TO[@]}"` would be "unbound").
+    if "${TO[@]+"${TO[@]}"}" cargo kani --features kani_contracts \
+          -Z function-contracts -Z loop-contracts -Z stubbing \
+          -p kcore --harness "$h"; then
+      echo "[$h] VERIFICATION SUCCESSFUL"
+    else
+      echo "[$h] VERIFICATION FAILED / TIMED OUT" \
+           "— see doc/results/18_kani-findings-15.md (one harness is expected to fail)"
+    fi
+  done
+  return 0 # exploratory — never gate
+}
+
 case "$MODE" in
-  replay) run_replay ;;
-  kani)   run_kani ;;
-  all)    run_replay; run_kani || true ;;
-  *) echo "usage: $0 [replay|kani|all]" >&2; exit 2 ;;
+  replay)    run_replay ;;
+  kani)      run_kani ;;
+  contracts) run_contracts ;;
+  all)       run_replay; run_kani || true ;;
+  *) echo "usage: $0 [replay|kani|contracts|all]" >&2; exit 2 ;;
 esac
 
 banner "deep-verify done"

@@ -17,6 +17,15 @@ edition.workspace = true
 # so the pinned per-PR suite keeps its TLC-scale bounds.
 kani_deep = []
 
+# Off-CI research spike (review rec. #6, doc/results/18_kani-findings-15.md):
+# enables the `-Z function-contracts` / `-Z loop-contracts` experiment on the
+# real `cspace::obj_unref`/`delete`/`revoke` recursion. The contract attributes
+# are `cfg_attr`-gated on this feature, so they are inert in every build that
+# does not set it — `cargo test`, the per-PR `cargo kani -p kcore`, and the
+# `kani_deep` job all stay untouched. Enabled ONLY by `scripts/deep-verify.sh
+# contracts`, which also passes the unstable `-Z` flags the attributes need.
+kani_contracts = []
+
 # cfg(kani) is injected by cargo-kani; teach plain cargo it's expected.
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }

@@ -220,6 +220,15 @@ pub unsafe fn unref_aspace<E: Env>(a: *mut crate::aspace::AspaceObj, env: &mut E
     }
 }
 
+// review-2 rec.6 spike (kani_contracts): the tractable baseline — a refcount
+// drop whose modified object is a *direct pointer parameter*, so `modifies` is
+// expressible. `requires refs >= 2` keeps execution on the non-destroy path, so
+// the write set is exactly `*cs` (no recursion into destroy_cspace). Inert
+// without the feature; see doc/results/18_kani-findings-15.md.
+#[cfg_attr(all(kani, feature = "kani_contracts"),
+    kani::requires(unsafe { (*cs).hdr.refs >= 2 }),
+    kani::modifies(cs),
+    kani::ensures(|_| unsafe { (*cs).hdr.refs } == old(unsafe { (*cs).hdr.refs }) - 1))]
 pub unsafe fn unref_cspace<E: Env>(cs: *mut CSpaceObj, env: &mut E) {
     (*cs).hdr.refs -= 1;
     if (*cs).hdr.refs == 0 {
@@ -377,6 +386,17 @@ pub unsafe fn derive(src: *mut CapSlot, dst: *mut CapSlot, mask: u8) -> Result<(
 /// through here; depth is bounded by the nesting of containers holding the
 /// final cap to other containers. seL4 flattens this with zombie caps —
 /// owed when the revoke walk becomes preemptible, tracked as M2 debt.
+// review-2 rec.6 spike (kani_contracts): the recursion-seam target. The naive
+// `modifies(slot)` is unsound — `delete` also writes the designated object's
+// header (via `obj_unref`, reached through the cap's *embedded* pointer) and,
+// for a non-isolated cap, its CDT neighbours (parent/prev/next/children) at
+// runtime-determined addresses. Whether that write set is expressible as a
+// `modifies` clause is the spike's central question; see
+// doc/results/18_kani-findings-15.md.
+#[cfg_attr(all(kani, feature = "kani_contracts"),
+    kani::requires(unsafe { !(*slot).cap.is_empty() }),
+    kani::modifies(slot),
+    kani::ensures(|_| unsafe { (*slot).cap.is_empty() && (*slot).parent.is_null() }))]
 pub unsafe fn delete<E: Env>(slot: *mut CapSlot, env: &mut E) {
     debug_assert!(!(*slot).cap.is_empty());
     let cap = (*slot).cap;

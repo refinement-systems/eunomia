@@ -23,6 +23,11 @@ mod exhaustive;
 pub mod channel;
 #[cfg(kani)]
 pub mod cdt;
+// Off-CI `-Z function-contracts` research spike (review rec. #6); gated on its
+// own feature so it never reaches the per-PR or kani_deep runs (DN-14,
+// doc/results/18_kani-findings-15.md).
+#[cfg(all(kani, feature = "kani_contracts"))]
+pub mod contracts;
 pub mod ghost;
 #[cfg(kani)]
 pub mod notification;

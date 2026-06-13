@@ -124,6 +124,16 @@ at TLC-scale bounds; this script runs them much deeper / wider, and the
   `#[kani::unwind]` literals switch with the feature through `cfg_attr`. Tens of
   minutes or OOM — expected off-CI. Only those two carry the cfg_attr unwind, so
   only those two are run under the feature (see `kcore/src/proofs/bounds.rs`).
+- `bash scripts/deep-verify.sh contracts` — the **`-Z function-contracts`
+  research spike** (review rec. #6, `doc/results/18_kani-findings-15.md`, DN-14)
+  on the `cspace::obj_unref`/`delete` recursion seam, behind the `kani_contracts`
+  feature. **Unstable + EXPLORATORY + NON-GATING:** `contract_unref_cspace_refcount`
+  verifies (function-contracts work on the refcount discipline) but
+  `contract_delete_leaf` is **expected to fail** — its failure (`delete`'s write
+  set reaches the designated object through the cap's embedded pointer, so a
+  `modifies` clause can't name it) is the recorded finding. Manual-only — *not*
+  wired into `kani-deep.yml`; the contract attributes are `cfg_attr`-gated on the
+  feature, so every other build (incl. the per-PR `kani` job) is untouched.
 On macOS the Bash-tool timeout does not reap a detached `cargo kani`'s solver
 children, so guard a run with `sleep N; pkill -9 cbmc kissat cadical` (the
 script installs an exit trap that does this).
