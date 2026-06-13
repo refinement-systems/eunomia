@@ -5,6 +5,7 @@ mod aspace;
 mod boot;
 mod channel;
 mod cspace;
+mod env;
 mod exceptions;
 mod gic;
 mod mmu;
@@ -196,7 +197,7 @@ unsafe fn setup_init(
     };
 
     let asp = carve(AspaceObj::bytes_for(16) as u64) as *mut AspaceObj;
-    AspaceObj::init(asp, 16);
+    aspace::init(asp, 16);
 
     let img = loader::elf::parse(INIT_ELF).expect("embedded init ELF is malformed");
     for seg in &img.segments[..img.nsegments] {
@@ -217,12 +218,12 @@ unsafe fn setup_init(
         if seg.flags & loader::elf::PF_X != 0 {
             perms |= PERM_X;
         }
-        AspaceObj::map(asp, pa, va_start, pages, perms).expect("mapping init segment");
+        aspace::map(asp, pa, va_start, pages, perms).expect("mapping init segment");
     }
 
     let stack_pa = carve(STACK_PAGES * PAGE);
     core::ptr::write_bytes(stack_pa as *mut u8, 0, (STACK_PAGES * PAGE) as usize);
-    AspaceObj::map(asp, stack_pa, STACK_TOP - STACK_PAGES * PAGE, STACK_PAGES, PERM_W)
+    aspace::map(asp, stack_pa, STACK_TOP - STACK_PAGES * PAGE, STACK_PAGES, PERM_W)
         .expect("mapping init stack");
 
     (*asp).hdr.refs += 1; // init thread's reference

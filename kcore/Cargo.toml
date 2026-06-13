@@ -1,0 +1,15 @@
+[package]
+name = "kcore"
+version.workspace = true
+edition.workspace = true
+
+# Zero dependencies, by design (plan §2.1): kcore is the architecture-
+# independent kernel object machinery, host-buildable so Kani/CBMC and
+# ordinary `cargo test` can verify it, and cross-buildable for
+# aarch64-unknown-none-softfloat as a dependency of `kernel`.
+[dependencies]
+
+# cfg(kani) is injected by cargo-kani; teach plain cargo it's expected
+# (same handling as scratchpad/).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }

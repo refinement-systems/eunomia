@@ -71,3 +71,73 @@ jobs:
         run: bash scripts/m1-test.sh
       - name: Spawn/reclaim burn loop + fault / panic / time demo
         run: bash scripts/spawn-test.sh
+
+  # Bounded model checking of the kernel object core (kcore) with Kani
+  # (cargo-kani PINNED — upgrades are deliberate PRs that re-run the suite,
+  # plan §5/§8). Re-checks the CapRevocation TLA invariants on the real
+  # implementation code at TLC-scale bounds. Runs every harness (no
+  # --harness filter), so adding a harness automatically gates.
+  kani:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # cargo-kani 0.67.0 + its CBMC/kissat backend (cargo kani setup) are
+      # slow to install; cache both, keyed on the pinned version so a bump
+      # busts the cache.
+      - name: Cache cargo-kani + backend
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-kani
+            ~/.cargo/bin/kani
+            ~/.kani
+          key: kani-0.67.0-${{ runner.os }}
+      - name: Install cargo-kani (pinned)
+        run: |
+          if ! command -v cargo-kani >/dev/null; then
+            cargo install --locked cargo-kani --version 0.67.0
+          fi
+          cargo kani setup
+      # Run from the repo root: there is no root .cargo/config.toml, so the
+      # host target applies. (Inside kernel/ the directory-scoped config
+      # would force the bare-metal target Kani can't drive.)
+      - name: Kani proof suite (scratchpad toolchain smoke + kcore core)
+        run: |
+          cargo kani -p scratchpad
+          if cargo metadata --no-deps --format-version 1 \
+               | grep -q '"name":"kcore"'; then
+            cargo kani -p kcore
+          fi
+
+  # The kcore layering rules (plan §2.2): the verified core must contain no
+  # inline asm, no MMIO, and no integer->pointer casts — CBMC cannot model
+  # any of them soundly. Grep-enforced, same spirit as the
+  # no-unsafe-without-comment convention.
+  layering:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: kcore contains no asm / MMIO / int->ptr casts
+        run: |
+          if [ ! -d kcore/src ]; then
+            echo "kcore/src not present yet; skipping layering check."
+            exit 0
+          fi
+          # Forbidden in kcore: asm!/global_asm! macros and any `as *mut` /
+          # `as *const` cast. kcore uses `.cast()` for every pointer-to-
+          # pointer conversion, so an `as *mut/*const` is always an
+          # integer->pointer cast (or a stray pointer cast that should be
+          # `.cast()`); either way it is a layering violation. Comment lines
+          # may mention the forms freely and are filtered out.
+          violations=$(grep -rnE \
+            '\b(asm!|global_asm!)|\bas +\*(mut|const)\b' \
+            kcore/src --include='*.rs' \
+            | grep -vE ':[0-9]+:[[:space:]]*(//|\*)' || true)
+          if [ -n "$violations" ]; then
+            echo "::error::kcore layering violation (plan §2.2):"
+            echo "$violations"
+            exit 1
+          fi
+          echo "kcore layering clean."
