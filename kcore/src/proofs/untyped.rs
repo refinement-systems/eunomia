@@ -42,7 +42,11 @@ fn check_carve_no_overflow() {
     let watermark: u64 = kani::any();
     let param: u64 = kani::any();
     let ty = any_objtype();
-    let _ = untyped::carve(base, size, watermark, ty, param);
+    let r = untyped::carve(base, size, watermark, ty, param);
+    // Totality is the proof; cover that both outcomes are live (rec. #3) so
+    // "never panics" isn't vacuously true over only the error path.
+    kani::cover!(r.is_ok());
+    kani::cover!(r.is_err());
 }
 
 /// `check_carve_geometry` (plan §4.2): on a *successful* carve the placed
@@ -57,7 +61,12 @@ fn check_carve_geometry() {
     let param: u64 = kani::any();
     let ty = any_objtype();
 
-    let Ok(c) = untyped::carve(base, size, watermark, ty, param) else {
+    let res = untyped::carve(base, size, watermark, ty, param);
+    // Guard the `let Ok(c) = … else { return }` (rec. #3): if no nondet inputs
+    // ever carve successfully, every geometry assertion below is vacuous.
+    kani::cover!(res.is_ok());
+    kani::cover!(res.is_err());
+    let Ok(c) = res else {
         return;
     };
     let align = ty.align();
@@ -180,6 +189,13 @@ fn check_retype_rights() {
         let v: u64 = kani::any();
         kani::assume(v < 8 && v != 2);
         let ty = ObjType::from_u64(v).unwrap();
+        // Every rights arm must be reachable (rec. #3): the `assume(v<8 && v!=2)`
+        // must not collapse to one type, or the PHYS-masking proof (Untyped arm)
+        // could pass vacuously.
+        kani::cover!(ty == ObjType::Frame);
+        kani::cover!(ty == ObjType::Thread);
+        kani::cover!(ty == ObjType::Untyped);
+        kani::cover!(ty != ObjType::Frame && ty != ObjType::Thread && ty != ObjType::Untyped);
 
         untyped::retype_install(ut, ty, CapKind::Notification(n), 0x4000_1000, dst, ptr::null_mut());
 

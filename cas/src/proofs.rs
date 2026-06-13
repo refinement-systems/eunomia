@@ -33,7 +33,8 @@ fn check_superblock_geometry() {
     };
     let dev_len: u64 = kani::any();
 
-    if sb.validate_geometry(dev_len).is_ok() {
+    let geo = sb.validate_geometry(dev_len);
+    if geo.is_ok() {
         // The committed chunk region (WAL region + committed chunks) fits the
         // device — the guarantee downstream sizing/reads rely on. The unwraps
         // are safe: validate_geometry's checked_adds were Some on this path.
@@ -43,6 +44,10 @@ fn check_superblock_geometry() {
         assert!(sb.wal_head <= sb.wal_len);
     }
     // Totality (no panic for any fields/dev_len) is checked by Kani directly.
+    // Guard against vacuity (rec. #3): the Ok body above must be reachable
+    // (else its region-within-device asserts never run), and so must a reject.
+    kani::cover!(geo.is_ok());
+    kani::cover!(geo.is_err());
 }
 
 /// A total ghost hash standing in for `blake3` (§4.7): deterministic, never
@@ -72,7 +77,12 @@ fn check_superblock_decode_total() {
     let mut buf = [0u8; SB_SIZE];
     let head: [u8; 128] = kani::any();
     buf[..128].copy_from_slice(&head);
-    let _ = Superblock::decode_checked(&buf);
+    let res = Superblock::decode_checked(&buf);
+    // Guard against vacuity (rec. #3): under the stubbed total hash, both a
+    // parsed superblock and a refusal must be reachable — neither outcome is
+    // assumed away.
+    kani::cover!(res.is_ok());
+    kani::cover!(res.is_err());
     let _ = SB_BODY; // (documents the checksummed-prefix bound)
 }
 

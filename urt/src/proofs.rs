@@ -62,6 +62,10 @@ fn check_slots_free_reuse() {
     kani::assume(i < CAP);
     a.free(got[i]);
     assert!(a.alloc() == Some(got[i])); // the lone free slot comes back
+    // Guard the `assume(i < CAP)` against silently collapsing the freed-index
+    // space (rec. #3): both window boundaries must be reachable.
+    kani::cover!(i == 0);
+    kani::cover!(i == CAP - 1);
 }
 
 /// `free`'s double-free contract (`debug_assert!(!is_free)`) fires: a fresh

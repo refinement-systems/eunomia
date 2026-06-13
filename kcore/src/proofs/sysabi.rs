@@ -40,6 +40,11 @@ fn check_decode_total() {
     } else {
         assert!(r == Err(SysError::UnknownCall));
     }
+    // Guard against vacuity (rec. #3): a known opcode must actually decode to
+    // `Ok`, and an unknown one must reach the `UnknownCall` error — neither is
+    // assumed away (here `nr` is unconstrained, so both are genuinely live).
+    kani::cover!(r.is_ok());
+    kani::cover!(r == Err(SysError::UnknownCall));
 }
 
 /// `check_validate_lengths` (plan §4.6): every value `decode` validates holds
@@ -53,7 +58,12 @@ fn check_decode_total() {
 fn check_validate_lengths() {
     let nr: u64 = kani::any();
     let a = nondet_args();
-    if let Ok(sys) = decode(nr, a) {
+    let d = decode(nr, a);
+    // Guard the `if let Ok(sys)` (rec. #3): if `decode` never returned `Ok`,
+    // the entire validation match below would pass vacuously.
+    kani::cover!(d.is_ok());
+    kani::cover!(d.is_err());
+    if let Ok(sys) = d {
         match sys {
             // The truncation guard: send's `data.len() as u16` is lossless.
             Sys::ChanSend { len, .. } => assert!(len <= MSG_PAYLOAD as u64),
@@ -71,6 +81,9 @@ fn check_validate_lengths() {
     // ObjType::from_u64 totality: Some iff the code names one of the 8 types.
     let v: u64 = kani::any();
     assert!(ObjType::from_u64(v).is_some() == (v < 8));
+    // Both the valid-code and invalid-code sides must be reachable (rec. #3).
+    kani::cover!(ObjType::from_u64(v).is_some());
+    kani::cover!(ObjType::from_u64(v).is_none());
 
     // CSpaceObj::slot bounds the index — the guard behind cur_slot's `as u32`
     // (the "slot index < cspace size before use" half of §4.6).

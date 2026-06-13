@@ -89,6 +89,10 @@ unsafe fn step(pool: &mut BarePool) {
     if a == b || (*pool.slot(a)).cap.is_empty() || !(*pool.slot(b)).cap.is_empty() {
         return; // ill-typed pick (TLA actions are guarded); a no-op step
     }
+    // Guard against the step degenerating to all-no-ops (rec. #3): a real
+    // derive and a real move must each execute past the guard on some path.
+    kani::cover!(op == 0);
+    kani::cover!(op == 1);
     match op {
         0 => {
             // derive a → b (a new child cap; refcount +1) — TLA `Copy`.

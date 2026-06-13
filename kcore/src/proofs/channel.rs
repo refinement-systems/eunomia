@@ -75,10 +75,12 @@ fn check_ring_fifo() {
                 let r = channel::send(ch, ChanEnd::A, &buf, &caps, &mut env);
                 if mcount < depth {
                     assert!(r.is_ok());
+                    kani::cover!(r.is_ok()); // send-into-space reached
                     model[(mhead + mcount) % depth] = tag;
                     mcount += 1;
                 } else {
                     assert!(r == Err(ChanError::Full));
+                    kani::cover!(r == Err(ChanError::Full)); // send-when-full reached
                 }
             } else {
                 let mut rb = [0u8; MSG_PAYLOAD];
@@ -86,6 +88,7 @@ fn check_ring_fifo() {
                 let r = channel::recv(ch, ChanEnd::B, &mut rb, &dests, &mut env);
                 if mcount > 0 {
                     assert!(r.is_ok());
+                    kani::cover!(r.is_ok()); // recv-when-nonempty reached
                     let (len, mask) = r.unwrap();
                     assert!(len == 1 && mask == 0); // one tag byte, no caps
                     assert!(rb[0] == model[mhead]); // FIFO order
@@ -93,6 +96,7 @@ fn check_ring_fifo() {
                     mcount -= 1;
                 } else {
                     assert!(r == Err(ChanError::Empty));
+                    kani::cover!(r == Err(ChanError::Empty)); // recv-when-empty reached
                 }
             }
             assert!(chan_wf(ch));
@@ -136,6 +140,8 @@ fn check_send_move() {
         let buf = [0xABu8];
         let r = channel::send(ch, ChanEnd::A, &buf, &caps, &mut env);
 
+        // Each scenario must be genuinely reachable (rec. #3): the `assume`
+        // must not collapse the three send outcomes to one.
         match scen {
             0 => {
                 assert!(r.is_ok());
@@ -144,14 +150,17 @@ fn check_send_move() {
                 assert!(matches!((*q).cap.kind, CapKind::Notification(p) if p == n));
                 assert!((*ch).count[0] == 1);
                 assert!((*n).hdr.refs == 1); // a move, not a copy
+                kani::cover!(r.is_ok());
             }
             1 => {
                 assert!(r == Err(ChanError::Full));
                 assert!(!(*src).cap.is_empty()); // untouched
+                kani::cover!(r == Err(ChanError::Full));
             }
             _ => {
                 assert!(r == Err(ChanError::PeerClosed));
                 assert!(!(*src).cap.is_empty()); // untouched
+                kani::cover!(r == Err(ChanError::PeerClosed));
             }
         }
     }

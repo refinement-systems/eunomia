@@ -23,6 +23,11 @@ fn check_header_decode_total() {
     if len != HEADER_SIZE {
         assert!(r == Err(HeaderError::BadLength));
     }
+    // Guard against an over-constraining `assume` collapsing this to one case
+    // (rec. #3): both the accept (exact length) and reject (short/trailing)
+    // outcomes must be reachable.
+    kani::cover!(r.is_ok());
+    kani::cover!(r.is_err());
 }
 
 /// `encode`∘`decode` is the identity in both directions — a total bijection
