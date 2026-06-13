@@ -113,14 +113,27 @@ jobs:
         # (The scratchpad toolchain-smoke proof is retired — the real kcore +
         #  host-side suites are the smoke test now, plan §8.)
         run: |
+          set -o pipefail
           # -Z stubbing: the §4.1 teardown harnesses stub the recursive
           # container destructors (destroy_cspace/channel/tcb) so a top-level
           # `delete` stays tractable — finding DN-4, doc/results/2_kani-findings.md.
-          cargo kani -Z stubbing -p kcore
+          cargo kani -Z stubbing -p kcore 2>&1 | tee kani-kcore.log
           # §4.7 host-side targets. cas's superblock-decode harness stubs the
           # blake3 hash, so cas runs with -Z stubbing (harmless for the rest).
-          cargo kani -p urt -p ipc -p dma-pool
-          cargo kani -p cas -Z stubbing
+          cargo kani -p urt -p ipc -p dma-pool 2>&1 | tee kani-host.log
+          cargo kani -p cas -Z stubbing 2>&1 | tee kani-cas.log
+          # rec #3 vacuity guard (doc/results/11_kani-findings-9.md): kani::cover!
+          # is *informational* — an unreachable cover does NOT fail the run, it
+          # only lowers the "N of M cover properties satisfied" tally. So fail
+          # here if any harness reported N < M (a cover went UNREACHABLE, meaning
+          # an over-constraining `assume` may have made a proof vacuous).
+          if grep -hE 'cover properties satisfied' kani-*.log \
+               | awk '{ if ($2 != $4) { print "UNREACHABLE cover: " $0; bad=1 } } END { exit bad+0 }'; then
+            echo "all kani::cover! checkpoints satisfied"
+          else
+            echo "::error::a kani::cover! checkpoint was UNREACHABLE — a proof may be vacuous (rec #3)"
+            exit 1
+          fi
 
   # The kcore layering rules (plan §2.2): the verified core must contain no
   # inline asm, no MMIO, and no integer->pointer casts — CBMC cannot model

@@ -113,6 +113,12 @@ fn check_map_model() {
 
     assert!(used as usize <= np); // pool high-water never exceeds capacity
     let mapped = aspace::range_mapped_in(&l1, &pool[..np], POOL_BASE, va, PAGE, false);
+    // Guard the `np` assume (rec. #3): both the successful map and the
+    // pool-exhaustion (`NeedMemory`) outcomes must be reachable.
+    // (use `==`, not `matches!`: the latter lowers to a `match` whose dead arm
+    // CBMC instruments as a spurious UNREACHABLE cover.)
+    kani::cover!(r.is_ok());
+    kani::cover!(r == Err(MapError::NeedMemory));
     match r {
         Ok(()) => assert!(mapped), // exactly the requested page is mapped
         Err(MapError::NeedMemory) => assert!(!mapped), // atomic: nothing installed
@@ -216,6 +222,14 @@ fn check_range_mapped() {
         in_set && (!want_write || writable)
     };
     assert!(got == expect);
+
+    // Guard the query-window `assume`s (rec. #3): the in-set (mapped),
+    // out-of-set (unmapped), zero-length, and write-granted cases must all be
+    // reachable — else `got == expect` could hold vacuously on one side.
+    kani::cover!(got);
+    kani::cover!(!got);
+    kani::cover!(len == 0);
+    kani::cover!(want_write && got);
 }
 
 /// `check_pool_accounting` (plan §4.5): `pool_used` never exceeds the pool

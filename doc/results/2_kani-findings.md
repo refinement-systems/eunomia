@@ -91,6 +91,16 @@ the current spec; each is revisited only if the spec changes.
   `check_revoke`. The additive `derive`/`slot_move` sequence rose to K=3. Full
   write-up: `doc/results/10_kani-findings-8.md`.
 
+- **DN-13 — `kani::cover!` is informational, not a gate.** The nondet harnesses
+  carry `kani::cover!` reachability checkpoints (rec. #3) so an over-constraining
+  `assume` can't make a proof vacuous. But cargo-kani 0.67 does **not** fail a
+  run when a cover is unreachable — it only lowers the `N of M cover properties
+  satisfied` tally (the check shows `Status: UNSATISFIABLE`). So the CI kani job
+  post-checks each run's log and fails if any `N != M`. 15 harnesses / 41 covers,
+  all satisfied; no vacuity bug. (Also: never put `matches!` inside `cover!` — it
+  spawns a spurious unreachable sub-cover; use `==`.) Full write-up:
+  `doc/results/11_kani-findings-9.md`.
+
 - **DN-3 — the CDT is a forest, not a single tree.** The kernel installs
   several parentless root caps directly (the boot caps in `kernel/src/main.rs`:
   the untyped, device/RTC frames, the init aspace), so there is no unique

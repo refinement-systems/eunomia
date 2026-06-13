@@ -135,6 +135,12 @@ fn check_remove_waiter() {
         // victim 0/1/2 = head/middle/tail; 3 = a thread never queued.
         let victim: usize = kani::any();
         kani::assume(victim < 4);
+        // All four removal positions must be reachable (rec. #3): the
+        // `assume(victim < 4)` must not collapse head/middle/tail/absent.
+        kani::cover!(victim == 0);
+        kani::cover!(victim == 1);
+        kani::cover!(victim == 2);
+        kani::cover!(victim == 3);
         let vp = match victim {
             0 => p0,
             1 => p1,
