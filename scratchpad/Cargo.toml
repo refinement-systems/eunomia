@@ -1,0 +1,12 @@
+[package]
+name = "scratchpad"
+version.workspace = true
+edition.workspace = true
+
+[dev-dependencies]
+loom = "0.7"
+shuttle = "0.7"
+
+# cfg(loom) is injected via RUSTFLAGS="--cfg loom"; teach plain cargo it's expected.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
