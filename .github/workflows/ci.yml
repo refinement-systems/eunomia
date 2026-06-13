@@ -79,6 +79,15 @@ jobs:
   # --harness filter), so adding a harness automatically gates.
   kani:
     runs-on: ubuntu-latest
+    # Budget (plan §8): each harness ≤ ~5 min, whole suite ≤ ~30 min. The suite
+    # is sequential and kcore-dominated (~22 of ~23 min on the dev machine);
+    # CI runners are slower and a cache-miss `cargo install kani-verifier` adds
+    # minutes, so this hard cap is a runaway guard with margin above the 30-min
+    # target, not the target itself (review rec. #5, doc/results/13_kani-findings-11.md).
+    # When the suite next outgrows the budget, split kcore into a matrix by
+    # `--harness` group — note that trades away the current "no --harness filter
+    # ⇒ a new harness auto-gates" property, so it is deferred until needed.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
