@@ -1,14 +1,25 @@
 //! Verification bounds, in one place (plan §3, §5). These mirror the
 //! TLC-checked `tla/cap_revocation/CapRevocation.cfg` configuration —
 //! `CapIds = 4`, `Procs = 2`, one channel of `QueueDepth = 2`,
-//! `Threads = 2`, `Notifs = 2`. At these bounds the Kani harnesses give two
-//! kinds of coverage: the contract/inductive harnesses prove each op preserves
-//! its invariants over *all* wf states the bound admits (a superset of the
-//! states TLC reaches), while the K-step transition harness re-runs a bounded
-//! prefix of the action alphabet from `Init`. This is complementary to — not a
-//! reproduction of — TLC's full-alphabet reachability fixpoint. Scaling any of
-//! these up is a one-line change here; every `#[kani::unwind]` value is
-//! derived from a named bound (`bound + 1`/`+ 2`), never a magic number.
+//! `Threads = 2`, `Notifs = 2`. These are **TLC-scale object bounds**, but do
+//! not over-read the TLA↔Kani correspondence (review-2 critique 1,
+//! `doc/results/16_kani-findings-13.md`): the suite is *complementary to*, not a
+//! *reproduction of*, TLC's reachability fixpoint. Two kinds of coverage:
+//!   - **per-op inductive harnesses** (`check_slot_move`, `check_derive_monotone`,
+//!     `check_delete_step`, …) prove each op preserves its invariants over *all*
+//!     wf states the bound admits — a *superset* of the states TLC reaches — but
+//!     each is one inductive step Kani does **not** chain into a sequence;
+//!   - **one multi-op transition harness** (`check_cdt_transition_system`) runs
+//!     the **additive sub-alphabet only** — `{derive, slot_move}`, K = 3 — *not*
+//!     the full Copy/Send/Receive/Bind/ThreadExit/Revoke/Retype alphabet TLC
+//!     explores to fixpoint. The destructive ops do not compose here (DN-12):
+//!     `delete` is the inductive `check_delete_step`, `revoke` the single
+//!     concrete tree `check_revoke`.
+//! So: the per-op inductive steps that correspond to the TLA actions (over a
+//! superset of states) plus a K=3 *additive* multi-op check — not TLC's
+//! full-alphabet multi-op reachability. Scaling any bound up is a one-line
+//! change here; every `#[kani::unwind]` value is derived from a named bound
+//! (`bound + 1`/`+ 2`), never a magic number.
 //!
 //! ## The `KANI_DEEP` knob (off the per-PR path)
 //!
