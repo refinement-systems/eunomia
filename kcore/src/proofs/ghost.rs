@@ -9,6 +9,8 @@
 //! form of the TSpec fire-before-reclaim obligation (plan §4.1, DN-2).
 
 use crate::aspace::AspaceObj;
+use crate::channel::Channel;
+use crate::cspace::CSpaceObj;
 use crate::env::Env;
 use crate::thread::{Tcb, ThreadState};
 use crate::timer::TimerObj;
@@ -29,6 +31,13 @@ pub enum GhostEvent {
     TlbInvalidate(u16, u64),
     BarrierMap,
     BarrierUnmap,
+    /// DN-4 routing witnesses (review-2 rec. 3): the recursive container
+    /// destructor `obj_unref` dispatched to, recorded by the no-op stub that
+    /// replaces it so a `check_delete_*` harness asserts the dispatch reached
+    /// the right arm (not just that the refcount hit zero).
+    DestroyCspace(*mut CSpaceObj),
+    DestroyChannel(*mut Channel),
+    DestroyTcb(*mut Tcb),
 }
 
 pub struct GhostEnv {
@@ -122,5 +131,20 @@ impl Env for GhostEnv {
 
     unsafe fn set_timer_armed_head(&mut self, head: *mut TimerObj) {
         self.armed_head = head;
+    }
+
+    #[cfg(kani)]
+    unsafe fn ghost_destroy_cspace(&mut self, cs: *mut CSpaceObj) {
+        self.push(GhostEvent::DestroyCspace(cs));
+    }
+
+    #[cfg(kani)]
+    unsafe fn ghost_destroy_channel(&mut self, ch: *mut Channel) {
+        self.push(GhostEvent::DestroyChannel(ch));
+    }
+
+    #[cfg(kani)]
+    unsafe fn ghost_destroy_tcb(&mut self, t: *mut Tcb) {
+        self.push(GhostEvent::DestroyTcb(t));
     }
 }
