@@ -9,7 +9,8 @@ ipc = { path = "../ipc" }
 [dev-dependencies]
 proptest = "1"
 
-# cfg(kani) is injected by cargo-kani; teach plain cargo it's expected
-# (same handling as kcore).
+# cfg(kani) is injected by cargo-kani; cfg(loom) is set by RUSTFLAGS="--cfg
+# loom" for the time-page seqlock model (plan 1_loom-shuttle-rewrite §4.1).
+# Teach plain cargo both are expected (same handling as kcore).
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)", "cfg(loom)"] }
