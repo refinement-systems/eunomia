@@ -25,6 +25,10 @@ pub enum GhostEvent {
     UnqueueReady(*mut Tcb),
     AspaceUnmap(*mut AspaceObj, u64, u64),
     AspaceDestroy(*mut AspaceObj),
+    /// (asid, va) of a page-table TLB invalidation (`aspace::unmap_in`).
+    TlbInvalidate(u16, u64),
+    BarrierMap,
+    BarrierUnmap,
 }
 
 pub struct GhostEnv {
@@ -98,6 +102,18 @@ impl Env for GhostEnv {
 
     unsafe fn aspace_destroy(&mut self, asp: *mut AspaceObj) {
         self.push(GhostEvent::AspaceDestroy(asp));
+    }
+
+    unsafe fn tlb_invalidate_page(&mut self, asid: u16, va: u64) {
+        self.push(GhostEvent::TlbInvalidate(asid, va));
+    }
+
+    unsafe fn barrier_after_map(&mut self) {
+        self.push(GhostEvent::BarrierMap);
+    }
+
+    unsafe fn barrier_after_unmap(&mut self) {
+        self.push(GhostEvent::BarrierUnmap);
     }
 
     unsafe fn timer_armed_head(&mut self) -> *mut TimerObj {

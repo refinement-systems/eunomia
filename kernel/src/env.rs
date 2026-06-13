@@ -28,6 +28,23 @@ impl Env for KernelEnv {
         crate::aspace::destroy_aspace(asp);
     }
 
+    // The page-table walker (kcore::aspace) is architecture-independent; these
+    // are the real AArch64 TLB/barrier sequences it drives. They are exactly
+    // the asm the old kernel `map`/`unmap` ran inline (plan §2.4).
+    unsafe fn tlb_invalidate_page(&mut self, asid: u16, va: u64) {
+        // TLBI VAE1: [63:48] ASID, [43:0] VA[55:12].
+        let arg = ((asid as u64) << 48) | ((va >> 12) & 0xFFF_FFFF_FFFF);
+        core::arch::asm!("tlbi vae1, {v}", v = in(reg) arg);
+    }
+
+    unsafe fn barrier_after_map(&mut self) {
+        core::arch::asm!("dsb ishst");
+    }
+
+    unsafe fn barrier_after_unmap(&mut self) {
+        core::arch::asm!("dsb ish", "isb");
+    }
+
     unsafe fn timer_armed_head(&mut self) -> *mut TimerObj {
         crate::timer::armed_head()
     }
