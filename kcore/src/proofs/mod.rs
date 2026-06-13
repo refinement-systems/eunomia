@@ -20,6 +20,8 @@ pub mod ghost;
 pub mod teardown;
 #[cfg(kani)]
 pub mod transition;
+#[cfg(kani)]
+pub mod untyped;
 pub mod wf;
 pub mod world;
 

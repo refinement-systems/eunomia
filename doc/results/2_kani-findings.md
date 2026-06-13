@@ -85,13 +85,16 @@ the current spec; each is revisited only if the spec changes.
 
 ## Findings
 
-None yet — harnesses land per plan phases 3–4. Every Kani-found bug gets a
-minimized regression harness kept forever (like a fuzz seed), a fix PR, and a
-row here.
+The §4.1 CDT/teardown suite found no defects. The §4.2 untyped/retype suite
+found two (UO-1, UO-2) — both carve-arithmetic overflows predicted by plan
+§7.1, confirmed and fixed alongside the harness. They are recorded in
+`doc/results/3_kani-findings-2.md` (the §4.2 continuation of this file).
+Every Kani-found bug gets a minimized regression harness kept forever (like a
+fuzz seed), a fix PR, and a row in the relevant findings file.
 
 | ID | Date | Harness | Bounds | Severity | Description | Status | Fix PR |
 |----|------|---------|--------|----------|-------------|--------|--------|
-| —  | —    | —       | —      | —        | (no defects found yet) | — | — |
+| —  | —    | —       | —      | —        | (no §4.1 defects; §4.2 in `3_kani-findings-2.md`) | — | — |
 
 ## Harness solver times (informational; CI budget ≤5 min/harness, §8)
 

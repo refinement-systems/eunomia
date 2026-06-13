@@ -53,7 +53,7 @@ impl ObjType {
         })
     }
 
-    fn align(self) -> u64 {
+    pub(crate) fn align(self) -> u64 {
         match self {
             ObjType::Frame | ObjType::Aspace | ObjType::Untyped => 4096,
             _ => 16,
@@ -107,10 +107,17 @@ pub unsafe fn retype_check(
 
 /// Pure placement arithmetic: object size from `(ty, param)`, alignment,
 /// watermark bump, bounds against `[base, base + size)`. No pointers — Kani
-/// verifies it exhaustively over all inputs (plan §4.2). The
-/// `next_multiple_of` / `base + watermark + align - 1` / `base + size`
-/// arithmetic is preserved verbatim, including its overflow exposure
-/// (plan §7.1): hardening it is §4.2's job.
+/// verifies it exhaustively over all inputs (`check_carve_no_overflow`,
+/// plan §4.2): the function is **total**, returning an error rather than
+/// panicking for any `(base, size, watermark, ty, param)`.
+///
+/// `param` arrives raw from user register `a[2]` (`syscall.rs`), so every
+/// step that touches it is checked: the page round-up (`next_multiple_of`
+/// panicked for `param` within a page of `u64::MAX` — plan §7.1, finding
+/// UO-1) and the placement adds (`base + watermark + align - 1`, `base +
+/// size` could overflow at the top of the address space — UO-2). A
+/// pathological input now yields `BadArg`/`NoMemory`, never a
+/// user-triggerable kernel panic.
 pub fn carve(
     base: u64,
     size: u64,
@@ -148,18 +155,31 @@ pub fn carve(
         }
         ObjType::Untyped => {
             // param is bytes; round up to a page so the carved range is
-            // page-aligned at both ends (§2.3). 0 is meaningless.
+            // page-aligned at both ends (§2.3). 0 is meaningless; a param
+            // within a page of the address space top has no rounded size.
             if param == 0 {
                 return Err(RetypeError::BadArg);
             }
-            (param as usize).next_multiple_of(4096)
+            match (param as usize).checked_next_multiple_of(4096) {
+                Some(b) => b,
+                None => return Err(RetypeError::BadArg),
+            }
         }
     } as u64;
 
+    // All placement arithmetic is checked so carve is total (plan §4.2): the
+    // align round-up and the limit add can overflow only at the very top of
+    // the 64-bit space, which no real untyped reaches, but an unchecked add
+    // there would panic the kernel rather than reject the retype.
     let align = ty.align();
-    let start = (base + watermark + align - 1) & !(align - 1);
+    let start = base
+        .checked_add(watermark)
+        .and_then(|x| x.checked_add(align - 1))
+        .ok_or(RetypeError::NoMemory)?
+        & !(align - 1);
     let end = start.checked_add(bytes).ok_or(RetypeError::NoMemory)?;
-    if end > base + size {
+    let limit = base.checked_add(size).ok_or(RetypeError::NoMemory)?;
+    if end > limit {
         return Err(RetypeError::NoMemory);
     }
     Ok(Carve { start, end, bytes })
