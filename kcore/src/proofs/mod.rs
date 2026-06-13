@@ -14,6 +14,8 @@
 
 pub mod bounds;
 #[cfg(kani)]
+pub mod channel;
+#[cfg(kani)]
 pub mod cdt;
 pub mod ghost;
 #[cfg(kani)]
