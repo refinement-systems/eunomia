@@ -318,3 +318,32 @@ immediately after it was written; they are off-CI, marked HEAVY, and run via
 These do not change the bounded-Kani picture above; they add a *different tool*
 (concrete exhaustive enumeration) over the exact operations CBMC cannot compose,
 which is the soundest available answer to the residual this review identifies.
+
+## Addendum 2 — follow-ups landed
+
+After the addendum above, the four follow-ups it implied were completed:
+
+1. **Cross-home coverage** (`exhaustive_cross_home_replay`, `proofs::exhaustive`).
+   A second replay over a `World` parks derived caps in a **channel ring slot**
+   and a **TCB binding slot** as well as cspace slots, asserting `cdt_wf` +
+   `refcount_sound` + `chan_wf` after each op. This is the first check of the
+   §2.2 "revocation sees through queues and TCB binding slots" guarantee over
+   *all* reachable shapes — closing critique 2's "revoke is checked on one
+   concrete cross-home tree." (depth 4 ≈ 13 M sequences, ~21 s; depth 3 ≈ 216 k.)
+2. **Continuous CI exercise.** Both replays now run at depth 3 in the per-PR
+   `host-tests` job (~0.25 s), so they are regression-guarded, not just manual.
+3. **Feature-driven Kani deepening.** The env knob became a `kani_deep` cargo
+   feature; `bounds.rs` reads `cfg!(feature)` and the two composition harnesses
+   (`check_cdt_transition_system`, `check_delete_step`) carry `cfg_attr` unwind
+   literals, so they now deepen on **object count too** (`POOL_SLOTS` 4→6) — not
+   just K — when run under the feature. (The structural single-op harnesses keep
+   fixed bounds, named explicitly in `deep-verify.sh`.)
+4. **Scheduled job.** `.github/workflows/kani-deep.yml` runs `deep-verify.sh`
+   (deep replays + widened-bound Kani) weekly and on `workflow_dispatch`,
+   mirroring `fuzz.yml`.
+
+With these, recommendation 1 is fully realized (composition + cross-home,
+continuously exercised) and recommendation 2 is realized as both a scheduled job
+and genuine object-count widening — leaving recommendations 3–6 (the DN-4
+ghost-witness, the `bounds.rs` comment, the CI cover-message, and the
+`function-contracts` spike) as the open items.

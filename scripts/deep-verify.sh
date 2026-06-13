@@ -1,57 +1,66 @@
 #!/usr/bin/env bash
 # Deep, off-CI verification supplements for the kcore object core.
 #
-#   ⚠️  HEAVY — RUN SPARINGLY.  These are NOT part of `cargo test`, the CI
-#   suite, or the per-PR Kani job. They are the "more exhaustive" checks
-#   recommended in doc/results/14_kani-review-2.md, deliberately kept off the
-#   pinned path because they take minutes to hours. Run them by hand before a
-#   release, after touching the cspace/CDT machinery, or when investigating a
-#   suspected composition bug — not routinely.
+#   ⚠️  HEAVY — RUN SPARINGLY.  These are NOT the per-PR path. CI runs the
+#   replays at a cheap depth (host-tests) and the Kani suite at TLC-scale
+#   bounds; this script runs the replays MUCH deeper and the Kani harnesses at
+#   WIDENED bounds. It is the "more exhaustive" tier recommended in
+#   doc/results/14_kani-review-2.md — run by hand before a release, after
+#   touching the cspace/CDT machinery, or from the scheduled kani-deep workflow.
 #
 # Two independent supplements, selected by the first argument:
 #
-#   replay   The "mini-TLC": an exhaustive plain-Rust enumeration of EVERY
-#            sequence of CDT ops (derive/move/delete/revoke) up to a bounded
-#            length, asserting cdt_wf + the refcount census after each step.
+#   replay   The "mini-TLC" host tests (kcore::proofs::exhaustive): exhaustive
+#            plain-Rust enumeration of EVERY CDT op sequence
+#            (derive/move/delete/revoke), asserting cdt_wf + the refcount census
+#            (+ chan_wf) after each step. Two tests:
+#              - exhaustive_cdt_replay        — BarePool, all reachable trees
+#                                               (EXHAUSTIVE_DEPTH, default 5
+#                                               ≈ 100M seqs, ~15 s release)
+#              - exhaustive_cross_home_replay — World; revoke seen through a
+#                                               channel ring slot AND a TCB bind
+#                                               slot (CROSS_HOME_DEPTH, default 4
+#                                               ≈ 13M seqs, ~21 s release)
 #            This is the multi-op composition coverage CBMC OOMs on (DN-12) and
-#            the only check that exercises `revoke` over all reachable shapes.
-#            Depth via EXHAUSTIVE_DEPTH (script default 5 ≈ 100M sequences,
-#            ~15 s release). Depth 6 ≈ 4B sequences ≈ tens of minutes.
+#            the only place `revoke` is checked over all reachable shapes.
 #
-#   kani     The additive transition harness re-run at a DEEPER op-sequence
-#            length (K 3→4) via the KANI_DEEP compile knob — the "raise K toward
-#            4–6" of review rec. #2, kept off CI because K=3 is already at the
-#            ~5-min per-harness budget. K=4 derive/move may take tens of minutes
-#            or OOM; that is expected off-CI. Widening the OBJECT-count bounds
-#            (POOL_SLOTS etc.) is a separate MANUAL edit — see bounds.rs (the
-#            `#[kani::unwind]` literals must be bumped in lockstep), not this
-#            toggle. The concrete `check_revoke` and the World/channel/notif/
-#            aspace families keep fixed bounds by design.
+#   kani     The composition/inductive CDT harnesses re-run at WIDENED bounds
+#            via the `kani_deep` cargo feature (POOL_SLOTS 4→6, transition K
+#            3→4; the matching #[kani::unwind] literals switch via cfg_attr):
+#              - check_cdt_transition_system   (additive K-step, now K=4 over 6)
+#              - check_delete_step             (inductive delete over 6 slots)
+#            Tens of minutes or OOM each — expected off-CI; that is why CI keeps
+#            the TLC-scale bounds. Only these two carry the cfg_attr unwind, so
+#            only these two are run under the feature. The concrete check_revoke
+#            and the World/channel/notif/aspace families keep fixed bounds by
+#            design (a wider bound only slows a concrete scenario).
 #
 #   all      replay then kani (default).
 #
 # Env knobs:
-#   EXHAUSTIVE_DEPTH   replay sequence length (default 5)
-#   DEEP_TIMEOUT       per-harness wall cap in seconds for `kani` (default 2400)
+#   EXHAUSTIVE_DEPTH   BarePool replay length      (default 5)
+#   CROSS_HOME_DEPTH   cross-home replay length    (default 4)
+#   DEEP_TIMEOUT       per-harness wall cap (s) for `kani` (default 2400)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 MODE="${1:-all}"
 EXHAUSTIVE_DEPTH="${EXHAUSTIVE_DEPTH:-5}"
+CROSS_HOME_DEPTH="${CROSS_HOME_DEPTH:-4}"
 DEEP_TIMEOUT="${DEEP_TIMEOUT:-2400}"
 
 banner() { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 
 run_replay() {
-  banner "mini-TLC exhaustive CDT replay (depth=${EXHAUSTIVE_DEPTH})"
-  echo "Enumerating all derive/move/delete/revoke sequences; asserting"
-  echo "cdt_wf + refcount census after every step. Release build for speed."
-  EXHAUSTIVE_DEPTH="$EXHAUSTIVE_DEPTH" \
-    cargo test -p kcore --release exhaustive_cdt_replay -- --ignored --nocapture
+  banner "mini-TLC exhaustive replays (BarePool depth=${EXHAUSTIVE_DEPTH}, cross-home depth=${CROSS_HOME_DEPTH})"
+  echo "Enumerating all derive/move/delete/revoke sequences; asserting cdt_wf +"
+  echo "refcount census (+ chan_wf) after every step. Release build for speed."
+  EXHAUSTIVE_DEPTH="$EXHAUSTIVE_DEPTH" CROSS_HOME_DEPTH="$CROSS_HOME_DEPTH" \
+    cargo test -p kcore --release exhaustive -- --ignored --nocapture
 }
 
 run_kani() {
-  banner "deep Kani — transition harness at K=4 (KANI_DEEP=1)"
+  banner "deep Kani — composition CDT harnesses at widened bounds (--features kani_deep)"
   if ! command -v cargo-kani >/dev/null 2>&1; then
     echo "cargo-kani not installed (pin: 0.67.0). See CLAUDE.md. Skipping." >&2
     return 0
@@ -67,23 +76,26 @@ run_kani() {
   elif command -v gtimeout >/dev/null 2>&1; then TO=(gtimeout "$DEEP_TIMEOUT")
   else echo "(no timeout(1) found — running without a per-harness wall cap)"; fi
 
-  # Only the additive transition harness scales SAFELY on the env toggle (K
-  # 3→4; its unwind(6) still covers the K=4 loop and the unchanged census
-  # scans). The object-count bounds need the manual edit described in the
-  # header / bounds.rs, so widening the structural CDT harnesses is not done
-  # here — it would only trip their fixed unwind literals.
-  banner "deep kani: check_cdt_transition_system (K=4)"
-  echo "NOT run here (need manual bounds + unwind edit): the structural CDT"
-  echo "harnesses at POOL_SLOTS>4, check_revoke, and the World families."
-  if KANI_DEEP=1 "${TO[@]}" cargo kani -Z stubbing -p kcore \
-        --harness check_cdt_transition_system; then
-    echo "[check_cdt_transition_system @K=4] OK"
-    return 0
-  else
-    echo "::warning:: [check_cdt_transition_system @K=4] FAILED / TIMED OUT / OOM" \
-         "— expected off-CI at K=4; this is why CI stays at K=3"
-    return 1
-  fi
+  # Only these two carry the cfg_attr unwind that tracks POOL_SLOTS=6, so only
+  # these are sound to verify under the feature (others keep unwind(6)).
+  local harnesses=(check_cdt_transition_system check_delete_step)
+  echo "Widened: POOL_SLOTS=6, transition K=4. Running: ${harnesses[*]}"
+  echo "NOT run (fixed bounds by design): check_revoke, the structural single-op"
+  echo "CDT harnesses, and the World/channel/notification/aspace families."
+
+  local fail=0
+  for h in "${harnesses[@]}"; do
+    banner "deep kani: $h (kani_deep)"
+    if "${TO[@]}" cargo kani --features kani_deep -Z stubbing \
+          -p kcore --harness "$h"; then
+      echo "[$h] OK"
+    else
+      echo "::warning:: [$h] FAILED / TIMED OUT / OOM at the widened bound" \
+           "— expected off-CI; this is why CI keeps TLC-scale bounds"
+      fail=1
+    fi
+  done
+  return "$fail"
 }
 
 case "$MODE" in

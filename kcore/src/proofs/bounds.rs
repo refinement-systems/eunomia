@@ -12,24 +12,30 @@
 //!
 //! ## The `KANI_DEEP` knob (off the per-PR path)
 //!
-//! When the `KANI_DEEP` env var is set at *compile time*, `K_STEPS` widens
-//! (3 → 4) for the heavy off-CI run driven by `scripts/deep-verify.sh` — the
-//! "raise K toward 4–6" of plan §3 / review rec. #2, kept off CI because the
-//! additive transition harness is already at the per-harness budget at K = 3.
-//! CI never sets the var, so the per-PR suite stays at K = 3.
+//! When the `kani_deep` cargo feature is enabled, the BarePool CDT bounds
+//! widen for the heavy off-CI run driven by `scripts/deep-verify.sh kani`:
+//! `POOL_SLOTS` 4 → 6 (more reachable shapes) and `K_STEPS` 3 → 4 (deeper
+//! transition sequences) — the "raise K/scope toward 4–6" of plan §3 / review
+//! rec. #2, kept off CI because at the wider bound a single harness can take
+//! tens of minutes or OOM. CI never enables the feature, so the per-PR suite
+//! stays at the TLC-scale 4 / 3.
 //!
-//! Only `K_STEPS` scales automatically, because the `#[kani::unwind(N)]`
-//! annotations are integer literals (the attribute takes no const expr) tuned
-//! to `UNWIND_POOL`; raising the *object-count* bounds (`POOL_SLOTS`,
-//! `CS_SLOTS`, `CHAN_DEPTH`) is therefore a deliberate manual edit that must
-//! bump those literals in lockstep, not an env toggle. Widening `K_STEPS`
-//! alone is safe: at K = 4 the transition harness's K-loop is ≤ 5 and its
-//! census scans are unchanged (still `POOL_SLOTS`), so `unwind(6)` still holds.
+//! A *feature* (not an env var) is used precisely because the
+//! `#[kani::unwind(N)]` annotations are integer literals (the attribute takes
+//! no const expr): only `cfg_attr(feature = "kani_deep", kani::unwind(8))` can
+//! switch a literal in lockstep with `POOL_SLOTS`. Only the two harnesses the
+//! deep job runs — `check_cdt_transition_system` and `check_delete_step` — carry
+//! that cfg_attr; the other BarePool harnesses keep their `unwind(6)` and so
+//! must NOT be verified under the feature (their unwind would be too small at
+//! `POOL_SLOTS = 6`). `deep-verify.sh` runs only the two deepened harnesses by
+//! `--harness` name, which is why enabling the feature crate-wide is safe there.
+//! `CS_SLOTS` / `CHAN_DEPTH` (the World harnesses) stay fixed — those are
+//! concrete scenarios a wider bound only slows.
 
 /// Compile-time deep-verification switch — see the module note. `false` on any
-/// normal or CI build (the env var is unset); `true` only under
-/// `KANI_DEEP=1 cargo kani …` via `scripts/deep-verify.sh`.
-const DEEP: bool = option_env!("KANI_DEEP").is_some();
+/// normal or CI build; `true` only under `--features kani_deep` via
+/// `scripts/deep-verify.sh kani`.
+const DEEP: bool = cfg!(feature = "kani_deep");
 
 /// Slots per cspace (TLA `CapIds = 4`: a small but non-trivial cspace).
 pub const CS_SLOTS: u32 = 4;
@@ -51,9 +57,9 @@ pub const NASPACES: usize = 1;
 /// children, and a free destination slot, small enough that the all-subsets
 /// nondet shape stays inside the CI solver budget (plan §3, §8 — a 6-slot
 /// pool put `check_cdt_insert_child` at ~6.5 min, over the ≤5 min target).
-/// Raising it is a manual edit (bump the `#[kani::unwind]` literals too — see
-/// the module note); it is deliberately NOT on the `KANI_DEEP` toggle.
-pub const POOL_SLOTS: usize = 4;
+/// Widens to 6 under the `kani_deep` feature (the deepened harnesses carry the
+/// matching `cfg_attr` unwind — see the module note).
+pub const POOL_SLOTS: usize = if DEEP { 6 } else { 4 };
 
 /// The full slot universe of a [`super::world::World`]: every cspace slot,
 /// every channel ring cap slot, every TCB binding slot. This is the set the
@@ -64,9 +70,9 @@ pub const TOTAL_SLOTS: usize = NCSPACES * CS_SLOTS as usize          // cspace s
 
 /// Op-sequence length for the transition-system harness (plan §4.1, consumed
 /// by `transition::check_cdt_transition_system`). K = 3 on CI (already at the
-/// per-harness ~5-min ceiling); widens to 4 under `KANI_DEEP`. The exhaustive
-/// host replay (`proofs::exhaustive`) reaches deeper still, on its own runtime
-/// `EXHAUSTIVE_DEPTH` knob, because plain Rust has none of CBMC's blow-up.
+/// per-harness ~5-min ceiling); widens to 4 under the `kani_deep` feature. The
+/// exhaustive host replay (`proofs::exhaustive`) reaches deeper still, on its
+/// own runtime depth knob, because plain Rust has none of CBMC's blow-up.
 pub const K_STEPS: usize = if DEEP { 4 } else { 3 };
 
 /// Unwinding for the bounded walks over the slot universe (`cdt_wf`

@@ -107,7 +107,11 @@ unsafe fn step(pool: &mut BarePool) {
 }
 
 #[kani::proof]
-#[kani::unwind(6)] // K-loop (≤K+1) and the POOL_SLOTS (4) census / wf scans
+// Unwind covers the K-loop (≤ K+1) and the POOL_SLOTS census / wf scans:
+// 6 at the CI bounds (POOL_SLOTS=4, K=3), 8 under `kani_deep` (POOL_SLOTS=6,
+// K=4). cfg_attr because `#[kani::unwind]` takes a literal, not `UNWIND_POOL`.
+#[cfg_attr(not(feature = "kani_deep"), kani::unwind(6))]
+#[cfg_attr(feature = "kani_deep", kani::unwind(8))]
 fn check_cdt_transition_system() {
     let mut pool = BarePool::new();
     unsafe {
@@ -136,7 +140,10 @@ fn check_cdt_transition_system() {
 /// LiveParent — and the children re-parent up one level). Generalizes the
 /// concrete `check_delete_reparent` to all shapes the bounds admit.
 #[kani::proof]
-#[kani::unwind(6)]
+// 6 at CI bounds (POOL_SLOTS=4), 8 under `kani_deep` (POOL_SLOTS=6): the
+// nondet-shape build + cdt_wf / census scans range over POOL_SLOTS slots.
+#[cfg_attr(not(feature = "kani_deep"), kani::unwind(6))]
+#[cfg_attr(feature = "kani_deep", kani::unwind(8))]
 #[kani::stub(crate::cspace::destroy_cspace, super::stubs::no_destroy_cspace)]
 #[kani::stub(crate::channel::destroy_channel, super::stubs::no_destroy_channel)]
 #[kani::stub(crate::thread::destroy_tcb, super::stubs::no_destroy_tcb)]

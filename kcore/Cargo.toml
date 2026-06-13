@@ -9,6 +9,14 @@ edition.workspace = true
 # aarch64-unknown-none-softfloat as a dependency of `kernel`.
 [dependencies]
 
+[features]
+# Deep, off-CI Kani verification (review rec. #2 follow-up): widens the BarePool
+# CDT bounds (POOL_SLOTS 4→6, transition K 3→4) and the matching
+# `#[kani::unwind]` literals via cfg_attr. Enabled only by
+# `scripts/deep-verify.sh kani` for the deepened harnesses; CI never enables it,
+# so the pinned per-PR suite keeps its TLC-scale bounds.
+kani_deep = []
+
 # cfg(kani) is injected by cargo-kani; teach plain cargo it's expected.
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
