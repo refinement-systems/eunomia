@@ -1,43 +1,28 @@
-//! Time (spec §2.6) and timer objects (spec §1, §3.6).
-//!
-//! Monotonic time is the ARM generic virtual timer: CNTVCT readable from
-//! EL0 (zero-syscall clock), CNTV programs the kernel tick. Timer objects
-//! are caps to program a deadline that signals a bound notification;
-//! expiry is checked on the periodic 10 ms tick, so deadline resolution is
-//! one tick at MVP.
+//! Kernel-side time and timer surface (spec §2.6, §3.6). The armed-timer
+//! list *logic* lives in [`kcore::timer`]; this module keeps what is
+//! architectural — the generic-timer register access (CNTVCT/CNTV, the
+//! 10 ms tick), and the list head itself (`ARMED_HEAD`), which kcore reaches
+//! through the [`kcore::env::Env`] seam.
 
-use crate::cspace::ObjHeader;
-use crate::notification::{self, NotifObj};
+pub use kcore::timer::*;
+
+use crate::env::KernelEnv;
 use core::arch::asm;
 use core::ptr;
+use kcore::notification::NotifObj;
 
 pub const TICK_HZ: u64 = 100;
 
-#[repr(C)]
-pub struct TimerObj {
-    pub hdr: ObjHeader,
-    armed: bool,
-    deadline: u64,
-    notif: *mut NotifObj,
-    bits: u64,
-    next: *mut TimerObj,
-}
-
+/// The armed-timer list head. kcore owns the insert/unlink/sweep logic and
+/// addresses this anchor through `Env::{timer_armed_head,set_timer_armed_head}`.
 static mut ARMED_HEAD: *mut TimerObj = ptr::null_mut();
 
-impl TimerObj {
-    /// pre:  memory at `this` writable.
-    /// post: disarmed, refs = 1 (creator cap).
-    pub unsafe fn init(this: *mut TimerObj) {
-        this.write(TimerObj {
-            hdr: ObjHeader { refs: 1 },
-            armed: false,
-            deadline: 0,
-            notif: ptr::null_mut(),
-            bits: 0,
-            next: ptr::null_mut(),
-        });
-    }
+pub(crate) unsafe fn armed_head() -> *mut TimerObj {
+    ARMED_HEAD
+}
+
+pub(crate) unsafe fn set_armed_head(head: *mut TimerObj) {
+    ARMED_HEAD = head;
 }
 
 pub fn counter() -> u64 {
@@ -52,61 +37,14 @@ pub fn freq() -> u64 {
     v
 }
 
-/// Arm (or re-arm) a timer: signal `bits` on `notif` once the counter
-/// passes `deadline`. The armed timer holds a ref on the notification.
+/// See [`kcore::timer::arm`].
 pub unsafe fn arm(t: *mut TimerObj, notif: *mut NotifObj, bits: u64, deadline: u64) {
-    disarm(t);
-    (*notif).hdr.refs += 1;
-    (*t).notif = notif;
-    (*t).bits = bits;
-    (*t).deadline = deadline;
-    (*t).armed = true;
-    (*t).next = ARMED_HEAD;
-    ARMED_HEAD = t;
+    kcore::timer::arm(t, notif, bits, deadline, &mut KernelEnv);
 }
 
-pub unsafe fn disarm(t: *mut TimerObj) {
-    if !(*t).armed {
-        return;
-    }
-    let mut cur = ARMED_HEAD;
-    let mut prev: *mut TimerObj = ptr::null_mut();
-    while !cur.is_null() {
-        if cur == t {
-            if prev.is_null() {
-                ARMED_HEAD = (*cur).next;
-            } else {
-                (*prev).next = (*cur).next;
-            }
-            break;
-        }
-        prev = cur;
-        cur = (*cur).next;
-    }
-    (*(*t).notif).hdr.refs -= 1;
-    (*t).notif = ptr::null_mut();
-    (*t).armed = false;
-    (*t).next = ptr::null_mut();
-}
-
-/// Tick-time expiry sweep. O(armed timers) per tick — fine at MVP scale.
+/// See [`kcore::timer::check_expired`].
 pub unsafe fn check_expired(now: u64) {
-    let mut cur = ARMED_HEAD;
-    while !cur.is_null() {
-        let next = (*cur).next;
-        if (*cur).deadline <= now {
-            let notif = (*cur).notif;
-            let bits = (*cur).bits;
-            disarm(cur);
-            notification::signal(notif, bits);
-        }
-        cur = next;
-    }
-}
-
-/// pre:  refs == 0.
-pub unsafe fn destroy_timer(t: *mut TimerObj) {
-    disarm(t);
+    kcore::timer::check_expired(now, &mut KernelEnv);
 }
 
 // ── Kernel tick ─────────────────────────────────────────────────────────

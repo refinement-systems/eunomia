@@ -43,7 +43,7 @@ unsafe fn user_range_ok(ptr: u64, len: u64) -> bool {
             && ptr >= USER_BASE
             && ptr.checked_add(len).is_some_and(|end| end <= USER_BASE + USER_SIZE)
     } else {
-        crate::aspace::AspaceObj::range_mapped((*t).aspace, ptr, len, false)
+        crate::aspace::range_mapped((*t).aspace, ptr, len, false)
     }
 }
 
@@ -52,7 +52,7 @@ unsafe fn user_range_writable(ptr: u64, len: u64) -> bool {
     if (*t).aspace.is_null() {
         user_range_ok(ptr, len)
     } else {
-        crate::aspace::AspaceObj::range_mapped((*t).aspace, ptr, len, true)
+        crate::aspace::range_mapped((*t).aspace, ptr, len, true)
     }
 }
 
@@ -415,7 +415,7 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
             {
                 return Some(ERR_PERM);
             }
-            match crate::aspace::AspaceObj::map(asp, base, a[2], pages, perms) {
+            match crate::aspace::map(asp, base, a[2], pages, perms) {
                 Ok(()) => {
                     (*asp).hdr.refs += 1;
                     (*fr_slot).cap.kind =
@@ -483,7 +483,7 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
                 return Some(ERR_PERM);
             }
             // Entry/SP live in the child's aspace, not the caller's.
-            if !crate::aspace::AspaceObj::range_mapped(asp, a[3], 4, false) {
+            if !crate::aspace::range_mapped(asp, a[3], 4, false) {
                 return Some(ERR_FAULT);
             }
             (*cs).hdr.refs += 1;
