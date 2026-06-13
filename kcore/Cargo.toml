@@ -9,7 +9,6 @@ edition.workspace = true
 # aarch64-unknown-none-softfloat as a dependency of `kernel`.
 [dependencies]
 
-# cfg(kani) is injected by cargo-kani; teach plain cargo it's expected
-# (same handling as scratchpad/).
+# cfg(kani) is injected by cargo-kani; teach plain cargo it's expected.
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }

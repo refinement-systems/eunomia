@@ -10,6 +10,6 @@ ipc = { path = "../ipc" }
 proptest = "1"
 
 # cfg(kani) is injected by cargo-kani; teach plain cargo it's expected
-# (same handling as kcore/scratchpad).
+# (same handling as kcore).
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }

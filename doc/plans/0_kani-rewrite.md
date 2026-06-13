@@ -1,6 +1,9 @@
 # Plan: rewriting the kernel for Kani verification
 
-**Status:** proposed, not started.
+**Status:** **implemented** — all phases (§4.1–§4.7 harnesses, the §2.4 aspace
+walker rewrite, the §2.5 syscall split, and §8 docs closeout) landed; findings
+in `doc/results/2_kani-findings.md` … `8_kani-findings-7.md`. The CI `kani` job
+runs the full suite on every PR (pinned cargo-kani 0.67.0).
 **Spec baseline:** `doc/spec/2_spec_rev2.md` (all § references below).
 **Model baseline:** `tla/cap_revocation/CapRevocation.tla` (Spec + TSpec),
 `tla/commit_protocol/CommitProtocol.tla` — both TLC-checked.
