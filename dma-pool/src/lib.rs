@@ -17,6 +17,10 @@
 
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
+/// Kani harnesses (plan §4.7), compiled only under `cargo kani`.
+#[cfg(kani)]
+mod proofs;
+
 /// Opaque device-visible address — never dereference on the CPU side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeviceAddress(pub u64);

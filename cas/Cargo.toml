@@ -17,3 +17,7 @@ blake3 = { version = "1", default-features = false, features = ["pure"] }
 
 [dev-dependencies]
 proptest = "1"
+
+# cfg(kani) is injected by cargo-kani; teach plain cargo it's expected.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }

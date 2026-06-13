@@ -109,13 +109,17 @@ jobs:
       # Run from the repo root: there is no root .cargo/config.toml, so the
       # host target applies. (Inside kernel/ the directory-scoped config
       # would force the bare-metal target Kani can't drive.)
-      - name: Kani proof suite (scratchpad toolchain smoke + kcore core)
+      - name: Kani proof suite (scratchpad smoke + kcore core + host targets)
         run: |
           cargo kani -p scratchpad
           if cargo metadata --no-deps --format-version 1 \
                | grep -q '"name":"kcore"'; then
             cargo kani -p kcore
           fi
+          # §4.7 host-side targets. cas's superblock-decode harness stubs the
+          # blake3 hash, so cas runs with -Z stubbing (harmless for the rest).
+          cargo kani -p urt -p ipc -p dma-pool
+          cargo kani -p cas -Z stubbing
 
   # The kcore layering rules (plan §2.2): the verified core must contain no
   # inline asm, no MMIO, and no integer->pointer casts — CBMC cannot model
