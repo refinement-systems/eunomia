@@ -74,6 +74,16 @@ siblings), destructors stubbed (DN-4) so nothing recurses:
 Failed Checks: Check that h->refs is assignable
 ```
 
+> **Tripwire (cargo-kani upgrades).** `contract_delete_leaf` is a *committed
+> expected-to-FAIL* harness, and nothing in CI gates its expected outcome (it runs
+> only under the manual `scripts/deep-verify.sh contracts`). The DN-14 conclusion
+> holds **only at the pinned cargo-kani 0.67.0**. When the pin moves, re-run
+> `deep-verify.sh contracts` and check this harness: if it now **VERIFIES**, or
+> **fails with any string other than** `Check that h->refs is assignable`, the
+> `modifies`-expressibility wall has changed — re-evaluate DN-14 (function
+> contracts may have become a viable route to the unbounded teardown/revoke
+> proofs, residuals 1–2). This is on the cargo-kani upgrade checklist (plan §5).
+
 `delete` decrements the **designated object's** header refcount (`obj_unref`'s
 `(*h).refs -= 1`), and `h` is reached through the cap's *embedded* pointer
 (`(*slot).cap.header()`), not through `delete`'s `(slot, env)` signature. So the

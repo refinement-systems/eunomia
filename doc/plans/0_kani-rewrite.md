@@ -407,10 +407,23 @@ in the harness doc comment.
   by construction. Each stub carries a comment stating the axiom it
   introduces.
 - **Loop contracts / function contracts** (`-Z function-contracts`): not
-  load-bearing in phase 1–4 (unstable surface); adopt selectively later
-  for `revoke`'s walk if unwinding costs bite. Pin the cargo-kani version
-  in CI (currently 0.67.0) and in `rust-toolchain`-adjacent docs;
-  upgrades are deliberate PRs that re-run the full suite.
+  load-bearing in phase 1–4 (unstable surface). The "adopt selectively later
+  for `revoke`'s walk" hypothesis was **spiked and refuted at cargo-kani
+  0.67.0** (review-2 rec. #6, finding **DN-14**, `doc/results/18_kani-findings-15.md`):
+  function contracts verify kcore's *value-level* refcount discipline
+  (`unref_cspace`, whose modified object is a direct pointer parameter) but
+  **cannot** reach the cap-algebra teardown — `delete`'s write set includes the
+  designated object's header (via `obj_unref`, through the cap's *embedded*
+  pointer) and the CDT neighbours at runtime addresses, none nameable as a
+  `modifies` place from `delete`'s signature, and a `revoke` `loop_invariant`
+  cannot even be `cfg_attr`-gated. So this is **not** a viable route to the
+  unbounded teardown/revoke proofs at the current pin; the exhaustive plain-Rust
+  replay (`proofs::exhaustive`, the DN-12 mini-TLC) is the instrument that covers
+  that composition instead. The spike is preserved behind the `kani_contracts`
+  feature as the scaffold to re-test against a future cargo-kani (the wall is
+  *version-pinned*, not fundamental). Pin the cargo-kani version in CI (currently
+  0.67.0) and in `rust-toolchain`-adjacent docs; upgrades are deliberate PRs that
+  re-run the full suite **and re-run `deep-verify.sh contracts`** (DN-14 tripwire).
 - Every Kani-found bug gets: a minimized regression harness (kept
   forever, like fuzz seeds → `--test fuzz_regressions`), a fix PR, and an
   entry in `doc/results/2_kani-findings.md`.
