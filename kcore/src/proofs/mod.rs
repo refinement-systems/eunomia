@@ -19,7 +19,11 @@ pub mod channel;
 pub mod cdt;
 pub mod ghost;
 #[cfg(kani)]
+pub mod notification;
+#[cfg(kani)]
 pub mod teardown;
+#[cfg(kani)]
+pub mod thread;
 #[cfg(kani)]
 pub mod transition;
 #[cfg(kani)]
