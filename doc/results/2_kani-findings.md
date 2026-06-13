@@ -87,14 +87,16 @@ the current spec; each is revisited only if the spec changes.
 
 The §4.1 CDT/teardown suite found no defects. The §4.2 untyped/retype suite
 found two (UO-1, UO-2) — both carve-arithmetic overflows predicted by plan
-§7.1, confirmed and fixed alongside the harness. They are recorded in
-`doc/results/3_kani-findings-2.md` (the §4.2 continuation of this file).
-Every Kani-found bug gets a minimized regression harness kept forever (like a
-fuzz seed), a fix PR, and a row in the relevant findings file.
+§7.1, confirmed and fixed alongside the harness; recorded in
+`doc/results/3_kani-findings-2.md`. The §4.3 channel suite found no defects;
+its notes (DN-5, the DN-4 refinement, and the harness-cost lesson) are in
+`doc/results/4_kani-findings-3.md`. Every Kani-found bug gets a minimized
+regression harness kept forever (like a fuzz seed), a fix PR, and a row in the
+relevant findings file.
 
 | ID | Date | Harness | Bounds | Severity | Description | Status | Fix PR |
 |----|------|---------|--------|----------|-------------|--------|--------|
-| —  | —    | —       | —      | —        | (no §4.1 defects; §4.2 in `3_kani-findings-2.md`) | — | — |
+| —  | —    | —       | —      | —        | (no §4.1/§4.3 defects; §4.2 in `3_kani-findings-2.md`) | — | — |
 
 ## Harness solver times (informational; CI budget ≤5 min/harness, §8)
 
