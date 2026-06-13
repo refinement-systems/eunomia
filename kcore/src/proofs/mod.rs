@@ -23,6 +23,8 @@ pub mod ghost;
 #[cfg(kani)]
 pub mod notification;
 #[cfg(kani)]
+pub mod stubs;
+#[cfg(kani)]
 pub mod sysabi;
 #[cfg(kani)]
 pub mod teardown;

@@ -23,7 +23,8 @@
 //!   and `check_thread_teardown` (§4.4). These are the structural analog of
 //!   one another and run in seconds.
 //! - **the `delete`/`obj_unref` dispatch, proven with the recursive arms
-//!   stubbed** to no-ops (the [`stub`] module): `check_delete_frame` (the
+//!   stubbed** to no-ops (the shared [`super::stubs`] module):
+//!   `check_delete_frame` (the
 //!   §2.5 mapped-frame unmap + aspace unref, whose frame-specific logic lives
 //!   in `delete` itself and calls none of the stubbed teardowns) and
 //!   `check_delete_cspace` (the `CapKind::CSpace => destroy_cspace` routing).
@@ -138,29 +139,6 @@ fn check_delete_reparent() {
     }
 }
 
-/// No-op stubs for the recursive container teardowns (finding DN-4). When a
-/// `delete` is the *top-level* entry, CBMC reads the deleted cap's kind from
-/// slot memory as a symbolic discriminant and unrolls *every* `obj_unref`
-/// match arm — including the `delete↔destroy_cspace↔destroy_channel↔
-/// destroy_tcb` recursion — before the solver can prune the infeasible ones,
-/// which never finishes unwinding within the CI budget. Stubbing these three
-/// recursion-causing teardowns to no-ops cuts the unrolling. The teardown
-/// bodies themselves stay *really* proven by the direct-call harnesses
-/// (`check_destroy_cspace` here, `check_destroy_channel` in §4.3,
-/// `check_thread_teardown` in §4.4), so the only thing a stubbed harness
-/// gives up is re-proving those bodies a second time through the dispatch.
-#[cfg(kani)]
-mod stub {
-    use crate::channel::Channel;
-    use crate::cspace::CSpaceObj;
-    use crate::env::Env;
-    use crate::thread::Tcb;
-
-    pub unsafe fn no_destroy_cspace<E: Env>(_cs: *mut CSpaceObj, _env: &mut E) {}
-    pub unsafe fn no_destroy_channel<E: Env>(_ch: *mut Channel, _env: &mut E) {}
-    pub unsafe fn no_destroy_tcb<E: Env>(_t: *mut Tcb, _env: &mut E) {}
-}
-
 /// `check_delete_frame` (plan §4.1, §2.5): deleting a *mapped* frame cap
 /// unmaps it and drops the aspace reference the mapping held — the one
 /// revocation story for shared memory. The frame-specific logic lives in
@@ -170,9 +148,9 @@ mod stub {
 /// recursion arms (DN-4) without weakening what the frame path proves.
 #[kani::proof]
 #[kani::unwind(6)]
-#[kani::stub(crate::cspace::destroy_cspace, stub::no_destroy_cspace)]
-#[kani::stub(crate::channel::destroy_channel, stub::no_destroy_channel)]
-#[kani::stub(crate::thread::destroy_tcb, stub::no_destroy_tcb)]
+#[kani::stub(crate::cspace::destroy_cspace, super::stubs::no_destroy_cspace)]
+#[kani::stub(crate::channel::destroy_channel, super::stubs::no_destroy_channel)]
+#[kani::stub(crate::thread::destroy_tcb, super::stubs::no_destroy_tcb)]
 fn check_delete_frame() {
     let mut w = World::new();
     unsafe {
@@ -248,9 +226,9 @@ fn check_destroy_cspace() {
 /// tears down residents", each a Kani proof.
 #[kani::proof]
 #[kani::unwind(6)]
-#[kani::stub(crate::cspace::destroy_cspace, stub::no_destroy_cspace)]
-#[kani::stub(crate::channel::destroy_channel, stub::no_destroy_channel)]
-#[kani::stub(crate::thread::destroy_tcb, stub::no_destroy_tcb)]
+#[kani::stub(crate::cspace::destroy_cspace, super::stubs::no_destroy_cspace)]
+#[kani::stub(crate::channel::destroy_channel, super::stubs::no_destroy_channel)]
+#[kani::stub(crate::thread::destroy_tcb, super::stubs::no_destroy_tcb)]
 fn check_delete_cspace() {
     let mut w = World::new();
     unsafe {
