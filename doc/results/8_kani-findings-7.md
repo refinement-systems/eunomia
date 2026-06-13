@@ -24,7 +24,7 @@ division). The boundary lines below are the substance of this phase.
 | `urt::time` `check_time_conversion_total` | `utc_ns_at` is total — no panic/overflow for **all** `(wall_base, cntvct_base, cntfrq, cntvct)` (the naive `Δ·10⁹` overflow at ~5 min, caught only probabilistically by proptest, can't happen) |
 | `ipc::header` `check_header_decode_total` | `decode` total over all byte strings; `Ok` **iff** length `== HEADER_SIZE` (short-input + trailing rejection) |
 | `ipc::header` `check_header_roundtrip` | `encode`∘`decode` = id both directions — a total bijection |
-| `dma-pool` `check_dma_alloc_disjoint` | allocations disjoint + in-pool; `device_addr == device_base + offset` (bijection); alignment honoured (concrete sizes — see DN-10) |
+| `dma-pool` `check_dma_alloc_disjoint` | **for all first sizes**: accept/reject boundary, in-pool, bijection `device_addr == device_base + offset`; + a concrete carve-split for alignment round-up & two-buffer disjointness (see DN-10 / part 10) |
 | `dma-pool` `check_dma_free_reuse` | free merges the range back; whole pool reusable |
 | `cas::disk` `check_superblock_geometry` | the §4.5 mount chokepoint: `validate_geometry` total (all `checked_add`); `Ok ⇒` the committed region lies within the device — no untrusted field vouches for another |
 | `cas::disk` `check_superblock_decode_total` | `decode_checked` total over arbitrary superblock bytes — never panics (blake3 stubbed; see DN-11) |
@@ -58,13 +58,20 @@ which keeps the codec the clean bijection the harnesses prove.
     `conversion_is_monotone`**. (Plan §1 already assigns the time-page seqlock
     — a *concurrency* property — to Loom/proptest; Kani harnesses neither.)
   - **`dma-pool` symbolic-size allocation** over the `[(usize,usize); 64]`
-    free list (`MAX_FREE_RANGES`) with `copy_within` generated a SAT instance
-    that **exhausted CBMC's memory** (even at `POOL=16`, and even with a
-    symbolic *alignment* the `& !(align-1)` mask alone blew up). The harnesses
-    therefore use **concrete** sizes/alignments — proving the disjoint /
-    in-pool / bijection / alignment invariants and arithmetic-safety on
-    representative carve-and-split sequences; "for all sizes" coverage stays
-    with the unit tests + proptest.
+    free list (`MAX_FREE_RANGES`) generated a SAT instance that **exhausted
+    CBMC's memory** (even at `POOL=16`, and even with a symbolic *alignment*
+    the `& !(align-1)` mask alone blew up). **Refined in part 10
+    (`12_kani-findings-10.md`, rec. #4):** a *single* symbolic-size `alloc` with
+    concrete `align == 1` on a *fresh* pool **does** verify (~0.5 s) — it reads
+    only the concrete `(0, POOL)` entry, so the symbolic size touches just the
+    `len1 > POOL` boundary compare. `check_dma_alloc_disjoint` now proves the
+    accept/reject boundary + in-pool + bijection **for all sizes** that way, and
+    keeps a concrete second alloc for the alignment round-up + two-buffer
+    disjointness. What still OOMs (so stays concrete): a *second* alloc with a
+    symbolic size — it re-reads the now-symbolic remainder entry `(len1,
+    POOL-len1)` and the round-up `(off+align-1) & !(align-1)` over that symbolic
+    offset bit-blasts CaDiCaL — and symbolic *alignment*. "For all sizes"
+    two-buffer disjointness stays with the unit tests + proptest.
   - **`cas::tlv` decode** allocates `Vec`s (name, inline content) of symbolic
     length; CBMC's `RawVec`/allocator modeling **OOM'd even at a 12-byte
     input** (18.5k VCCs). The decode-totality and canonical-form
