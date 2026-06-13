@@ -81,9 +81,13 @@ cargo +nightly miri test -p cas
 ### Kani (kernel object core, host)
 
 cargo-kani is **pinned at 0.67.0** (CI installs that exact version; upgrades
-are deliberate PRs that re-run the suite). Run from the repo root — never
-inside `kernel/`, whose `.cargo/config.toml` forces the bare-metal target
-Kani can't drive. The CDT/teardown suite runs in a few minutes; the
+are deliberate PRs that re-run the suite). Install it via `cargo install
+--locked kani-verifier --version 0.67.0` (then `cargo kani setup`): the
+crate is **`kani-verifier`**, which ships the `cargo-kani`/`kani` binaries —
+there is **no `cargo-kani` crate on crates.io** (installing that name fails
+with "could not find cargo-kani in cargo-registry crates-io"). Run from the
+repo root — never inside `kernel/`, whose `.cargo/config.toml` forces the
+bare-metal target Kani can't drive. The CDT/teardown suite runs in a few minutes; the
 nondet-shape harnesses dominate (`doc/results/2_kani-findings.md` tracks
 per-harness times and the bounds).
 

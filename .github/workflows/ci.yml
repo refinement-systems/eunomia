@@ -94,10 +94,16 @@ jobs:
             ~/.cargo/bin/kani
             ~/.kani
           key: kani-0.67.0-${{ runner.os }}
-      - name: Install cargo-kani (pinned)
+      - name: Install Kani (pinned)
+        # Kani ships as the `kani-verifier` crate: installing it provides the
+        # `cargo-kani` and `kani` binaries, and `cargo kani setup` then
+        # downloads the matching CBMC backend. There is no `cargo-kani` crate
+        # on crates.io — installing that name is what broke this job ("could
+        # not find cargo-kani in cargo-registry crates-io ..."). The CLI is
+        # still invoked as `cargo kani`; only the install crate name differs.
         run: |
           if ! command -v cargo-kani >/dev/null; then
-            cargo install --locked cargo-kani --version 0.67.0
+            cargo install --locked kani-verifier --version 0.67.0
           fi
           cargo kani setup
       # Run from the repo root: there is no root .cargo/config.toml, so the
