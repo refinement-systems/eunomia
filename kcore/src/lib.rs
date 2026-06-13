@@ -32,5 +32,9 @@ pub mod thread;
 pub mod timer;
 pub mod untyped;
 
-// The proof harnesses and well-formedness predicates (plan §4.1) land in a
-// follow-up; `#[cfg(any(kani, test))] pub mod proofs;` is wired in then.
+/// Proof infrastructure and Kani harnesses (plan §4.1): the well-formedness
+/// predicates, the refcount census, the ghost environment, and the world
+/// builders. Compiled for `cargo kani` and ordinary `cargo test` (the wf
+/// predicates double as unit-test oracles), never in a shipping build.
+#[cfg(any(kani, test))]
+pub mod proofs;
