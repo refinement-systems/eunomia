@@ -76,6 +76,21 @@ the current spec; each is revisited only if the spec changes.
   QEMU-covered (`spawn-test.sh` reclaim loop); the proofs here cover one level
   of recursion with leaf (notification) residents.
 
+- **DN-12 — destructive ops don't fit a *nondet multi-step* transition
+  harness (post-DN-4).** Closing DN-4 made *single concrete* `delete`s
+  tractable, but **not** K independent nondet deletes: putting `delete`/`revoke`
+  in the K-step `check_cdt_transition_system` sequence OOMs CBMC (the 4-op
+  alphabet at K=2 is ~9.3 M SAT vars; even 3-op OOMs at K=2, verifies only at
+  K=1), and CBMC emits spurious unwinding-assertion failures because it can't
+  bound the `cdt_unlink`/`slot_move` walks without `cdt_wf` as an *assumption*
+  (an exhaustive plain-Rust replay of all length-2 sequences confirmed the
+  invariants actually hold — no real bug). The sound resolution: `delete` is
+  checked *inductively* — one op over a nondet asserted-wf shape
+  (`check_delete_step`, generalizing `check_delete_reparent` to all shapes);
+  `revoke`'s symbolic-tree walk OOMs even inductively, so it stays the concrete
+  `check_revoke`. The additive `derive`/`slot_move` sequence rose to K=3. Full
+  write-up: `doc/results/10_kani-findings-8.md`.
+
 - **DN-3 — the CDT is a forest, not a single tree.** The kernel installs
   several parentless root caps directly (the boot caps in `kernel/src/main.rs`:
   the untyped, device/RTC frames, the init aspace), so there is no unique
@@ -147,7 +162,8 @@ machine (cargo-kani 0.67.0); CI runners differ but the ratios hold.
 | `check_destroy_cspace` | `World`, 2 notif residents | ~2 s |
 | `check_delete_frame` | `World`, stubbed destructors | ~9 s |
 | `check_delete_cspace` | `World`, stubbed destructors | ~1 s |
-| `check_cdt_transition_system` | bare pool, K=2 | ~131 s (K=3 ≈ 297 s) |
+| `check_cdt_transition_system` | bare pool, K=3 (derive/move) | ~315 s |
+| `check_delete_step` | nondet shape, `POOL_SLOTS=4` | ~160 s |
 
 A 6-slot pool put `check_cdt_insert_child` at ~387 s (over budget); 4 slots —
 which is exactly TLA `CapIds` — brings the nondet-shape harnesses well under
