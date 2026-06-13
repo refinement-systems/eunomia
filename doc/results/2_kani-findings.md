@@ -40,6 +40,20 @@ the current spec; each is revisited only if the spec changes.
   "object destroyed exactly when refs hits zero" assertion would produce
   spurious counterexamples and is deliberately **not** used. (Plan §7 item 4
   adjacent.)
+- **DN-3 — the CDT is a forest, not a single tree.** The kernel installs
+  several parentless root caps directly (the boot caps in `kernel/src/main.rs`:
+  the untyped, device/RTC frames, the init aspace), so there is no unique
+  root. `cdt_unlink` of a root that has children re-parents them to the null
+  parent, leaving them roots that still share sibling links. Consequence for
+  verification: `cdt_wf` asserts the forest invariants (double-linked sibling
+  lists, parent/first-child back-pointers, empty⇒detached, acyclicity, links
+  in-universe) but deliberately does **not** assert "roots have no siblings".
+  That property holds of freshly-built shapes — only `cdt_insert_child` makes
+  siblings, always under a non-null parent — but `cdt_unlink` does not
+  preserve it, and it is not a structural-integrity property. Asserting it
+  would produce a counterexample (unlink a multi-child root) that is not a
+  real defect. (Surfaced while writing `check_cdt_unlink`, plan §4.1.)
+
 - **DN-2 — fire-before-reclaim ordering is end-state-unobservable in general.**
   `cspace::delete` fires `endpoint_cap_dropped` (peer-closed) strictly before
   `obj_unref` (source order: `kernel/src/cspace.rs`), satisfying the TSpec
@@ -60,4 +74,22 @@ row here.
 
 | ID | Date | Harness | Bounds | Severity | Description | Status | Fix PR |
 |----|------|---------|--------|----------|-------------|--------|--------|
-| —  | —    | —       | —      | —        | (no findings yet) | — | — |
+| —  | —    | —       | —      | —        | (no defects found yet) | — | — |
+
+## Harness solver times (informational; CI budget ≤5 min/harness, §8)
+
+Recorded so a regression in solver cost is visible. Measured on the dev
+machine (cargo-kani 0.67.0); CI runners differ but the ratios hold.
+
+| Harness | Bounds | Time |
+|---------|--------|------|
+| `check_cdt_insert_child` | `POOL_SLOTS=4` | ~76 s |
+| `check_cdt_unlink` | `POOL_SLOTS=4` | ~101 s |
+| `check_slot_move` | `POOL_SLOTS=4` | ~114 s |
+| `check_derive_*` (×3) | 2 slots | <2 s each |
+| negatives (×4) | minimal | <2 s each |
+
+A 6-slot pool put `check_cdt_insert_child` at ~387 s (over budget); 4 slots —
+which is exactly TLA `CapIds` — brings the nondet-shape harnesses well under
+the cap (plan §3, §9). The `cdt_wf` membership check is the `O(n²)` cost
+driver, so the bound is load-bearing.

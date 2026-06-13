@@ -260,7 +260,10 @@ pub unsafe fn cdt_insert_child(parent: *mut CapSlot, child: *mut CapSlot) {
 ///       parent's child list (re-parented one level up). Authority remains
 ///       monotone: the children were derived through slot, so everything
 ///       they grant was already derivable from the parent.
-unsafe fn cdt_unlink(slot: *mut CapSlot) {
+///
+/// `pub(crate)` so the proof harnesses can exercise the unlink directly
+/// (plan §4.1 `check_cdt_unlink`); it has no callers outside this crate.
+pub(crate) unsafe fn cdt_unlink(slot: *mut CapSlot) {
     let parent = (*slot).parent;
     let prev = (*slot).prev_sib;
     let next = (*slot).next_sib;

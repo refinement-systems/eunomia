@@ -14,6 +14,8 @@ use super::bounds::*;
 use super::ghost::GhostEnv;
 use crate::aspace::AspaceObj;
 use crate::channel::{Binding, Channel, MsgSlot, MSG_CAPS, MSG_PAYLOAD};
+#[cfg(kani)]
+use crate::cspace::{self, Cap, CapKind, Rights};
 use crate::cspace::{CapSlot, CSpaceObj, ObjHeader};
 use crate::notification::NotifObj;
 use crate::thread::Tcb;
@@ -227,4 +229,88 @@ impl Default for World {
     fn default() -> World {
         World::new()
     }
+}
+
+// ── bare slot pool for the structural CDT harnesses ──────────────────────
+
+/// A flat pool of `POOL_SLOTS` cap slots plus one notification object every
+/// occupied slot designates. Smaller than the full [`World`], so an
+/// all-subsets nondet CDT shape stays tractable under CBMC (plan §4.1, §9).
+pub struct BarePool {
+    pub slots: [CapSlot; POOL_SLOTS],
+    pub notif: NotifObj,
+}
+
+impl BarePool {
+    pub fn new() -> BarePool {
+        BarePool { slots: [const { CapSlot::empty() }; POOL_SLOTS], notif: empty_notif() }
+    }
+
+    pub fn slot(&mut self, i: usize) -> *mut CapSlot {
+        ptr::addr_of_mut!(self.slots[i])
+    }
+
+    pub fn notif_ptr(&mut self) -> *mut NotifObj {
+        ptr::addr_of_mut!(self.notif)
+    }
+
+    pub fn slot_ptrs(&mut self) -> [*mut CapSlot; POOL_SLOTS] {
+        let mut out = [ptr::null_mut(); POOL_SLOTS];
+        for i in 0..POOL_SLOTS {
+            out[i] = self.slot(i);
+        }
+        out
+    }
+}
+
+impl Default for BarePool {
+    fn default() -> BarePool {
+        BarePool::new()
+    }
+}
+
+/// Nondeterministic CDT shape (plan §4.1 shape builder). Each slot is
+/// independently occupied-or-not; each occupied slot's parent is either none
+/// (a root) or an occupied slot of *strictly smaller index* — so the tree is
+/// acyclic by construction, no `kani::any()` on pointers. Caps are placed,
+/// then links are materialized by replaying `cdt_insert_child` in index
+/// order, then the notification's refcount is *set* to the census (the
+/// occupied-slot count). Returns `(occupied, parent_index)` with
+/// `parent_index[i] == POOL_SLOTS` meaning "root".
+///
+/// The harness asserts (not assumes) `cdt_wf` on the result, so a builder
+/// bug surfaces as a failure rather than a vacuous proof.
+#[cfg(kani)]
+pub unsafe fn nondet_shape(pool: &mut BarePool) -> ([bool; POOL_SLOTS], [usize; POOL_SLOTS]) {
+    let n = pool.notif_ptr();
+    let mut occ = [false; POOL_SLOTS];
+    let mut par = [POOL_SLOTS; POOL_SLOTS]; // sentinel POOL_SLOTS == root
+
+    for i in 0..POOL_SLOTS {
+        occ[i] = kani::any();
+        if occ[i] {
+            (*pool.slot(i)).cap = Cap { kind: CapKind::Notification(n), rights: Rights::ALL };
+        }
+    }
+    for i in 0..POOL_SLOTS {
+        if occ[i] {
+            let raw: usize = kani::any();
+            kani::assume(raw <= i); // raw == i encodes "root"
+            if raw < i {
+                kani::assume(occ[raw]);
+                par[i] = raw;
+                cspace::cdt_insert_child(pool.slot(raw), pool.slot(i));
+            }
+        }
+    }
+
+    let mut refs = 0u32;
+    for i in 0..POOL_SLOTS {
+        if occ[i] {
+            refs += 1;
+        }
+    }
+    (*n).hdr.refs = refs;
+
+    (occ, par)
 }

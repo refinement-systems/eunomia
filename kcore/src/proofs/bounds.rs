@@ -22,8 +22,11 @@ pub const NTIMERS: usize = 1;
 pub const NASPACES: usize = 1;
 
 /// Bare-slot pool for the structural CDT harnesses (insert/unlink/move/
-/// derive) — small enough that an all-subsets nondet shape stays tractable.
-pub const POOL_SLOTS: usize = 6;
+/// derive). Equal to TLA `CapIds = 4`: large enough for a parent, several
+/// children, and a free destination slot, small enough that the all-subsets
+/// nondet shape stays inside the CI solver budget (plan §3, §8 — a 6-slot
+/// pool put `check_cdt_insert_child` at ~6.5 min, over the ≤5 min target).
+pub const POOL_SLOTS: usize = 4;
 
 /// The full slot universe of a [`super::world::World`]: every cspace slot,
 /// every channel ring cap slot, every TCB binding slot. This is the set the

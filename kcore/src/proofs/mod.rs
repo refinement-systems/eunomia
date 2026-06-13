@@ -13,6 +13,8 @@
 #![allow(dead_code)]
 
 pub mod bounds;
+#[cfg(kani)]
+pub mod cdt;
 pub mod ghost;
 pub mod wf;
 pub mod world;

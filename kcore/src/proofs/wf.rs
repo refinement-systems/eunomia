@@ -24,7 +24,17 @@ unsafe fn is_member(p: *mut CapSlot, slots: &[*mut CapSlot]) -> bool {
 
 /// The executable `TypeOK` for the CDT (plan §4.1): sibling lists doubly
 /// consistent, parent/first-child consistent, empty slots fully detached,
-/// roots sibling-free, no cycles, all links inside the universe.
+/// no cycles, all links inside the universe.
+///
+/// This is a *forest* invariant, not a single-tree one: the kernel has many
+/// roots (the boot caps installed directly in `main.rs` carry no parent),
+/// and `cdt_unlink` of a multi-child root re-parents its children to the
+/// null parent — leaving them roots that still share sibling links. So
+/// "roots have no siblings" is deliberately *not* asserted; it holds of
+/// freshly-built shapes (only `cdt_insert_child` makes siblings, always
+/// under a non-null parent) but is not preserved by deletion, and is not a
+/// structural-integrity property — the double-linked sibling list, the
+/// parent/child back-pointers, and acyclicity are.
 pub unsafe fn cdt_wf(slots: &[*mut CapSlot]) -> bool {
     let n = slots.len();
 
@@ -68,12 +78,6 @@ pub unsafe fn cdt_wf(slots: &[*mut CapSlot]) -> bool {
 
         // A first child (parent set, no prev sib) is its parent's first_child.
         if !parent.is_null() && ps.is_null() && (*parent).first_child != s {
-            return false;
-        }
-
-        // Roots have no siblings (only cdt_insert_child makes siblings, and
-        // always under a non-null parent).
-        if parent.is_null() && (!ps.is_null() || !ns.is_null()) {
             return false;
         }
     }
