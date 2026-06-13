@@ -14,17 +14,9 @@
 use super::bounds::POOL_SLOTS;
 use super::ghost::GhostEnv;
 use super::wf::cdt_wf;
-use super::world::{nondet_shape, BarePool};
+use super::world::{nondet_shape, pick, BarePool};
 use crate::aspace::AspaceObj;
 use crate::cspace::{self, Cap, CapKind, CapSlot, Rights};
-
-/// Pick a nondet slot index satisfying `occupied[i] == want`.
-unsafe fn pick(occ: &[bool; POOL_SLOTS], want: bool) -> usize {
-    let i: usize = kani::any();
-    kani::assume(i < POOL_SLOTS);
-    kani::assume(occ[i] == want);
-    i
-}
 
 #[kani::proof]
 #[kani::unwind(6)] // = bounds::UNWIND_POOL (POOL_SLOTS + 2)

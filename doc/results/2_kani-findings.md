@@ -40,6 +40,23 @@ the current spec; each is revisited only if the spec changes.
   "object destroyed exactly when refs hits zero" assertion would produce
   spurious counterexamples and is deliberately **not** used. (Plan §7 item 4
   adjacent.)
+- **DN-4 — `delete`'s recursive teardown is a CBMC tractability wall.**
+  `delete` dispatches through `obj_unref`, whose `match` is on a cap kind
+  read from slot memory; CBMC does not constant-fold it, so every arm is
+  explored — including `destroy_cspace`/`destroy_channel`, which loop over
+  (symbolic) slot counts and recurse back into `delete`. Deleting a
+  **notification** cap stays tractable (its `destroy_notif` has no loops/
+  recursion): `check_revoke` (≈193 s) and the concrete `check_delete_reparent`
+  (≈2.5 s) both verify. But a single delete of a frame, channel, or cspace
+  cap — or a nondet CDT shape layered on a delete — unrolls the recursive
+  teardown into a formula that blows past the CI budget (many minutes). So
+  the frame-unmap / peer-closed-fire-order / container-teardown behaviours
+  are **not** Kani proofs; they are covered by the TLC-checked `CapRevocation`
+  TSpec, the `delete` source order, and the QEMU suites (`m1-test.sh` step 6,
+  `spawn-test.sh` reclaim loop) — see `kcore/src/proofs/teardown.rs`. Lifting
+  the wall (e.g. `-Z stubbing` the `destroy_*` recursion, or a function
+  contract on `obj_unref`) is deferred future work, not an unsound bound.
+
 - **DN-3 — the CDT is a forest, not a single tree.** The kernel installs
   several parentless root caps directly (the boot caps in `kernel/src/main.rs`:
   the untyped, device/RTC frames, the init aspace), so there is no unique
@@ -88,6 +105,8 @@ machine (cargo-kani 0.67.0); CI runners differ but the ratios hold.
 | `check_slot_move` | `POOL_SLOTS=4` | ~114 s |
 | `check_derive_*` (×3) | 2 slots | <2 s each |
 | negatives (×4) | minimal | <2 s each |
+| `check_revoke` | `World` (28 slots) | ~193 s |
+| `check_delete_reparent` | concrete 3-node | ~3 s |
 
 A 6-slot pool put `check_cdt_insert_child` at ~387 s (over budget); 4 slots —
 which is exactly TLA `CapIds` — brings the nondet-shape harnesses well under

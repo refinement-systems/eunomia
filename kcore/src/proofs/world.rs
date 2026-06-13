@@ -43,7 +43,7 @@ const fn empty_msgslot() -> MsgSlot {
     }
 }
 
-const fn empty_notif() -> NotifObj {
+pub(crate) const fn empty_notif() -> NotifObj {
     NotifObj {
         hdr: ObjHeader { refs: 0 },
         word: 0,
@@ -52,7 +52,7 @@ const fn empty_notif() -> NotifObj {
     }
 }
 
-const fn empty_timer() -> TimerObj {
+pub(crate) const fn empty_timer() -> TimerObj {
     TimerObj {
         hdr: ObjHeader { refs: 0 },
         armed: false,
@@ -63,7 +63,7 @@ const fn empty_timer() -> TimerObj {
     }
 }
 
-const fn empty_aspace() -> AspaceObj {
+pub(crate) const fn empty_aspace() -> AspaceObj {
     AspaceObj {
         hdr: ObjHeader { refs: 0 },
         asid: 0,
@@ -119,11 +119,15 @@ pub struct World {
 }
 
 impl World {
-    /// A blank canvas: every object present but unreferenced. `Tcb::empty`
+    /// A blank canvas: every object present but unreferenced. All the const
+    /// "empty" constructors start `refs = 0` except `Tcb::empty`, which
     /// hardcodes `refs = 1` (the creator-cap assumption); since no cap points
-    /// anywhere yet, normalize every refcount to its census (here, zero) so
-    /// the world starts refcount-sound. Builders place caps and call
-    /// [`super::wf::recompute_refs`]; the real ops maintain refs thereafter.
+    /// anywhere yet, zero those so the world starts refcount-sound. This is
+    /// deliberately a tiny `NTHREADS` loop rather than a full
+    /// `recompute_refs` (whose 28-slot scans would force a large unwind on
+    /// *every* World harness). Builders place caps and the real ops maintain
+    /// refs thereafter; `refcount_sound` is called explicitly where a harness
+    /// needs the census.
     pub fn new() -> World {
         let mut w = World {
             cspaces: [const { CSpacePool::new() }; NCSPACES],
@@ -134,7 +138,9 @@ impl World {
             aspaces: [const { empty_aspace() }; NASPACES],
             env: GhostEnv::new(),
         };
-        unsafe { super::wf::recompute_refs(&mut w) };
+        for i in 0..NTHREADS {
+            w.tcbs[i].hdr.refs = 0;
+        }
         w
     }
 
@@ -313,4 +319,13 @@ pub unsafe fn nondet_shape(pool: &mut BarePool) -> ([bool; POOL_SLOTS], [usize; 
     (*n).hdr.refs = refs;
 
     (occ, par)
+}
+
+/// Pick a nondet pool index whose occupancy matches `want`.
+#[cfg(kani)]
+pub fn pick(occ: &[bool; POOL_SLOTS], want: bool) -> usize {
+    let i: usize = kani::any();
+    kani::assume(i < POOL_SLOTS);
+    kani::assume(occ[i] == want);
+    i
 }

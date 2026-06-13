@@ -16,6 +16,8 @@ pub mod bounds;
 #[cfg(kani)]
 pub mod cdt;
 pub mod ghost;
+#[cfg(kani)]
+pub mod teardown;
 pub mod wf;
 pub mod world;
 
