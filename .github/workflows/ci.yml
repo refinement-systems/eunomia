@@ -163,6 +163,29 @@ jobs:
             exit 1
           fi
 
+  # The concurrency tier (plan 1_loom-shuttle-rewrite.md §6): the Loom models,
+  # run under RUSTFLAGS="--cfg loom". Today that is the time-page seqlock
+  # exhaustive proof (urt::time::loom_tests, §4.1) — every C11-permitted
+  # interleaving + reordering of one writer's seqlock update and one reader's
+  # sample(), proving no torn read; the native proptest stays the breadth/Miri
+  # tier (it is cfg(not(loom))-gated). No per-test filter, so a new loom::model
+  # anywhere in urt auto-gates — the property the kani job also prizes. Grows to
+  # host the Shuttle IPC models (§4.2) once that crate exists.
+  concurrency:
+    runs-on: ubuntu-latest
+    # Runaway guard: a Loom model that loses its bound (e.g. an unbounded spin —
+    # the failure mode caught + fixed in part 3 via loom::hint::spin_loop)
+    # explodes loom's branch search instead of failing fast. Today's model is
+    # ~0.2 s; this cap is margin. Bound new models with small state +
+    # LOOM_MAX_PREEMPTIONS, not by relaxing this.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Loom models (RUSTFLAGS=--cfg loom cargo test -p urt --lib)
+        run: RUSTFLAGS="--cfg loom" cargo test -p urt --lib
+
   # The kcore layering rules (plan §2.2): the verified core must contain no
   # inline asm, no MMIO, and no integer->pointer casts — CBMC cannot model
   # any of them soundly. Grep-enforced, same spirit as the
