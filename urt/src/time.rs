@@ -25,23 +25,29 @@
 //! and the host stress test (a writer thread tearing the page on purpose)
 //! stays data-race-free under Miri.
 
-// The seqlock's atomics come through a single cfg-selected seam: a
-// `--cfg loom` build (the Phase-1 model, plan 1_loom-shuttle-rewrite §4.1)
-// gets loom's instrumented atomics; every normal/aarch64 build is unchanged.
-// AtomicUsize is loom-side absent: its only user, the `static TIME_PAGE`
-// page-location cell, is `not(loom)`-gated below (loom atomics can't sit in a
-// `static`). The seqlock proof needs only the four field atomics + fence.
+// The seqlock's atomics come through a single cfg-selected seam: `--cfg loom`
+// (the certifying Phase-1 model, §4.1) gets loom's instrumented atomics;
+// `--cfg shuttle` (the non-certifying breadth-smoke, §4.1 item 5) gets
+// shuttle's; every normal/aarch64 build is unchanged. AtomicUsize is needed
+// only by the `static TIME_PAGE` page-location cell, which is real-build-only
+// (neither model can put an atomic in a `static`); the seqlock protocol both
+// models check needs only the four field atomics + fence.
 #[cfg(loom)]
 use loom::sync::atomic::{fence, AtomicI64, AtomicU64, Ordering};
-#[cfg(not(loom))]
+#[cfg(shuttle)]
+use shuttle::sync::atomic::{fence, AtomicI64, AtomicU64, Ordering};
+#[cfg(all(not(loom), not(shuttle)))]
 use core::sync::atomic::{fence, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 
-// The reader's seqlock spin hint rides the same seam: loom's mocked spin_loop
-// yields to its scheduler, which bounds the model (a raw core::hint::spin_loop
-// is opaque to loom and blows its branch budget); native keeps the CPU hint.
+// The reader's seqlock spin hint rides the same seam: loom's and shuttle's
+// mocked spin_loop yield to their scheduler (a raw core::hint::spin_loop is
+// opaque to them and blows loom's branch budget / never preempts under
+// shuttle); native keeps the CPU hint.
 #[cfg(loom)]
 use loom::hint::spin_loop;
-#[cfg(not(loom))]
+#[cfg(shuttle)]
+use shuttle::hint::spin_loop;
+#[cfg(all(not(loom), not(shuttle)))]
 use core::hint::spin_loop;
 
 const NANOS_PER_SEC: u64 = 1_000_000_000;
@@ -58,10 +64,10 @@ pub struct TimePage {
 }
 
 // The struct is the page ABI; a layout drift here would misread every
-// process's clock. Skipped under loom, whose atomics wrap a model-state
-// index and are neither 8 bytes nor ABI-stable — the loom build never
-// touches the real page layout (it shares a TimePage via loom::sync::Arc).
-#[cfg(not(loom))]
+// process's clock. Skipped under loom/shuttle, whose atomics wrap a model-state
+// index and are neither 8 bytes nor ABI-stable — a model build never touches
+// the real page layout (it shares a TimePage via the model's Arc).
+#[cfg(all(not(loom), not(shuttle)))]
 const _: () = {
     assert!(core::mem::size_of::<TimePage>() == PAGE_PREFIX_BYTES);
     assert!(core::mem::offset_of!(TimePage, seq) == 0);
@@ -79,10 +85,10 @@ pub struct Sample {
 }
 
 impl TimePage {
-    // loom's `Atomic*::new` is not `const`, so the loom build drops `const`;
-    // the body is identical. The real page is built once at boot, where const
-    // construction is worth keeping.
-    #[cfg(not(loom))]
+    // loom's / shuttle's `Atomic*::new` is not `const`, so a model build drops
+    // `const`; the body is identical. The real page is built once at boot, where
+    // const construction is worth keeping.
+    #[cfg(all(not(loom), not(shuttle)))]
     pub const fn new(wall_base_ns: i64, cntvct_base: u64, cntfrq: u64) -> TimePage {
         TimePage {
             seq: AtomicU64::new(0),
@@ -92,7 +98,7 @@ impl TimePage {
         }
     }
 
-    #[cfg(loom)]
+    #[cfg(any(loom, shuttle))]
     pub fn new(wall_base_ns: i64, cntvct_base: u64, cntfrq: u64) -> TimePage {
         TimePage {
             seq: AtomicU64::new(0),
@@ -173,11 +179,11 @@ pub fn encode_boot(wall_base_ns: i64, cntvct_base: u64, cntfrq: u64) -> [u8; PAG
 }
 
 // The page-location indirection (a static atomic cell + an int->pointer cast)
-// is `not(loom)`-gated: loom atomics can't live in a `static`, and this is not
-// the seqlock protocol the Loom model checks — that model constructs a
-// TimePage inside loom::model and shares it via loom::sync::Arc, never via this
+// is real-build-only: neither model's atomics can live in a `static`, and this
+// is not the seqlock protocol the models check — they construct a TimePage
+// inside the model/run and share it via the model's Arc, never via this
 // process-global pointer.
-#[cfg(not(loom))]
+#[cfg(all(not(loom), not(shuttle)))]
 static TIME_PAGE: AtomicUsize = AtomicUsize::new(0);
 
 /// Register the time-page mapping for this process. The address comes
@@ -186,12 +192,12 @@ static TIME_PAGE: AtomicUsize = AtomicUsize::new(0);
 /// # Safety
 /// `va` must be the base of a live `TimePage` mapping (read-only is
 /// enough) that stays mapped for the rest of the process's life.
-#[cfg(not(loom))]
+#[cfg(all(not(loom), not(shuttle)))]
 pub unsafe fn attach(va: usize) {
     TIME_PAGE.store(va, Ordering::Release);
 }
 
-#[cfg(not(loom))]
+#[cfg(all(not(loom), not(shuttle)))]
 pub fn page() -> Option<&'static TimePage> {
     let p = TIME_PAGE.load(Ordering::Acquire);
     if p == 0 {
@@ -236,10 +242,11 @@ pub fn now_utc_ns() -> i64 {
 
 // The native tier: conversion proptests (breadth) + the probabilistic
 // std-thread seqlock race (also the Miri weak-memory pass). Excluded under
-// loom, which constructs its atomics inside loom::model — the std-thread test
-// would build a TimePage outside one and panic. The exhaustive ordering proof
-// of the same seqlock lives in `loom_tests` below (plan 1_loom-shuttle §4.1).
-#[cfg(all(test, not(loom)))]
+// loom/shuttle, which construct their atomics inside the model/run — the
+// std-thread test would build a TimePage outside one and panic. The exhaustive
+// ordering proof lives in `loom_tests`, the randomized smoke in `shuttle_tests`
+// below (plan 1_loom-shuttle §4.1).
+#[cfg(all(test, not(loom), not(shuttle)))]
 mod tests {
     use super::*;
     extern crate std;
@@ -460,5 +467,53 @@ mod loom_tests {
 
             writer.join().unwrap();
         });
+    }
+}
+
+/// Shuttle breadth-smoke of the same seqlock model (plan 1_loom-shuttle-rewrite
+/// §4.1 item 5) — a *second* scheduler over the same one-writer/one-reader
+/// interleavings, structurally identical to `loom_tests`.
+///
+/// NON-CERTIFYING, and deliberately so: Shuttle models only SeqCst and
+/// reinterprets the seqlock's Relaxed/Acquire/Release as SeqCst (it prints a
+/// one-time warning to that effect on the first run), so it **cannot witness a
+/// torn read** — under SeqCst the seqlock cannot tear. `loom_tests` is the proof
+/// of record; this is a randomized-scheduler sanity pass (deadlock / retry-loop
+/// / logic smoke) and the template for the future IPC Shuttle work (§4.2). Run
+/// with `RUSTFLAGS="--cfg shuttle" cargo test -p urt --lib`.
+#[cfg(all(test, shuttle))]
+mod shuttle_tests {
+    use super::*;
+    use shuttle::sync::Arc;
+    use shuttle::thread;
+
+    #[test]
+    fn no_torn_sample_under_random_schedules() {
+        shuttle::check_random(
+            || {
+                // Initial epoch k=0: (wall, cntvct, cntfrq) = (0, 0, 1).
+                let page = Arc::new(TimePage::new(0, 0, 1));
+
+                let writer = {
+                    let page = Arc::clone(&page);
+                    thread::spawn(move || {
+                        // One seqlock write to epoch k=1 → (1, 2, 4).
+                        page.seq.fetch_add(1, Ordering::Relaxed); // odd: writer in
+                        fence(Ordering::Release);
+                        page.wall_base_ns.store(1, Ordering::Relaxed);
+                        page.cntvct_base.store(2, Ordering::Relaxed);
+                        page.cntfrq.store(4, Ordering::Relaxed);
+                        page.seq.fetch_add(1, Ordering::Release); // even: writer out
+                    })
+                };
+
+                let s = page.sample();
+                assert_eq!(s.cntvct_base, 2 * s.wall_base_ns as u64, "torn sample: {s:?}");
+                assert_eq!(s.cntfrq, (3 * s.wall_base_ns + 1) as u64, "torn sample: {s:?}");
+
+                writer.join().unwrap();
+            },
+            1000,
+        );
     }
 }
