@@ -298,4 +298,70 @@ mod tests {
     fn fifo_no_drop_shuttle() {
         shuttle::check_random(|| fifo_no_drop(2), 1000);
     }
+
+    // Harness #1 (plan §5.2/§5.3): no lost wakeup, over the *real* Reactor (the
+    // phase-2 §4.2 code). A sender sends one message; a receiver registers the
+    // channel for readable on a Reactor, then loops wait() -> recv_nb. The
+    // threads race — the send may land before *or* after the receiver's bind,
+    // and inside the wait window — and the message must always be received.
+    // poll-once (register's self-signal) catches the send-before-bind case; the
+    // notif_wait word-check catches the in-window race. Deleting register's
+    // self-signal makes the send-before-bind interleaving deadlock (the negative
+    // control), which Loom/Shuttle report.
+    fn reactor_no_lost_wakeup() {
+        use crate::endpoint::{Endpoint, Message};
+        use crate::reactor::{Reactor, Signals};
+        use crate::transport::Chan;
+        const CHAN: Chan = 0;
+        const NOTIF: crate::transport::Notif = 0;
+        const KEY: crate::reactor::Key = 7;
+        let t = ModelTransport::shared(2, 1);
+
+        let ts = Arc::clone(&t);
+        let sender = thread::spawn(move || {
+            let ep = Endpoint::new(&*ts, CHAN);
+            ep.send_nb(&Message::bytes(&[42u8])).unwrap();
+        });
+
+        let tr = Arc::clone(&t);
+        let receiver = thread::spawn(move || -> u8 {
+            let mut reactor = Reactor::new(&*tr, NOTIF);
+            reactor.register(CHAN, Signals::READABLE, KEY).unwrap();
+            let ep = Endpoint::new(&*tr, CHAN);
+            let mut msg = Message::new();
+            loop {
+                let (key, _signals) = reactor.wait();
+                assert_eq!(key, KEY, "wait returned the wrong source key");
+                match ep.recv_nb(&mut msg) {
+                    Ok(()) => return msg.payload()[0],
+                    Err(RecvErr::Empty) => {} // spurious wakeup — re-wait
+                    Err(e) => panic!("unexpected recv error: {:?}", e),
+                }
+            }
+        });
+
+        sender.join().unwrap();
+        let got = receiver.join().unwrap();
+        assert_eq!(got, 42, "the receiver must observe the sent message (no lost wakeup)");
+    }
+
+    #[cfg(all(not(loom), not(shuttle)))]
+    #[test]
+    fn reactor_no_lost_wakeup_std() {
+        reactor_no_lost_wakeup();
+    }
+
+    #[cfg(shuttle)]
+    #[test]
+    fn reactor_no_lost_wakeup_shuttle() {
+        shuttle::check_random(reactor_no_lost_wakeup, 1000);
+    }
+
+    // The §5.3 weak-memory fragment: the poll-then-wait sequence against the
+    // notification word, exhaustively, at a tiny bound (one message).
+    #[cfg(loom)]
+    #[test]
+    fn reactor_no_lost_wakeup_loom() {
+        loom::model(reactor_no_lost_wakeup);
+    }
 }
