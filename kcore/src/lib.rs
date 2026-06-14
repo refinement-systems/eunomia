@@ -35,6 +35,7 @@ pub mod aspace;
 pub mod channel;
 pub mod cspace;
 pub mod env;
+pub mod id;
 pub mod notification;
 pub mod sysabi;
 pub mod thread;
