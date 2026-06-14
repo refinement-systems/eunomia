@@ -7,9 +7,11 @@
 
 pub use kcore::untyped::*;
 
+use crate::store::KernelStore;
 use kcore::aspace::AspaceObj;
 use kcore::channel::Channel;
 use kcore::cspace::{CapKind, CapSlot, ChanEnd, CSpaceObj};
+use kcore::id::{ObjId, SlotId};
 use kcore::notification::NotifObj;
 use kcore::thread::Tcb;
 use kcore::timer::TimerObj;
@@ -31,34 +33,41 @@ pub unsafe fn retype(
     dst: *mut CapSlot,
     dst2: *mut CapSlot,
 ) -> Result<(), RetypeError> {
-    let (base, size, watermark) = retype_check(ut_slot, ty, dst, dst2)?;
+    // The int→ptr boundary stays in this wrapper (plan §2.3); the kcore halves
+    // now speak handles, so translate the slot pointers once here. `dst2` is
+    // nullable for every non-channel type → `None`.
+    let ut_id = SlotId(ut_slot as u64);
+    let dst_id = SlotId(dst as u64);
+    let dst2_id = if dst2.is_null() { None } else { Some(SlotId(dst2 as u64)) };
+
+    let (base, size, watermark) = retype_check(&mut KernelStore, ut_id, ty, dst_id, dst2_id)?;
     let c = carve(base, size, watermark, ty, param)?;
 
     let kind = match ty {
         ObjType::CSpace => {
             let p = c.start as *mut CSpaceObj;
             CSpaceObj::init(p, param as u32);
-            CapKind::CSpace(p)
+            CapKind::CSpace(ObjId(p as u64))
         }
         ObjType::Thread => {
             let p = c.start as *mut Tcb;
             Tcb::init(p);
-            CapKind::Thread(p)
+            CapKind::Thread(ObjId(p as u64))
         }
         ObjType::Channel => {
             let p = c.start as *mut Channel;
             Channel::init(p, param as u32);
-            CapKind::Channel(p, ChanEnd::A)
+            CapKind::Channel(ObjId(p as u64), ChanEnd::A)
         }
         ObjType::Notification => {
             let p = c.start as *mut NotifObj;
             NotifObj::init(p);
-            CapKind::Notification(p)
+            CapKind::Notification(ObjId(p as u64))
         }
         ObjType::Timer => {
             let p = c.start as *mut TimerObj;
             TimerObj::init(p);
-            CapKind::Timer(p)
+            CapKind::Timer(ObjId(p as u64))
         }
         ObjType::Frame => {
             // Zeroed: frames flow into fresh address spaces; leaking prior
@@ -69,11 +78,11 @@ pub unsafe fn retype(
         ObjType::Aspace => {
             let p = c.start as *mut AspaceObj;
             crate::aspace::init(p, param);
-            CapKind::Aspace(p)
+            CapKind::Aspace(ObjId(p as u64))
         }
         ObjType::Untyped => CapKind::Untyped { base: c.start, size: c.bytes, watermark: 0 },
     };
 
-    retype_install(ut_slot, ty, kind, c.end, dst, dst2);
+    retype_install(&mut KernelStore, ut_id, ty, kind, c.end, dst_id, dst2_id);
     Ok(())
 }

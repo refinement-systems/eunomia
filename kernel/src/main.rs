@@ -20,6 +20,7 @@ mod user;
 use core::fmt::Write;
 use core::ptr::{addr_of, addr_of_mut};
 use cspace::{Cap, CapKind, CapSlot, CSpaceObj, ObjHeader, Rights};
+use kcore::id::ObjId;
 use thread::{Tcb, ThreadState, TrapFrame};
 
 /// Init's cspace, statically allocated: the one kernel object not carved
@@ -122,7 +123,7 @@ pub extern "C" fn kernel_main() -> ! {
         if !init_aspace.is_null() {
             let slot5 = CSpaceObj::slot(root, 5);
             (*slot5).cap = Cap {
-                kind: CapKind::Aspace(init_aspace),
+                kind: CapKind::Aspace(ObjId(init_aspace as u64)),
                 rights: Rights::ALL,
             };
             (*init_aspace).hdr.refs += 1;
@@ -130,13 +131,13 @@ pub extern "C" fn kernel_main() -> ! {
 
         // Slot 1: init's own thread cap (creator-grade: the §2.3 thread
         // bits, like any retyped TCB's first cap).
-        (*init).cspace = root;
+        (*init).cspace = Some(ObjId(root as u64));
         (*root).hdr.refs += 1;
         (*init).priority = 16;
         (*init).state = ThreadState::Running;
         let slot1 = CSpaceObj::slot(root, 1);
         (*slot1).cap = Cap {
-            kind: CapKind::Thread(init),
+            kind: CapKind::Thread(ObjId(init as u64)),
             rights: Rights::THREAD_ALL,
         };
 
@@ -227,7 +228,7 @@ unsafe fn setup_init(
         .expect("mapping init stack");
 
     (*asp).hdr.refs += 1; // init thread's reference
-    (*init).aspace = asp;
+    (*init).aspace = Some(ObjId(asp as u64));
     (*init).frame = TrapFrame::zeroed();
     (*init).frame.elr = img.entry;
     (*init).frame.sp_el0 = STACK_TOP;
