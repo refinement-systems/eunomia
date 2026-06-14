@@ -356,8 +356,12 @@ point (never over-grants), with the fixed `ConnectReq`/`GrantReply`
 codecs and the pure `admit_connect` step. Harnesses #1–#5 (FIFO/no-drop,
 lost-wakeup, backpressure, cap-ack, multi-client fairness) live in
 `ipc/src/model.rs`; the `concurrency` CI job runs them with no per-test
-filter, so a new `loom::model`/`shuttle::check_*` auto-gates. The wire
-decoder is also a cargo-fuzz target (`ipc/fuzz`). **`storaged`**
+filter, so a new `loom::model`/`shuttle::check_*` auto-gates. The Shuttle
+harnesses run under a **pinned seed** (`check_pinned`, a seeded
+`RandomScheduler`) so a CI failure reproduces from source, with a
+`shuttle_replay_corpus` landing spot for committing a failing schedule as a
+`shuttle::replay` regression (the fuzz-corpus discipline; loom-shuttle §5).
+The wire decoder is also a cargo-fuzz target (`ipc/fuzz`). **`storaged`**
 (`user/storaged/src/main.rs`) is the first production consumer: its
 drain-then-wait loop is now `Reactor::wait` + `Endpoint` over
 `SyscallTransport`, dispatching by opaque key — no notification bit named
