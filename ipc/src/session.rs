@@ -38,17 +38,15 @@ pub enum GrantReply {
     Refused,
 }
 
-/// Why a connect failed from the client's side.
+/// Why a connect failed. Today the only failure is the server refusing under its
+/// window quota (`admit`'s sole error); the client-side connect *mechanism* (the
+/// endpoint-cap handshake, §3.5) is deferred, so its richer errors — a
+/// peer-closed session channel, a reply that does not decode, a transport error
+/// — are not yet constructed. They return when that mechanism lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectErr {
     /// The server refused under its quota (§3.5).
     Refused,
-    /// The session channel's peer was closed (§3.3).
-    Closed,
-    /// The reply did not decode as a `GrantReply` — a protocol violation.
-    BadReply,
-    /// A transport error other than `Full`/`Closed`.
-    Other(i64),
 }
 
 // Tag bytes for the fixed wire forms (first payload byte). Distinct so a

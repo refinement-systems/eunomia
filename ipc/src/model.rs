@@ -16,7 +16,7 @@
 //! code runs under std (smoke), loom (exhaustive), and shuttle (randomized).
 
 use crate::sync::{Arc, Condvar, Mutex};
-use crate::transport::{Chan, Event, Notif, RecvErr, RecvOk, SendErr, Timer, Transport};
+use crate::transport::{Chan, Event, Notif, RecvErr, RecvOk, SendErr, Transport};
 use std::collections::VecDeque;
 use std::vec::Vec;
 
@@ -209,12 +209,6 @@ impl Transport for ModelTransport {
         let w = *word;
         *word = 0;
         w
-    }
-
-    fn timer_arm(&self, _t: Timer, _n: Notif, _bits: u64, _delta: u64) {
-        // Timers enter with the reactor (plan §4.3, phase 3); the Phase-0 rig
-        // smoke needs none, and a logical-clock model lands with them.
-        unimplemented!("ModelTransport timer modeling: reactor phase");
     }
 }
 

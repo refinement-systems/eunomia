@@ -1,11 +1,15 @@
 //! Userspace IPC crate — shared by every server (spec §3.5, §3.7).
 //!
 //! Responsibilities (M1+):
-//!   - Async send/recv over kernel channels
-//!   - FULL backpressure and retry
-//!   - Valuable-cap ack protocol
-//!   - Postcard message (de)serialisation (module-private)
-//!   - Lost-wakeup discipline around the notification object
+//!   - Non-blocking send/recv over kernel channels (§4.1)
+//!   - `Full` backpressure: blocking + bounded-retry send (§4.3; no executor
+//!     exists, so there is no `async`/`.await` form)
+//!   - The epoll-shaped reactor: multiplex sources behind one wait, bits hidden (§4.2)
+//!   - Valuable-cap ack protocol (§4.4)
+//!   - Postcard message (de)serialisation (module-private, behind the `wire`
+//!     feature so alloc-free binaries stay minimal; §4.5)
+//!   - Session admission quota (§4.6)
+//!   - Lost-wakeup discipline around the notification object (§3.6)
 //!
 //! The reactor API is epoll-shaped — `register(source, signals, key)` —
 //! implemented over notification bit-groups for M1 and upgraded to the

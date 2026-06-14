@@ -17,8 +17,6 @@ use crate::sys;
 pub type Chan = u32;
 /// A notification cap handle (a cspace slot index).
 pub type Notif = u32;
-/// A timer cap handle (a cspace slot index).
-pub type Timer = u32;
 
 /// The channel events a binding can target (§3.3, §3.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,10 +84,14 @@ pub trait Transport {
     /// word (which is cleared). This is the "wait" half of the lost-wakeup
     /// discipline — it checks the word before sleeping.
     fn notif_wait(&self, n: Notif) -> u64;
-
-    /// Arm a timer to signal `(notif, bits)` after `delta` ticks (§3.6, §4.4).
-    fn timer_arm(&self, t: Timer, n: Notif, bits: u64, delta: u64);
 }
+
+// A timer is **not** on this trait: the reactor consumes one as an
+// externally-bound, edge-triggered source via `Reactor::register_bound` (the
+// caller arms it through `sys::timer_arm`, like a `thread_bind` exit/fault
+// source), so the timer never flows through a `Transport` method. Modeling a
+// schedulable logical-clock timer in `ModelTransport` lands with an actual
+// reactor timer consumer (none today).
 
 /// Production transport: a zero-sized shim over the real kernel syscalls
 /// (`crate::sys`). On the aarch64 target these are real `svc #0`s; on the host
@@ -142,9 +144,5 @@ impl Transport for SyscallTransport {
 
     fn notif_wait(&self, n: Notif) -> u64 {
         sys::notif_wait(n) as u64
-    }
-
-    fn timer_arm(&self, t: Timer, n: Notif, bits: u64, delta: u64) {
-        sys::timer_arm(t, n, bits, delta);
     }
 }
