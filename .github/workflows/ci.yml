@@ -28,13 +28,6 @@ jobs:
         # user binaries stay no-alloc; `cargo test --workspace` builds ipc
         # default-features, so its unit tests need this explicit pass.
         run: cargo test -p ipc --features wire
-      - name: exhaustive CDT replays (cheap depth — continuous regression guard)
-        # The mini-TLC replays (kcore::proofs::exhaustive) are #[ignore]d so the
-        # deep depths stay off the per-PR path (scripts/deep-verify.sh / the
-        # kani-deep job). Run them here at depth 3 — milliseconds-to-~0.2 s — so
-        # the CDT-algebra composition AND the revoke-through-queue/TCB-bind-slot
-        # coverage are exercised on every PR, not only by hand.
-        run: EXHAUSTIVE_DEPTH=3 CROSS_HOME_DEPTH=3 cargo test -p kcore exhaustive -- --ignored --nocapture
 
   # Rerun the TLA+ proofs. Both the CapRevocation safety model (incl. the
   # §3.3 channel whole-object teardown TSpec) and the CommitProtocol model
@@ -135,13 +128,12 @@ jobs:
       # host target applies. (Inside kernel/ the directory-scoped config
       # would force the bare-metal target Kani can't drive.)
       - name: Kani proof suite (host targets)
-        # The kcore Kani harnesses are GATED OFF during the Verus phase-1 arena
-        # rewrite (doc/plans/3_verus-rewrite.md §9): they predate the handle/Store
-        # model (feature `legacy_ptr_harness`, off by default), so `cargo kani -p
-        # kcore` would now find no harnesses and error. The boot tests (on-os job)
-        # are the phase-1 gate; phase 2 reintroduces the kernel-core proofs in
-        # Verus (the `verus` job). The host-side §4.7 targets keep their Kani
-        # harnesses and still gate here.
+        # The kcore Kani harnesses are GONE: the Verus rewrite migrated the
+        # kernel-core proofs to deductive verification (the `verus` job;
+        # doc/plans/3_verus-rewrite.md phase 2 deleted src/proofs and the
+        # deep-Kani machinery it subsumed). `cargo kani -p kcore` is no longer
+        # run. The host-side §4.7 targets keep their Kani harnesses and gate here
+        # until their own Verus ports land (plan phase 6).
         run: |
           set -o pipefail
           # §4.7 host-side targets. cas's superblock-decode harness stubs the

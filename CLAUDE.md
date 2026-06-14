@@ -12,8 +12,9 @@ kernel/          AArch64 bare-metal microkernel (aarch64-unknown-none) —
                  the architectural shell over kcore (boot, MMU, GIC, sched)
 kcore/           Host-buildable kernel object core: cspace/CDT, untyped,
                  channels, notifications, thread/timer objects, aspace data;
-                 Kani-verified (§6, doc/plans/0_kani-rewrite.md). no_std,
-                 zero deps; the kernel links it, hardware behind the Env seam
+                 Verus-verified (§6, doc/plans/3_verus-rewrite.md). no_std,
+                 zero deps; the kernel links it, hardware + objects behind the
+                 handle/Store seam
 ipc/             Async IPC crate — shared by all userspace servers (§3.5)
 dma-pool/        DMA buffer pool — the only place PAs are visible (§2.5)
 cas/             CAS primitives: chunker, prolly tree, commit protocol (§4)
@@ -76,7 +77,7 @@ cargo test -p cas
 cargo +nightly miri test -p cas
 ```
 
-### Kani (kernel object core, host)
+### Kani (host chokepoints)
 
 cargo-kani is **pinned at 0.67.0** (CI installs that exact version; upgrades
 are deliberate PRs that re-run the suite). Install it via `cargo install
@@ -85,21 +86,20 @@ crate is **`kani-verifier`**, which ships the `cargo-kani`/`kani` binaries —
 there is **no `cargo-kani` crate on crates.io** (installing that name fails
 with "could not find cargo-kani in cargo-registry crates-io"). Run from the
 repo root — never inside `kernel/`, whose `.cargo/config.toml` forces the
-bare-metal target Kani can't drive. The CDT/teardown suite runs in a few
-minutes; the nondet-shape harnesses dominate. The kernel object core lives in
-`kcore`; the host-side §4.7 targets (`urt`, `ipc`, `cas`, `dma-pool`) have
-their own `#[cfg(kani)]` harnesses. Findings, per-harness bounds, and times are
-tracked across `doc/results/2_kani-findings.md` … `8_kani-findings-7.md`.
+bare-metal target Kani can't drive.
 
-**Phase-1 note (`doc/plans/3_verus-rewrite.md`):** the `kcore` Kani harnesses
-(`src/proofs`) are **gated off** during the Verus arena rewrite — they predate the
-handle/`Store` model (feature `legacy_ptr_harness`, off by default), so `cargo kani
--p kcore` finds no harnesses and errors. The boot tests (`scripts/{m1,spawn}-test.sh`)
-are the phase-1 gate; phase 2 reintroduces the kernel-core proofs in Verus. The
-host-side §4.7 targets keep their Kani harnesses.
+**Kani no longer covers the kernel object core.** The Verus rewrite
+(`doc/plans/3_verus-rewrite.md`, phase 2) migrated the `kcore` cspace/CDT
+proofs to deductive verification (see **Verus** below), deleting
+`kcore/src/proofs` and the off-CI deep-Kani machinery (`scripts/deep-verify.sh`,
+`kani-deep.yml`, the `kani_deep`/`kani_contracts` features) it subsumed; `cargo
+kani -p kcore` is no longer run. Kani is retained for the host-side §4.7
+chokepoints (`urt`, `ipc`, `cas`, `dma-pool`), which keep their own
+`#[cfg(kani)]` harnesses until their Verus ports land (plan phase 6). The
+historical kcore findings/bounds remain recorded across
+`doc/results/2_kani-findings.md` … `8_kani-findings-7.md`.
 
 ```sh
-# kcore harnesses are gated off this phase (see note above); host targets:
 cargo kani -p urt -p ipc -p dma-pool                 # urt time/slots, ipc header, dma-pool
 cargo kani -p cas -Z stubbing                        # cas superblock (blake3 stubbed)
 cargo test -p kcore                                  # kcore host unit tests
@@ -116,52 +116,24 @@ made concrete, or scoped to another tier and documented — never left to hang.
 `scratchpad/Cargo.toml`). Verus is unstable software: both the binary and the
 `vstd` version must be upgraded together and any upgrade is a deliberate PR.
 Code in `verus!{}` blocks erases to plain Rust under a normal `cargo build`/`test`
-and `cargo kani` (the macro drops ghost code), so the aarch64 kernel build and the
-Kani suite are unaffected.
+(the macro drops ghost code), so the aarch64 kernel build and the host crates are
+unaffected — confirmed by the kernel cross-build and `cargo test`.
 
-Verus is the deductive tier for `kcore` (plan `doc/plans/3_verus-rewrite.md`):
-phase 0 proves `untyped::carve`/`carve_place` (totality + placement geometry,
-**unbounded** over all inputs) and is gated by CI's `verus` job. `scratchpad`
-keeps the toolchain-smoke `spec fn min` example.
+Verus is the **mechanized implementation tier for `kcore`** (plan
+`doc/plans/3_verus-rewrite.md`): **unbounded**, terminating, functional proofs on
+the real handle/`Store` code — the Store seam carries an abstract ghost view so
+the generic `fn op<S: Store>` operations are verified once for all stores. Proven
+so far: `untyped::carve`/`carve_place` (totality + placement geometry, phase 0);
+the cspace/CDT operation contracts (`cdt_wf`/`refcount_sound` preservation,
+monotone derivation ∀ masks, the revoke/delete **termination** Kani could not
+give — phase 2). The `verus` CI job runs `cargo verus verify -p kcore` with no
+per-proof filter, so a new `verus!{}` obligation auto-gates. `scratchpad` keeps
+the toolchain-smoke `spec fn min` example.
 
 ```sh
-cargo verus verify -p kcore        # the phase-0 carve proofs (CI-gated)
+cargo verus verify -p kcore        # the kcore proofs (CI-gated)
 cargo verus verify -p scratchpad   # the spec fn min smoke example
 ```
-
-**Deep, off-CI supplements (`scripts/deep-verify.sh`, ⚠ HEAVY — run
-sparingly).** The "more exhaustive" tier from `doc/results/14_kani-review-2.md`.
-The per-PR `ci.yml` runs the replays at a *cheap* depth (`host-tests`) and Kani
-at TLC-scale bounds; this script runs them much deeper / wider, and the
-`kani-deep.yml` workflow runs it weekly (and on `workflow_dispatch`).
-- `bash scripts/deep-verify.sh replay` — the "mini-TLC" host tests
-  (`kcore::proofs::exhaustive`, `#[ignore]`d): exhaustive plain-Rust enumeration
-  of **every** CDT op sequence (derive/move/delete/**revoke**), asserting
-  `cdt_wf` + the refcount census (+ `chan_wf`) after each step — the multi-op
-  composition coverage CBMC OOMs on (DN-12). Two tests:
-  `exhaustive_cdt_replay` (BarePool, all reachable trees, `EXHAUSTIVE_DEPTH`
-  default 5) and `exhaustive_cross_home_replay` (World; the only check of
-  **revoke seen through a channel-queue slot AND a TCB binding slot** over all
-  shapes, `CROSS_HOME_DEPTH` default 4). CI runs both at depth 3.
-- `bash scripts/deep-verify.sh kani` — the composition CDT harnesses
-  (`check_cdt_transition_system`, `check_delete_step`) at **widened bounds**
-  (`POOL_SLOTS` 4→6, transition K 3→4) via the `kani_deep` cargo feature; their
-  `#[kani::unwind]` literals switch with the feature through `cfg_attr`. Tens of
-  minutes or OOM — expected off-CI. Only those two carry the cfg_attr unwind, so
-  only those two are run under the feature (see `kcore/src/proofs/bounds.rs`).
-- `bash scripts/deep-verify.sh contracts` — the **`-Z function-contracts`
-  research spike** (review rec. #6, `doc/results/18_kani-findings-15.md`, DN-14)
-  on the `cspace::obj_unref`/`delete` recursion seam, behind the `kani_contracts`
-  feature. **Unstable + EXPLORATORY + NON-GATING:** `contract_unref_cspace_refcount`
-  verifies (function-contracts work on the refcount discipline) but
-  `contract_delete_leaf` is **expected to fail** — its failure (`delete`'s write
-  set reaches the designated object through the cap's embedded pointer, so a
-  `modifies` clause can't name it) is the recorded finding. Manual-only — *not*
-  wired into `kani-deep.yml`; the contract attributes are `cfg_attr`-gated on the
-  feature, so every other build (incl. the per-PR `kani` job) is untouched.
-On macOS the Bash-tool timeout does not reap a detached `cargo kani`'s solver
-children, so guard a run with `sleep N; pkill -9 cbmc kissat cadical` (the
-script installs an exit trap that does this).
 
 ### TLA+ specs
 
@@ -467,8 +439,8 @@ non-`#[inline(always)]` helpers in user.rs.
 | Tool | Scope | When |
 |------|-------|------|
 | TLA+ / TLC | commit protocol, cap revocation | Before respective milestone |
-| Kani | kernel object core (`kcore`): cspace/CDT, untyped, channels, notifications, thread reports, aspace walker, syscall decode; + host chokepoints (`urt`, `ipc`, `cas`, `dma-pool`) | During kernel development |
-| Verus | `kcore` deductive tier (plan `doc/plans/3_verus-rewrite.md`): `untyped::carve` proven (phase 0); migrating from Kani as phases land. + `scratchpad` smoke | CI `verus` job (`cargo verus verify -p kcore`); during the Verus rewrite |
+| Kani | host chokepoints (`urt`, `ipc`, `cas`, `dma-pool`); the `kcore` kernel-core harnesses were migrated to Verus (plan `doc/plans/3_verus-rewrite.md` phase 2) | During kernel development |
+| Verus | **mechanized implementation tier for `kcore`** (plan `doc/plans/3_verus-rewrite.md`): unbounded/terminating/functional proofs on the real handle/`Store` code — `untyped::carve` (phase 0), cspace/CDT contracts + termination (phase 2); migrating the rest as phases land. + `scratchpad` smoke | CI `verus` job (`cargo verus verify -p kcore`); during the Verus rewrite |
 | Loom / Shuttle | IPC crate, userspace servers | During M1+ development |
 | Miri + proptest | everything; chunker + prolly tree esp. | Continuous |
 | cargo-fuzz | IPC decoder, postcard payloads | From M1 |
@@ -478,20 +450,21 @@ The IPC crate (`ipc/`) is the first serious Loom/Shuttle target (§3.5).
 **Deviation from the §6 spec table (`doc/plans/0_kani-rewrite.md`).** The spec
 assigned cspace/CDT and the allocator to **Verus** ("written in Verus dialect
 from day one"); that did not happen — the kernel predated any verification
-tooling. Per the Kani rewrite plan, **Kani is the mechanized tier for the
-kernel implementation**: the object machinery was extracted into the
-host-buildable `kcore` crate and the harness suite (plan §4.1–§4.7, all
-landed) re-checks the CapRevocation TLA+ invariants on the real code
-(`cargo kani -p kcore`) — cspace/CDT, untyped, channels, notifications, thread
-reports, the §2.4 page-table-walker rewrite, and the §2.5 syscall-decode split
-— plus the host-side chokepoints (`urt`, `ipc`, `cas`, `dma-pool`). It found
-and fixed real defects (a `carve` overflow DoS; a `PERM_DEVICE | PERM_X`
-executable-MMIO encoding). The rewrite's shape (explicit `wf()` predicates,
-the `Env`/`Hal` seam, no int→ptr in the core) is also what a later Verus port
-would need, so Verus is now wired in (`scratchpad` crate) as a live starting
-point; the version is pinned and future production harnesses can extend from
-there. Findings and
-bounds: `doc/results/2_kani-findings.md` … `8_kani-findings-7.md`.
+tooling. **Kani served as the interim mechanized tier for the kernel
+implementation**: the object machinery was extracted into the host-buildable
+`kcore` crate and the harness suite (plan §4.1–§4.7) re-checked the
+CapRevocation TLA+ invariants on the real code (`cargo kani -p kcore`) —
+cspace/CDT, untyped, channels, notifications, thread reports, the §2.4
+page-table-walker rewrite, and the §2.5 syscall-decode split — plus the
+host-side chokepoints (`urt`, `ipc`, `cas`, `dma-pool`). It found and fixed
+real defects (a `carve` overflow DoS; a `PERM_DEVICE | PERM_X` executable-MMIO
+encoding). Its shape (explicit `wf()` predicates, the handle/`Store` seam, no
+int→ptr in the core) is exactly what the Verus port needed — and
+`doc/plans/3_verus-rewrite.md` has now made that port the real thing: as of
+phase 2, **Verus is the mechanized kernel-core tier** (the spec's original
+assignment), so `cargo kani -p kcore` is retired and the kcore harnesses are
+deleted. The historical findings/bounds remain recorded:
+`doc/results/2_kani-findings.md` … `8_kani-findings-7.md`.
 
 ### Continuous integration
 
@@ -509,11 +482,14 @@ bounds: `doc/results/2_kani-findings.md` … `8_kani-findings-7.md`.
   (`scripts/spawn-test.sh`: the 100× burn loop, status propagation, the
   wild-pointer fault demo + re-spawn, the panic path, the time grant) plus
   the M1 cap-mechanism EL0 test (`scripts/m1-test.sh`).
-- **kani** — `cargo kani -p kcore` then `-p urt -p ipc -p dma-pool` and
-  `-p cas -Z stubbing` (pinned cargo-kani 0.67.0, cached with its CBMC
-  backend): the §4.1–§4.7 proof suite, re-checking the CapRevocation invariants
-  on the real kernel code plus the host-side chokepoints. No `--harness`
-  filter, so a new harness gates automatically.
+- **kani** — `cargo kani -p urt -p ipc -p dma-pool` and `-p cas -Z stubbing`
+  (pinned cargo-kani 0.67.0, cached with its CBMC backend): the §4.7 host
+  chokepoints. The `kcore` kernel-core leg was migrated to Verus (the `verus`
+  job; plan phase 2). No `--harness` filter, so a new harness gates automatically.
+- **verus** — `cargo verus verify -p kcore` (pinned Verus `0.2026.06.07.cd03505`,
+  release zip cached): the deductive kernel-core proofs (`untyped::carve` +
+  cspace/CDT contracts/termination). No per-proof filter, so a new `verus!{}`
+  obligation gates automatically.
 - **concurrency** — the Loom/Shuttle models under `RUSTFLAGS="--cfg loom"` /
   `"--cfg shuttle"` (plan `doc/plans/1_loom-shuttle-rewrite.md` §6):
   `cargo test -p urt -p ipc --lib`. Loom is the certifying exhaustive proof

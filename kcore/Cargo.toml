@@ -4,12 +4,12 @@ version.workspace = true
 edition.workspace = true
 
 # kcore is the architecture-independent kernel object machinery: host-buildable
-# so Kani/CBMC and ordinary `cargo test` can verify it, and cross-buildable for
+# so Verus and ordinary `cargo test` can verify it, and cross-buildable for
 # aarch64-unknown-none-softfloat as a dependency of `kernel`.
 #
-# vstd is the *Verus* dependency (plan doc/plans/3_verus-rewrite.md, phase 0):
-# it provides the `verus!{}` macro + the ghost `spec`/`proof`/`int` vocabulary
-# for the deductive proofs (starting with `untyped::carve`). It is `#![no_std]`
+# vstd is the *Verus* dependency (plan doc/plans/3_verus-rewrite.md): it
+# provides the `verus!{}` macro + the ghost `spec`/`proof`/`int` vocabulary for
+# the deductive proofs (`untyped::carve`, the cspace/CDT contracts). It is `#![no_std]`
 # by default (std/alloc are opt-in features, off here) and its nightly
 # `feature(..)` flags are gated on `verus_keep_ghost`, set only under
 # `cargo verus verify` — so in an ordinary `cargo build` (host or the aarch64
@@ -23,30 +23,7 @@ vstd = { version = "=0.0.0-2026-05-31-0205", default-features = false }
 [package.metadata.verus]
 verify = true
 
-[features]
-# Deep, off-CI Kani verification (review rec. #2 follow-up): widens the BarePool
-# CDT bounds (POOL_SLOTS 4→6, transition K 3→4) and the matching
-# `#[kani::unwind]` literals via cfg_attr. Enabled only by
-# `scripts/deep-verify.sh kani` for the deepened harnesses; CI never enables it,
-# so the pinned per-PR suite keeps its TLC-scale bounds.
-kani_deep = []
-
-# Off-CI research spike (review rec. #6, doc/results/18_kani-findings-15.md):
-# enables the `-Z function-contracts` / `-Z loop-contracts` experiment on the
-# real `cspace::obj_unref`/`delete`/`revoke` recursion. The contract attributes
-# are `cfg_attr`-gated on this feature, so they are inert in every build that
-# does not set it — `cargo test`, the per-PR `cargo kani -p kcore`, and the
-# `kani_deep` job all stay untouched. Enabled ONLY by `scripts/deep-verify.sh
-# contracts`, which also passes the unstable `-Z` flags the attributes need.
-kani_contracts = []
-
-# legacy_ptr_harness: gates the old raw-pointer Kani proof suite (`src/proofs`),
-# OFF by default during the Verus phase-1 arena rewrite (the harnesses predate the
-# handle/Store model). Phase 2 deletes them as the Verus proofs replace them; the
-# feature is the temporary off-switch (plan doc/plans/3_verus-rewrite.md §9).
-legacy_ptr_harness = []
-
-# cfg(kani) is injected by cargo-kani; cfg(verus_keep_ghost)/cfg(verus_only) by
-# Verus during `cargo verus verify`. Teach plain cargo all are expected.
+# cfg(verus_keep_ghost)/cfg(verus_only) are injected by Verus during
+# `cargo verus verify`. Teach plain cargo they are expected.
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)", "cfg(verus_keep_ghost)", "cfg(verus_only)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(verus_keep_ghost)", "cfg(verus_only)"] }
