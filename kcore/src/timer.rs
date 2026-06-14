@@ -1,24 +1,24 @@
 //! Timer objects (spec §1, §3.6): a cap to program a deadline that signals
 //! a bound notification. kcore owns the armed-timer *list* — insert, unlink,
-//! and the expiry sweep — operating on the list head through the [`Env`]
+//! and the expiry sweep — operating on the list head through the [`Store`]
 //! seam; the head itself (`ARMED_HEAD`) is a kernel static, and the
 //! generic-timer register access (`CNTVCT`/`CNTV`, the tick) stays in the
 //! `kernel` crate (`kernel/src/timer.rs`). Expiry is checked on the periodic
 //! tick, so deadline resolution is one tick at MVP.
 
 use crate::cspace::ObjHeader;
-use crate::env::Env;
-use crate::notification::{self, NotifObj};
-use core::ptr;
+use crate::id::ObjId;
+use crate::notification;
+use crate::store::Store;
 
 #[repr(C)]
 pub struct TimerObj {
     pub hdr: ObjHeader,
     pub(crate) armed: bool,
     pub(crate) deadline: u64,
-    pub(crate) notif: *mut NotifObj,
+    pub(crate) notif: Option<ObjId>,
     pub(crate) bits: u64,
-    pub(crate) next: *mut TimerObj,
+    pub(crate) next: Option<ObjId>,
 }
 
 impl TimerObj {
@@ -29,72 +29,72 @@ impl TimerObj {
             hdr: ObjHeader { refs: 1 },
             armed: false,
             deadline: 0,
-            notif: ptr::null_mut(),
+            notif: None,
             bits: 0,
-            next: ptr::null_mut(),
+            next: None,
         });
     }
 }
 
 /// Arm (or re-arm) a timer: signal `bits` on `notif` once the counter
 /// passes `deadline`. The armed timer holds a ref on the notification.
-pub unsafe fn arm<E: Env>(
-    t: *mut TimerObj,
-    notif: *mut NotifObj,
-    bits: u64,
-    deadline: u64,
-    env: &mut E,
-) {
-    disarm(t, env);
-    (*notif).hdr.refs += 1;
-    (*t).notif = notif;
-    (*t).bits = bits;
-    (*t).deadline = deadline;
-    (*t).armed = true;
-    (*t).next = env.timer_armed_head();
-    env.set_timer_armed_head(t);
+pub fn arm<S: Store>(store: &mut S, t: ObjId, notif: ObjId, bits: u64, deadline: u64) {
+    disarm(store, t);
+    store.set_obj_refs(notif, store.obj_refs(notif) + 1);
+    store.set_timer_notif(t, Some(notif));
+    store.set_timer_bits(t, bits);
+    store.set_timer_deadline(t, deadline);
+    store.set_timer_armed(t, true);
+    store.set_timer_next(t, store.timer_armed_head());
+    store.set_timer_armed_head(Some(t));
 }
 
-pub unsafe fn disarm<E: Env>(t: *mut TimerObj, env: &mut E) {
-    if !(*t).armed {
+pub fn disarm<S: Store>(store: &mut S, t: ObjId) {
+    if !store.timer_armed(t) {
         return;
     }
-    let mut cur = env.timer_armed_head();
-    let mut prev: *mut TimerObj = ptr::null_mut();
-    while !cur.is_null() {
-        if cur == t {
-            if prev.is_null() {
-                env.set_timer_armed_head((*cur).next);
-            } else {
-                (*prev).next = (*cur).next;
+    let mut cur = store.timer_armed_head();
+    let mut prev: Option<ObjId> = None;
+    while let Some(c) = cur {
+        if c == t {
+            let cnext = store.timer_next(c);
+            match prev {
+                None => store.set_timer_armed_head(cnext),
+                Some(p) => store.set_timer_next(p, cnext),
             }
             break;
         }
         prev = cur;
-        cur = (*cur).next;
+        cur = store.timer_next(c);
     }
-    (*(*t).notif).hdr.refs -= 1;
-    (*t).notif = ptr::null_mut();
-    (*t).armed = false;
-    (*t).next = ptr::null_mut();
+    // When armed, `notif` was set by `arm` and is always present.
+    if let Some(n) = store.timer_notif(t) {
+        store.set_obj_refs(n, store.obj_refs(n) - 1);
+    }
+    store.set_timer_notif(t, None);
+    store.set_timer_armed(t, false);
+    store.set_timer_next(t, None);
 }
 
 /// Tick-time expiry sweep. O(armed timers) per tick — fine at MVP scale.
-pub unsafe fn check_expired<E: Env>(now: u64, env: &mut E) {
-    let mut cur = env.timer_armed_head();
-    while !cur.is_null() {
-        let next = (*cur).next;
-        if (*cur).deadline <= now {
-            let notif = (*cur).notif;
-            let bits = (*cur).bits;
-            disarm(cur, env);
-            notification::signal(notif, bits, env);
+pub fn check_expired<S: Store>(store: &mut S, now: u64) {
+    let mut cur = store.timer_armed_head();
+    while let Some(c) = cur {
+        let next = store.timer_next(c);
+        if store.timer_deadline(c) <= now {
+            // Read the firing target before `disarm` clears it.
+            let notif = store.timer_notif(c);
+            let bits = store.timer_bits(c);
+            disarm(store, c);
+            if let Some(n) = notif {
+                notification::signal(store, n, bits);
+            }
         }
         cur = next;
     }
 }
 
 /// pre:  refs == 0.
-pub unsafe fn destroy_timer<E: Env>(t: *mut TimerObj, env: &mut E) {
-    disarm(t, env);
+pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId) {
+    disarm(store, t);
 }

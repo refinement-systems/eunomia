@@ -16,7 +16,9 @@
 //! is the statically allocated root cspace, which is morally init's memory
 //! baked into the image.
 
-use crate::cspace::{self, Cap, CapKind, CapSlot, CSpaceObj, Rights};
+use crate::cspace::{self, Cap, CapKind, ChanEnd, CSpaceObj, Rights};
+use crate::id::SlotId;
+use crate::store::Store;
 use vstd::prelude::*;
 
 verus! {
@@ -88,21 +90,23 @@ pub struct Carve {
 /// (BadArg | NoMemory).
 ///
 /// post: returns the untyped's `(base, size, watermark)` unchanged.
-pub unsafe fn retype_check(
-    ut_slot: *mut CapSlot,
+pub fn retype_check<S: Store>(
+    store: &mut S,
+    ut_slot: SlotId,
     ty: ObjType,
-    dst: *mut CapSlot,
-    dst2: *mut CapSlot,
+    dst: SlotId,
+    dst2: Option<SlotId>,
 ) -> Result<(u64, u64, u64), RetypeError> {
-    let CapKind::Untyped { base, size, watermark } = (*ut_slot).cap.kind else {
+    let CapKind::Untyped { base, size, watermark } = store.slot(ut_slot).cap.kind else {
         return Err(RetypeError::NotUntyped);
     };
-    if !(*dst).cap.is_empty() {
+    if !store.slot(dst).cap.is_empty() {
         return Err(RetypeError::DestOccupied);
     }
     if ty == ObjType::Channel {
-        if dst2.is_null() || dst2 == dst || !(*dst2).cap.is_empty() {
-            return Err(RetypeError::DestOccupied);
+        match dst2 {
+            Some(d2) if d2 != dst && store.slot(d2).cap.is_empty() => {}
+            _ => return Err(RetypeError::DestOccupied),
         }
     }
     Ok((base, size, watermark))
@@ -331,20 +335,22 @@ pub fn carve(
 ///       `kind` was built at `carve.start`; `end == carve.end`.
 /// post: watermark = `end - base`; dst holds the cap; object refs == caps
 ///       installed (1, or 2 for channels).
-pub unsafe fn retype_install(
-    ut_slot: *mut CapSlot,
+pub fn retype_install<S: Store>(
+    store: &mut S,
+    ut_slot: SlotId,
     ty: ObjType,
     kind: CapKind,
     end: u64,
-    dst: *mut CapSlot,
-    dst2: *mut CapSlot,
+    dst: SlotId,
+    dst2: Option<SlotId>,
 ) {
-    let CapKind::Untyped { base, size, .. } = (*ut_slot).cap.kind else {
+    let mut ut = store.slot(ut_slot);
+    let CapKind::Untyped { base, size, .. } = ut.cap.kind else {
         // Unreachable: retype_check established this and nothing mutates
         // ut_slot's kind between check and install.
         return;
     };
-    (*ut_slot).cap.kind = CapKind::Untyped {
+    ut.cap.kind = CapKind::Untyped {
         base,
         size,
         watermark: end - base,
@@ -357,22 +363,30 @@ pub unsafe fn retype_install(
     // funds child memory, not DMA authority — stripping here keeps phys
     // off ordinary derivation chains (§2.5) by construction.
     let rights = match ty {
-        ObjType::Frame => (*ut_slot).cap.rights,
+        ObjType::Frame => ut.cap.rights,
         ObjType::Thread => Rights::THREAD_ALL,
-        ObjType::Untyped => (*ut_slot).cap.rights.masked(Rights::READ | Rights::WRITE),
+        ObjType::Untyped => ut.cap.rights.masked(Rights::READ | Rights::WRITE),
         _ => Rights::ALL,
     };
-    (*dst).cap = Cap { kind, rights };
-    cspace::cdt_insert_child(ut_slot, dst);
+    store.set_slot(ut_slot, ut);
+    let mut d = store.slot(dst);
+    d.cap = Cap { kind, rights };
+    store.set_slot(dst, d);
+    cspace::cdt_insert_child(store, ut_slot, dst);
     if let CapKind::Channel(ch, _) = kind {
-        crate::channel::endpoint_cap_added(ch, cspace::ChanEnd::A);
-        (*dst2).cap = Cap {
-            kind: CapKind::Channel(ch, cspace::ChanEnd::B),
-            rights: Rights::ALL,
-        };
-        (*ch.cast::<crate::cspace::ObjHeader>()).refs += 1;
-        cspace::cdt_insert_child(ut_slot, dst2);
-        crate::channel::endpoint_cap_added(ch, cspace::ChanEnd::B);
+        crate::channel::endpoint_cap_added(store, ch, ChanEnd::A);
+        // dst2 is Some for channels (retype_check enforced it).
+        if let Some(d2) = dst2 {
+            let mut s2 = store.slot(d2);
+            s2.cap = Cap {
+                kind: CapKind::Channel(ch, ChanEnd::B),
+                rights: Rights::ALL,
+            };
+            store.set_slot(d2, s2);
+            store.set_obj_refs(ch, store.obj_refs(ch) + 1);
+            cspace::cdt_insert_child(store, ut_slot, d2);
+            crate::channel::endpoint_cap_added(store, ch, ChanEnd::B);
+        }
     }
 }
 
@@ -383,13 +397,15 @@ pub unsafe fn retype_install(
 ///
 /// pre:  ut_slot holds an Untyped cap with no CDT children (caller revoked).
 /// post: watermark = 0; the whole range is reusable.
-pub unsafe fn reset(ut_slot: *mut CapSlot) -> Result<(), RetypeError> {
-    let CapKind::Untyped { base, size, .. } = (*ut_slot).cap.kind else {
+pub fn reset<S: Store>(store: &mut S, ut_slot: SlotId) -> Result<(), RetypeError> {
+    let mut ut = store.slot(ut_slot);
+    let CapKind::Untyped { base, size, .. } = ut.cap.kind else {
         return Err(RetypeError::NotUntyped);
     };
-    if !(*ut_slot).first_child.is_null() {
+    if ut.first_child.is_some() {
         return Err(RetypeError::BadArg);
     }
-    (*ut_slot).cap.kind = CapKind::Untyped { base, size, watermark: 0 };
+    ut.cap.kind = CapKind::Untyped { base, size, watermark: 0 };
+    store.set_slot(ut_slot, ut);
     Ok(())
 }

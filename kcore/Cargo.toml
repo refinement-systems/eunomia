@@ -40,6 +40,12 @@ kani_deep = []
 # contracts`, which also passes the unstable `-Z` flags the attributes need.
 kani_contracts = []
 
+# legacy_ptr_harness: gates the old raw-pointer Kani proof suite (`src/proofs`),
+# OFF by default during the Verus phase-1 arena rewrite (the harnesses predate the
+# handle/Store model). Phase 2 deletes them as the Verus proofs replace them; the
+# feature is the temporary off-switch (plan doc/plans/3_verus-rewrite.md §9).
+legacy_ptr_harness = []
+
 # cfg(kani) is injected by cargo-kani; cfg(verus_keep_ghost)/cfg(verus_only) by
 # Verus during `cargo verus verify`. Teach plain cargo all are expected.
 [lints.rust]
