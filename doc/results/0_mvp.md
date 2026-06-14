@@ -75,6 +75,14 @@ single-session MVP never generated the multiplexing pressure that would
 have forced the reactor into existence. Consequence: the Loom/Shuttle
 verification tier had no target and was not exercised.
 
+*Resolved (`doc/plans/2_ipc.md`).* The `ipc` crate now owns all of it —
+non-blocking primitives, the epoll-shaped reactor (notification bits
+hidden behind `register`/`wait`), async/bounded-retry backpressure, the
+valuable-cap ack, the postcard codec, and the §4.6 session/admission
+layer — with harnesses #1–#5 under Shuttle (+ Loom for the lost-wakeup
+fragment) and the `IpcReactor` TLA+ spec. `storaged` is the first
+production consumer: its drain-then-wait loop is now reactor-driven.
+
 **Verification tiers (§6).** The spec's own warning — "Verus cannot be
 retrofitted — these components are written in Verus dialect from day
 one" — was not heeded: cspace/CDT and the allocator are plain Rust with

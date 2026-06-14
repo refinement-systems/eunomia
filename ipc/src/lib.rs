@@ -27,6 +27,7 @@ extern crate std;
 pub mod endpoint;
 pub mod header;
 pub mod reactor;
+pub mod session;
 pub mod sys;
 pub mod transport;
 #[cfg(feature = "wire")]
@@ -37,6 +38,7 @@ pub mod wire;
 // transport seam.
 pub use endpoint::{Endpoint, Message, MAX_PAYLOAD};
 pub use reactor::{Key, Reactor, RegisterErr, Signals};
+pub use session::{admit_connect, Admission, ConnectErr, ConnectReq, GrantReply, WindowGrant};
 pub use transport::{
     Chan, Event, RecvErr, RecvOk, SendErr, SyscallTransport, Transport,
 };
