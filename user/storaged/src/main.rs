@@ -15,7 +15,7 @@
 extern crate alloc;
 
 use dma_pool::{DeviceAddress, DmaBacking, DmaPool};
-use ipc::sys;
+use ipc::{sys, Endpoint, Message, Reactor, RecvErr, SendErr, Signals, SyscallTransport};
 use storage_server::wire;
 use storage_server::Server;
 use virtio_blk::blockdev::VirtioBlockDev;
@@ -27,6 +27,11 @@ static HEAP: urt::Heap<{ 3 * 1024 * 1024 }> = urt::Heap::new();
 const BOOT_CHAN: u32 = 0;
 const SESSION_CHAN: u32 = 1;
 const WAKE_NOTIF: u32 = 2;
+// The reactor source key for the session channel. storaged multiplexes one
+// source today; the key is what a second session (a future connect, §4.6) would
+// add alongside — the reactor returns it from `wait`, so the dispatch below
+// never names a notification bit (§3.6: the API hides the bit shape).
+const SESSION_KEY: ipc::Key = 0;
 
 struct MmioWindow {
     base: usize,
@@ -81,9 +86,19 @@ fn recv_blocking(chan: u32, buf: &mut [u8; 256]) -> usize {
     }
 }
 
-fn send_blocking(chan: u32, data: &[u8]) {
-    while sys::chan_send(chan, data, None) == sys::ERR_FULL {
-        sys::yield_now();
+/// Send one response message, retrying on backpressure. Responses are
+/// message-bounded (`encode_response` refuses > 256 bytes, §3.1), so a single
+/// `Message` always suffices; `Full` means the shell hasn't drained its reply
+/// ring yet (it reads one reply per request), so a yield-retry drains promptly.
+/// `Closed` ends the loop — the peer is gone.
+fn send_response<T: ipc::Transport>(ep: &Endpoint<T>, bytes: &[u8]) {
+    let msg = Message::bytes(bytes);
+    loop {
+        match ep.send_nb(&msg) {
+            Ok(()) | Err(SendErr::Closed) => return,
+            Err(SendErr::Full) => sys::yield_now(),
+            Err(SendErr::Other(_)) => return,
+        }
     }
 }
 
@@ -146,25 +161,44 @@ pub extern "C" fn _start() -> ! {
     let session = server.open_session(alloc::vec![grant]);
     sys::debug_write(b"[storaged] serving\n");
 
-    // Drain-then-wait (the §3.6 lost-wakeup discipline): handle every
-    // queued request, then block on the readable→notification binding.
+    // The IPC reactor (§3.6, §4.2) — storaged is its first production consumer.
+    // `register` binds the session channel's readable event to WAKE_NOTIF and
+    // self-signals (poll once), so the first `wait` drains anything already
+    // queued and the bind-poll-wait lost-wakeup discipline lives in the crate,
+    // not here. Dispatch is by the opaque `key`, never a notification bit — the
+    // same loop would multiplex a second session by registering its channel
+    // under a second key (§4.6, the connect path).
+    let transport = SyscallTransport;
+    let ep = Endpoint::new(&transport, SESSION_CHAN);
+    let mut reactor = Reactor::new(&transport, WAKE_NOTIF);
+    if reactor.register(SESSION_CHAN, Signals::READABLE, SESSION_KEY).is_err() {
+        fail(b"reactor register");
+    }
+    let mut msg = Message::new();
     loop {
+        let (key, _signals) = reactor.wait();
+        debug_assert_eq!(key, SESSION_KEY);
+        // Drain every queued request for the ready source, then wait again
+        // (a wakeup is level-ish — keep serving until the ring is Empty).
         loop {
-            let (len, _) = sys::chan_recv(SESSION_CHAN, buf.as_mut_ptr(), None);
-            if len < 0 {
-                break;
+            match ep.recv_nb(&mut msg) {
+                Ok(()) => {}
+                Err(RecvErr::Empty) => break,
+                // NoSlot can't arise (no caps in storage requests); Closed/other
+                // means the peer is gone — stop draining and re-wait.
+                Err(_) => break,
             }
-            let resp = match wire::decode_request(&buf[..len as usize]) {
+            let resp = match wire::decode_request(msg.payload()) {
                 Ok(req) => server.handle(session, req, now_utc()),
                 Err(_) => storage_server::Response::Err(storage_server::ErrorCode::Internal),
             };
             match wire::encode_response(&resp) {
-                Ok(bytes) => send_blocking(SESSION_CHAN, &bytes),
+                Ok(bytes) => send_response(&ep, &bytes),
                 Err(_) => {
                     // Response too big for a message — report instead
                     // (the bulk path is post-MVP; requests are bounded).
                     let e = storage_server::Response::Err(storage_server::ErrorCode::Internal);
-                    send_blocking(SESSION_CHAN, &wire::encode_response(&e).unwrap());
+                    send_response(&ep, &wire::encode_response(&e).unwrap());
                 }
             }
             // Drain a pending GC trigger (§4.6: post-rewrite or
@@ -184,7 +218,6 @@ pub extern "C" fn _start() -> ! {
                 }
             }
         }
-        sys::notif_wait(WAKE_NOTIF);
     }
 }
 

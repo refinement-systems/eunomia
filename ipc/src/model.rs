@@ -43,38 +43,62 @@ struct Notification {
     cv: Condvar,
 }
 
-/// A deterministic in-memory kernel: one channel (`Chan` is ignored — a single
-/// channel for now) and a fixed set of notifications. Shared across model
-/// threads via `crate::sync::Arc`.
+/// A deterministic in-memory kernel: a fixed set of channels (indexed by the
+/// `Chan` handle, each a bounded FIFO ring) and a fixed set of notifications.
+/// Shared across model threads via `crate::sync::Arc`. Harnesses #1–#4 drive a
+/// single channel (`Chan` 0); harness #5 multiplexes several through one reactor.
 pub struct ModelTransport {
-    ring: Mutex<Ring>,
+    rings: Vec<Mutex<Ring>>,
     cap: usize,
     notifs: Vec<Notification>,
 }
 
+fn fresh_ring() -> Ring {
+    Ring {
+        msgs: VecDeque::new(),
+        peer_closed: false,
+        on_readable: None,
+        on_writable: None,
+        on_peer_closed: None,
+    }
+}
+
 impl ModelTransport {
-    /// A channel of capacity `cap` slots (§3.2) and `num_notifs` notifications.
+    /// A single channel of capacity `cap` slots (§3.2) and `num_notifs`
+    /// notifications — the shape harnesses #1–#4 use (`Chan` 0).
     pub fn new(cap: usize, num_notifs: usize) -> ModelTransport {
+        ModelTransport::with_channels(1, cap, num_notifs)
+    }
+
+    /// `num_chans` channels, each of capacity `cap`, plus `num_notifs`
+    /// notifications (§4.6 / harness #5: one channel per client, one server
+    /// notification multiplexing them).
+    pub fn with_channels(num_chans: usize, cap: usize, num_notifs: usize) -> ModelTransport {
+        let mut rings = Vec::with_capacity(num_chans);
+        for _ in 0..num_chans {
+            rings.push(Mutex::new(fresh_ring()));
+        }
         let mut notifs = Vec::with_capacity(num_notifs);
         for _ in 0..num_notifs {
             notifs.push(Notification { word: Mutex::new(0), cv: Condvar::new() });
         }
-        ModelTransport {
-            ring: Mutex::new(Ring {
-                msgs: VecDeque::new(),
-                peer_closed: false,
-                on_readable: None,
-                on_writable: None,
-                on_peer_closed: None,
-            }),
-            cap,
-            notifs,
-        }
+        ModelTransport { rings, cap, notifs }
     }
 
-    /// Convenience wrapper: a fresh `ModelTransport` behind a model `Arc`.
+    /// Convenience wrapper: a fresh single-channel `ModelTransport` behind a
+    /// model `Arc`.
     pub fn shared(cap: usize, num_notifs: usize) -> Arc<ModelTransport> {
         Arc::new(ModelTransport::new(cap, num_notifs))
+    }
+
+    /// Convenience wrapper: a fresh multi-channel `ModelTransport` behind a
+    /// model `Arc`.
+    pub fn shared_channels(num_chans: usize, cap: usize, num_notifs: usize) -> Arc<ModelTransport> {
+        Arc::new(ModelTransport::with_channels(num_chans, cap, num_notifs))
+    }
+
+    fn ring(&self, ch: Chan) -> &Mutex<Ring> {
+        &self.rings[ch as usize]
     }
 
     /// Destroy the channel (§3.4): queued messages — and their caps — are
@@ -86,8 +110,13 @@ impl ModelTransport {
     /// (`Endpoint::send_acked`) exists to keep this from happening before a
     /// queued cap lands.
     pub fn destroy(&self) {
+        self.destroy_chan(0);
+    }
+
+    /// Destroy a specific channel (§3.4) — see [`destroy`](Self::destroy).
+    pub fn destroy_chan(&self, ch: Chan) {
         let binding = {
-            let mut ring = self.ring.lock().unwrap();
+            let mut ring = self.ring(ch).lock().unwrap();
             ring.msgs.clear();
             ring.peer_closed = true;
             ring.on_peer_closed
@@ -99,9 +128,9 @@ impl ModelTransport {
 }
 
 impl Transport for ModelTransport {
-    fn send_nb(&self, _ch: Chan, data: &[u8], caps: Option<&[u32; 4]>) -> Result<(), SendErr> {
+    fn send_nb(&self, ch: Chan, data: &[u8], caps: Option<&[u32; 4]>) -> Result<(), SendErr> {
         let binding = {
-            let mut ring = self.ring.lock().unwrap();
+            let mut ring = self.ring(ch).lock().unwrap();
             if ring.peer_closed {
                 return Err(SendErr::Closed);
             }
@@ -122,9 +151,9 @@ impl Transport for ModelTransport {
         Ok(())
     }
 
-    fn recv_nb(&self, _ch: Chan, buf: &mut [u8], _dests: Option<&[u32; 4]>) -> Result<RecvOk, RecvErr> {
+    fn recv_nb(&self, ch: Chan, buf: &mut [u8], _dests: Option<&[u32; 4]>) -> Result<RecvOk, RecvErr> {
         let (result, writable) = {
-            let mut ring = self.ring.lock().unwrap();
+            let mut ring = self.ring(ch).lock().unwrap();
             match ring.msgs.pop_front() {
                 Some(msg) => {
                     let len = msg.data.len().min(buf.len());
@@ -150,8 +179,8 @@ impl Transport for ModelTransport {
         result
     }
 
-    fn bind(&self, _ch: Chan, ev: Event, notif: Notif, bits: u64) -> Result<(), i64> {
-        let mut ring = self.ring.lock().unwrap();
+    fn bind(&self, ch: Chan, ev: Event, notif: Notif, bits: u64) -> Result<(), i64> {
+        let mut ring = self.ring(ch).lock().unwrap();
         let slot = match ev {
             Event::Readable => &mut ring.on_readable,
             Event::Writable => &mut ring.on_writable,
@@ -516,5 +545,130 @@ mod tests {
     #[test]
     fn valuable_cap_ack_no_loss_shuttle() {
         shuttle::check_random(valuable_cap_ack_no_loss, 1000);
+    }
+
+    // Harness #5 (plan doc/plans/2_ipc.md §5.2, §6 phase 6): multi-client
+    // fairness / liveness *smoke* over the real Reactor multiplexing several
+    // client channels, plus the §4.6 connect/admission handshake. `num_clients`
+    // client processes each fund their own request channel (chan i) and reply
+    // channel (chan num_clients+i); each sends one `ConnectReq` and polls its
+    // reply channel. One server process runs a single Reactor (one notification)
+    // registering *every* request channel for readable, then wait()-dispatches
+    // and services each connect via `admit_connect` under a `budget`-bounded
+    // `Admission` — the §3.5 single admission point. The threads race (a connect
+    // may land before or after its bind); poll-once + the notif word-check make
+    // the reactor surface every client (no lost wakeup at N sources).
+    //
+    // Properties (schedule-independent — the granted *set* is first-come, but the
+    // counts are not): every client is serviced (liveness/fairness smoke, no
+    // starvation), exactly min(budget, N) are granted and the rest refused (the
+    // quota never over-grants), and no reply is dropped or duplicated.
+    #[cfg(not(loom))]
+    fn fairness_smoke(num_clients: usize, budget: u32) {
+        use crate::endpoint::{Endpoint, Message};
+        use crate::reactor::{Reactor, Signals};
+        use crate::session::{admit_connect, Admission, ConnectReq, GrantReply};
+        use crate::transport::{Chan, Notif};
+        const SERVER_NOTIF: Notif = 0;
+        const WINDOW: u32 = 1; // each client requests one window byte
+        // Channel layout: request channel for client i is `i`, reply channel is
+        // `num_clients + i` (a fn, not a closure, so it crosses the move into
+        // each thread without borrowing the captured `num_clients`).
+        fn req_chan(i: usize) -> Chan {
+            i as Chan
+        }
+        fn reply_chan(n: usize, i: usize) -> Chan {
+            (n + i) as Chan
+        }
+        // 2 channels per client (request + reply); one server notification.
+        let t = ModelTransport::shared_channels(2 * num_clients, 2, 1);
+
+        let ts = Arc::clone(&t);
+        let server = thread::spawn(move || -> std::vec::Vec<GrantReply> {
+            let mut adm = Admission::new(budget);
+            let mut reactor = Reactor::new(&*ts, SERVER_NOTIF);
+            for i in 0..num_clients {
+                reactor.register(req_chan(i), Signals::READABLE, i).unwrap();
+            }
+            let mut replies: std::vec::Vec<Option<GrantReply>> = std::vec![None; num_clients];
+            let mut served = 0;
+            let mut msg = Message::new();
+            while served < num_clients {
+                let (key, _signals) = reactor.wait();
+                let req_ep = Endpoint::new(&*ts, req_chan(key));
+                let reply_ep = Endpoint::new(&*ts, reply_chan(num_clients, key));
+                // Drain this source (a wakeup is level-ish — poll until Empty).
+                loop {
+                    match req_ep.recv_nb(&mut msg) {
+                        Ok(()) => {
+                            assert!(replies[key].is_none(), "client {key} serviced twice");
+                            let reply = admit_connect(&mut adm, msg.payload());
+                            let (bytes, n) = reply.encode();
+                            reply_ep.send_nb(&Message::bytes(&bytes[..n])).unwrap();
+                            replies[key] = Some(reply);
+                            served += 1;
+                        }
+                        Err(RecvErr::Empty) => break,
+                        Err(e) => panic!("server recv error: {:?}", e),
+                    }
+                }
+            }
+            replies.into_iter().map(|r| r.unwrap()).collect()
+        });
+
+        let mut clients = std::vec::Vec::new();
+        for i in 0..num_clients {
+            let tc = Arc::clone(&t);
+            clients.push(thread::spawn(move || -> GrantReply {
+                let req_ep = Endpoint::new(&*tc, req_chan(i));
+                let reply_ep = Endpoint::new(&*tc, reply_chan(num_clients, i));
+                req_ep
+                    .send_nb(&Message::bytes(&ConnectReq::for_window(WINDOW).encode()))
+                    .unwrap();
+                let mut msg = Message::new();
+                loop {
+                    match reply_ep.recv_nb(&mut msg) {
+                        Ok(()) => {
+                            return GrantReply::decode(msg.payload())
+                                .expect("server reply must decode");
+                        }
+                        Err(RecvErr::Empty) => thread::yield_now(),
+                        Err(e) => panic!("client {i} recv error: {:?}", e),
+                    }
+                }
+            }));
+        }
+
+        let server_view = server.join().unwrap();
+        let client_views: std::vec::Vec<GrantReply> =
+            clients.into_iter().map(|c| c.join().unwrap()).collect();
+
+        // Every client got a reply (liveness/fairness smoke: none starved).
+        assert_eq!(client_views.len(), num_clients);
+        // The server's record of each client matches what that client received
+        // (no drop / no cross-wire / no duplication across the N channels).
+        assert_eq!(server_view, client_views, "server/client reply views diverged");
+        // The quota never over-grants: exactly min(budget, N) grants.
+        let grants = client_views.iter().filter(|r| matches!(r, GrantReply::Grant(_))).count();
+        let refused = client_views.iter().filter(|r| matches!(r, GrantReply::Refused)).count();
+        let expect_grants = (budget as usize).min(num_clients);
+        assert_eq!(grants, expect_grants, "wrong number of admissions");
+        assert_eq!(refused, num_clients - expect_grants, "wrong number of refusals");
+    }
+
+    #[cfg(all(not(loom), not(shuttle)))]
+    #[test]
+    fn fairness_smoke_std() {
+        fairness_smoke(3, 3); // admit all
+        fairness_smoke(3, 2); // quota refuses one
+    }
+
+    // Shuttle is harness #5's tier (interleaving / progress at scale); the
+    // lost-wakeup memory ordering stays harness #1's loom job (§5.3), so there
+    // is no loom variant.
+    #[cfg(shuttle)]
+    #[test]
+    fn fairness_smoke_shuttle() {
+        shuttle::check_random(|| fairness_smoke(3, 2), 1000);
     }
 }

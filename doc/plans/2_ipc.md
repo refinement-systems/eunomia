@@ -1,6 +1,11 @@
 # Plan: implementing the IPC crate (§3) — Shuttle-verifiable from day one
 
-**Status:** **proposed.**
+**Status:** **done.** All six phases (§6) are implemented and verified — the
+rig + `IpcReactor` TLA+ spec, the non-blocking primitives, the reactor, async/
+bounded-retry backpressure, the valuable-cap ack, the postcard codec + fuzz
+targets, and (phase 6) the §4.6 admission layer (`ipc::session`) with `storaged`
+re-pointed onto the reactor as the first production consumer. Harnesses #1–#5 run
+under Shuttle (+ Loom for the lost-wakeup fragment) in the `concurrency` CI job.
 **Spec baseline:** `doc/spec/2_spec_rev2.md` §3 (§3.1 message format … §3.7 wire
 protocol), with §2.3/§2.5 (caps, fund-by-failure-mode) and §4.8 (bulk-window
 concurrency) as context.
@@ -241,6 +246,18 @@ fixed `Header` codec stays Kani-verified (`ipc/src/proofs.rs`, done); any new
    drain-then-wait loop onto the reactor (the first real consumer; proves the API
    hides bits) + the fairness smoke (#5). storaged serving a second concurrent
    session is the §4.3-of-loom-shuttle "Phase 3" target, unlocked here.
+   **Done:** `ipc::session` is the §4.6 admission layer — the single admission
+   point (`Admission`, never over-grants its window quota) plus the fixed
+   `ConnectReq`/`GrantReply` codecs and the pure `admit_connect` server step.
+   `ModelTransport` gained multi-channel support and harness #5
+   (`fairness_smoke`) drives N clients through one server reactor over their own
+   channels (Shuttle), exercising connect/admission and no-starvation; the
+   negative control (drop the reactor's poll-once) deadlocks it. `storaged`'s
+   loop is now `Reactor::{register,wait}` + `Endpoint` over `SyscallTransport`,
+   dispatching by opaque key — no notification bit named in the server. The
+   *dynamic* connect on the real OS (a client retyping a channel and the server
+   accepting a second session) needs kernel cap-transfer wiring and stays a
+   follow-up; the protocol + reactor multiplexing it relies on are proven here.
 
 ---
 

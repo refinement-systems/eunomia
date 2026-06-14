@@ -333,6 +333,40 @@ bin/selftest 253` reads a sane UTC clock (`time-ok`). Scope cut held:
 children get stdin/stdout via the console; no storage-session delegation
 (that needs the server to accept a second session, §2.4).
 
+### Rev2: the IPC crate (§3) — done
+`doc/plans/2_ipc.md` (six phases) built the userspace IPC crate the MVP
+deferred (`0_mvp.md` debt). Verifiable-first: the kernel IPC surface sits
+behind a `Transport` seam (`SyscallTransport` in production, the
+deterministic in-memory `ModelTransport` for harnesses), so the
+cross-process races (lost wakeup, backpressure, cap handoff) run under
+**Shuttle** (randomized, at scale) and **Loom** (exhaustive, the
+lost-wakeup memory-ordering fragment) over the real reactor code — the
+concurrency counterpart to Kani on the kernel core. The `IpcReactor` TLA+
+spec (safety invariants + the project's first liveness property,
+`EventuallyDelivered`) is the design gate, re-checked in CI's `model`
+job. Surface: non-blocking `Endpoint::{send_nb,recv_nb}` (§4.1, null-slot
+tolerant); the epoll-shaped `Reactor::{register,wait}` that **hides
+notification bits** and owns the bind-poll-wait discipline (§4.2/§3.6);
+`send_blocking`/`send_retry` over the writable signal (§4.3); the
+`send_acked`/`recv_acked` valuable-cap handshake (§4.4); the
+module-private postcard `wire` codec behind the `wire` feature (§4.5,
+opt-in so alloc-free binaries stay minimal); and `ipc::session` — the
+§4.6 admission layer: `Admission` is the single window-quota admission
+point (never over-grants), with the fixed `ConnectReq`/`GrantReply`
+codecs and the pure `admit_connect` step. Harnesses #1–#5 (FIFO/no-drop,
+lost-wakeup, backpressure, cap-ack, multi-client fairness) live in
+`ipc/src/model.rs`; the `concurrency` CI job runs them with no per-test
+filter, so a new `loom::model`/`shuttle::check_*` auto-gates. The wire
+decoder is also a cargo-fuzz target (`ipc/fuzz`). **`storaged` is the
+first production consumer** (`user/storaged/src/main.rs`): its
+drain-then-wait loop is now `Reactor::wait` + `Endpoint` over
+`SyscallTransport`, dispatching by opaque key — no notification bit named
+in the server, so the §3.6 wait-set upgrade will change no server code.
+Scope cut: the *dynamic* connect (a client retyping a channel pair and
+the server accepting a **second** concurrent session) needs kernel
+cap-transfer wiring and stays a follow-up; the protocol and the reactor
+multiplexing it relies on are proven (harness #5).
+
 ### M1 exit criterion (met)
 Booting prints `123456M1 PASS` (`bash scripts/m1-test.sh` builds the
 `m1-test` feature, boots it, and asserts the full marker line): the
