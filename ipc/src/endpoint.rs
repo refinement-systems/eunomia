@@ -14,7 +14,7 @@
 
 use crate::reactor::{Reactor, Signals};
 use crate::sys::SLOT_NONE;
-use crate::transport::{Chan, RecvErr, SendErr, Transport};
+use crate::transport::{Chan, Notif, RecvErr, SendErr, Transport};
 
 /// Maximum inline payload, in bytes (§3.1). Larger data travels through a
 /// per-session bulk window (§3.1), out of scope for these primitives.
@@ -178,5 +178,42 @@ impl<'t, T: Transport> Endpoint<'t, T> {
                 Err(e) => return Err(e),
             }
         }
+    }
+
+    /// Sender half of the **valuable-cap ack protocol** (§3.4, §4.4): send `msg`
+    /// (which may carry a valuable cap), then block on `ack_notif` until the
+    /// receiver confirms it has the cap in its cspace. Returns `Ok` only once
+    /// acked — at which point the handoff is durable and the channel is safe to
+    /// tear down. A bare send-then-destroy would let channel destruction shred
+    /// the still-queued cap (§3.4: "cash in a shredded envelope"); this gate is
+    /// what prevents that, in pure userspace (no kernel reverse-path).
+    ///
+    /// `Full`/`Closed` from the send propagate (combine with [`send_blocking`]
+    /// when the channel may be full). The cap's *exactly-one-owner* / no-dup
+    /// guarantee is the kernel's move semantics (`CapRevocation`), not this
+    /// protocol's — this carries only the no-loss obligation.
+    pub fn send_acked(&self, msg: &Message, ack_notif: Notif) -> Result<(), SendErr> {
+        self.send_nb(msg)?;
+        // The ack is an event (§3.6): notif_wait checks the accumulated word
+        // before sleeping, so a receiver that acks before this wait is never
+        // slept through (the lost-wakeup guard proven by harness #1).
+        let _ = self.transport.notif_wait(ack_notif);
+        Ok(())
+    }
+
+    /// Receiver half of the valuable-cap ack protocol (§4.4): receive into `msg`,
+    /// then signal `ack_notif` so the sender's [`send_acked`](Self::send_acked)
+    /// returns. The ack fires only *after* the cap is in this receiver's cspace,
+    /// so the sender never tears the channel down with the cap still in flight.
+    /// `Empty`/`Closed` propagate (nothing is acked on a failed receive).
+    pub fn recv_acked(
+        &self,
+        msg: &mut Message,
+        ack_notif: Notif,
+        ack_bit: u64,
+    ) -> Result<(), RecvErr> {
+        self.recv_nb(msg)?;
+        self.transport.notif_signal(ack_notif, ack_bit);
+        Ok(())
     }
 }

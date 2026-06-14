@@ -76,6 +76,26 @@ impl ModelTransport {
     pub fn shared(cap: usize, num_notifs: usize) -> Arc<ModelTransport> {
         Arc::new(ModelTransport::new(cap, num_notifs))
     }
+
+    /// Destroy the channel (§3.4): queued messages — and their caps — are
+    /// **gone**, the peer is marked closed, and the on-peer-closed binding
+    /// fires. Models the kernel reclaiming the channel's backing untyped (in
+    /// production a cspace `cap_delete`/`revoke`, not a `Transport` op). After
+    /// this, `recv_nb` on the surviving endpoint returns `Closed` — the
+    /// observable "the queued cap was lost". The valuable-cap ack protocol
+    /// (`Endpoint::send_acked`) exists to keep this from happening before a
+    /// queued cap lands.
+    pub fn destroy(&self) {
+        let binding = {
+            let mut ring = self.ring.lock().unwrap();
+            ring.msgs.clear();
+            ring.peer_closed = true;
+            ring.on_peer_closed
+        };
+        if let Some((n, bits)) = binding {
+            self.notif_signal(n, bits);
+        }
+    }
 }
 
 impl Transport for ModelTransport {
@@ -434,5 +454,67 @@ mod tests {
     #[test]
     fn full_backpressure_no_drop_shuttle() {
         shuttle::check_random(|| full_backpressure_no_drop(3), 1000);
+    }
+
+    // Harness #4 (plan §5.2): the valuable-cap ack protocol — no lost cap. The
+    // sender hands off a message carrying a cap via Endpoint::send_acked, then
+    // destroy()s the channel; the receiver drains via recv_acked and acks. The
+    // ack gates the destroy, so the cap is received *before* destruction shreds
+    // the queue — the receiver always gets it (never Closed). Removing the ack
+    // gate (send_nb + immediate destroy) lets destroy race recv and lose the cap
+    // (the negative control). Scope (§5.1): this checks the protocol's no-loss;
+    // the cap's exactly-one-owner/no-dup is the kernel's (CapRevocation).
+    #[cfg(not(loom))]
+    fn valuable_cap_ack_no_loss() {
+        use crate::endpoint::{Endpoint, Message};
+        use crate::transport::Chan;
+        const CHAN: Chan = 0;
+        const ACK_NOTIF: crate::transport::Notif = 0;
+        const ACK_BIT: u64 = 1;
+        const CAP_SLOT: u32 = 42; // the valuable cap (a cspace slot index)
+        let t = ModelTransport::shared(2, 1);
+
+        let ts = Arc::clone(&t);
+        let sender = thread::spawn(move || {
+            let ep = Endpoint::new(&*ts, CHAN);
+            let mut msg = Message::new();
+            msg.caps[0] = Some(CAP_SLOT);
+            // Hand off the cap and wait for the ack before tearing down.
+            ep.send_acked(&msg, ACK_NOTIF).unwrap();
+            ts.destroy();
+        });
+
+        let tr = Arc::clone(&t);
+        let receiver = thread::spawn(move || -> Option<u32> {
+            let ep = Endpoint::new(&*tr, CHAN);
+            let mut msg = Message::new();
+            // Offer slot CAP_SLOT as the destination for an incoming cap.
+            loop {
+                msg.caps[0] = Some(CAP_SLOT);
+                match ep.recv_acked(&mut msg, ACK_NOTIF, ACK_BIT) {
+                    Ok(()) => return msg.caps[0],
+                    Err(RecvErr::Empty) => thread::yield_now(),
+                    // Closed here would mean the channel was destroyed before the
+                    // cap arrived — the loss the ack protocol must prevent.
+                    Err(e) => panic!("valuable cap lost: {:?}", e),
+                }
+            }
+        });
+
+        sender.join().unwrap();
+        let got = receiver.join().unwrap();
+        assert_eq!(got, Some(CAP_SLOT), "the receiver must land the valuable cap");
+    }
+
+    #[cfg(all(not(loom), not(shuttle)))]
+    #[test]
+    fn valuable_cap_ack_no_loss_std() {
+        valuable_cap_ack_no_loss();
+    }
+
+    #[cfg(shuttle)]
+    #[test]
+    fn valuable_cap_ack_no_loss_shuttle() {
+        shuttle::check_random(valuable_cap_ack_no_loss, 1000);
     }
 }
