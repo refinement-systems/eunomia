@@ -18,9 +18,17 @@
 #[cfg(any(test, loom, shuttle))]
 extern crate std;
 
+pub mod endpoint;
 pub mod header;
 pub mod sys;
 pub mod transport;
+
+// The server-facing surface (§4.1): the typed non-blocking primitives over the
+// kernel transport seam.
+pub use endpoint::{Endpoint, Message, MAX_PAYLOAD};
+pub use transport::{
+    Chan, Event, RecvErr, RecvOk, SendErr, SyscallTransport, Transport,
+};
 
 /// The cfg-swappable concurrency seam + the deterministic in-memory kernel
 /// (`ModelTransport`) the Shuttle/Loom harnesses drive (plan §3.2–§3.4). Not in
@@ -33,38 +41,3 @@ pub mod model;
 /// Kani harnesses (plan §4.7), compiled only under `cargo kani`.
 #[cfg(kani)]
 mod proofs;
-
-// ── Milestone M1 work items ──────────────────────────────────────────────────
-
-/// Opaque handle to a kernel channel endpoint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Channel(u64);
-
-/// Fixed message format: 256-byte inline payload + 4 cap slots (spec §3.1).
-#[derive(Debug)]
-pub struct Message {
-    pub payload: [u8; 256],
-    pub payload_len: u16,
-    pub caps: [Option<u64>; 4],
-}
-
-/// Non-blocking send; returns `Err(Full)` when the queue is full (spec §3.3).
-pub fn send(_ch: Channel, _msg: &Message) -> Result<(), SendError> {
-    todo!("M1: implement kernel send syscall wrapper")
-}
-
-/// Non-blocking receive.
-pub fn recv(_ch: Channel, _msg: &mut Message) -> Result<(), RecvError> {
-    todo!("M1: implement kernel recv syscall wrapper")
-}
-
-#[derive(Debug)]
-pub enum SendError {
-    Full,
-}
-
-#[derive(Debug)]
-pub enum RecvError {
-    Empty,
-    NoCspaceSlot,
-}

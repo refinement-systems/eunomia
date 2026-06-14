@@ -218,4 +218,84 @@ mod tests {
     fn rig_smoke_shuttle() {
         shuttle::check_random(rig_smoke, 1000);
     }
+
+    // Harness #3 (plan doc/plans/2_ipc.md §5.2): FIFO / no double-delivery under
+    // concurrent senders, over the *typed* Endpoint (the real Phase-1 code).
+    // Two sender processes each send `per_sender` distinct ids on one channel
+    // (A: 1..=k, B: 101..=100+k); a receiver drains all 2k. Capacity = 2k, so
+    // Full never fires here — backpressure/retry is harness #2 (phase 3) — and
+    // no notifications are used (waiting is harness #1, phase 2): pure poll.
+    // Gated to the tiers that drive it (std + shuttle); there is no loom variant.
+    #[cfg(not(loom))]
+    fn fifo_no_drop(per_sender: u8) {
+        use crate::endpoint::{Endpoint, Message};
+        use crate::transport::Chan;
+        const CHAN: Chan = 0;
+        let total = 2 * per_sender as usize;
+        let t = ModelTransport::shared(total, 0);
+
+        let ta = Arc::clone(&t);
+        let sa = thread::spawn(move || {
+            let ep = Endpoint::new(&*ta, CHAN);
+            for i in 1..=per_sender {
+                ep.send_nb(&Message::bytes(&[i])).unwrap();
+            }
+        });
+
+        let tb = Arc::clone(&t);
+        let sb = thread::spawn(move || {
+            let ep = Endpoint::new(&*tb, CHAN);
+            for i in 1..=per_sender {
+                ep.send_nb(&Message::bytes(&[100 + i])).unwrap();
+            }
+        });
+
+        let tr = Arc::clone(&t);
+        let receiver = thread::spawn(move || -> std::vec::Vec<u8> {
+            let ep = Endpoint::new(&*tr, CHAN);
+            let mut got = std::vec::Vec::new();
+            let mut msg = Message::new();
+            while got.len() < total {
+                match ep.recv_nb(&mut msg) {
+                    Ok(()) => got.push(msg.payload()[0]),
+                    Err(RecvErr::Empty) => thread::yield_now(),
+                    Err(e) => panic!("unexpected recv error: {:?}", e),
+                }
+            }
+            got
+        });
+
+        sa.join().unwrap();
+        sb.join().unwrap();
+        let got = receiver.join().unwrap();
+
+        // No drop / no double-delivery: exactly the sent set, once each.
+        let mut sorted = got.clone();
+        sorted.sort_unstable();
+        let mut expected: std::vec::Vec<u8> =
+            (1..=per_sender).chain(101..=100 + per_sender).collect();
+        expected.sort_unstable();
+        assert_eq!(sorted, expected, "every id received exactly once (no drop, no dup)");
+
+        // Per-sender FIFO: each sender's ids arrive in increasing (send) order,
+        // since the channel is FIFO (§3.3).
+        let a: std::vec::Vec<u8> = got.iter().copied().filter(|&x| x <= per_sender).collect();
+        assert!(a.windows(2).all(|w| w[0] < w[1]), "sender A not FIFO: {:?}", a);
+        let b: std::vec::Vec<u8> = got.iter().copied().filter(|&x| x > 100).collect();
+        assert!(b.windows(2).all(|w| w[0] < w[1]), "sender B not FIFO: {:?}", b);
+    }
+
+    #[cfg(all(not(loom), not(shuttle)))]
+    #[test]
+    fn fifo_no_drop_std() {
+        fifo_no_drop(2);
+    }
+
+    // Shuttle is harness #3's tier (interleaving/SC); loom is reserved for the
+    // phase-2 lost-wakeup fragment (§5.3), so there is no loom variant here.
+    #[cfg(shuttle)]
+    #[test]
+    fn fifo_no_drop_shuttle() {
+        shuttle::check_random(|| fifo_no_drop(2), 1000);
+    }
 }
