@@ -908,6 +908,7 @@ dependencies = [
  "ipc",
  "loom",
  "proptest",
+ "shuttle",
 ]
 
 [[package]]

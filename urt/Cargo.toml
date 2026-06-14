@@ -16,8 +16,14 @@ proptest = "1"
 [target.'cfg(loom)'.dependencies]
 loom = "0.7"
 
-# cfg(kani) is injected by cargo-kani; cfg(loom) is set by RUSTFLAGS="--cfg
-# loom" for the time-page seqlock model (plan 1_loom-shuttle-rewrite §4.1).
-# Teach plain cargo both are expected (same handling as kcore).
+# shuttle is the same story as loom one stanza up (a cfg-gated real dependency,
+# off the normal build), for the non-certifying seqlock breadth-smoke
+# (RUSTFLAGS="--cfg shuttle"; plan 1_loom-shuttle-rewrite §4.1 item 5). Pinned §5.
+[target.'cfg(shuttle)'.dependencies]
+shuttle = "0.7"
+
+# cfg(kani) is injected by cargo-kani; cfg(loom)/cfg(shuttle) are set by
+# RUSTFLAGS="--cfg loom|shuttle" for the time-page seqlock models (plan
+# 1_loom-shuttle-rewrite §4.1). Teach plain cargo all are expected (like kcore).
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)", "cfg(loom)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)", "cfg(loom)", "cfg(shuttle)"] }
