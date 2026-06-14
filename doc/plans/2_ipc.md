@@ -36,10 +36,13 @@ concurrency) as context.
 Phase-1 seqlock seam (the *proven* cfg(loom)/cfg(shuttle) template). Framing
 mirrors `doc/plans/0_kani-rewrite.md`: a verifiable-first seam (the `Env`/`Hal`
 analogue), and TLA+ checking the *design* while Shuttle re-checks the *real code*.
-**Status quo:** `ipc/` is the fixed header (`header.rs`, done + Kani-verified) and
-raw syscall wrappers (`sys.rs`); `send`/`recv` in `lib.rs` are `todo!()`. The
-reactor, backpressure, valuable-cap ack, and serialization do not exist
-(`doc/results/0_mvp.md` debt #2).
+**Starting point (pre-implementation baseline, for the record):** when this plan
+was written `ipc/` was only the fixed header (`header.rs`, done + Kani-verified)
+and the raw syscall wrappers (`sys.rs`); `send`/`recv` in `lib.rs` were `todo!()`,
+and the reactor, backpressure, valuable-cap ack, and serialization did not exist
+(`doc/results/0_mvp.md` debt #2). All of those now exist and are verified — see the
+**Status** block above; this paragraph is retained only as the baseline the work
+started from.
 
 ---
 
