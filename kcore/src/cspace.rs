@@ -604,6 +604,65 @@ pub open spec fn slot_refs(m: Map<SlotId, CapSlot>, obj: ObjId) -> nat {
     m.dom().filter(|k: SlotId| cap_obj(m[k].cap) == Some(obj)).len()
 }
 
+// Two census lemmas (the spec basis for refcount soundness — the stored
+// refcount must move in lockstep with the count of designating slots):
+
+// Link-only edits (same domain, same caps) leave the census untouched.
+proof fn lemma_same_caps_same_census(
+    m1: Map<SlotId, CapSlot>,
+    m2: Map<SlotId, CapSlot>,
+    obj: ObjId,
+)
+    requires
+        m1.dom() == m2.dom(),
+        forall|k: SlotId| #[trigger] m1.dom().contains(k) ==> m1[k].cap == m2[k].cap,
+    ensures
+        slot_refs(m1, obj) == slot_refs(m2, obj),
+{
+    let s1 = m1.dom().filter(|k: SlotId| cap_obj(m1[k].cap) == Some(obj));
+    let s2 = m2.dom().filter(|k: SlotId| cap_obj(m2[k].cap) == Some(obj));
+    assert forall|k: SlotId| s1.contains(k) <==> s2.contains(k) by {
+        if m1.dom().contains(k) {
+            assert(m1[k].cap == m2[k].cap);
+        }
+    }
+    assert(s1 =~= s2);
+    assert(slot_refs(m1, obj) == s1.len());
+    assert(slot_refs(m2, obj) == s2.len());
+}
+
+// Re-pointing one slot from designating nothing-of-`obj` to designating `obj`
+// raises `obj`'s census by exactly one.
+proof fn lemma_designation_bump(
+    m: Map<SlotId, CapSlot>,
+    k: SlotId,
+    v: CapSlot,
+    obj: ObjId,
+)
+    requires
+        m.dom().finite(),
+        m.dom().contains(k),
+        cap_obj(m[k].cap) != Some(obj),
+        cap_obj(v.cap) == Some(obj),
+    ensures
+        slot_refs(m.insert(k, v), obj) == slot_refs(m, obj) + 1,
+{
+    let m2 = m.insert(k, v);
+    let f1 = m.dom().filter(|j: SlotId| cap_obj(m[j].cap) == Some(obj));
+    let f2 = m2.dom().filter(|j: SlotId| cap_obj(m2[j].cap) == Some(obj));
+    assert(m2.dom() =~= m.dom());
+    assert forall|j: SlotId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.insert(k).contains(j) by {
+        if j != k {
+            assert(m2[j] == m[j]);
+        }
+    }
+    assert(f2 =~= f1.insert(k));
+    assert(!f1.contains(k));
+    assert(f1.finite());
+    assert(slot_refs(m2, obj) == f2.len());
+    assert(slot_refs(m, obj) == f1.len());
+}
+
 // ── Verified operations (moved here from plain Rust; bodies are unchanged
 //    modulo verus-friendly control flow). ──
 
@@ -706,6 +765,7 @@ pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
 pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (res: Result<(), ()>)
     requires
         cdt_wf(old(store).slot_view()),
+        old(store).slot_view().dom().finite(),
         old(store).slot_view().dom().contains(src),
         old(store).slot_view().dom().contains(dst),
         cap_obj(old(store).slot_view()[src].cap) matches Some(o) ==>
@@ -725,6 +785,11 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (r
             &&& (cap_obj(old(store).slot_view()[src].cap) matches Some(o) ==>
                   final(store).refs_view()
                       =~= old(store).refs_view().insert(o, (old(store).refs_view()[o] + 1) as nat))
+            // refcount soundness preserved: the slot census rises by one in
+            // lockstep with the stored refcount above.
+            &&& (cap_obj(old(store).slot_view()[src].cap) matches Some(o) ==>
+                  slot_refs(final(store).slot_view(), o)
+                      == slot_refs(old(store).slot_view(), o) + 1)
         },
         res is Err ==> {
             &&& final(store).slot_view() == old(store).slot_view()
@@ -742,6 +807,8 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (r
     // On this path src is non-empty and dst is empty, so src != dst, and (by
     // empty_slots_detached) dst is fully detached.
     assert(src != dst);
+    assert(is_empty_cap(m0[dst].cap));
+    assert(cap_obj(m0[dst].cap) == Option::<ObjId>::None);
     assert(m0[dst].parent is None && m0[dst].first_child is None
         && m0[dst].next_sib is None && m0[dst].prev_sib is None);
 
@@ -777,6 +844,15 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (r
         let r = m0[src].cap.rights.0;
         // monotone-derivation subset corollary: (r & mask) & r == r & mask.
         assert((r & mask) & r == (r & mask)) by (bit_vector);
+        // census delta: dst now designates the object, so its slot census rose
+        // by one (set_slot), and the link surgery left every cap unchanged.
+        match cap_obj(cap) {
+            Some(o) => {
+                lemma_designation_bump(m0, dst, d, o);
+                lemma_same_caps_same_census(m1, store.slot_view(), o);
+            }
+            None => {}
+        }
     }
     Ok(())
 }
