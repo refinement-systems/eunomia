@@ -86,15 +86,24 @@ the aarch64 kernel cross-build.
 
 Verified operations:
 
+- `cdt_wf(m)` is the **structural** CDT invariant; it does **not** include
+  acyclicity (see §6 — acyclicity lands with the termination/ghost-rank
+  increment). It carries `links_in_domain`, `siblings_doubly_consistent`,
+  `first_child_parent_agree` **and its converse `head_is_first_child`** (a
+  list-head node is its parent's first child — added after the review, §8), and
+  `empty_slots_detached`.
+
 | op | contract proven |
 |---|---|
-| `obj_ref` | refcount bump; **overflow guarded** (Verus makes the `< u32::MAX` precondition explicit — an unchecked refcount bump is a known kernel-vuln class); the slot arena is untouched. |
-| `cdt_insert_child` | **`cdt_wf` preserved** by the doubly-linked insertion, ∀ shapes; child becomes parent's first child; caps and refcounts framed unchanged. |
-| `derive` | the **monotone-derivation security theorem** (§2.3): on `Ok`, `dst.rights == src.rights & mask`, hence a **subset for every mask** (proven ∀, not sampled); refuses empty/Untyped src and occupied dst with the store unchanged; `cdt_wf` preserved; **refcount soundness preserved** — the stored refcount **and** the slot census both rise by exactly one (in lockstep). |
+| `obj_ref` | refcount bump, the slot arena untouched. Overflow-free given a `< u32::MAX` precondition (which `derive` discharges — see below). |
+| `cdt_insert_child` | **`cdt_wf` preserved** by the doubly-linked insertion, ∀ shapes; child becomes parent's first child and the **prior children follow in order** (the sibling list is spliced in unchanged); caps and refcounts framed unchanged. |
+| `derive` | the **monotone-derivation security theorem** (§2.3): on `Ok`, `dst.rights == src.rights & mask`, hence a **subset for every mask** (proven ∀, not sampled); a **faithful copy** — `dst`'s kind/object equals `src`'s, a Frame copy unmapped (§2.5); refuses empty/Untyped src, occupied dst, **or a refcount already at `u32::MAX`**, store unchanged; **overflow-free for all inputs** (no unchecked `+ 1` wrap — a theorem, not an assumption); `cdt_wf` preserved; the stored refcount **and** the slot census both rise by exactly one (the refcount-soundness *delta*; the full `refs == census`, incl. non-slot refs, is deferred). |
 
 This is the security pivot (monotone derivation), the structural invariant
-(`cdt_wf`), and the refcount discipline — the heart of the CapRevocation
-invariant set — proven **unbounded** where Kani checked at TLC-scale bounds.
+(`cdt_wf`), and the refcount discipline (delta) — the heart of the CapRevocation
+invariant set — proven **unbounded** where Kani checked at TLC-scale bounds, for
+the three non-recursive cspace/CDT operations. The looping/teardown ops remain
+(§6).
 
 ---
 
@@ -189,3 +198,47 @@ teardown port.
   workspace-layout note) and `0_kani-rewrite.md`'s deviation paragraph track the
   new division: Verus is the mechanized kernel-core tier (the spec's original §6
   assignment); Kani is retained only for the host chokepoints.
+
+---
+
+## 8. Adversarial review (and the fixes it forced)
+
+Before finalizing, the proofs were put through a three-lens adversarial review
+(vacuity & trusted-boundary soundness; fidelity to the CapRevocation invariants /
+the deleted predicates; Verus-soundness & erasure). The reviewers independently
+converged — and confirmed in Verus, against the real impl, that the proofs are
+**sound** (the `Rights::masked` assumed spec matches the impl; the abstract Store
+contract is satisfiable and faithful to `KernelStore`; the body rewrites are
+behavior-preserving; no `assume`/`external_body` weakens the bodies). They also
+found that several *green* proofs proved **less** than the comments claimed. Each
+was fixed before landing:
+
+- **Refcount overflow was a real, reachable UAF, not just a documented one.** The
+  `< u32::MAX` precondition was never discharged by the production `CapCopy →
+  derive` path, so the kernel kept an unchecked `r + 1` that wraps to zero and
+  triggers premature last-ref teardown. **Fixed**: `derive` now refuses at the
+  ceiling (Err) before any mutation; the precondition is dropped; the bump is
+  proven overflow-free for all inputs (the way `carve` was handled). The
+  production path inherits the guarantee.
+- **`cdt_wf` was weaker than the predicate it replaced** — it admitted cyclic
+  CDTs (acyclicity dropped) and orphan-head nodes (the reverse first-child check
+  missing). **Fixed** the reverse check (`head_is_first_child`); acyclicity is
+  honestly scoped as deferred to the termination increment, and `cdt_wf` is
+  labeled the *structural* fragment, not the full TLA TypeOK.
+- **`derive` pinned only rights, not the "copy".** A derive that changed the cap
+  kind / channel end would have satisfied the contract. **Fixed**: `derived_kind`
+  pins dst's kind/object = src's (Frame unmapped, §2.5); + the bare-cap
+  refcount-unchanged clause.
+- **`cdt_insert_child` didn't prove the prior children survive.** **Fixed**: the
+  sibling-list splice (child heads, prior children follow in order) is now an
+  ensures.
+- **"Refcount soundness preserved" overstated two co-increments.** Reworded
+  everywhere to the **delta** it is (stored refcount and slot census both +1);
+  the full `refs == census` invariant (with non-slot refs) is deferred.
+
+Acknowledged-and-deferred (documented, not fixed this increment): full acyclic
+`cdt_wf` + the six looping/recursive ops + their termination (§6); the full
+`refs == census` soundness predicate; the finiteness invariant living on the
+`Store` contract rather than as a `derive` precondition; and a host-test guard
+that `KernelStore`'s slot/refcount storage is disjoint (the trusted-layout
+assumption the abstract contract rests on, §5).
