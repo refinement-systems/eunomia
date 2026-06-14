@@ -357,15 +357,22 @@ codecs and the pure `admit_connect` step. Harnesses #1–#5 (FIFO/no-drop,
 lost-wakeup, backpressure, cap-ack, multi-client fairness) live in
 `ipc/src/model.rs`; the `concurrency` CI job runs them with no per-test
 filter, so a new `loom::model`/`shuttle::check_*` auto-gates. The wire
-decoder is also a cargo-fuzz target (`ipc/fuzz`). **`storaged` is the
-first production consumer** (`user/storaged/src/main.rs`): its
+decoder is also a cargo-fuzz target (`ipc/fuzz`). **`storaged`**
+(`user/storaged/src/main.rs`) is the first production consumer: its
 drain-then-wait loop is now `Reactor::wait` + `Endpoint` over
 `SyscallTransport`, dispatching by opaque key — no notification bit named
 in the server, so the §3.6 wait-set upgrade will change no server code.
-Scope cut: the *dynamic* connect (a client retyping a channel pair and
-the server accepting a **second** concurrent session) needs kernel
-cap-transfer wiring and stays a follow-up; the protocol and the reactor
-multiplexing it relies on are proven (harness #5).
+The **shell** (`user/shell/src/main.rs`) is the first *multi-source*
+consumer (review rec 2, `doc/results/19_ipc-review.md`): its spawn/reap
+loop multiplexes a child's exit and fault terminations through the reactor
+via `Reactor::register_bound` — the entry point for **externally-bound,
+edge-triggered** sources (a thread on-exit/on-fault `thread_bind`, a
+timer, an IRQ), which (unlike the channel `register`) neither binds nor
+self-signals a poll-once. Scope cut: the *dynamic* connect (a client
+retyping a channel pair and the server accepting a **second** concurrent
+session) needs kernel cap-transfer wiring and stays a follow-up; the
+admission protocol and reactor multiplexing it relies on are proven
+(harness #5).
 
 ### M1 exit criterion (met)
 Booting prints `123456M1 PASS` (`bash scripts/m1-test.sh` builds the

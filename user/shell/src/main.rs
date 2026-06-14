@@ -25,7 +25,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use ipc::sys;
+use ipc::{sys, Reactor, SyscallTransport};
 use storage_server::{wire, DirEnt, Request, Response};
 use urt::slots::SlotAlloc;
 use urt::spawn::{Exit, SpawnRec};
@@ -69,13 +69,19 @@ const CHILD_PRIO: u64 = 3;
 /// still travels in the ST01 block — never assumed.
 const CHILD_TIME_VA: u64 = 0xA300_0000;
 
-/// Notification bits the kernel raises for this child (§5.1). Distinct so
-/// the notification *word* tells exit from fault before `read_report` does —
-/// the §3.6 bit-group scan, here doing real multiplexing for the first time.
-/// A console-readable source would slot in as a third bit once the console
-/// is a channel rather than a syscall.
+/// Notification bits the kernel raises for this child (§5.1). Distinct so the
+/// notification *word* tells exit from fault — two sources multiplexed on one
+/// notification, the §3.6 bit-group scan. The shell registers each as a source
+/// with the IPC reactor (`register_bound`), which owns the scan; the shell is
+/// the reactor's first multi-source production consumer. A console-readable
+/// source would slot in as a third bit once the console is a channel.
 const EXIT_BIT: u64 = 1 << 0;
 const FAULT_BIT: u64 = 1 << 1;
+/// Reactor source keys for this child's two terminations (`register_bound`).
+/// Opaque to the wait loop — either means "terminated, go reap" (the kind is
+/// read back from the report). Distinct so the dispatch is genuinely two-source.
+const EXIT_KEY: ipc::Key = 0;
+const FAULT_KEY: ipc::Key = 1;
 
 fn out(s: &[u8]) {
     sys::debug_write(s);
@@ -528,19 +534,32 @@ impl Spawner {
             self.scrub(s.time_copy);
             return Err(RunErr::Carve);
         }
+        // Multiplex this child's termination through the IPC reactor (§3.6/§4.2):
+        // the exit and fault bits were bound to the TCB by `rec.arm` (a
+        // `thread_bind`, above, before start), so register them as two
+        // externally-bound, edge-triggered sources — `register_bound` records
+        // only the bit→key dispatch (no channel bind, no poll-once). This is the
+        // shell as the reactor's first multi-source production consumer; the wait
+        // below never names a notification bit.
+        let transport = SyscallTransport;
+        let mut reactor = Reactor::new(&transport, EVENT_NOTIF);
+        if reactor.register_bound(EXIT_BIT, EXIT_KEY).is_err()
+            || reactor.register_bound(FAULT_BIT, FAULT_KEY).is_err()
+        {
+            self.scrub(s.time_copy);
+            return Err(RunErr::Carve);
+        }
         if loader::spawn::start(&prepared, CHILD_PRIO).is_err() {
             self.scrub(s.time_copy);
             return Err(RunErr::Start);
         }
 
-        // Block on the bit group until this child terminates (exit | fault).
-        loop {
-            let word = sys::notif_wait(EVENT_NOTIF);
-            if word >= 0 && rec.terminated(word as u64) {
-                break;
-            }
-            sys::yield_now();
-        }
+        // Block until this child terminates. `wait` returns when a registered
+        // source (exit or fault) fires, ignoring any unregistered bit — it
+        // absorbs the by-hand bit-group scan the loop here used to do. Both keys
+        // mean "go reap"; reap reads back which (exit vs fault) from the report.
+        let (key, _signals) = reactor.wait();
+        debug_assert!(key == EXIT_KEY || key == FAULT_KEY, "unexpected reactor key");
         // Unmap the time grant before reap's revoke frees the child aspace
         // (§2.5), then read_report strictly before revoke (enforced in reap).
         let _ = sys::cap_delete(s.time_copy);

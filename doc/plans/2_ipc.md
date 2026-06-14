@@ -1,11 +1,23 @@
 # Plan: implementing the IPC crate (§3) — Shuttle-verifiable from day one
 
-**Status:** **done.** All six phases (§6) are implemented and verified — the
-rig + `IpcReactor` TLA+ spec, the non-blocking primitives, the reactor, async/
-bounded-retry backpressure, the valuable-cap ack, the postcard codec + fuzz
-targets, and (phase 6) the §4.6 admission layer (`ipc::session`) with `storaged`
-re-pointed onto the reactor as the first production consumer. Harnesses #1–#5 run
-under Shuttle (+ Loom for the lost-wakeup fragment) in the `concurrency` CI job.
+**Status:** **substantially implemented; scoped — see
+`doc/results/19_ipc-review.md`.** Phases 0–5 — the verifiable rig + `IpcReactor`
+TLA+ spec, the non-blocking primitives, the reactor, blocking/bounded-retry
+backpressure, the valuable-cap ack, and the postcard codec + fuzz targets — are
+implemented and verified (harnesses #1–#5 under Shuttle, + Loom for the
+lost-wakeup fragment, in the `concurrency` CI job). Phase 6 landed the §4.6
+**admission policy** (`ipc::session`: `Admission` + the `ConnectReq`/`GrantReply`
+codecs + `admit_connect`) and re-pointed `storaged` onto the reactor. Review
+rec 2 then made the reactor multi-source in production: the **shell's spawn/reap
+loop** now multiplexes a child's exit/fault terminations through
+`Reactor::register_bound` (`user/shell/src/main.rs`) — the first multi-source
+production consumer (`storaged` stays single-source).
+**Deferred (not yet built):** the dynamic **connect mechanism** — a client
+funding and passing an *endpoint cap*, the server accepting a *second live
+session* (§3.5; needs kernel cap-transfer wiring); the **bulk-window
+mechanism** — only the byte quota exists, no granted frame/descriptor/doorbell
+(§4.6); and the **pinned Shuttle seed** (§5.2/§7). The review
+(`doc/results/19_ipc-review.md`) has the full gap list and ranked follow-ups.
 **Spec baseline:** `doc/spec/2_spec_rev2.md` §3 (§3.1 message format … §3.7 wire
 protocol), with §2.3/§2.5 (caps, fund-by-failure-mode) and §4.8 (bulk-window
 concurrency) as context.

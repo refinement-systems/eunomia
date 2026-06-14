@@ -671,4 +671,39 @@ mod tests {
     fn fairness_smoke_shuttle() {
         shuttle::check_random(|| fairness_smoke(3, 2), 1000);
     }
+
+    // `register_bound` dispatch — the §5.1 thread-source path the shell's
+    // spawn/reap loop uses (`user/shell/src/main.rs`): two externally-bound,
+    // edge-triggered sources on one notification, each dispatched to its key.
+    // Unlike `register`, `register_bound` does NOT poll-once; the test proves it
+    // by registering two bits and signaling only the *higher* one, then asserting
+    // `wait` returns *its* key — a fabricated poll-once would have left the low
+    // bit pending and (lowest-first) returned it instead. Also checks that a
+    // re-register of a used bit is `Taken`. Std-only: a sequential check of the
+    // dispatch logic, not a concurrency harness (multi-source Shuttle is rec 4).
+    #[cfg(all(not(loom), not(shuttle)))]
+    #[test]
+    fn reactor_register_bound_dispatch() {
+        use crate::reactor::{Key, Reactor, RegisterErr};
+        use crate::transport::Notif;
+        const NOTIF: Notif = 0;
+        const BIT_LO: u64 = 1 << 0;
+        const BIT_HI: u64 = 1 << 1;
+        const KEY_LO: Key = 100;
+        const KEY_HI: Key = 200;
+        let t = ModelTransport::shared(1, 1);
+        let mut reactor = Reactor::new(&*t, NOTIF);
+        reactor.register_bound(BIT_LO, KEY_LO).unwrap();
+        reactor.register_bound(BIT_HI, KEY_HI).unwrap();
+        // A used bit cannot be re-registered.
+        assert_eq!(reactor.register_bound(BIT_LO, 999), Err(RegisterErr::Taken));
+        // No poll-once: nothing is pending until a source actually fires. Signal
+        // only the high bit (as a thread death would) and assert wait returns its
+        // key — the low bit was not self-signaled at registration time.
+        t.notif_signal(NOTIF, BIT_HI);
+        assert_eq!(reactor.wait().0, KEY_HI);
+        // The low source then fires and dispatches to its own key.
+        t.notif_signal(NOTIF, BIT_LO);
+        assert_eq!(reactor.wait().0, KEY_LO);
+    }
 }
