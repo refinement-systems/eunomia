@@ -13,8 +13,11 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
-// The model + its sync seam are host-only (std-backed) and compiled solely for
-// the test/loom/shuttle builds (plan §3.2); production stays no_std.
+// no_std + alloc: the wire codec (§3.7) (de)serializes owned, variable-length
+// bodies, so the crate needs the heap (urt provides it on the OS), exactly like
+// storage-server. The model + its sync seam are host-only (std-backed) and
+// compiled solely for the test/loom/shuttle builds (plan §3.2).
+extern crate alloc;
 #[cfg(any(test, loom, shuttle))]
 extern crate std;
 
@@ -23,14 +26,22 @@ pub mod header;
 pub mod reactor;
 pub mod sys;
 pub mod transport;
+pub mod wire;
 
-// The server-facing surface (§4.1, §4.2): the typed non-blocking primitives and
-// the epoll-shaped reactor, over the kernel transport seam.
+// The server-facing surface (§4.1, §4.2, §4.5): the typed non-blocking
+// primitives, the epoll-shaped reactor, and the wire codec, over the kernel
+// transport seam.
 pub use endpoint::{Endpoint, Message, MAX_PAYLOAD};
 pub use reactor::{Key, Reactor, RegisterErr, Signals};
 pub use transport::{
     Chan, Event, RecvErr, RecvOk, SendErr, SyscallTransport, Transport,
 };
+pub use wire::{decode, encode, WireError};
+
+/// Representative body type + round-trip oracle for fuzzing the wire codec
+/// (§5.4); not part of the production API.
+#[cfg(feature = "fuzzing")]
+pub mod fuzz_support;
 
 /// The cfg-swappable concurrency seam + the deterministic in-memory kernel
 /// (`ModelTransport`) the Shuttle/Loom harnesses drive (plan §3.2–§3.4). Not in

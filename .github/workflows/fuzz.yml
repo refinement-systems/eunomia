@@ -27,6 +27,10 @@ jobs:
         run: |
           cargo test -p cas -p storage-server -p loader \
             --test fuzz_corpus --test fuzz_regressions
+      - name: Replay ipc wire-codec corpus
+        # ipc's corpus test + its DemoMsg body type are behind the `fuzzing`
+        # feature (no real server body type until §4.6), so it runs on its own.
+        run: cargo test -p ipc --features fuzzing --test fuzz_corpus
 
   # Per-PR smoke: build every target and replay its corpus (libFuzzer
   # -runs=0). Catches a harness that stopped compiling or a seed that

@@ -3,12 +3,18 @@ name = "ipc"
 version.workspace = true
 edition.workspace = true
 
-# no_std by default; enable "std" for host testing.
+# no_std (+ alloc) by default; enable "std" for host testing. "fuzzing" exposes
+# the wire-codec fuzz support (representative body type + oracle) — §5.4.
 [features]
 default = []
 std = []
+fuzzing = []
 
 [dependencies]
+# The wire codec (§3.7): a postcard body behind a module-private trait. no_std +
+# alloc (same as storage-server); the aarch64 build links these over urt's heap.
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
 
 # loom/shuttle reach the IPC model's *library* code (ModelTransport's sync
 # primitives), so they are real deps, not dev-deps — but only when a model is
@@ -19,6 +25,13 @@ loom = "0.7"
 
 [target.'cfg(shuttle)'.dependencies]
 shuttle = "0.7"
+
+# The seed generator uses the fuzz-only DemoMsg, so it is skipped unless the
+# `fuzzing` feature is on (otherwise a plain `cargo test`/`build` would try to
+# compile it and fail on the missing `fuzz_support`).
+[[example]]
+name = "gen_ipc_corpus"
+required-features = ["fuzzing"]
 
 # cfg(kani) is injected by cargo-kani; cfg(loom)/cfg(shuttle) by
 # RUSTFLAGS="--cfg loom|shuttle" for the IPC reactor models (plan 2_ipc.md §5.2).
