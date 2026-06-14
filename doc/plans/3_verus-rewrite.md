@@ -83,7 +83,7 @@ The whole plan turns on this table. "Incumbent" is what verifies it today.
 | `kcore` aspace walker + PTE encode | Kani (bounded) | **Verus** | **Migrate.** Pure index/bit arithmetic and a partial-map model — Verus's sweet spot; isolation invariants proven for all VAs, not sampled. |
 | `kcore` syscall decode/validate | Kani (bounded) | **Verus** | **Migrate.** Totality + length/slot validation as `ensures`. |
 | `urt::time` tick→ns; `urt::slots` allocator; `dma-pool` disjointness; `ipc` header codec; `cas` TLV + superblock geometry | Kani (supplementary) + proptest/fuzz | **Verus** for the functional core | **Migrate the proof obligation.** Overflow-freedom and disjointness for *all* inputs; proptest/fuzz stay as differential/regression coverage. |
-| Storage commit/recovery (`cas::store` A/B flip, WAL replay) — functional core | TLA+ + crash-injection proptest | **Verus** *complements* TLA+ | **Add (scoped).** Verus on the real recovery function closes the model-to-code gap TLA+ leaves; std/`Vec` weight bounds the scope (§4.8). TLA+ stays the design tier. |
+| Storage commit/recovery (`cas::store` A/B flip, WAL replay) — functional core | TLA+ + crash-injection proptest | **Verus** *complements* TLA+ | **Add (mandatory, scoped).** Verus on the real recovery function closes the model-to-code gap TLA+ leaves; std/`Vec` weight bounds the scope to an extracted pure function (§4.8), but the proof is required — the commit protocol is a correctness pivot (spec §6). TLA+ stays the design tier. |
 | Cross-process IPC races (reactor lost-wakeup/backpressure); `urt::time` seqlock *interleavings* | TLA+ IpcReactor + Loom + Shuttle | **Loom/Shuttle + TLA+** | **Keep.** Verus *can* do concurrency (tokenized state machines, `vstd::atomic`) but it is a research-grade lift, and the TLA+/Loom/Shuttle coverage is already strong and proven. Not worth overriding. Honest call: Verus is **not** better here today. |
 | Adversarial bytes: wire/on-disk decoders, ELF loader, mount over arbitrary device contents | cargo-fuzz + proptest | **cargo-fuzz** | **Keep.** Verus proves decode *totality* and *canonical form* (and will, §4.7), but differential coverage, the checksum-reseal harnesses, and corpus regressions are fuzzing's job. Complementary, not replaced. |
 | `blake3`, FastCDC gear loop | Miri/proptest | **neither** | **Out of scope.** Crypto/perf inner loops; interpreted hashing is what makes even Miri slow. Stub with an injective-on-small-inputs ghost where a proof needs a hash (same axiom Kani used). |
@@ -291,17 +291,19 @@ regression coverage).
 | `cas::tlv` | deterministic TLV: `decode`-then-re-`encode` reproduces input for all accepting inputs (the canonical-form oracle as a theorem); non-canonical rejected. |
 | `cas::disk` superblock | the §4.5 mount chokepoint: every geometry field validated vs. a symbolic device length with checked arithmetic only — "no untrusted field vouches for another" as a proven dataflow; parse total over arbitrary bytes. *(Scope flag: `disk.rs` is `Vec`-heavy; if the `vstd::Vec` port proves disproportionate, this one target may stay on Kani — the single explicit place Kani earns a stay of execution, §5.)* |
 
-### 4.8 Storage commit protocol (scoped complement to TLA+)
+### 4.8 Storage commit protocol (mandatory; scoped complement to TLA+)
 
 `cas::store` (1634 lines, std/`Vec`/`Box`-heavy) is not a wholesale Verus target.
 But the **recovery core** — "recovered state = committed roots + replay of WAL
 records not covered by the committed head," the `AckedWritesRecoverable` invariant
-TLA+ checks and `cas/src/store.rs`'s crash-injection proptest samples — is worth a
-Verus proof on the *extracted pure decision function* (pick-survivor-superblock,
-replay-bound computation), where Verus closes the model-to-code gap. This is
-**additive** (TLA+ remains the design gate; proptest/fuzz stay) and deliberately
-narrow; it is the lowest-priority phase and may be deferred if the extraction is
-not clean. Recorded so it is budgeted, not discovered.
+TLA+ checks and `cas/src/store.rs`'s crash-injection proptest samples — **is**
+proven in Verus on an *extracted pure decision function* (pick-survivor-superblock,
+replay-bound computation), where Verus closes the model-to-code gap TLA+ cannot
+reach. This is **additive** (TLA+ remains the design gate; proptest/fuzz stay) and
+deliberately narrow — but it is **required, not optional**: cleanly extracting that
+pure function from `store.rs` is part of the work, not a precondition for doing it.
+The commit protocol is, with the cap machinery, where the system's correctness
+actually pivots (spec §6), so it does not get a weaker tier than the kernel core.
 
 ---
 
@@ -380,8 +382,10 @@ questions Verus does not.
    At this point `cargo kani -p kcore` is gone.
 6. **Host chokepoints (§4.7).** Port per target; delete the matching Kani host
    harnesses (`urt/dma-pool/ipc/cas` `proofs.rs`). Decide the `cas::disk` holdout.
-7. **(Optional) commit-protocol recovery core (§4.8).** Additive Verus proof; defer
-   if extraction is not clean.
+7. **Commit-protocol recovery core (§4.8).** Extract the pure recovery decision
+   function from `cas::store` and prove `AckedWritesRecoverable` on it (additive to
+   TLA+). **Mandatory** — the commit protocol is a correctness pivot (spec §6), so
+   it gets the same mechanized tier as the kernel core.
 8. **Closeout.** Update spec §6, `CLAUDE.md`, and `0_kani-rewrite.md` (a closeout
    note pointing here); retire Kani CI/scripts if step 6 left no holdout.
 
@@ -446,7 +450,8 @@ Each phase is a PR with proofs green in CI before the deletion lands in the same
 - **The asm shell.** Boot/MMU/GIC/MMIO/scheduler statics stay the trusted base.
 - **Crypto/perf inner loops** (`blake3`, FastCDC).
 - **Rewriting `store.rs`/`disk.rs` wholesale** — only the extracted recovery core
-  and the superblock chokepoint are candidates (§4.8/§4.7).
+  (§4.8, mandatory) and the superblock chokepoint (§4.7) are in scope; the rest of
+  those modules stays on proptest/fuzz/TLA+.
 
 ---
 
