@@ -10,15 +10,17 @@
 
 #[cfg(loom)]
 pub use loom::sync::{Arc, Condvar, Mutex};
-#[cfg(loom)]
+// `thread` is harness-only (the ModelTransport itself spawns nothing), so it is
+// `test`-gated — otherwise the non-test library build sees an unused re-export.
+#[cfg(all(test, loom))]
 pub use loom::thread;
 
 #[cfg(shuttle)]
 pub use shuttle::sync::{Arc, Condvar, Mutex};
-#[cfg(shuttle)]
+#[cfg(all(test, shuttle))]
 pub use shuttle::thread;
 
 #[cfg(all(not(loom), not(shuttle)))]
 pub use std::sync::{Arc, Condvar, Mutex};
-#[cfg(all(not(loom), not(shuttle)))]
+#[cfg(all(test, not(loom), not(shuttle)))]
 pub use std::thread;
