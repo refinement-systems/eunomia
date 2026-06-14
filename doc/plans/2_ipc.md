@@ -11,13 +11,16 @@ codecs + `admit_connect`) and re-pointed `storaged` onto the reactor. Review
 rec 2 then made the reactor multi-source in production: the **shell's spawn/reap
 loop** now multiplexes a child's exit/fault terminations through
 `Reactor::register_bound` (`user/shell/src/main.rs`) — the first multi-source
-production consumer (`storaged` stays single-source).
+production consumer (`storaged` stays single-source). Review rec 3 then pinned
+the Shuttle seed (`ipc/src/model.rs`: `check_pinned`, a seeded `RandomScheduler`
+in place of `check_random`'s entropy seed) and wired the `shuttle::replay`
+corpus (`shuttle_replay_corpus`) — §5.2/§7 satisfied.
 **Deferred (not yet built):** the dynamic **connect mechanism** — a client
 funding and passing an *endpoint cap*, the server accepting a *second live
-session* (§3.5; needs kernel cap-transfer wiring); the **bulk-window
+session* (§3.5; needs kernel cap-transfer wiring); and the **bulk-window
 mechanism** — only the byte quota exists, no granted frame/descriptor/doorbell
-(§4.6); and the **pinned Shuttle seed** (§5.2/§7). The review
-(`doc/results/19_ipc-review.md`) has the full gap list and ranked follow-ups.
+(§4.6). The review (`doc/results/19_ipc-review.md`) has the full gap list and
+ranked follow-ups.
 **Spec baseline:** `doc/spec/2_spec_rev2.md` §3 (§3.1 message format … §3.7 wire
 protocol), with §2.3/§2.5 (caps, fund-by-failure-mode) and §4.8 (bulk-window
 concurrency) as context.

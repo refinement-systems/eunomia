@@ -223,6 +223,45 @@ mod tests {
     use super::*;
     use crate::sync::{thread, Arc};
 
+    // Shuttle reproducibility (plan §5.2/§7, loom-shuttle §5: "fixed seed +
+    // replay corpus"): run every harness under a *pinned* seed + iteration count
+    // rather than `check_random`'s entropy seed, so each CI run explores the same
+    // schedules and a failure reproduces from source — not only from the
+    // schedule the failing run happens to print. Arbitrary but fixed; bump
+    // deliberately (like the pinned tool versions) to widen coverage. This is
+    // exactly what `shuttle::check_random` does internally, with a seeded
+    // `RandomScheduler` in place of the entropy one.
+    #[cfg(shuttle)]
+    const SHUTTLE_SEED: u64 = 0x1C_5EED; // "ipc seed"
+    #[cfg(shuttle)]
+    const SHUTTLE_ITERS: usize = 1000;
+    #[cfg(shuttle)]
+    fn check_pinned<F: Fn() + Send + Sync + 'static>(f: F) {
+        use shuttle::scheduler::RandomScheduler;
+        use shuttle::Runner;
+        let scheduler = RandomScheduler::new_from_seed(SHUTTLE_SEED, SHUTTLE_ITERS);
+        Runner::new(scheduler, Default::default()).run(f);
+    }
+
+    // The Shuttle replay corpus (loom-shuttle §5; the fuzz-corpus discipline
+    // applied to interleavings). When Shuttle finds a failing schedule it prints
+    // an encoded replay string; paste it here as a `(harness, schedule)` entry
+    // and it becomes a deterministic regression pinning that exact interleaving,
+    // independent of SHUTTLE_SEED. Empty until the first bug — the designated
+    // place for it to land (the empty slice keeps the `shuttle::replay` plumbing
+    // type-checked). Parameterized harnesses wrap as a non-capturing fn, e.g.
+    // `((|| fifo_no_drop(2)) as fn(), "…encoded…")`.
+    #[cfg(shuttle)]
+    #[test]
+    fn shuttle_replay_corpus() {
+        let corpus: &[(fn(), &str)] = &[
+            // ((|| reactor_no_lost_wakeup()) as fn(), "…encoded schedule…"),
+        ];
+        for &(harness, schedule) in corpus {
+            shuttle::replay(harness, schedule);
+        }
+    }
+
     // The Phase-0 rig smoke: a sender process enqueues one message (firing the
     // on-readable binding) while a receiver process binds, polls, and — if the
     // poll is Empty — waits, then receives. The message must always arrive (no
@@ -274,7 +313,7 @@ mod tests {
     #[cfg(shuttle)]
     #[test]
     fn rig_smoke_shuttle() {
-        shuttle::check_random(rig_smoke, 1000);
+        check_pinned(rig_smoke);
     }
 
     // Harness #3 (plan doc/plans/2_ipc.md §5.2): FIFO / no double-delivery under
@@ -354,7 +393,7 @@ mod tests {
     #[cfg(shuttle)]
     #[test]
     fn fifo_no_drop_shuttle() {
-        shuttle::check_random(|| fifo_no_drop(2), 1000);
+        check_pinned(|| fifo_no_drop(2));
     }
 
     // Harness #1 (plan §5.2/§5.3): no lost wakeup, over the *real* Reactor (the
@@ -412,7 +451,7 @@ mod tests {
     #[cfg(shuttle)]
     #[test]
     fn reactor_no_lost_wakeup_shuttle() {
-        shuttle::check_random(reactor_no_lost_wakeup, 1000);
+        check_pinned(reactor_no_lost_wakeup);
     }
 
     // The §5.3 weak-memory fragment: the poll-then-wait sequence against the
@@ -482,7 +521,7 @@ mod tests {
     #[cfg(shuttle)]
     #[test]
     fn full_backpressure_no_drop_shuttle() {
-        shuttle::check_random(|| full_backpressure_no_drop(3), 1000);
+        check_pinned(|| full_backpressure_no_drop(3));
     }
 
     // Harness #4 (plan §5.2): the valuable-cap ack protocol — no lost cap. The
@@ -544,7 +583,7 @@ mod tests {
     #[cfg(shuttle)]
     #[test]
     fn valuable_cap_ack_no_loss_shuttle() {
-        shuttle::check_random(valuable_cap_ack_no_loss, 1000);
+        check_pinned(valuable_cap_ack_no_loss);
     }
 
     // Harness #5 (plan doc/plans/2_ipc.md §5.2, §6 phase 6): multi-client
@@ -669,7 +708,7 @@ mod tests {
     #[cfg(shuttle)]
     #[test]
     fn fairness_smoke_shuttle() {
-        shuttle::check_random(|| fairness_smoke(3, 2), 1000);
+        check_pinned(|| fairness_smoke(3, 2));
     }
 
     // `register_bound` dispatch — the §5.1 thread-source path the shell's
