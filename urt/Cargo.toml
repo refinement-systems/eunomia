@@ -9,6 +9,13 @@ ipc = { path = "../ipc" }
 [dev-dependencies]
 proptest = "1"
 
+# loom reaches the time-page seqlock's *library* code (the field atomics), so
+# it must be a real dependency, not a dev-dep — but only when the seqlock model
+# is being built (RUSTFLAGS="--cfg loom"). A normal/aarch64 build never pulls
+# it. Pinned per plan 1_loom-shuttle-rewrite §5.
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
 # cfg(kani) is injected by cargo-kani; cfg(loom) is set by RUSTFLAGS="--cfg
 # loom" for the time-page seqlock model (plan 1_loom-shuttle-rewrite §4.1).
 # Teach plain cargo both are expected (same handling as kcore).

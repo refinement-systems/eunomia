@@ -28,8 +28,11 @@
 // The seqlock's atomics come through a single cfg-selected seam: a
 // `--cfg loom` build (the Phase-1 model, plan 1_loom-shuttle-rewrite §4.1)
 // gets loom's instrumented atomics; every normal/aarch64 build is unchanged.
+// AtomicUsize is loom-side absent: its only user, the `static TIME_PAGE`
+// page-location cell, is `not(loom)`-gated below (loom atomics can't sit in a
+// `static`). The seqlock proof needs only the four field atomics + fence.
 #[cfg(loom)]
-use loom::sync::atomic::{fence, AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use loom::sync::atomic::{fence, AtomicI64, AtomicU64, Ordering};
 #[cfg(not(loom))]
 use core::sync::atomic::{fence, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 
@@ -47,7 +50,10 @@ pub struct TimePage {
 }
 
 // The struct is the page ABI; a layout drift here would misread every
-// process's clock.
+// process's clock. Skipped under loom, whose atomics wrap a model-state
+// index and are neither 8 bytes nor ABI-stable — the loom build never
+// touches the real page layout (it shares a TimePage via loom::sync::Arc).
+#[cfg(not(loom))]
 const _: () = {
     assert!(core::mem::size_of::<TimePage>() == PAGE_PREFIX_BYTES);
     assert!(core::mem::offset_of!(TimePage, seq) == 0);
@@ -65,7 +71,21 @@ pub struct Sample {
 }
 
 impl TimePage {
+    // loom's `Atomic*::new` is not `const`, so the loom build drops `const`;
+    // the body is identical. The real page is built once at boot, where const
+    // construction is worth keeping.
+    #[cfg(not(loom))]
     pub const fn new(wall_base_ns: i64, cntvct_base: u64, cntfrq: u64) -> TimePage {
+        TimePage {
+            seq: AtomicU64::new(0),
+            wall_base_ns: AtomicI64::new(wall_base_ns),
+            cntvct_base: AtomicU64::new(cntvct_base),
+            cntfrq: AtomicU64::new(cntfrq),
+        }
+    }
+
+    #[cfg(loom)]
+    pub fn new(wall_base_ns: i64, cntvct_base: u64, cntfrq: u64) -> TimePage {
         TimePage {
             seq: AtomicU64::new(0),
             wall_base_ns: AtomicI64::new(wall_base_ns),
@@ -144,6 +164,12 @@ pub fn encode_boot(wall_base_ns: i64, cntvct_base: u64, cntfrq: u64) -> [u8; PAG
     buf
 }
 
+// The page-location indirection (a static atomic cell + an int->pointer cast)
+// is `not(loom)`-gated: loom atomics can't live in a `static`, and this is not
+// the seqlock protocol the Loom model checks — that model constructs a
+// TimePage inside loom::model and shares it via loom::sync::Arc, never via this
+// process-global pointer.
+#[cfg(not(loom))]
 static TIME_PAGE: AtomicUsize = AtomicUsize::new(0);
 
 /// Register the time-page mapping for this process. The address comes
@@ -152,10 +178,12 @@ static TIME_PAGE: AtomicUsize = AtomicUsize::new(0);
 /// # Safety
 /// `va` must be the base of a live `TimePage` mapping (read-only is
 /// enough) that stays mapped for the rest of the process's life.
+#[cfg(not(loom))]
 pub unsafe fn attach(va: usize) {
     TIME_PAGE.store(va, Ordering::Release);
 }
 
+#[cfg(not(loom))]
 pub fn page() -> Option<&'static TimePage> {
     let p = TIME_PAGE.load(Ordering::Acquire);
     if p == 0 {
