@@ -14,7 +14,14 @@ loop** now multiplexes a child's exit/fault terminations through
 production consumer (`storaged` stays single-source). Review rec 3 then pinned
 the Shuttle seed (`ipc/src/model.rs`: `check_pinned`, a seeded `RandomScheduler`
 in place of `check_random`'s entropy seed) and wired the `shuttle::replay`
-corpus (`shuttle_replay_corpus`) — §5.2/§7 satisfied.
+corpus (`shuttle_replay_corpus`) — §5.2/§7 satisfied. Review rec 4 then
+Kani-verified the §4.6 session codecs + `Admission` (§5.4) and recorded the
+multi-source caveat. Review rec 5 tidied the dead/stale surface so the API
+matches what is reachable: removed the unconstructed `ConnectErr` variants
+(`Closed`/`BadReply`/`Other` — they return with the deferred connect mechanism),
+fixed the stale `lib.rs` "Async send/recv" doc line, and dropped `timer_arm` from
+the MVP `Transport` trait (the reactor takes a timer via `register_bound`,
+§3.1).
 **Deferred (not yet built):** the dynamic **connect mechanism** — a client
 funding and passing an *endpoint cap*, the server accepting a *second live
 session* (§3.5; needs kernel cap-transfer wiring); and the **bulk-window
@@ -105,12 +112,16 @@ trait Transport {
     fn bind(&self, ch: Chan, ev: Event, notif: Notif, bits: u64) -> Result<(), Err>; // READABLE|WRITABLE|PEER_CLOSED
     fn notif_signal(&self, n: Notif, bits: u64);
     fn notif_wait(&self, n: Notif) -> u64;        // accumulated word, which clears (§3.6)
-    fn timer_arm(&self, t: Timer, n: Notif, bits: u64, delta: u64);
 }
 ```
 
+(Review rec 5 dropped `timer_arm` from this trait: a timer reaches the reactor as
+an externally-bound, edge-triggered source via `Reactor::register_bound` — the
+caller arms it through `sys::timer_arm`, never a `Transport` method — so it was
+unreachable surface. `sys::timer_arm` (the raw kernel ABI) stays.)
+
 - **Production:** `SyscallTransport` — a zero-cost shim over `ipc::sys`
-  (`chan_send`/`chan_recv`/`chan_bind`/`notif_signal`/`notif_wait`/`timer_arm`).
+  (`chan_send`/`chan_recv`/`chan_bind`/`notif_signal`/`notif_wait`).
 - **Test/model:** `ModelTransport` — a deterministic in-memory kernel: a bounded
   FIFO queue ring (capacity = the §3.2 donated-bytes/slot count), a notification
   word with the §3.6 semantics (signalers **OR** bits in; a waiter receives the

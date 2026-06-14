@@ -146,9 +146,9 @@ impl<'t, T: Transport> Reactor<'t, T> {
 
     /// Register a source whose events are bound to `mask` **outside** the reactor
     /// and are **edge-triggered**: a thread on-exit/on-fault binding (a
-    /// `thread_bind` into the TCB, §5.1), a timer (`timer_arm`), or an IRQ —
-    /// anything the kernel signals into this notification at a bit the caller
-    /// controls. Each set bit in `mask` dispatches to `key`.
+    /// `thread_bind` into the TCB, §5.1), a timer (armed via `sys::timer_arm`),
+    /// or an IRQ — anything the kernel signals into this notification at a bit
+    /// the caller controls. Each set bit in `mask` dispatches to `key`.
     ///
     /// Unlike [`register`], this does **no** `bind` (it is not a channel event)
     /// and does **no** poll-once self-signal: an edge-triggered source fires
