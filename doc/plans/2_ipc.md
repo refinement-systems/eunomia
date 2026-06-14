@@ -175,13 +175,22 @@ below.
 ### 5.1 TLA+ (design tier) — a new spec, checked *before* the reactor is built
 `tla/ipc_reactor/IpcReactor.tla` (+ `.cfg`), in the house style of
 `CapRevocation`/`CommitProtocol`. Model: a sender, a receiver, a **bounded queue**,
-and a **notification word** (bits; OR-accumulate; clear-on-receive; FIFO waiter
-queue), with the bind / poll / wait / signal / drain actions. Properties:
-- **NoLostWakeup** (liveness, under weak fairness): a receiver that observes Empty
-  and waits is *eventually* woken once a message is enqueued — the property
-  Shuttle's bounded randomized search **cannot** establish and TLC can.
-- **NoDrop**: `Full` is always signalled, never a silent drop.
-- **FifoPerChannel**: receive order = send order.
+and a **notification word** (bits; OR-accumulate; clear-on-receive — faithful to
+`kcore::notification`'s "wait checks the word before sleeping"), with the
+send/poll/wait-consume/block actions. The framing is **both safety and liveness**
+(the safety invariants gate and port to the §5.2 Shuttle harness; the liveness
+property is the TLC-only extra, in the spirit of the safety-only
+CapRevocation/CommitProtocol house style):
+- **NoLostWakeup** (safety invariant): a blocked receiver has nothing pending —
+  never `blocked ∧ queue-non-empty ∧ word-zero`. A lost wakeup is exactly that
+  bad state; a negative control (dropping the wait's word-check) makes TLC report
+  it. This is the gate, and it ports to Shuttle.
+- **NoDrop** (safety): every offered message is received or still queued — `Full`
+  is the only refusal, never a silent drop.
+- **FifoPerChannel** (safety): receive order = send order.
+- **EventuallyDelivered** (liveness, weak fairness): every offered message is
+  *eventually* received — the property Shuttle's bounded randomized search
+  **cannot** establish and TLC can. The project's first fairness/liveness spec.
 
 It deliberately **does not re-model cap move/teardown** — `CapRevocation.tla`
 already proves "queue slots are CDT-visible, revocation deletes in-flight caps,

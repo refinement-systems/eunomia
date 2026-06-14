@@ -46,7 +46,7 @@ jobs:
         run: |
           curl -fsSL -o "$RUNNER_TEMP/tla2tools.jar" \
             https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
-      - name: Model-check CapRevocation (+ teardown) and CommitProtocol
+      - name: Model-check CapRevocation (+ teardown), CommitProtocol, IpcReactor
         # find-tla-tools.sh honours a pre-set JAVA + TLA_TOOLS instead of
         # probing for the macOS Toolbox, so the same scripts run here.
         env:
@@ -56,6 +56,10 @@ jobs:
           bash tools/tla/tla-model-check.sh tla/cap_revocation/CapRevocation.tla
           bash tools/tla/tla-model-check.sh tla/cap_revocation/CapRevocation.tla CapRevocation_Teardown.cfg
           bash tools/tla/tla-model-check.sh tla/commit_protocol/CommitProtocol.tla
+          # The §3.6 IPC reactor lost-wakeup + backpressure spec — the §5.1
+          # gate checked before the reactor impl (plan doc/plans/2_ipc.md).
+          # Safety invariants + the EventuallyDelivered liveness property.
+          bash tools/tla/tla-model-check.sh tla/ipc_reactor/IpcReactor.tla
 
   # The §5.1 exit criterion: boot the real system under QEMU and drive the
   # shell through the burn regression (spawn/wait/reclaim 100x), status
@@ -172,9 +176,10 @@ jobs:
   # randomized schedules over the same model; SeqCst-only, so it cannot witness
   # the torn-read class, but it is a second scheduler's sanity pass and the
   # template for the IPC Shuttle models (§4.2). The native proptest stays the
-  # breadth/Miri tier (cfg(not(loom),not(shuttle))-gated). No per-test filter,
-  # so a new loom::model / shuttle test in urt auto-gates — the property the
-  # kani job also prizes.
+  # breadth/Miri tier (cfg(not(loom),not(shuttle))-gated). It also drives the
+  # `ipc` rig (the ModelTransport sender/receiver smoke, 2_ipc.md Phase 0)
+  # under both schedulers. No per-test filter, so a new loom::model / shuttle
+  # test in urt or ipc auto-gates — the property the kani job also prizes.
   concurrency:
     runs-on: ubuntu-latest
     # Runaway guard: a Loom model that loses its bound (e.g. an unbounded spin —
@@ -187,10 +192,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Loom models (RUSTFLAGS=--cfg loom cargo test -p urt --lib)
-        run: RUSTFLAGS="--cfg loom" cargo test -p urt --lib
-      - name: Shuttle smoke (RUSTFLAGS=--cfg shuttle cargo test -p urt --lib)
-        run: RUSTFLAGS="--cfg shuttle" cargo test -p urt --lib
+      - name: Loom models (RUSTFLAGS=--cfg loom cargo test -p urt -p ipc --lib)
+        run: RUSTFLAGS="--cfg loom" cargo test -p urt -p ipc --lib
+      - name: Shuttle smoke (RUSTFLAGS=--cfg shuttle cargo test -p urt -p ipc --lib)
+        run: RUSTFLAGS="--cfg shuttle" cargo test -p urt -p ipc --lib
 
   # The kcore layering rules (plan §2.2): the verified core must contain no
   # inline asm, no MMIO, and no integer->pointer casts — CBMC cannot model

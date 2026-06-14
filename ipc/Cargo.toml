@@ -10,6 +10,18 @@ std = []
 
 [dependencies]
 
-# cfg(kani) is injected by cargo-kani; teach plain cargo it's expected.
+# loom/shuttle reach the IPC model's *library* code (ModelTransport's sync
+# primitives), so they are real deps, not dev-deps — but only when a model is
+# being built (RUSTFLAGS="--cfg loom|shuttle"); a normal/aarch64 build never
+# pulls them. Pinned per plan 1_loom-shuttle-rewrite §5 (same as urt).
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
+[target.'cfg(shuttle)'.dependencies]
+shuttle = "0.7"
+
+# cfg(kani) is injected by cargo-kani; cfg(loom)/cfg(shuttle) by
+# RUSTFLAGS="--cfg loom|shuttle" for the IPC reactor models (plan 2_ipc.md §5.2).
+# Teach plain cargo all are expected (same handling as urt/kcore).
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)", "cfg(loom)", "cfg(shuttle)"] }

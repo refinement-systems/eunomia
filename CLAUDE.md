@@ -153,6 +153,12 @@ bash tools/tla/tla-model-check.sh tla/cap_revocation/CapRevocation.tla
 # whole-object teardown; check it with its own config (fast, ~1s):
 bash tools/tla/tla-model-check.sh tla/cap_revocation/CapRevocation.tla \
   CapRevocation_Teardown.cfg
+
+# IpcReactor.tla — the §3.6 IPC lost-wakeup/backpressure spec (plan
+# doc/plans/2_ipc.md §5.1). Unlike the others it carries a liveness property
+# (EventuallyDelivered) under weak fairness alongside the safety invariants;
+# check before the IPC reactor implementation (~1s):
+bash tools/tla/tla-model-check.sh tla/ipc_reactor/IpcReactor.tla
 ```
 
 ### Fuzzing (cargo-fuzz, host)
@@ -347,6 +353,9 @@ non-`#[inline(always)]` helpers in user.rs.
 ### Sequencing rules
 - **TLA+ `CapRevocation` model must be checked before M1 implementation.**
 - **TLA+ `CommitProtocol` model must be checked before M2 implementation.**
+- **TLA+ `IpcReactor` model must be checked before the IPC reactor
+  implementation** (the §3.6 lost-wakeup/backpressure protocol; plan
+  `doc/plans/2_ipc.md` §5.1 — Phase 0 lands the spec, the reactor is phase 2).
 - `cas` crate's proptest canonical-form suite must pass before `mkfs` is used.
 - The `storage-server` and `mkfs` can be developed on macOS host in parallel
   with M0–M1 (they are pure userspace Rust, no kernel dependency).
@@ -412,9 +421,10 @@ bounds: `doc/results/2_kani-findings.md` … `8_kani-findings-7.md`.
   monotone rights-mask attenuation (`storage-server` sessions), the CAS
   canonical-form proptests, the wire decoders, the ELF parser, etc.
 - **model** — reruns the TLA+ proofs (CapRevocation, its §3.3 teardown
-  TSpec, and CommitProtocol) on Linux. `tools/tla/find-tla-tools.sh` honours
-  a pre-set `JAVA` + `TLA_TOOLS`, so CI points it at a downloaded
-  `tla2tools.jar`; locally it still finds the macOS Toolbox.
+  TSpec, CommitProtocol, and the §3.6 `IpcReactor` lost-wakeup/backpressure
+  spec) on Linux. `tools/tla/find-tla-tools.sh` honours a pre-set `JAVA` +
+  `TLA_TOOLS`, so CI points it at a downloaded `tla2tools.jar`; locally it
+  still finds the macOS Toolbox.
 - **on-os** — boots the system under QEMU and runs the §5.1 exit criterion
   (`scripts/spawn-test.sh`: the 100× burn loop, status propagation, the
   wild-pointer fault demo + re-spawn, the panic path, the time grant) plus
@@ -424,6 +434,12 @@ bounds: `doc/results/2_kani-findings.md` … `8_kani-findings-7.md`.
   backend): the §4.1–§4.7 proof suite, re-checking the CapRevocation invariants
   on the real kernel code plus the host-side chokepoints. No `--harness`
   filter, so a new harness gates automatically.
+- **concurrency** — the Loom/Shuttle models under `RUSTFLAGS="--cfg loom"` /
+  `"--cfg shuttle"` (plan `doc/plans/1_loom-shuttle-rewrite.md` §6):
+  `cargo test -p urt -p ipc --lib`. Loom is the certifying exhaustive proof
+  (the `urt::time` seqlock; the `ipc` `ModelTransport` rig), Shuttle the
+  randomized breadth-smoke. No per-test filter, so a new `loom::model` /
+  `shuttle::check_*` test auto-gates.
 - **layering** — greps `kcore/src` for the §2.2 violations CBMC can't model
   (`asm!`/`global_asm!`, `as *mut`/`as *const`); kcore uses `.cast()` for
   every pointer-to-pointer conversion.
