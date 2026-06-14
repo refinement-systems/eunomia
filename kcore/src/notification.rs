@@ -12,8 +12,8 @@ use crate::thread::ThreadState;
 pub struct NotifObj {
     pub hdr: ObjHeader,
     pub word: u64,
-    pub(crate) wait_head: Option<ObjId>,
-    pub(crate) wait_tail: Option<ObjId>,
+    pub wait_head: Option<ObjId>,
+    pub wait_tail: Option<ObjId>,
 }
 
 impl NotifObj {

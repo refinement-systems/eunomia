@@ -14,11 +14,11 @@ use crate::store::Store;
 #[repr(C)]
 pub struct TimerObj {
     pub hdr: ObjHeader,
-    pub(crate) armed: bool,
-    pub(crate) deadline: u64,
-    pub(crate) notif: Option<ObjId>,
-    pub(crate) bits: u64,
-    pub(crate) next: Option<ObjId>,
+    pub armed: bool,
+    pub deadline: u64,
+    pub notif: Option<ObjId>,
+    pub bits: u64,
+    pub next: Option<ObjId>,
 }
 
 impl TimerObj {

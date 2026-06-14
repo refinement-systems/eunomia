@@ -41,13 +41,13 @@ pub struct MsgSlot {
 #[repr(C)]
 pub struct Channel {
     pub hdr: ObjHeader,
-    pub(crate) depth: u32,
+    pub depth: u32,
     /// Live endpoint caps per end, for peer-closed (§3.3).
-    pub(crate) end_caps: [u32; 2],
-    pub(crate) head: [u32; 2],
-    pub(crate) count: [u32; 2],
+    pub end_caps: [u32; 2],
+    pub head: [u32; 2],
+    pub count: [u32; 2],
     /// bindings[end][event] — events observed by that end's holder.
-    pub(crate) bindings: [[Binding; 3]; 2],
+    pub bindings: [[Binding; 3]; 2],
     // MsgSlot[2 * depth] follows: ring 0 then ring 1.
 }
 
@@ -94,7 +94,7 @@ impl Channel {
         }
     }
 
-    pub(crate) unsafe fn slot(this: *mut Channel, ring: usize, i: u32) -> *mut MsgSlot {
+    pub unsafe fn slot(this: *mut Channel, ring: usize, i: u32) -> *mut MsgSlot {
         let base = this.add(1).cast::<MsgSlot>();
         base.add(ring * (*this).depth as usize + i as usize)
     }
