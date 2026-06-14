@@ -246,9 +246,16 @@ jobs:
     timeout-minutes: 20
     env:
       VERUS_VERSION: 0.2026.06.07.cd03505
+      # Verus's rust_verify driver requires the *exact* rust toolchain it was
+      # built against (version.json: 1.95.0); `@stable` floats off it and the run
+      # fails with "required rust toolchain 1.95.0-... not found". Bump in lockstep
+      # with VERUS_VERSION when the pin moves.
+      VERUS_TOOLCHAIN: "1.95.0"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.VERUS_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@v2
       - name: Cache Verus toolchain
         id: verus-cache
