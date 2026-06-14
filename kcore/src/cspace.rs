@@ -535,6 +535,17 @@ pub open spec fn is_empty_cap(c: Cap) -> bool {
     c.kind matches CapKind::Empty
 }
 
+// The kind a derivation produces from `k`: identical (same object, same channel
+// end), except a Frame copy starts unmapped (§2.5, one mapping per cap copy).
+// This is the "copy" half of monotone derivation — derivation cannot change the
+// designated object or amplify via the kind.
+pub open spec fn derived_kind(k: CapKind) -> CapKind {
+    match k {
+        CapKind::Frame { base, pages, mapping: _ } => CapKind::Frame { base, pages, mapping: None },
+        _ => k,
+    }
+}
+
 // `Rights::masked` clears bits (rights ∩ mask); its bit-level spec is what makes
 // monotone derivation provable. (Trusted boundary: the method is plain Rust;
 // this states what it computes.)
@@ -577,6 +588,16 @@ pub open spec fn first_child_parent_agree(m: Map<SlotId, CapSlot>) -> bool {
             m.dom().contains(c) && m[c].parent == Some(p) && m[c].prev_sib == None)
 }
 
+// The converse: a list-head node (parent set, no prev sibling) IS its parent's
+// first child. Without this a child could name a parent that has forgotten it —
+// an orphan-head the revoke walk would never reach. (Restores parity with the
+// pre-rewrite predicate.)
+pub open spec fn head_is_first_child(m: Map<SlotId, CapSlot>) -> bool {
+    forall|c: SlotId| #[trigger] m.dom().contains(c) ==>
+        (m[c].parent matches Some(p) ==> (m[c].prev_sib is None ==>
+            m.dom().contains(p) && m[p].first_child == Some(c)))
+}
+
 // Empty slots are fully detached.
 pub open spec fn empty_slots_detached(m: Map<SlotId, CapSlot>) -> bool {
     forall|k: SlotId| #[trigger] m.dom().contains(k) ==> (is_empty_cap(m[k].cap) ==> {
@@ -587,10 +608,17 @@ pub open spec fn empty_slots_detached(m: Map<SlotId, CapSlot>) -> bool {
     })
 }
 
+// The **structural** CDT invariant. NOTE: this is deliberately the structural
+// fragment — it does NOT include acyclicity. Acyclicity is what the revoke/delete
+// termination proofs need, and it lands with the ghost-rank machinery in the
+// termination increment (plan §4.1); the non-recursive ops proven here
+// (cdt_insert_child, derive) preserve the structural invariant. Until then this
+// is NOT the full TLA TypeOK — it admits cyclic trees.
 pub open spec fn cdt_wf(m: Map<SlotId, CapSlot>) -> bool {
     &&& links_in_domain(m)
     &&& siblings_doubly_consistent(m)
     &&& first_child_parent_agree(m)
+    &&& head_is_first_child(m)
     &&& empty_slots_detached(m)
 }
 
@@ -703,8 +731,9 @@ pub fn obj_ref<S: Store>(store: &mut S, cap: Cap)
 /// pre:  the cspace is well-formed; `parent` and `child` are distinct live
 ///       slots; `child` is detached (all four links null) and non-empty;
 ///       `parent` is non-empty.
-/// post: `child` is `parent`'s first child; the previous children follow it;
-///       caps and refcounts are untouched; the cspace stays well-formed.
+/// post: `child` is `parent`'s first child and the previous children follow it
+///       in order (the sibling list is spliced in unchanged); caps and refcounts
+///       are untouched; the cspace stays well-formed.
 pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
     requires
         cdt_wf(old(store).slot_view()),
@@ -724,6 +753,14 @@ pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
             ==> final(store).slot_view()[k].cap == old(store).slot_view()[k].cap,
         final(store).slot_view()[child].cap == old(store).slot_view()[child].cap,
         final(store).slot_view()[parent].first_child == Some(child),
+        // the prior child list is spliced in after `child`, in order: `child`
+        // heads it (prev None), the old first child follows, and that old first
+        // child now points back at `child`.
+        final(store).slot_view()[child].parent == Some(parent),
+        final(store).slot_view()[child].prev_sib is None,
+        final(store).slot_view()[child].next_sib == old(store).slot_view()[parent].first_child,
+        old(store).slot_view()[parent].first_child matches Some(f)
+            ==> final(store).slot_view()[f].prev_sib == Some(child),
         cdt_wf(final(store).slot_view()),
 {
     let ghost m0 = old(store).slot_view();
@@ -756,12 +793,17 @@ pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
 /// derivation; there is no amplification path.
 ///
 /// pre:  the cspace is well-formed; `src`/`dst` are live; if `src` designates an
-///       object that object's refcount is below `u32::MAX`.
-/// post: on `Ok`, `dst` holds `src`'s cap with rights ∩ `mask` — so its rights
-///       are a **subset** of `src`'s for every `mask` (the load-bearing monotone
-///       -derivation theorem, now proven ∀ rather than sampled); `dst` is `src`'s
-///       first child; the object's refcount is +1; the cspace stays well-formed.
-///       On `Err` (empty/Untyped src, or occupied dst) the store is unchanged.
+///       object, that object is live (in the refcount table).
+/// post: on `Ok`, `dst` holds a faithful copy of `src`'s cap — same kind and
+///       designated object (a fresh Frame copy starts unmapped, §2.5) — with
+///       rights ∩ `mask`, so its rights are a **subset** of `src`'s for every
+///       `mask` (the load-bearing monotone-derivation theorem, proven ∀ rather
+///       than sampled); `dst` is `src`'s first child; the object's refcount and
+///       slot census both rise by exactly one; the cspace stays well-formed.
+///       On `Err` (empty/Untyped src, occupied dst, or a refcount already at
+///       `u32::MAX`) the store is unchanged. Refusing at the ceiling makes the
+///       refcount bump overflow-free for **all** inputs — no unchecked `+ 1`
+///       wrap-to-zero (a UAF class); the production `CapCopy` path inherits this.
 pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (res: Result<(), ()>)
     requires
         cdt_wf(old(store).slot_view()),
@@ -769,10 +811,14 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (r
         old(store).slot_view().dom().contains(src),
         old(store).slot_view().dom().contains(dst),
         cap_obj(old(store).slot_view()[src].cap) matches Some(o) ==>
-            old(store).refs_view().dom().contains(o)
-                && old(store).refs_view()[o] < u32::MAX as nat,
+            old(store).refs_view().dom().contains(o),
     ensures
         res is Ok ==> {
+            // faithful copy: dst's kind is src's (same object / channel end),
+            // a Frame copy unmapped — derivation cannot change the object or
+            // amplify via the kind.
+            &&& final(store).slot_view()[dst].cap.kind
+                  == derived_kind(old(store).slot_view()[src].cap.kind)
             // monotone derivation: dst's rights are src's rights masked, hence a
             // subset for ALL masks — authority only ever shrinks.
             &&& final(store).slot_view()[dst].cap.rights.0
@@ -785,11 +831,15 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (r
             &&& (cap_obj(old(store).slot_view()[src].cap) matches Some(o) ==>
                   final(store).refs_view()
                       =~= old(store).refs_view().insert(o, (old(store).refs_view()[o] + 1) as nat))
-            // refcount soundness preserved: the slot census rises by one in
-            // lockstep with the stored refcount above.
+            // the stored refcount and the slot census rise by one in lockstep —
+            // the per-op delta refcount soundness requires (the full
+            // `refs == census` invariant, incl. non-slot refs, is deferred).
             &&& (cap_obj(old(store).slot_view()[src].cap) matches Some(o) ==>
                   slot_refs(final(store).slot_view(), o)
                       == slot_refs(old(store).slot_view(), o) + 1)
+            // bare caps (no object): no refcount perturbed.
+            &&& (cap_obj(old(store).slot_view()[src].cap) is None ==>
+                  final(store).refs_view() == old(store).refs_view())
         },
         res is Err ==> {
             &&& final(store).slot_view() == old(store).slot_view()
@@ -818,8 +868,29 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (r
         k => k,
     };
     let cap = Cap { kind, rights: s.cap.rights.masked(mask) };
+    assert(kind == derived_kind(s.cap.kind));
     assert(cap_obj(cap) == cap_obj(s.cap));
     assert(!is_empty_cap(cap));
+
+    // Refuse rather than wrap: an unchecked refcount bump is a UAF class
+    // (doc/results/21). Checking here (before any mutation) discharges obj_ref's
+    // overflow precondition without trusting the caller, so the bump below is
+    // provably total — and the Err path leaves the store untouched.
+    let obj_opt = match cap.kind {
+        CapKind::Aspace(o)
+        | CapKind::CSpace(o)
+        | CapKind::Thread(o)
+        | CapKind::Channel(o, _)
+        | CapKind::Notification(o)
+        | CapKind::Timer(o) => Some(o),
+        CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => None,
+    };
+    assert(obj_opt == cap_obj(cap));
+    if let Some(o) = obj_opt {
+        if store.obj_refs(o) == u32::MAX {
+            return Err(());
+        }
+    }
 
     let mut d = store.slot(dst);
     d.cap = cap;
@@ -829,6 +900,9 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (r
     let ghost m1 = store.slot_view();
     assert(m1 =~= m0.insert(dst, d));
     assert(cdt_wf(m1));
+    // set_slot preserves refcounts, and the overflow check above bounded the
+    // designated object's count — so obj_ref's bump cannot wrap.
+    assert(cap_obj(cap) matches Some(o) ==> store.refs_view()[o] < u32::MAX as nat);
 
     obj_ref(store, cap);
     // obj_ref touches only refcounts, so the arena (hence cdt_wf and dst's cap)
@@ -841,6 +915,7 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (r
         // (child-cap preserved), so it is still the masked copy.
         assert(m1[dst] == d);
         assert(store.slot_view()[dst].cap == cap);
+        assert(store.slot_view()[dst].cap.kind == derived_kind(m0[src].cap.kind));
         let r = m0[src].cap.rights.0;
         // monotone-derivation subset corollary: (r & mask) & r == r & mask.
         assert((r & mask) & r == (r & mask)) by (bit_vector);
