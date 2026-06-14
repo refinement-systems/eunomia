@@ -104,19 +104,24 @@ A harness that does not terminate (CBMC blow-up — e.g. symbolic `u128`
 division, a large symbolic free-list, or `Vec`-parsing) must be bounded,
 made concrete, or scoped to another tier and documented — never left to hang.
 
-### Verus (scratchpad)
+### Verus (`kcore` + scratchpad)
 
 **Pinned at `0.2026.06.07.cd03505`** — installed at `/Users/mjm/inst/verus/`;
-`vstd` companion pinned at `=0.0.0-2026-05-31-0205` (in
+`vstd` companion pinned at `=0.0.0-2026-05-31-0205` (in `kcore/Cargo.toml` and
 `scratchpad/Cargo.toml`). Verus is unstable software: both the binary and the
 `vstd` version must be upgraded together and any upgrade is a deliberate PR.
-Run with `cargo verus verify -p scratchpad`; the `scratchpad` crate also builds
-under plain `cargo build` (the `verus!{}` macro erases ghost code on normal
-builds). Not CI-gated today — a CI job is a future step when production
-harnesses are added.
+Code in `verus!{}` blocks erases to plain Rust under a normal `cargo build`/`test`
+and `cargo kani` (the macro drops ghost code), so the aarch64 kernel build and the
+Kani suite are unaffected.
+
+Verus is the deductive tier for `kcore` (plan `doc/plans/3_verus-rewrite.md`):
+phase 0 proves `untyped::carve`/`carve_place` (totality + placement geometry,
+**unbounded** over all inputs) and is gated by CI's `verus` job. `scratchpad`
+keeps the toolchain-smoke `spec fn min` example.
 
 ```sh
-cargo verus verify -p scratchpad   # verify the spec fn min example
+cargo verus verify -p kcore        # the phase-0 carve proofs (CI-gated)
+cargo verus verify -p scratchpad   # the spec fn min smoke example
 ```
 
 **Deep, off-CI supplements (`scripts/deep-verify.sh`, ⚠ HEAVY — run
@@ -458,7 +463,7 @@ non-`#[inline(always)]` helpers in user.rs.
 |------|-------|------|
 | TLA+ / TLC | commit protocol, cap revocation | Before respective milestone |
 | Kani | kernel object core (`kcore`): cspace/CDT, untyped, channels, notifications, thread reports, aspace walker, syscall decode; + host chokepoints (`urt`, `ipc`, `cas`, `dma-pool`) | During kernel development |
-| Verus | `scratchpad` (example; future deductive tier for host crates) | `cargo verus verify -p scratchpad` (not CI-gated) |
+| Verus | `kcore` deductive tier (plan `doc/plans/3_verus-rewrite.md`): `untyped::carve` proven (phase 0); migrating from Kani as phases land. + `scratchpad` smoke | CI `verus` job (`cargo verus verify -p kcore`); during the Verus rewrite |
 | Loom / Shuttle | IPC crate, userspace servers | During M1+ development |
 | Miri + proptest | everything; chunker + prolly tree esp. | Continuous |
 | cargo-fuzz | IPC decoder, postcard payloads | From M1 |
