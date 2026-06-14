@@ -1,7 +1,8 @@
 //! Syscall-decode harnesses (plan §4.6). `decode` is pure `u64` reasoning
 //! (no pointers, no large arrays), so these run over fully nondeterministic
-//! register files and are among the cheapest in the suite (like
-//! `check_carve_no_overflow`).
+//! register files and are among the cheapest in the suite. (`decode` is a Verus
+//! candidate in a later phase, like `untyped::carve` already is — plan
+//! doc/plans/3_verus-rewrite.md §4.6.)
 
 #![cfg(kani)]
 

@@ -23,6 +23,14 @@
 //! ownership contracts.
 #![cfg_attr(not(test), no_std)]
 
+// Verus (plan doc/plans/3_verus-rewrite.md, phase 0): the deductive-proof tier
+// for kcore. `vstd::prelude` supplies the `verus!{}` macro + ghost vocabulary the
+// proofs use (starting with `untyped::carve`); Verus requires it imported at the
+// crate root. In an ordinary build the macro erases ghost code, so this import is
+// otherwise unused — hence the allow.
+#[allow(unused_imports)]
+use vstd::prelude::*;
+
 pub mod aspace;
 pub mod channel;
 pub mod cspace;

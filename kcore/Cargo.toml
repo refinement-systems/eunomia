@@ -3,11 +3,25 @@ name = "kcore"
 version.workspace = true
 edition.workspace = true
 
-# Zero dependencies, by design (plan §2.1): kcore is the architecture-
-# independent kernel object machinery, host-buildable so Kani/CBMC and
-# ordinary `cargo test` can verify it, and cross-buildable for
+# kcore is the architecture-independent kernel object machinery: host-buildable
+# so Kani/CBMC and ordinary `cargo test` can verify it, and cross-buildable for
 # aarch64-unknown-none-softfloat as a dependency of `kernel`.
+#
+# vstd is the *Verus* dependency (plan doc/plans/3_verus-rewrite.md, phase 0):
+# it provides the `verus!{}` macro + the ghost `spec`/`proof`/`int` vocabulary
+# for the deductive proofs (starting with `untyped::carve`). It is `#![no_std]`
+# by default (std/alloc are opt-in features, off here) and its nightly
+# `feature(..)` flags are gated on `verus_keep_ghost`, set only under
+# `cargo verus verify` — so in an ordinary `cargo build` (host or the aarch64
+# kernel build) `verus!{}` erases to plain Rust and vstd compiles to nothing
+# load-bearing. Pinned (=version): an upgrade is a deliberate PR that re-runs the
+# proofs, exactly like the cargo-kani pin.
 [dependencies]
+vstd = { version = "=0.0.0-2026-05-31-0205", default-features = false }
+
+# `cargo verus verify -p kcore` targets this crate (the same flag scratchpad uses).
+[package.metadata.verus]
+verify = true
 
 [features]
 # Deep, off-CI Kani verification (review rec. #2 follow-up): widens the BarePool
@@ -26,6 +40,7 @@ kani_deep = []
 # contracts`, which also passes the unstable `-Z` flags the attributes need.
 kani_contracts = []
 
-# cfg(kani) is injected by cargo-kani; teach plain cargo it's expected.
+# cfg(kani) is injected by cargo-kani; cfg(verus_keep_ghost)/cfg(verus_only) by
+# Verus during `cargo verus verify`. Teach plain cargo all are expected.
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)", "cfg(verus_keep_ghost)", "cfg(verus_only)"] }

@@ -232,3 +232,42 @@ jobs:
             exit 1
           fi
           echo "kcore layering clean."
+
+  # Deductive verification of kcore with Verus (plan doc/plans/3_verus-rewrite.md,
+  # phase 0). PINNED to 0.2026.06.07.cd03505 (the `vstd` companion is pinned in
+  # kcore/Cargo.toml); an upgrade is a deliberate PR that re-runs the proofs, like
+  # the cargo-kani pin. Phase 0 verifies `untyped::carve`/`carve_place`; no
+  # per-proof filter, so a new verus!{} obligation auto-gates (the property the
+  # kani/concurrency jobs also prize). Verus ships no crates.io binary — the
+  # release zip (verus + cargo-verus + z3 + prebuilt vstd) is fetched and cached,
+  # keyed on the version so a bump busts the cache.
+  verus:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      VERUS_VERSION: 0.2026.06.07.cd03505
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache Verus toolchain
+        id: verus-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/verus
+          key: verus-${{ env.VERUS_VERSION }}-${{ runner.os }}
+      - name: Install Verus (pinned)
+        if: steps.verus-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/verus && cd ~/verus
+          url="https://github.com/verus-lang/verus/releases/download/release/${VERUS_VERSION}/verus-${VERUS_VERSION}-x86-linux.zip"
+          curl -fsSL "$url" -o verus.zip
+          unzip -q verus.zip && rm verus.zip
+      - name: Verify kcore (cargo verus verify -p kcore)
+        run: |
+          # The zip extracts to a dir holding `verus`/`cargo-verus`/`z3`; put it on
+          # PATH so `cargo verus` resolves (works whether or not it nests a subdir).
+          bindir="$(find ~/verus -maxdepth 2 -name cargo-verus -exec dirname {} \; | head -1)"
+          if [ -z "$bindir" ]; then echo "::error::cargo-verus not found in the Verus release"; exit 1; fi
+          export PATH="$bindir:$PATH"
+          cargo verus verify -p kcore

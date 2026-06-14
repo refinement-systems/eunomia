@@ -17,6 +17,9 @@
 //! baked into the image.
 
 use crate::cspace::{self, Cap, CapKind, CapSlot, CSpaceObj, Rights};
+use vstd::prelude::*;
+
+verus! {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjType {
@@ -38,6 +41,8 @@ pub enum ObjType {
     Untyped,
 }
 
+} // verus!
+
 impl ObjType {
     pub fn from_u64(v: u64) -> Option<ObjType> {
         Some(match v {
@@ -53,13 +58,9 @@ impl ObjType {
         })
     }
 
-    pub(crate) fn align(self) -> u64 {
-        match self {
-            ObjType::Frame | ObjType::Aspace | ObjType::Untyped => 4096,
-            _ => 16,
-        }
-    }
 }
+
+verus! {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetypeError {
@@ -78,6 +79,8 @@ pub struct Carve {
     pub end: u64,
     pub bytes: u64,
 }
+
+} // verus!
 
 /// Slot-state half of retype's validation: `ut_slot` must hold an Untyped
 /// cap, `dst` (and `dst2` for channels) must be empty and detached. Runs
@@ -105,53 +108,199 @@ pub unsafe fn retype_check(
     Ok((base, size, watermark))
 }
 
-/// Pure placement arithmetic: object size from `(ty, param)`, alignment,
-/// watermark bump, bounds against `[base, base + size)`. No pointers — Kani
-/// verifies it exhaustively over all inputs (`check_carve_no_overflow`,
-/// plan §4.2): the function is **total**, returning an error rather than
-/// panicking for any `(base, size, watermark, ty, param)`.
+verus! {
+
+impl ObjType {
+    /// The object's required alignment as a ghost value, so [`align`](Self::align)
+    /// can be used in `carve`'s `ensures` (via `when_used_as_spec`).
+    pub open spec fn spec_align(self) -> u64 {
+        match self {
+            ObjType::Frame => 4096,
+            ObjType::Aspace => 4096,
+            ObjType::Untyped => 4096,
+            _ => 16,
+        }
+    }
+
+    #[verifier::when_used_as_spec(spec_align)]
+    pub(crate) fn align(self) -> (r: u64)
+        ensures r == self.spec_align(),
+    {
+        match self {
+            ObjType::Frame | ObjType::Aspace | ObjType::Untyped => 4096,
+            _ => 16,
+        }
+    }
+}
+
+// Trusted boundary (plan doc/plans/3_verus-rewrite.md, phase 0): the per-object
+// size helpers are not yet ported, so `carve` trusts only that they return a
+// `usize` — their own overflow/positivity proofs land when cspace/channel/aspace
+// port (phases 2–5). The single fact `carve`'s geometry needs from them,
+// `0 < bytes`, is taken as an explicit `assume` at the trusted boundary below,
+// not from these (deliberately empty) specs.
+pub assume_specification [ CSpaceObj::bytes_for ](n: u32) -> usize;
+pub assume_specification [ crate::channel::Channel::bytes_for ](n: u32) -> usize;
+pub assume_specification [ crate::aspace::AspaceObj::bytes_for ](n: u64) -> usize;
+
+// The fixed-size object arms take `core::mem::size_of::<T>()` of these kcore
+// types, which live outside `verus!{}` (their own ports come in phases 2–5);
+// register them as opaque so `size_of` typechecks in the verified `carve`.
+// (`allow(dead_code)`: these wrappers are Verus-only scaffolding — after the
+// macro erases ghost code in a normal build they are unread tuple structs.)
+#[verifier::external_type_specification]
+#[verifier::external_body]
+#[allow(dead_code)]
+pub struct ExTcb(crate::thread::Tcb);
+#[verifier::external_type_specification]
+#[verifier::external_body]
+#[allow(dead_code)]
+pub struct ExNotifObj(crate::notification::NotifObj);
+#[verifier::external_type_specification]
+#[verifier::external_body]
+#[allow(dead_code)]
+pub struct ExTimerObj(crate::timer::TimerObj);
+
+// vstd has no spec for `checked_next_multiple_of` yet; trust its signature (the
+// Untyped arm only needs that it returns an `Option`, then re-checks positivity).
+pub assume_specification [ usize::checked_next_multiple_of ](
+    a: usize,
+    b: usize,
+) -> Option<usize>;
+
+/// The pure placement core: round `base + watermark` up to `align`, place
+/// `bytes` there, and bounds-check against `[base, base + size)`. All `u64`
+/// arithmetic, no pointers, no `usize`, no external calls — so Verus proves it
+/// **total** (no panic/overflow for any inputs) and fully functional for **all**
+/// `(base, size, watermark, align ∈ {16,4096}, bytes > 0)`. `carve` (below)
+/// computes `bytes`/`align` and forwards here; this split keeps the geometry
+/// proof free of the size-helper trusted boundary (plan §4.2 / phase 0).
 ///
-/// `param` arrives raw from user register `a[2]` (`syscall.rs`), so every
-/// step that touches it is checked: the page round-up (`next_multiple_of`
-/// panicked for `param` within a page of `u64::MAX` — plan §7.1, finding
-/// UO-1) and the placement adds (`base + watermark + align - 1`, `base +
-/// size` could overflow at the top of the address space — UO-2). A
-/// pathological input now yields `BadArg`/`NoMemory`, never a
-/// user-triggerable kernel panic.
+/// The monotone-watermark/disjointness property the old Kani harness needed a
+/// *second* carve to assert is now a free corollary of the containment `ensures`:
+/// a follow-on carve at `new_wm = end - base` has `start' >= base + new_wm = end`.
+pub fn carve_place(
+    base: u64,
+    size: u64,
+    watermark: u64,
+    align: u64,
+    bytes: u64,
+) -> (result: Result<Carve, RetypeError>)
+    requires
+        align == 16 || align == 4096,
+        bytes > 0,
+    ensures
+        match result {
+            Ok(c) => {
+                &&& c.bytes == bytes
+                &&& c.start % align == 0
+                &&& c.start <= c.end
+                &&& c.end - c.start == bytes
+                &&& base + watermark <= c.start
+                &&& c.end <= base + size
+                &&& watermark < c.end - base
+            }
+            Err(_) => true,
+        },
+{
+    let bpw = match base.checked_add(watermark) {
+        Some(x) => x,
+        None => return Err(RetypeError::NoMemory),
+    };
+    let s = match bpw.checked_add(align - 1) {
+        Some(x) => x,
+        None => return Err(RetypeError::NoMemory),
+    };
+    // Round `s = bpw + (align - 1)` down to a multiple of `align` — equivalently,
+    // round `bpw` up. The mod/sub form is the verification-friendly equivalent of
+    // a `& !(align - 1)` mask for a power-of-two align: no `!`, and no overflow
+    // obligation (rem <= s, so the subtraction never underflows). `align != 0`
+    // holds from the `requires`.
+    let rem = s % align;
+    let start = s - rem;
+    proof {
+        // Verus's built-in div/mod axioms give 0 <= rem < align and
+        // s == align * (s / align) + rem, so start == align * (s / align): a
+        // multiple of align, with s - start == rem <= align - 1. Combined with
+        // s == bpw + (align - 1) (the checked_add result) this yields bpw <= start.
+        assert(start % align == 0) by (nonlinear_arith)
+            requires align > 0, rem == s % align, start == s - rem;
+    }
+    let end = match start.checked_add(bytes) {
+        Some(e) => e,
+        None => return Err(RetypeError::NoMemory),
+    };
+    let limit = match base.checked_add(size) {
+        Some(l) => l,
+        None => return Err(RetypeError::NoMemory),
+    };
+    if end > limit {
+        return Err(RetypeError::NoMemory);
+    }
+    Ok(Carve { start, end, bytes })
+}
+
+/// Pure placement arithmetic: object size from `(ty, param)`, alignment,
+/// watermark bump, bounds against `[base, base + size)`. No pointers.
+///
+/// Verus proves this **total** — no panic, no arithmetic overflow for **any**
+/// `(base, size, watermark, ty, param)` (the UO-1/UO-2 findings as a theorem,
+/// for all inputs, not bounded) — and forwards the geometry guarantees of
+/// [`carve_place`]. The size helpers are a trusted boundary (`0 < bytes`); the
+/// `param` arithmetic (`param * 4096`, the page round-up) is verified here.
+///
+/// `param` arrives raw from user register `a[2]` (`syscall.rs`); every step that
+/// touches it is checked, so a pathological input yields `BadArg`/`NoMemory`,
+/// never a user-triggerable kernel panic.
 pub fn carve(
     base: u64,
     size: u64,
     watermark: u64,
     ty: ObjType,
     param: u64,
-) -> Result<Carve, RetypeError> {
-    let bytes = match ty {
+) -> (result: Result<Carve, RetypeError>)
+    ensures
+        match result {
+            Ok(c) => {
+                &&& c.bytes > 0
+                &&& c.start <= c.end
+                &&& c.end - c.start == c.bytes
+                &&& c.start % ty.spec_align() == 0
+                &&& base + watermark <= c.start
+                &&& c.end <= base + size
+                &&& watermark < c.end - base
+            }
+            Err(_) => true,
+        },
+{
+    let bytes: u64 = match ty {
         ObjType::CSpace => {
             if param == 0 || param > 1024 {
                 return Err(RetypeError::BadArg);
             }
-            CSpaceObj::bytes_for(param as u32)
+            CSpaceObj::bytes_for(param as u32) as u64
         }
-        ObjType::Thread => core::mem::size_of::<crate::thread::Tcb>(),
+        ObjType::Thread => core::mem::size_of::<crate::thread::Tcb>() as u64,
         ObjType::Channel => {
             if param == 0 || param > 256 {
                 return Err(RetypeError::BadArg);
             }
-            crate::channel::Channel::bytes_for(param as u32)
+            crate::channel::Channel::bytes_for(param as u32) as u64
         }
-        ObjType::Notification => core::mem::size_of::<crate::notification::NotifObj>(),
-        ObjType::Timer => core::mem::size_of::<crate::timer::TimerObj>(),
+        ObjType::Notification => core::mem::size_of::<crate::notification::NotifObj>() as u64,
+        ObjType::Timer => core::mem::size_of::<crate::timer::TimerObj>() as u64,
         ObjType::Frame => {
-            if param == 0 || param > 1 << 16 {
+            if param == 0 || param > 65536 {
                 return Err(RetypeError::BadArg);
             }
-            (param * 4096) as usize
+            // param <= 65536, so param * 4096 <= 2^28 — Verus proves no overflow.
+            param * 4096
         }
         ObjType::Aspace => {
             if param == 0 || param > 256 {
                 return Err(RetypeError::BadArg);
             }
-            crate::aspace::AspaceObj::bytes_for(param)
+            crate::aspace::AspaceObj::bytes_for(param) as u64
         }
         ObjType::Untyped => {
             // param is bytes; round up to a page so the carved range is
@@ -161,29 +310,18 @@ pub fn carve(
                 return Err(RetypeError::BadArg);
             }
             match (param as usize).checked_next_multiple_of(4096) {
-                Some(b) => b,
+                Some(b) => b as u64,
                 None => return Err(RetypeError::BadArg),
             }
         }
-    } as u64;
-
-    // All placement arithmetic is checked so carve is total (plan §4.2): the
-    // align round-up and the limit add can overflow only at the very top of
-    // the 64-bit space, which no real untyped reaches, but an unchecked add
-    // there would panic the kernel rather than reject the retype.
-    let align = ty.align();
-    let start = base
-        .checked_add(watermark)
-        .and_then(|x| x.checked_add(align - 1))
-        .ok_or(RetypeError::NoMemory)?
-        & !(align - 1);
-    let end = start.checked_add(bytes).ok_or(RetypeError::NoMemory)?;
-    let limit = base.checked_add(size).ok_or(RetypeError::NoMemory)?;
-    if end > limit {
-        return Err(RetypeError::NoMemory);
-    }
-    Ok(Carve { start, end, bytes })
+    };
+    // Trusted boundary (see the assume_specification note above): every size
+    // helper returns a positive byte count. Carve's geometry needs only this.
+    assume(bytes > 0);
+    carve_place(base, size, watermark, ty.align(), bytes)
 }
+
+} // verus!
 
 /// Install half: advance the untyped's watermark, set the new cap's rights
 /// per the inheritance table, link it as a CDT child, and run the channel
