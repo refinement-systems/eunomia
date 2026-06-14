@@ -20,12 +20,14 @@ extern crate std;
 
 pub mod endpoint;
 pub mod header;
+pub mod reactor;
 pub mod sys;
 pub mod transport;
 
-// The server-facing surface (§4.1): the typed non-blocking primitives over the
-// kernel transport seam.
+// The server-facing surface (§4.1, §4.2): the typed non-blocking primitives and
+// the epoll-shaped reactor, over the kernel transport seam.
 pub use endpoint::{Endpoint, Message, MAX_PAYLOAD};
+pub use reactor::{Key, Reactor, RegisterErr, Signals};
 pub use transport::{
     Chan, Event, RecvErr, RecvOk, SendErr, SyscallTransport, Transport,
 };
