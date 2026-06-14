@@ -25,6 +25,12 @@
 //! and the host stress test (a writer thread tearing the page on purpose)
 //! stays data-race-free under Miri.
 
+// The seqlock's atomics come through a single cfg-selected seam: a
+// `--cfg loom` build (the Phase-1 model, plan 1_loom-shuttle-rewrite §4.1)
+// gets loom's instrumented atomics; every normal/aarch64 build is unchanged.
+#[cfg(loom)]
+use loom::sync::atomic::{fence, AtomicI64, AtomicU64, AtomicUsize, Ordering};
+#[cfg(not(loom))]
 use core::sync::atomic::{fence, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 
 const NANOS_PER_SEC: u64 = 1_000_000_000;
