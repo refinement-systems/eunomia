@@ -2,25 +2,27 @@
 //! §3.4).
 //!
 //! Every kernel object is reached through a `Cap` living in a `CapSlot`.
-//! Slots form the CDT: parent/first-child/sibling pointers threaded through
-//! the slots themselves (seL4-style). Channel queue slots are ordinary
-//! `CapSlot`s owned by the channel, so the revoke walk sees in-flight caps
-//! with no special case — the property checked unconditionally by the
-//! CapRevocation TLA+ model.
+//! Slots form the CDT: parent/first-child/sibling links threaded through
+//! the slots themselves (seL4-style), now expressed as opaque [`SlotId`]
+//! handles resolved through the [`Store`] seam. Channel queue slots are
+//! ordinary `CapSlot`s owned by the channel, so the revoke walk sees
+//! in-flight caps with no special case — the property checked
+//! unconditionally by the CapRevocation TLA+ model.
 //!
 //! Concurrency invariant carried by every function here: the kernel is
 //! single-core and non-preemptible (IRQs masked at EL1), so whoever is
-//! executing kernel code has exclusive access to all kernel objects. All
-//! raw-pointer dereferences below rely on that plus the ownership rules
-//! stated per function.
+//! executing kernel code has exclusive access to all kernel objects. The
+//! `Store` impl encapsulates whatever unsafe the production handle
+//! resolution needs; the operations below are safe and read as pure
+//! functions over an abstract indexed store (plan §3, the arena rewrite).
 //!
 //! Verification (plan §4.1): these operations are the centerpiece Kani
 //! target — the executable re-check of the CapRevocation TLA+ invariants on
 //! the real implementation. Each op carries its contract as a pre/post
 //! comment; the proof harnesses turn those into `cdt_wf` assertions.
 
-use crate::env::Env;
-use core::ptr;
+use crate::id::{ObjId, SlotId};
+use crate::store::Store;
 
 /// Rights bits — monotone under derivation (§2.3): `derive` may only clear
 /// bits, never set them.
@@ -56,8 +58,11 @@ impl Rights {
 }
 
 /// Common header at the start of every kernel object. `refs` counts every
-/// kernel pointer that keeps the object alive: cap slots, channel-event
-/// bindings, blocked waiters, armed timers.
+/// kernel reference that keeps the object alive: cap slots, channel-event
+/// bindings, blocked waiters, armed timers. Retained as the production
+/// layout struct at every object's head (the `Store` resolves a handle's
+/// refcount through it); the verified core touches it only via
+/// [`Store::obj_refs`]/[`Store::set_obj_refs`].
 #[repr(C)]
 pub struct ObjHeader {
     pub refs: u32,
@@ -72,7 +77,8 @@ pub enum ChanEnd {
 /// The object a cap designates. Untyped carries its region inline: untyped
 /// caps are never copied (the watermark must have one owner), so the state
 /// needs no shared object. Frames carry their mapping inline too — one
-/// mapping per cap copy, and deleting the cap unmaps it (§2.5).
+/// mapping per cap copy, and deleting the cap unmaps it (§2.5). Object
+/// designations are opaque [`ObjId`] handles (was a `*mut Obj`).
 #[derive(Clone, Copy)]
 pub enum CapKind {
     Empty,
@@ -84,14 +90,14 @@ pub enum CapKind {
     Frame {
         base: u64,
         pages: u64,
-        mapping: Option<(*mut crate::aspace::AspaceObj, u64)>,
+        mapping: Option<(crate::id::ObjId, u64)>,
     },
-    Aspace(*mut crate::aspace::AspaceObj),
-    CSpace(*mut crate::cspace::CSpaceObj),
-    Thread(*mut crate::thread::Tcb),
-    Channel(*mut crate::channel::Channel, ChanEnd),
-    Notification(*mut crate::notification::NotifObj),
-    Timer(*mut crate::timer::TimerObj),
+    Aspace(crate::id::ObjId),
+    CSpace(crate::id::ObjId),
+    Thread(crate::id::ObjId),
+    Channel(crate::id::ObjId, ChanEnd),
+    Notification(crate::id::ObjId),
+    Timer(crate::id::ObjId),
 }
 
 #[derive(Clone, Copy)]
@@ -110,45 +116,54 @@ impl Cap {
         matches!(self.kind, CapKind::Empty)
     }
 
-    /// The refcounted object header behind this cap, if any. Frames are
+    /// The refcounted object handle behind this cap, if any. Frames are
     /// bare memory like untyped — no object, no refcount.
-    fn header(&self) -> Option<*mut ObjHeader> {
+    fn obj(&self) -> Option<ObjId> {
         match self.kind {
             CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => None,
-            CapKind::Aspace(p) => Some(p.cast()),
-            CapKind::CSpace(p) => Some(p.cast()),
-            CapKind::Thread(p) => Some(p.cast()),
-            CapKind::Channel(p, _) => Some(p.cast()),
-            CapKind::Notification(p) => Some(p.cast()),
-            CapKind::Timer(p) => Some(p.cast()),
+            CapKind::Aspace(o) => Some(o),
+            CapKind::CSpace(o) => Some(o),
+            CapKind::Thread(o) => Some(o),
+            CapKind::Channel(o, _) => Some(o),
+            CapKind::Notification(o) => Some(o),
+            CapKind::Timer(o) => Some(o),
         }
     }
 }
 
 /// A capability slot, CDT links included. Slots live inside cspace objects
-/// and inside channel message slots — both are CDT-visible (§3.4).
-#[repr(C)]
+/// and inside channel message slots — both are CDT-visible (§3.4). The
+/// links are [`SlotId`] handles ([`crate::id`]) that span containers exactly
+/// as the old `*mut CapSlot` links did, with no special case in the revoke
+/// walk.
+#[derive(Clone, Copy)]
 pub struct CapSlot {
     pub cap: Cap,
-    pub parent: *mut CapSlot,
-    pub first_child: *mut CapSlot,
-    pub next_sib: *mut CapSlot,
-    pub prev_sib: *mut CapSlot,
+    pub parent: Option<crate::id::SlotId>,
+    pub first_child: Option<crate::id::SlotId>,
+    pub next_sib: Option<crate::id::SlotId>,
+    pub prev_sib: Option<crate::id::SlotId>,
 }
 
 impl CapSlot {
     pub const fn empty() -> CapSlot {
         CapSlot {
             cap: Cap::EMPTY,
-            parent: ptr::null_mut(),
-            first_child: ptr::null_mut(),
-            next_sib: ptr::null_mut(),
-            prev_sib: ptr::null_mut(),
+            parent: None,
+            first_child: None,
+            next_sib: None,
+            prev_sib: None,
         }
     }
 }
 
 /// A capability space: header + inline slot array.
+///
+/// The construction/layout helpers (`bytes_for`, `init`, `slot`) take a
+/// caller-supplied `*mut Self` and are retained for the kernel shell that
+/// *places* objects in donated untyped memory; they are not part of the
+/// Store-based verified core (which addresses cspace residents by handle via
+/// [`Store::cspace_slot`]).
 #[repr(C)]
 pub struct CSpaceObj {
     pub hdr: ObjHeader,
@@ -165,7 +180,7 @@ impl CSpaceObj {
     /// post: returns slot i, or null if i is out of range.
     pub unsafe fn slot(this: *mut CSpaceObj, i: u32) -> *mut CapSlot {
         if i >= (*this).num_slots {
-            return ptr::null_mut();
+            return core::ptr::null_mut();
         }
         let base = this.add(1).cast::<CapSlot>();
         base.add(i as usize)
@@ -186,26 +201,26 @@ impl CSpaceObj {
 
 /// pre:  cap designates a live object (or none).
 /// post: object refcount incremented.
-pub unsafe fn obj_ref(cap: &Cap) {
-    if let Some(h) = cap.header() {
-        (*h).refs += 1;
+pub fn obj_ref<S: Store>(store: &mut S, cap: Cap) {
+    if let Some(o) = cap.obj() {
+        store.set_obj_refs(o, store.obj_refs(o) + 1);
     }
 }
 
 /// pre:  cap designates a live object (or none); refs > 0.
 /// post: refcount decremented; if it reached zero the object is destroyed
 ///       (type-specific teardown).
-unsafe fn obj_unref<E: Env>(cap: &Cap, env: &mut E) {
-    let Some(h) = cap.header() else { return };
-    (*h).refs -= 1;
-    if (*h).refs == 0 {
+fn obj_unref<S: Store>(store: &mut S, cap: Cap) {
+    let Some(o) = cap.obj() else { return };
+    store.set_obj_refs(o, store.obj_refs(o) - 1);
+    if store.obj_refs(o) == 0 {
         match cap.kind {
-            CapKind::CSpace(p) => destroy_cspace(p, env),
-            CapKind::Thread(p) => crate::thread::destroy_tcb(p, env),
-            CapKind::Channel(p, _) => crate::channel::destroy_channel(p, env),
-            CapKind::Notification(p) => crate::notification::destroy_notif(p),
-            CapKind::Timer(p) => crate::timer::destroy_timer(p, env),
-            CapKind::Aspace(p) => env.aspace_destroy(p),
+            CapKind::CSpace(_) => destroy_cspace(store, o),
+            CapKind::Thread(_) => crate::thread::destroy_tcb(store, o),
+            CapKind::Channel(_, _) => crate::channel::destroy_channel(store, o),
+            CapKind::Notification(_) => crate::notification::destroy_notif(store, o),
+            CapKind::Timer(_) => crate::timer::destroy_timer(store, o),
+            CapKind::Aspace(_) => store.aspace_destroy(o),
             CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => {}
         }
     }
@@ -213,26 +228,18 @@ unsafe fn obj_unref<E: Env>(cap: &Cap, env: &mut E) {
 
 /// Drop a non-cap reference to an aspace (mapped frames and bound
 /// threads hold these so the aspace can't die under them).
-pub unsafe fn unref_aspace<E: Env>(a: *mut crate::aspace::AspaceObj, env: &mut E) {
-    (*a).hdr.refs -= 1;
-    if (*a).hdr.refs == 0 {
-        env.aspace_destroy(a);
+pub fn unref_aspace<S: Store>(store: &mut S, a: ObjId) {
+    store.set_obj_refs(a, store.obj_refs(a) - 1);
+    if store.obj_refs(a) == 0 {
+        store.aspace_destroy(a);
     }
 }
 
-// review-2 rec.6 spike (kani_contracts): the tractable baseline — a refcount
-// drop whose modified object is a *direct pointer parameter*, so `modifies` is
-// expressible. `requires refs >= 2` keeps execution on the non-destroy path, so
-// the write set is exactly `*cs` (no recursion into destroy_cspace). Inert
-// without the feature; see doc/results/18_kani-findings-15.md.
-#[cfg_attr(all(kani, feature = "kani_contracts"),
-    kani::requires(unsafe { (*cs).hdr.refs >= 2 }),
-    kani::modifies(cs),
-    kani::ensures(|_| unsafe { (*cs).hdr.refs } == old(unsafe { (*cs).hdr.refs }) - 1))]
-pub unsafe fn unref_cspace<E: Env>(cs: *mut CSpaceObj, env: &mut E) {
-    (*cs).hdr.refs -= 1;
-    if (*cs).hdr.refs == 0 {
-        destroy_cspace(cs, env);
+// kani_contracts spike retired in the arena rewrite.
+pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId) {
+    store.set_obj_refs(cs, store.obj_refs(cs) - 1);
+    if store.obj_refs(cs) == 0 {
+        destroy_cspace(store, cs);
     }
 }
 
@@ -242,11 +249,12 @@ pub unsafe fn unref_cspace<E: Env>(cs: *mut CSpaceObj, env: &mut E) {
 /// `pub(crate)` so the proof harness can drive the resident-teardown loop
 /// directly (plan §4.1 `check_destroy_cspace`); it has no callers outside
 /// this crate.
-pub(crate) unsafe fn destroy_cspace<E: Env>(cs: *mut CSpaceObj, env: &mut E) {
-    for i in 0..(*cs).num_slots {
-        let s = CSpaceObj::slot(cs, i);
-        if !(*s).cap.is_empty() {
-            delete(s, env);
+pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId) {
+    let n = store.cspace_num_slots(cs);
+    for i in 0..n {
+        let sid = store.cspace_slot(cs, i);
+        if !store.slot(sid).cap.is_empty() {
+            delete(store, sid);
         }
     }
     // Memory returns to the donor untyped only via revoke of the untyped
@@ -258,14 +266,24 @@ pub(crate) unsafe fn destroy_cspace<E: Env>(cs: *mut CSpaceObj, env: &mut E) {
 /// pre:  child is a detached slot (no links, non-empty cap already set);
 ///       parent is a live slot.
 /// post: child is the first child of parent; previous children follow it.
-pub unsafe fn cdt_insert_child(parent: *mut CapSlot, child: *mut CapSlot) {
-    (*child).parent = parent;
-    (*child).prev_sib = ptr::null_mut();
-    (*child).next_sib = (*parent).first_child;
-    if !(*parent).first_child.is_null() {
-        (*(*parent).first_child).prev_sib = child;
+pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId) {
+    let old_first = store.slot(parent).first_child;
+
+    let mut c = store.slot(child);
+    c.parent = Some(parent);
+    c.prev_sib = None;
+    c.next_sib = old_first;
+    store.set_slot(child, c);
+
+    if let Some(f) = old_first {
+        let mut fs = store.slot(f);
+        fs.prev_sib = Some(child);
+        store.set_slot(f, fs);
     }
-    (*parent).first_child = child;
+
+    let mut p = store.slot(parent);
+    p.first_child = Some(child);
+    store.set_slot(parent, p);
 }
 
 /// pre:  slot is linked in the CDT (possibly a root with null parent).
@@ -276,41 +294,58 @@ pub unsafe fn cdt_insert_child(parent: *mut CapSlot, child: *mut CapSlot) {
 ///
 /// `pub(crate)` so the proof harnesses can exercise the unlink directly
 /// (plan §4.1 `check_cdt_unlink`); it has no callers outside this crate.
-pub(crate) unsafe fn cdt_unlink(slot: *mut CapSlot) {
-    let parent = (*slot).parent;
-    let prev = (*slot).prev_sib;
-    let next = (*slot).next_sib;
-    let first = (*slot).first_child;
+pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId) {
+    let s = store.slot(slot);
+    let parent = s.parent;
+    let prev = s.prev_sib;
+    let next = s.next_sib;
+    let first = s.first_child;
 
     // Children take slot's place in the sibling list: prev → C1…Ck → next.
-    let mut last = ptr::null_mut();
+    let mut last = None;
     let mut c = first;
-    while !c.is_null() {
-        (*c).parent = parent;
-        last = c;
-        c = (*c).next_sib;
+    while let Some(cur) = c {
+        let mut cs = store.slot(cur);
+        cs.parent = parent;
+        let nx = cs.next_sib;
+        store.set_slot(cur, cs);
+        last = Some(cur);
+        c = nx;
     }
 
-    let head = if first.is_null() { next } else { first };
-    if !prev.is_null() {
-        (*prev).next_sib = head;
-    } else if !parent.is_null() {
-        (*parent).first_child = head;
+    let head = if first.is_none() { next } else { first };
+    if let Some(pv) = prev {
+        let mut ps = store.slot(pv);
+        ps.next_sib = head;
+        store.set_slot(pv, ps);
+    } else if let Some(pa) = parent {
+        let mut pas = store.slot(pa);
+        pas.first_child = head;
+        store.set_slot(pa, pas);
     }
-    if !head.is_null() {
-        (*head).prev_sib = prev;
+    if let Some(h) = head {
+        let mut hs = store.slot(h);
+        hs.prev_sib = prev;
+        store.set_slot(h, hs);
     }
-    if !first.is_null() {
-        (*last).next_sib = next;
-        if !next.is_null() {
-            (*next).prev_sib = last;
+    if first.is_some() {
+        let l = last.unwrap();
+        let mut ls = store.slot(l);
+        ls.next_sib = next;
+        store.set_slot(l, ls);
+        if let Some(nx) = next {
+            let mut ns = store.slot(nx);
+            ns.prev_sib = last;
+            store.set_slot(nx, ns);
         }
     }
 
-    (*slot).parent = ptr::null_mut();
-    (*slot).first_child = ptr::null_mut();
-    (*slot).next_sib = ptr::null_mut();
-    (*slot).prev_sib = ptr::null_mut();
+    let mut s = store.slot(slot);
+    s.parent = None;
+    s.first_child = None;
+    s.next_sib = None;
+    s.prev_sib = None;
+    store.set_slot(slot, s);
 }
 
 /// Move a cap between slots, preserving its CDT position (§3.4: send and
@@ -319,29 +354,46 @@ pub(crate) unsafe fn cdt_unlink(slot: *mut CapSlot) {
 /// pre:  src is non-empty and linked; dst is empty and detached.
 /// post: dst holds src's cap and CDT position; src is empty and detached;
 ///       refcounts unchanged (same single owner throughout).
-pub unsafe fn slot_move(src: *mut CapSlot, dst: *mut CapSlot) {
-    debug_assert!(!(*src).cap.is_empty());
-    debug_assert!((*dst).cap.is_empty());
-    (*dst).cap = (*src).cap;
-    (*dst).parent = (*src).parent;
-    (*dst).first_child = (*src).first_child;
-    (*dst).next_sib = (*src).next_sib;
-    (*dst).prev_sib = (*src).prev_sib;
-    if !(*dst).parent.is_null() && (*(*dst).parent).first_child == src {
-        (*(*dst).parent).first_child = dst;
+pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId) {
+    let s = store.slot(src);
+    debug_assert!(!s.cap.is_empty());
+    debug_assert!(store.slot(dst).cap.is_empty());
+
+    let mut d = store.slot(dst);
+    d.cap = s.cap;
+    d.parent = s.parent;
+    d.first_child = s.first_child;
+    d.next_sib = s.next_sib;
+    d.prev_sib = s.prev_sib;
+    store.set_slot(dst, d);
+
+    if let Some(pa) = d.parent {
+        let mut pas = store.slot(pa);
+        if pas.first_child == Some(src) {
+            pas.first_child = Some(dst);
+            store.set_slot(pa, pas);
+        }
     }
-    if !(*dst).prev_sib.is_null() {
-        (*(*dst).prev_sib).next_sib = dst;
+    if let Some(pv) = d.prev_sib {
+        let mut pvs = store.slot(pv);
+        pvs.next_sib = Some(dst);
+        store.set_slot(pv, pvs);
     }
-    if !(*dst).next_sib.is_null() {
-        (*(*dst).next_sib).prev_sib = dst;
+    if let Some(nx) = d.next_sib {
+        let mut nxs = store.slot(nx);
+        nxs.prev_sib = Some(dst);
+        store.set_slot(nx, nxs);
     }
-    let mut c = (*dst).first_child;
-    while !c.is_null() {
-        (*c).parent = dst;
-        c = (*c).next_sib;
+    let mut c = d.first_child;
+    while let Some(cur) = c {
+        let mut cs = store.slot(cur);
+        cs.parent = Some(dst);
+        let nx = cs.next_sib;
+        store.set_slot(cur, cs);
+        c = nx;
     }
-    *src = CapSlot::empty();
+
+    store.set_slot(src, CapSlot::empty());
 }
 
 /// Derive a child cap (§2.3): copy with rights intersected — the only
@@ -351,24 +403,28 @@ pub unsafe fn slot_move(src: *mut CapSlot, dst: *mut CapSlot) {
 ///       and detached; mask ⊆ u8.
 /// post: dst holds src's cap with rights ∩ mask, as a CDT child of src;
 ///       object refcount incremented.
-pub unsafe fn derive(src: *mut CapSlot, dst: *mut CapSlot, mask: u8) -> Result<(), ()> {
-    if (*src).cap.is_empty() || matches!((*src).cap.kind, CapKind::Untyped { .. }) {
+pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> Result<(), ()> {
+    let s = store.slot(src);
+    if s.cap.is_empty() || matches!(s.cap.kind, CapKind::Untyped { .. }) {
         return Err(());
     }
-    if !(*dst).cap.is_empty() {
+    if !store.slot(dst).cap.is_empty() {
         return Err(());
     }
-    let mut kind = (*src).cap.kind;
+    let mut kind = s.cap.kind;
     // One mapping per cap copy (§2.5): a fresh frame copy starts unmapped.
     if let CapKind::Frame { mapping, .. } = &mut kind {
         *mapping = None;
     }
-    (*dst).cap = Cap {
+    let cap = Cap {
         kind,
-        rights: (*src).cap.rights.masked(mask),
+        rights: s.cap.rights.masked(mask),
     };
-    obj_ref(&(*dst).cap);
-    cdt_insert_child(src, dst);
+    let mut d = store.slot(dst);
+    d.cap = cap;
+    store.set_slot(dst, d);
+    obj_ref(store, cap);
+    cdt_insert_child(store, src, dst);
     Ok(())
 }
 
@@ -386,33 +442,25 @@ pub unsafe fn derive(src: *mut CapSlot, dst: *mut CapSlot, mask: u8) -> Result<(
 /// through here; depth is bounded by the nesting of containers holding the
 /// final cap to other containers. seL4 flattens this with zombie caps —
 /// owed when the revoke walk becomes preemptible, tracked as M2 debt.
-// review-2 rec.6 spike (kani_contracts): the recursion-seam target. The naive
-// `modifies(slot)` is unsound — `delete` also writes the designated object's
-// header (via `obj_unref`, reached through the cap's *embedded* pointer) and,
-// for a non-isolated cap, its CDT neighbours (parent/prev/next/children) at
-// runtime-determined addresses. Whether that write set is expressible as a
-// `modifies` clause is the spike's central question; see
-// doc/results/18_kani-findings-15.md.
-#[cfg_attr(all(kani, feature = "kani_contracts"),
-    kani::requires(unsafe { !(*slot).cap.is_empty() }),
-    kani::modifies(slot),
-    kani::ensures(|_| unsafe { (*slot).cap.is_empty() && (*slot).parent.is_null() }))]
-pub unsafe fn delete<E: Env>(slot: *mut CapSlot, env: &mut E) {
-    debug_assert!(!(*slot).cap.is_empty());
-    let cap = (*slot).cap;
-    cdt_unlink(slot);
-    (*slot).cap = Cap::EMPTY;
+// kani_contracts spike retired in the arena rewrite.
+pub fn delete<S: Store>(store: &mut S, slot: SlotId) {
+    let cap = store.slot(slot).cap;
+    debug_assert!(!cap.is_empty());
+    cdt_unlink(store, slot);
+    let mut s = store.slot(slot);
+    s.cap = Cap::EMPTY;
+    store.set_slot(slot, s);
     // Channel endpoint liveness is tracked per end for peer-closed (§3.3).
     if let CapKind::Channel(ch, end) = cap.kind {
-        crate::channel::endpoint_cap_dropped(ch, end, env);
+        crate::channel::endpoint_cap_dropped(store, ch, end);
     }
     // Deleting a mapped frame cap unmaps it — the one revocation story
     // for shared memory (§2.5).
     if let CapKind::Frame { pages, mapping: Some((asp, va)), .. } = cap.kind {
-        env.aspace_unmap(asp, va, pages);
-        unref_aspace(asp, env);
+        store.aspace_unmap(asp, va, pages);
+        unref_aspace(store, asp);
     }
-    obj_unref(&cap, env);
+    obj_unref(store, cap);
 }
 
 /// Revoke: delete every CDT descendant of `slot` — cspace residents and
@@ -423,13 +471,12 @@ pub unsafe fn delete<E: Env>(slot: *mut CapSlot, env: &mut E) {
 ///
 /// pre:  slot non-empty.
 /// post: slot has no descendants; slot's cap unchanged.
-pub unsafe fn revoke<E: Env>(slot: *mut CapSlot, env: &mut E) {
-    while !(*slot).first_child.is_null() {
+pub fn revoke<S: Store>(store: &mut S, slot: SlotId) {
+    while let Some(mut leaf) = store.slot(slot).first_child {
         // Descend to a leaf of our subtree.
-        let mut leaf = (*slot).first_child;
-        while !(*leaf).first_child.is_null() {
-            leaf = (*leaf).first_child;
+        while let Some(c) = store.slot(leaf).first_child {
+            leaf = c;
         }
-        delete(leaf, env);
+        delete(store, leaf);
     }
 }

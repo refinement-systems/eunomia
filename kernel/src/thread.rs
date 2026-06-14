@@ -15,22 +15,36 @@
 
 pub use kcore::thread::*;
 
-use crate::env::KernelEnv;
+use crate::store::KernelStore;
 use kcore::cspace::CapSlot;
+use kcore::id::{ObjId, SlotId};
 use core::ptr;
 
 // Canonical definition lives in kcore::sysabi (shared with the syscall
 // decoder's priority-range check, plan §2.5).
 pub use kcore::sysabi::NUM_PRIOS;
 
+// Handle ⇄ pointer for the ready-queue links, which are architectural shell
+// state (this file owns the queues) but read/write the converted
+// `Tcb.qnext: Option<ObjId>` field.
+#[inline]
+unsafe fn as_tcb(o: Option<ObjId>) -> *mut Tcb {
+    o.map_or(ptr::null_mut(), |h| h.0 as *mut Tcb)
+}
+#[inline]
+unsafe fn tcb_id(t: *mut Tcb) -> Option<ObjId> {
+    if t.is_null() { None } else { Some(ObjId(t as u64)) }
+}
+
 /// See [`kcore::thread::report_terminal`].
 pub unsafe fn report_terminal(t: *mut Tcb, r: Report) {
-    kcore::thread::report_terminal(t, r, &mut KernelEnv);
+    kcore::thread::report_terminal(&mut KernelStore, ObjId(t as u64), r);
 }
 
 /// See [`kcore::thread::bind`].
 pub unsafe fn bind(t: *mut Tcb, which: usize, notif_src: *mut CapSlot, bits: u64) {
-    kcore::thread::bind(t, which, notif_src, bits, &mut KernelEnv);
+    let src = if notif_src.is_null() { None } else { Some(SlotId(notif_src as u64)) };
+    kcore::thread::bind(&mut KernelStore, ObjId(t as u64), which, src, bits);
 }
 
 struct Queue {
@@ -57,12 +71,12 @@ pub unsafe fn set_current(t: *mut Tcb) {
 pub unsafe fn enqueue(t: *mut Tcb) {
     let prio = (*t).priority as usize;
     (*t).state = ThreadState::Runnable;
-    (*t).qnext = ptr::null_mut();
+    (*t).qnext = None;
     let q = &mut READY[prio];
     if q.tail.is_null() {
         q.head = t;
     } else {
-        (*q.tail).qnext = t;
+        (*q.tail).qnext = tcb_id(t);
     }
     q.tail = t;
     READY_BITMAP |= 1 << prio;
@@ -71,12 +85,12 @@ pub unsafe fn enqueue(t: *mut Tcb) {
 unsafe fn dequeue(prio: usize) -> *mut Tcb {
     let q = &mut READY[prio];
     let t = q.head;
-    q.head = (*t).qnext;
+    q.head = as_tcb((*t).qnext);
     if q.head.is_null() {
         q.tail = ptr::null_mut();
         READY_BITMAP &= !(1 << prio);
     }
-    (*t).qnext = ptr::null_mut();
+    (*t).qnext = None;
     t
 }
 
@@ -100,7 +114,7 @@ pub(crate) unsafe fn unqueue_ready(t: *mut Tcb) {
     while !cur.is_null() {
         if cur == t {
             if prev.is_null() {
-                q.head = (*cur).qnext;
+                q.head = as_tcb((*cur).qnext);
             } else {
                 (*prev).qnext = (*cur).qnext;
             }
@@ -110,7 +124,7 @@ pub(crate) unsafe fn unqueue_ready(t: *mut Tcb) {
             break;
         }
         prev = cur;
-        cur = (*cur).qnext;
+        cur = as_tcb((*cur).qnext);
     }
     if q.head.is_null() {
         READY_BITMAP &= !(1 << (*t).priority as usize);
@@ -158,10 +172,11 @@ pub unsafe fn maybe_switch(frame: *mut TrapFrame, preempt_equal: bool) {
 /// the switch flush-free; the shared kernel entries keep EL1 mapped
 /// across it.
 pub unsafe fn activate_aspace(t: *mut Tcb) {
-    let ttbr = if (*t).aspace.is_null() {
-        crate::mmu::kernel_ttbr0()
-    } else {
-        crate::aspace::ttbr0((*t).aspace)
+    let ttbr = match (*t).aspace {
+        None => crate::mmu::kernel_ttbr0(),
+        // Architectural shell owns the aspace object; resolve the handle to
+        // the pointer `crate::aspace::ttbr0` expects.
+        Some(a) => crate::aspace::ttbr0(a.0 as *mut crate::aspace::AspaceObj),
     };
     core::arch::asm!("msr ttbr0_el1, {v}", "isb", v = in(reg) ttbr);
 }

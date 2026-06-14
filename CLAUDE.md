@@ -91,13 +91,18 @@ minutes; the nondet-shape harnesses dominate. The kernel object core lives in
 their own `#[cfg(kani)]` harnesses. Findings, per-harness bounds, and times are
 tracked across `doc/results/2_kani-findings.md` … `8_kani-findings-7.md`.
 
+**Phase-1 note (`doc/plans/3_verus-rewrite.md`):** the `kcore` Kani harnesses
+(`src/proofs`) are **gated off** during the Verus arena rewrite — they predate the
+handle/`Store` model (feature `legacy_ptr_harness`, off by default), so `cargo kani
+-p kcore` finds no harnesses and errors. The boot tests (`scripts/{m1,spawn}-test.sh`)
+are the phase-1 gate; phase 2 reintroduces the kernel-core proofs in Verus. The
+host-side §4.7 targets keep their Kani harnesses.
+
 ```sh
-cargo kani -p kcore                                  # full kernel-core suite
-cargo kani -p kcore --harness check_revoke           # one harness
-cargo test -p kcore                                  # wf predicates as unit tests
-# §4.7 host-side targets:
+# kcore harnesses are gated off this phase (see note above); host targets:
 cargo kani -p urt -p ipc -p dma-pool                 # urt time/slots, ipc header, dma-pool
 cargo kani -p cas -Z stubbing                        # cas superblock (blake3 stubbed)
+cargo test -p kcore                                  # kcore host unit tests
 ```
 
 A harness that does not terminate (CBMC blow-up — e.g. symbolic `u128`

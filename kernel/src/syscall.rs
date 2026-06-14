@@ -12,11 +12,49 @@ use crate::channel::{self, ChanError, MSG_CAPS, MSG_PAYLOAD};
 use crate::cspace::{self, CapKind, CapSlot, CSpaceObj, Rights};
 use crate::mmu::{USER_BASE, USER_SIZE};
 use crate::notification;
+use crate::store::KernelStore;
 use crate::thread::{self, ThreadState, TrapFrame};
 use crate::timer;
 use crate::untyped::{self, ObjType, RetypeError};
 use core::ptr;
+use kcore::aspace::AspaceObj;
+use kcore::channel::Channel;
+use kcore::id::{ObjId, SlotId};
+use kcore::notification::NotifObj;
 use kcore::sysabi::{self, Sys, SysError};
+use kcore::thread::Tcb;
+use kcore::timer::TimerObj;
+
+// Handle → pointer for the architectural shell paths that legitimately own the
+// object (this file places objects in donated untyped, switches frames, and
+// bumps refcounts directly). The converted `CapKind`/`Tcb` fields carry opaque
+// `ObjId` handles (plan §3, the arena rewrite); resolve them back to the live
+// address the shell code dereferences — the same boundary the scheduler shell
+// (`kernel/src/thread.rs`) uses.
+#[inline]
+unsafe fn cspace_ptr(o: ObjId) -> *mut CSpaceObj {
+    o.0 as *mut CSpaceObj
+}
+#[inline]
+unsafe fn tcb_ptr(o: ObjId) -> *mut Tcb {
+    o.0 as *mut Tcb
+}
+#[inline]
+unsafe fn aspace_ptr(o: ObjId) -> *mut AspaceObj {
+    o.0 as *mut AspaceObj
+}
+#[inline]
+unsafe fn chan_ptr(o: ObjId) -> *mut Channel {
+    o.0 as *mut Channel
+}
+#[inline]
+unsafe fn notif_ptr(o: ObjId) -> *mut NotifObj {
+    o.0 as *mut NotifObj
+}
+#[inline]
+unsafe fn timer_ptr(o: ObjId) -> *mut TimerObj {
+    o.0 as *mut TimerObj
+}
 
 pub const ERR_BADSLOT: i64 = -1;
 pub const ERR_TYPE: i64 = -2;
@@ -39,21 +77,21 @@ pub const SLOT_NONE: u32 = u32::MAX;
 /// is exactly the check that the access cannot fault at EL1.
 unsafe fn user_range_ok(ptr: u64, len: u64) -> bool {
     let t = thread::current();
-    if (*t).aspace.is_null() {
-        len <= USER_SIZE
-            && ptr >= USER_BASE
-            && ptr.checked_add(len).is_some_and(|end| end <= USER_BASE + USER_SIZE)
-    } else {
-        crate::aspace::range_mapped((*t).aspace, ptr, len, false)
+    match (*t).aspace {
+        None => {
+            len <= USER_SIZE
+                && ptr >= USER_BASE
+                && ptr.checked_add(len).is_some_and(|end| end <= USER_BASE + USER_SIZE)
+        }
+        Some(a) => crate::aspace::range_mapped(aspace_ptr(a), ptr, len, false),
     }
 }
 
 unsafe fn user_range_writable(ptr: u64, len: u64) -> bool {
     let t = thread::current();
-    if (*t).aspace.is_null() {
-        user_range_ok(ptr, len)
-    } else {
-        crate::aspace::range_mapped((*t).aspace, ptr, len, true)
+    match (*t).aspace {
+        None => user_range_ok(ptr, len),
+        Some(a) => crate::aspace::range_mapped(aspace_ptr(a), ptr, len, true),
     }
 }
 
@@ -62,11 +100,10 @@ unsafe fn cur_slot(idx: u64) -> *mut CapSlot {
     if idx > u32::MAX as u64 {
         return ptr::null_mut();
     }
-    let cs = (*thread::current()).cspace;
-    if cs.is_null() {
+    let Some(cs) = (*thread::current()).cspace else {
         return ptr::null_mut();
-    }
-    CSpaceObj::slot(cs, idx as u32)
+    };
+    CSpaceObj::slot(cspace_ptr(cs), idx as u32)
 }
 
 /// Resolve a user array of 4 slot indices (SLOT_NONE = absent) into slot
@@ -194,7 +231,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if src.is_null() || dst.is_null() {
                 return Some(ERR_BADSLOT);
             }
-            Some(match cspace::derive(src, dst, mask as u8) {
+            Some(match cspace::derive(&mut KernelStore, SlotId(src as u64), SlotId(dst as u64), mask as u8) {
                 Ok(()) => 0,
                 Err(()) => ERR_NOSLOT,
             })
@@ -229,14 +266,14 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if dst_index > u32::MAX as u64 {
                 return Some(ERR_ARG);
             }
-            let dst = CSpaceObj::slot(cs, dst_index as u32);
+            let dst = CSpaceObj::slot(cspace_ptr(cs), dst_index as u32);
             if dst.is_null() {
                 return Some(ERR_BADSLOT);
             }
             if !(*dst).cap.is_empty() {
                 return Some(ERR_NOSLOT);
             }
-            cspace::slot_move(src, dst);
+            cspace::slot_move(&mut KernelStore, SlotId(src as u64), SlotId(dst as u64));
             Some(0)
         }
         // chan_send: `len` is already <= MSG_PAYLOAD (decode), so the
@@ -260,7 +297,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if let Err(e) = resolve_cap_list(caps, &mut capslots, true) {
                 return Some(e);
             }
-            Some(match channel::send(ch, end, data, &capslots) {
+            Some(match channel::send(chan_ptr(ch), end, data, &capslots) {
                 Ok(()) => 0,
                 Err(ChanError::Full) => ERR_FULL,
                 Err(ChanError::PeerClosed) => ERR_CLOSED,
@@ -290,7 +327,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
                 return Some(e);
             }
             let mut rbuf = [0u8; MSG_PAYLOAD];
-            match channel::recv(ch, end, &mut rbuf, &destslots) {
+            match channel::recv(chan_ptr(ch), end, &mut rbuf, &destslots) {
                 Ok((len, mask)) => {
                     core::ptr::copy_nonoverlapping(rbuf.as_ptr(), buf as *mut u8, len);
                     (*frame).x[1] = mask as u64;
@@ -317,7 +354,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if !(*ns).cap.rights.has(Rights::WRITE) {
                 return Some(ERR_PERM);
             }
-            channel::bind(ch, end, event, n, bits);
+            channel::bind(&mut KernelStore, ch, end, event, Some(n), bits);
             Some(0)
         }
         Sys::NotifSignal { slot, bits } => {
@@ -331,7 +368,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if !(*s).cap.rights.has(Rights::WRITE) {
                 return Some(ERR_PERM);
             }
-            notification::signal(n, bits);
+            notification::signal(notif_ptr(n), bits);
             Some(0)
         }
         // notif_wait → accumulated word
@@ -346,7 +383,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if !(*s).cap.rights.has(Rights::READ) {
                 return Some(ERR_PERM);
             }
-            match notification::wait(n, thread::current()) {
+            match notification::wait(&mut KernelStore, n, ObjId(thread::current() as u64)) {
                 Some(word) => Some(word as i64),
                 None => None, // blocked; signal() writes x0 on wake
             }
@@ -364,7 +401,9 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             let CapKind::CSpace(cs) = (*cs_slot).cap.kind else {
                 return Some(ERR_TYPE);
             };
-            if (*t).state != ThreadState::Inactive {
+            let tp = tcb_ptr(t);
+            let csp = cspace_ptr(cs);
+            if (*tp).state != ThreadState::Inactive {
                 return Some(ERR_STATE);
             }
             if !user_range_ok(entry, 4) || !user_range_ok(sp, 0) {
@@ -375,15 +414,15 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if prio > (*thread::current()).priority {
                 return Some(ERR_PERM);
             }
-            (*cs).hdr.refs += 1;
-            (*t).cspace = cs;
-            (*t).priority = prio;
-            (*t).frame = TrapFrame::zeroed();
-            (*t).frame.elr = entry;
-            (*t).frame.sp_el0 = sp;
-            (*t).frame.spsr = 0; // EL0t, interrupts enabled
-            (*t).frame.x[0] = arg;
-            thread::enqueue(t);
+            (*csp).hdr.refs += 1;
+            (*tp).cspace = Some(cs);
+            (*tp).priority = prio;
+            (*tp).frame = TrapFrame::zeroed();
+            (*tp).frame.elr = entry;
+            (*tp).frame.sp_el0 = sp;
+            (*tp).frame.spsr = 0; // EL0t, interrupts enabled
+            (*tp).frame.x[0] = arg;
+            thread::enqueue(tp);
             Some(0)
         }
         // timer_arm
@@ -402,7 +441,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if !(*ns).cap.rights.has(Rights::WRITE) {
                 return Some(ERR_PERM);
             }
-            timer::arm(t, n, bits, timer::counter().saturating_add(delta));
+            timer::arm(timer_ptr(t), notif_ptr(n), bits, timer::counter().saturating_add(delta));
             Some(0)
         }
         // thread_exit — the only voluntary stop (§5.1). The kernel records
@@ -445,9 +484,10 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if perms & crate::aspace::PERM_DEVICE != 0 && !(*fr_slot).cap.rights.has(Rights::PHYS) {
                 return Some(ERR_PERM);
             }
-            match crate::aspace::map(asp, base, va, pages, perms) {
+            let asp_ptr = aspace_ptr(asp);
+            match crate::aspace::map(asp_ptr, base, va, pages, perms) {
                 Ok(()) => {
-                    (*asp).hdr.refs += 1;
+                    (*asp_ptr).hdr.refs += 1;
                     (*fr_slot).cap.kind = CapKind::Frame { base, pages, mapping: Some((asp, va)) };
                     Some(0)
                 }
@@ -496,26 +536,29 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             let CapKind::Aspace(asp) = (*asp_slot).cap.kind else {
                 return Some(ERR_TYPE);
             };
-            if (*t).state != ThreadState::Inactive {
+            let tp = tcb_ptr(t);
+            let csp = cspace_ptr(cs);
+            let asp_ptr = aspace_ptr(asp);
+            if (*tp).state != ThreadState::Inactive {
                 return Some(ERR_STATE);
             }
             if prio > (*thread::current()).priority {
                 return Some(ERR_PERM);
             }
             // Entry/SP live in the child's aspace, not the caller's.
-            if !crate::aspace::range_mapped(asp, entry, 4, false) {
+            if !crate::aspace::range_mapped(asp_ptr, entry, 4, false) {
                 return Some(ERR_FAULT);
             }
-            (*cs).hdr.refs += 1;
-            (*asp).hdr.refs += 1;
-            (*t).cspace = cs;
-            (*t).aspace = asp;
-            (*t).priority = prio;
-            (*t).frame = TrapFrame::zeroed();
-            (*t).frame.elr = entry;
-            (*t).frame.sp_el0 = sp;
-            (*t).frame.spsr = 0;
-            thread::enqueue(t);
+            (*csp).hdr.refs += 1;
+            (*asp_ptr).hdr.refs += 1;
+            (*tp).cspace = Some(cs);
+            (*tp).aspace = Some(asp);
+            (*tp).priority = prio;
+            (*tp).frame = TrapFrame::zeroed();
+            (*tp).frame.elr = entry;
+            (*tp).frame.sp_el0 = sp;
+            (*tp).frame.spsr = 0;
+            thread::enqueue(tp);
             Some(0)
         }
         // frame_paddr → PA. Gated on the phys-read bit (§2.5): only the
@@ -573,7 +616,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
                 }
                 ns
             };
-            thread::bind(t, which, ns, bits);
+            thread::bind(tcb_ptr(t), which, ns, bits);
             Some(0)
         }
         // read_report(tcb) → x0 = 0 running | 1 exited | 2 faulted,
@@ -590,7 +633,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if !(*ts).cap.rights.has(Rights::READ_REPORT) {
                 return Some(ERR_PERM);
             }
-            let (code, v1, v2) = match (*t).report {
+            let (code, v1, v2) = match (*tcb_ptr(t)).report {
                 thread::Report::Running => (0, 0, 0),
                 thread::Report::Exited(status) => (1, status, 0),
                 thread::Report::Faulted { cause, far } => (2, cause, far),
@@ -608,7 +651,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if s.is_null() || (*s).cap.is_empty() {
                 return Some(ERR_BADSLOT);
             }
-            Some(match untyped::reset(s) {
+            Some(match untyped::reset(&mut KernelStore, SlotId(s as u64)) {
                 Ok(()) => 0,
                 Err(RetypeError::NotUntyped) => ERR_TYPE,
                 // reset's only other failure is "still has children".

@@ -134,15 +134,16 @@ jobs:
       # Run from the repo root: there is no root .cargo/config.toml, so the
       # host target applies. (Inside kernel/ the directory-scoped config
       # would force the bare-metal target Kani can't drive.)
-      - name: Kani proof suite (kcore core + host targets)
-        # (The scratchpad toolchain-smoke proof is retired — the real kcore +
-        #  host-side suites are the smoke test now, plan §8.)
+      - name: Kani proof suite (host targets)
+        # The kcore Kani harnesses are GATED OFF during the Verus phase-1 arena
+        # rewrite (doc/plans/3_verus-rewrite.md §9): they predate the handle/Store
+        # model (feature `legacy_ptr_harness`, off by default), so `cargo kani -p
+        # kcore` would now find no harnesses and error. The boot tests (on-os job)
+        # are the phase-1 gate; phase 2 reintroduces the kernel-core proofs in
+        # Verus (the `verus` job). The host-side §4.7 targets keep their Kani
+        # harnesses and still gate here.
         run: |
           set -o pipefail
-          # -Z stubbing: the §4.1 teardown harnesses stub the recursive
-          # container destructors (destroy_cspace/channel/tcb) so a top-level
-          # `delete` stays tractable — finding DN-4, doc/results/2_kani-findings.md.
-          cargo kani -Z stubbing -p kcore 2>&1 | tee kani-kcore.log
           # §4.7 host-side targets. cas's superblock-decode harness stubs the
           # blake3 hash, so cas runs with -Z stubbing (harmless for the rest).
           cargo kani -p urt -p ipc -p dma-pool 2>&1 | tee kani-host.log

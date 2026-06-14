@@ -6,8 +6,9 @@
 //! assignment, the boot kernel-L1 copy, `ttbr0`, and the **one sanctioned
 //! int→pointer boundary** — building the `&mut [[u64; 512]]` slice views over
 //! the `AspaceObj`'s physical L1/pool addresses so the kcore walker can drive
-//! them. The TLBI/DSB maintenance the walker needs is the `KernelEnv` `Env`
-//! impl (`kernel/src/env.rs`); the kcore walker calls it through the seam.
+//! them. The TLBI/DSB maintenance the walker needs is the `KernelStore`
+//! `Store` impl (`kernel/src/store.rs`); the kcore walker calls it through the
+//! seam.
 //!
 //! Layout of one process's view:
 //!   L1[0]   device GiB        — shared kernel entry, EL1-only
@@ -21,7 +22,7 @@
 
 pub use kcore::aspace::*;
 
-use crate::env::KernelEnv;
+use crate::store::KernelStore;
 use core::ptr;
 
 static mut NEXT_ASID: u16 = 1;
@@ -84,25 +85,25 @@ pub unsafe fn map(
 ) -> Result<(), MapError> {
     let base = (*this).pool_base;
     let mut used = (*this).pool_used;
-    let mut env = KernelEnv;
+    let mut store = KernelStore;
     let r = {
         let l1 = l1_view(this);
         let pool = pool_view(this);
-        kcore::aspace::map_in(l1, pool, &mut used, base, pa, va, pages, perms, &mut env)
+        kcore::aspace::map_in(l1, pool, &mut used, base, pa, va, pages, perms, &mut store)
     };
     (*this).pool_used = used;
     r
 }
 
 /// Unmap (frame-cap deletion path). The verified walker clears the leaves and
-/// drives the per-page TLBI + trailing barrier through `KernelEnv`.
+/// drives the per-page TLBI + trailing barrier through `KernelStore`.
 pub unsafe fn unmap(this: *mut AspaceObj, va: u64, pages: u64) {
     let base = (*this).pool_base;
     let asid = (*this).asid;
-    let mut env = KernelEnv;
+    let mut store = KernelStore;
     let l1 = l1_view(this);
     let pool = pool_view(this);
-    kcore::aspace::unmap_in(l1, pool, base, asid, va, pages, &mut env);
+    kcore::aspace::unmap_in(l1, pool, base, asid, va, pages, &mut store);
 }
 
 /// Is [va, va+len) fully mapped (and writable, if asked)? Used by the syscall

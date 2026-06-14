@@ -4,27 +4,30 @@
 //! waiter queue is intrusive through the TCBs.
 
 use crate::cspace::ObjHeader;
-use crate::env::Env;
-use crate::thread::{Tcb, ThreadState};
-use core::ptr;
+use crate::id::ObjId;
+use crate::store::Store;
+use crate::thread::ThreadState;
 
 #[repr(C)]
 pub struct NotifObj {
     pub hdr: ObjHeader,
     pub word: u64,
-    pub(crate) wait_head: *mut Tcb,
-    pub(crate) wait_tail: *mut Tcb,
+    pub wait_head: Option<ObjId>,
+    pub wait_tail: Option<ObjId>,
 }
 
 impl NotifObj {
     /// pre:  memory at `this` writable.
     /// post: clear word, no waiters, refs = 1 (creator cap).
+    ///
+    /// Production construction/layout helper: places the object at a
+    /// caller-supplied pointer. Not part of the Store-based core.
     pub unsafe fn init(this: *mut NotifObj) {
         this.write(NotifObj {
             hdr: ObjHeader { refs: 1 },
             word: 0,
-            wait_head: ptr::null_mut(),
-            wait_tail: ptr::null_mut(),
+            wait_head: None,
+            wait_tail: None,
         });
     }
 }
@@ -35,69 +38,71 @@ impl NotifObj {
 /// post: either a waiter was dequeued, made Runnable, with the whole word
 ///       in its return register and word == 0 — or no waiter existed and
 ///       the word accumulates.
-pub unsafe fn signal<E: Env>(n: *mut NotifObj, bits: u64, env: &mut E) {
-    (*n).word |= bits;
-    if (*n).word == 0 || (*n).wait_head.is_null() {
+pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64) {
+    let word = store.notif_word(n) | bits;
+    store.set_notif_word(n, word);
+    let head = store.notif_wait_head(n);
+    if word == 0 || head.is_none() {
         return;
     }
-    let t = (*n).wait_head;
-    (*n).wait_head = (*t).qnext;
-    if (*n).wait_head.is_null() {
-        (*n).wait_tail = ptr::null_mut();
+    let t = head.unwrap();
+    let next = store.tcb_qnext(t);
+    store.set_notif_wait_head(n, next);
+    if next.is_none() {
+        store.set_notif_wait_tail(n, None);
     }
-    (*t).qnext = ptr::null_mut();
-    (*t).wait_notif = ptr::null_mut();
-    (*t).frame.x[0] = (*n).word;
-    (*n).word = 0;
+    store.set_tcb_qnext(t, None);
+    store.set_tcb_wait_notif(t, None);
+    store.set_tcb_retval(t, word);
+    store.set_notif_word(n, 0);
     // The waiter held a ref while queued (it has no cap in hand mid-wait).
-    (*n).hdr.refs -= 1;
-    env.make_runnable(t);
+    store.set_obj_refs(n, store.obj_refs(n) - 1);
+    store.make_runnable(t);
 }
 
 /// Wait: consume the word if nonzero, else block the current thread.
 ///
 /// post: Some(word≠0) and word cleared — or None, with `cur` Blocked,
 ///       queued FIFO, holding one ref on n (released on wake or teardown).
-pub unsafe fn wait(n: *mut NotifObj, cur: *mut Tcb) -> Option<u64> {
-    if (*n).word != 0 {
-        let w = (*n).word;
-        (*n).word = 0;
-        return Some(w);
+pub fn wait<S: Store>(store: &mut S, n: ObjId, cur: ObjId) -> Option<u64> {
+    let word = store.notif_word(n);
+    if word != 0 {
+        store.set_notif_word(n, 0);
+        return Some(word);
     }
-    (*cur).state = ThreadState::BlockedNotif;
-    (*cur).wait_notif = n;
-    (*cur).qnext = ptr::null_mut();
-    if (*n).wait_tail.is_null() {
-        (*n).wait_head = cur;
-    } else {
-        (*(*n).wait_tail).qnext = cur;
+    store.set_tcb_state(cur, ThreadState::BlockedNotif);
+    store.set_tcb_wait_notif(cur, Some(n));
+    store.set_tcb_qnext(cur, None);
+    match store.notif_wait_tail(n) {
+        None => store.set_notif_wait_head(n, Some(cur)),
+        Some(tail) => store.set_tcb_qnext(tail, Some(cur)),
     }
-    (*n).wait_tail = cur;
-    (*n).hdr.refs += 1;
+    store.set_notif_wait_tail(n, Some(cur));
+    store.set_obj_refs(n, store.obj_refs(n) + 1);
     None
 }
 
 /// Unlink a waiter (thread teardown path).
-pub unsafe fn remove_waiter(n: *mut NotifObj, t: *mut Tcb) {
-    let mut cur = (*n).wait_head;
-    let mut prev: *mut Tcb = ptr::null_mut();
-    while !cur.is_null() {
-        if cur == t {
-            if prev.is_null() {
-                (*n).wait_head = (*cur).qnext;
-            } else {
-                (*prev).qnext = (*cur).qnext;
+pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId) {
+    let mut cur = store.notif_wait_head(n);
+    let mut prev: Option<ObjId> = None;
+    while let Some(c) = cur {
+        if c == t {
+            let next = store.tcb_qnext(c);
+            match prev {
+                None => store.set_notif_wait_head(n, next),
+                Some(p) => store.set_tcb_qnext(p, next),
             }
-            if (*n).wait_tail == t {
-                (*n).wait_tail = prev;
+            if store.notif_wait_tail(n) == Some(t) {
+                store.set_notif_wait_tail(n, prev);
             }
-            (*t).qnext = ptr::null_mut();
-            (*t).wait_notif = ptr::null_mut();
-            (*n).hdr.refs -= 1;
+            store.set_tcb_qnext(t, None);
+            store.set_tcb_wait_notif(t, None);
+            store.set_obj_refs(n, store.obj_refs(n) - 1);
             return;
         }
         prev = cur;
-        cur = (*cur).qnext;
+        cur = store.tcb_qnext(c);
     }
 }
 
@@ -105,6 +110,8 @@ pub unsafe fn remove_waiter(n: *mut NotifObj, t: *mut Tcb) {
 ///       (waiters hold refs, so a notification with blocked waiters
 ///       cannot reach zero; they stay blocked until killed, accepted MVP
 ///       behaviour).
-pub unsafe fn destroy_notif(n: *mut NotifObj) {
-    debug_assert!((*n).wait_head.is_null());
+pub fn destroy_notif<S: Store>(store: &mut S, n: ObjId) {
+    debug_assert!(store.notif_wait_head(n).is_none());
+    let _ = store;
+    let _ = n;
 }

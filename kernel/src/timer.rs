@@ -2,19 +2,20 @@
 //! list *logic* lives in [`kcore::timer`]; this module keeps what is
 //! architectural — the generic-timer register access (CNTVCT/CNTV, the
 //! 10 ms tick), and the list head itself (`ARMED_HEAD`), which kcore reaches
-//! through the [`kcore::env::Env`] seam.
+//! through the [`kcore::store::Store`] seam.
 
 pub use kcore::timer::*;
 
-use crate::env::KernelEnv;
+use crate::store::KernelStore;
 use core::arch::asm;
 use core::ptr;
+use kcore::id::ObjId;
 use kcore::notification::NotifObj;
 
 pub const TICK_HZ: u64 = 100;
 
 /// The armed-timer list head. kcore owns the insert/unlink/sweep logic and
-/// addresses this anchor through `Env::{timer_armed_head,set_timer_armed_head}`.
+/// addresses this anchor through `Store::{timer_armed_head,set_timer_armed_head}`.
 static mut ARMED_HEAD: *mut TimerObj = ptr::null_mut();
 
 pub(crate) unsafe fn armed_head() -> *mut TimerObj {
@@ -39,12 +40,12 @@ pub fn freq() -> u64 {
 
 /// See [`kcore::timer::arm`].
 pub unsafe fn arm(t: *mut TimerObj, notif: *mut NotifObj, bits: u64, deadline: u64) {
-    kcore::timer::arm(t, notif, bits, deadline, &mut KernelEnv);
+    kcore::timer::arm(&mut KernelStore, ObjId(t as u64), ObjId(notif as u64), bits, deadline);
 }
 
 /// See [`kcore::timer::check_expired`].
 pub unsafe fn check_expired(now: u64) {
-    kcore::timer::check_expired(now, &mut KernelEnv);
+    kcore::timer::check_expired(&mut KernelStore, now);
 }
 
 // ── Kernel tick ─────────────────────────────────────────────────────────

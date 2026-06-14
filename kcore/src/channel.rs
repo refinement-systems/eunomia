@@ -11,11 +11,18 @@
 //! messages are never dropped. Each endpoint carries fixed binding slots
 //! (on-readable / on-writable / on-peer-closed → notification, bits);
 //! event delivery never allocates (§3.6).
+//!
+//! Arena rewrite (plan §3): the channel is addressed by an opaque
+//! [`ObjId`](crate::id::ObjId) and all of its state is reached through the
+//! [`Store`] seam — ring caps are [`SlotId`](crate::id::SlotId) handles, event
+//! bindings are [`crate::store::Binding`]s. The construction/layout helpers
+//! (`bytes_for`/`init`/`slot`) remain pointer-based: the kernel shell uses them
+//! to *place* an object before any handle exists.
 
 use crate::cspace::{self, CapSlot, ChanEnd, ObjHeader};
-use crate::env::Env;
-use crate::notification::{self, NotifObj};
-use core::ptr;
+use crate::id::{ObjId, SlotId};
+use crate::notification;
+use crate::store::{Binding, Store};
 
 pub const MSG_PAYLOAD: usize = 256;
 pub const MSG_CAPS: usize = 4;
@@ -32,24 +39,15 @@ pub struct MsgSlot {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
-pub struct Binding {
-    pub notif: *mut NotifObj,
-    pub bits: u64,
-}
-
-const UNBOUND: Binding = Binding { notif: ptr::null_mut(), bits: 0 };
-
-#[repr(C)]
 pub struct Channel {
     pub hdr: ObjHeader,
-    pub(crate) depth: u32,
+    pub depth: u32,
     /// Live endpoint caps per end, for peer-closed (§3.3).
-    pub(crate) end_caps: [u32; 2],
-    pub(crate) head: [u32; 2],
-    pub(crate) count: [u32; 2],
+    pub end_caps: [u32; 2],
+    pub head: [u32; 2],
+    pub count: [u32; 2],
     /// bindings[end][event] — events observed by that end's holder.
-    pub(crate) bindings: [[Binding; 3]; 2],
+    pub bindings: [[Binding; 3]; 2],
     // MsgSlot[2 * depth] follows: ring 0 then ring 1.
 }
 
@@ -83,7 +81,7 @@ impl Channel {
             end_caps: [0, 0],
             head: [0, 0],
             count: [0, 0],
-            bindings: [[UNBOUND; 3]; 2],
+            bindings: [[Binding::UNBOUND; 3]; 2],
         });
         for ring in 0..2 {
             for i in 0..depth {
@@ -96,89 +94,89 @@ impl Channel {
         }
     }
 
-    pub(crate) unsafe fn slot(this: *mut Channel, ring: usize, i: u32) -> *mut MsgSlot {
+    pub unsafe fn slot(this: *mut Channel, ring: usize, i: u32) -> *mut MsgSlot {
         let base = this.add(1).cast::<MsgSlot>();
         base.add(ring * (*this).depth as usize + i as usize)
     }
 }
 
-pub unsafe fn endpoint_cap_added(ch: *mut Channel, end: ChanEnd) {
-    (*ch).end_caps[end_idx(end)] += 1;
+pub fn endpoint_cap_added<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd) {
+    let e = end_idx(end);
+    store.set_chan_end_caps(ch, e, store.chan_end_caps(ch, e) + 1);
 }
 
 /// Called on every endpoint-cap deletion; the last cap of an end raises
 /// the other end's peer-closed event (§3.3, session cleanup §2.4).
-pub unsafe fn endpoint_cap_dropped<E: Env>(ch: *mut Channel, end: ChanEnd, env: &mut E) {
+pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd) {
     let e = end_idx(end);
-    (*ch).end_caps[e] -= 1;
-    if (*ch).end_caps[e] == 0 {
-        fire(ch, 1 - e, EV_PEER_CLOSED, env);
+    store.set_chan_end_caps(ch, e, store.chan_end_caps(ch, e) - 1);
+    if store.chan_end_caps(ch, e) == 0 {
+        fire(store, ch, 1 - e, EV_PEER_CLOSED);
     }
 }
 
-unsafe fn fire<E: Env>(ch: *mut Channel, end: usize, event: usize, env: &mut E) {
-    let b = (*ch).bindings[end][event];
-    if !b.notif.is_null() {
-        notification::signal(b.notif, b.bits, env);
+fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize) {
+    let b = store.chan_binding(ch, end, event);
+    if let Some(n) = b.notif {
+        notification::signal(store, n, b.bits);
     }
 }
 
 /// Configure an endpoint's event binding (holder-configured, §3.6).
 /// Replacing a binding releases the old notification's ref.
-pub unsafe fn bind(
-    ch: *mut Channel,
+pub fn bind<S: Store>(
+    store: &mut S,
+    ch: ObjId,
     end: ChanEnd,
     event: usize,
-    notif: *mut NotifObj,
+    notif: Option<ObjId>,
     bits: u64,
 ) {
-    let slot = &mut (*ch).bindings[end_idx(end)][event];
-    if !slot.notif.is_null() {
-        (*slot.notif).hdr.refs -= 1;
+    let e = end_idx(end);
+    let old = store.chan_binding(ch, e, event);
+    if let Some(n) = old.notif {
+        store.set_obj_refs(n, store.obj_refs(n) - 1);
     }
-    if !notif.is_null() {
-        (*notif).hdr.refs += 1;
+    if let Some(n) = notif {
+        store.set_obj_refs(n, store.obj_refs(n) + 1);
     }
-    *slot = Binding { notif, bits };
+    store.set_chan_binding(ch, e, event, Binding { notif, bits });
 }
 
 /// Send: copy the payload into the ring and move caps from the sender's
 /// slots into the message's CDT-visible slots (§3.4 move semantics).
 ///
-/// pre:  data.len() ≤ MSG_PAYLOAD; each caps[i] is null or a non-empty
+/// pre:  data.len() ≤ MSG_PAYLOAD; each caps[i] is None or a non-empty
 ///       slot owned by the sender.
 /// post: message queued FIFO; sender's cap slots empty; receiver's
 ///       readable event fired.
-pub unsafe fn send<E: Env>(
-    ch: *mut Channel,
+pub fn send<S: Store>(
+    store: &mut S,
+    ch: ObjId,
     end: ChanEnd,
     data: &[u8],
-    caps: &[*mut CapSlot; MSG_CAPS],
-    env: &mut E,
+    caps: &[Option<SlotId>; MSG_CAPS],
 ) -> Result<(), ChanError> {
     let e = end_idx(end);
-    if (*ch).end_caps[1 - e] == 0 {
+    if store.chan_end_caps(ch, 1 - e) == 0 {
         return Err(ChanError::PeerClosed);
     }
     let ring = e; // end A sends on ring 0, B on ring 1
-    if (*ch).count[ring] == (*ch).depth {
+    let depth = store.chan_depth(ch);
+    if store.chan_count(ch, ring) == depth {
         return Err(ChanError::Full);
     }
-    let i = ((*ch).head[ring] + (*ch).count[ring]) % (*ch).depth;
-    let slot = Channel::slot(ch, ring, i);
-    (*slot).len = data.len() as u16;
-    core::ptr::copy_nonoverlapping(
-        data.as_ptr(),
-        core::ptr::addr_of_mut!((*slot).payload).cast::<u8>(),
-        data.len(),
-    );
+    let i = (store.chan_head(ch, ring) + store.chan_count(ch, ring)) % depth;
+    store.set_chan_msg_len(ch, ring, i, data.len() as u16);
+    store.chan_msg_write(ch, ring, i, data);
     for (c, &src) in caps.iter().enumerate() {
-        if !src.is_null() {
-            cspace::slot_move(src, core::ptr::addr_of_mut!((*slot).caps[c]));
+        if let Some(src) = src {
+            let dst = store.chan_ring_cap(ch, ring, i, c);
+            cspace::slot_move(store, src, dst);
         }
     }
-    (*ch).count[ring] += 1;
-    fire(ch, 1 - e, EV_READABLE, env);
+    store.set_chan_count(ch, ring, store.chan_count(ch, ring) + 1);
+    fire(store, ch, 1 - e, EV_READABLE);
     Ok(())
 }
 
@@ -190,68 +188,72 @@ pub unsafe fn send<E: Env>(
 ///
 /// post on success: returns (len, cap-present mask); message dequeued;
 ///       sender's writable event fired.
-pub unsafe fn recv<E: Env>(
-    ch: *mut Channel,
+pub fn recv<S: Store>(
+    store: &mut S,
+    ch: ObjId,
     end: ChanEnd,
     buf: &mut [u8; MSG_PAYLOAD],
-    dests: &[*mut CapSlot; MSG_CAPS],
-    env: &mut E,
+    dests: &[Option<SlotId>; MSG_CAPS],
 ) -> Result<(usize, u8), ChanError> {
     let e = end_idx(end);
     let ring = 1 - e;
-    if (*ch).count[ring] == 0 {
+    if store.chan_count(ch, ring) == 0 {
         return Err(ChanError::Empty);
     }
-    let slot = Channel::slot(ch, ring, (*ch).head[ring]);
+    let head = store.chan_head(ch, ring);
     for c in 0..MSG_CAPS {
-        if !(*slot).caps[c].cap.is_empty() {
-            let d = dests[c];
-            if d.is_null() || !(*d).cap.is_empty() {
-                return Err(ChanError::NoCapSlot);
+        let src = store.chan_ring_cap(ch, ring, head, c);
+        if !store.slot(src).cap.is_empty() {
+            match dests[c] {
+                None => return Err(ChanError::NoCapSlot),
+                Some(d) => {
+                    if !store.slot(d).cap.is_empty() {
+                        return Err(ChanError::NoCapSlot);
+                    }
+                }
             }
         }
     }
     let mut mask = 0u8;
     for c in 0..MSG_CAPS {
-        if !(*slot).caps[c].cap.is_empty() {
-            cspace::slot_move(core::ptr::addr_of_mut!((*slot).caps[c]), dests[c]);
+        let src = store.chan_ring_cap(ch, ring, head, c);
+        if !store.slot(src).cap.is_empty() {
+            // Checked above: dests[c] is Some and empty.
+            let d = dests[c].unwrap();
+            cspace::slot_move(store, src, d);
             mask |= 1 << c;
         }
     }
-    let len = (*slot).len as usize;
-    core::ptr::copy_nonoverlapping(
-        core::ptr::addr_of!((*slot).payload).cast::<u8>(),
-        buf.as_mut_ptr(),
-        len,
-    );
-    (*slot).len = 0;
-    (*ch).head[ring] = ((*ch).head[ring] + 1) % (*ch).depth;
-    (*ch).count[ring] -= 1;
-    fire(ch, 1 - e, EV_WRITABLE, env);
+    let len = store.chan_msg_len(ch, ring, head) as usize;
+    store.chan_msg_read(ch, ring, head, len, buf);
+    store.set_chan_msg_len(ch, ring, head, 0);
+    let depth = store.chan_depth(ch);
+    store.set_chan_head(ch, ring, (head + 1) % depth);
+    store.set_chan_count(ch, ring, store.chan_count(ch, ring) - 1);
+    fire(store, ch, 1 - e, EV_WRITABLE);
     Ok((len, mask))
 }
 
 /// pre:  refs == 0 (both ends' caps all deleted).
 /// post: queued caps destroyed with ordinary CDT cleanup — cash in a
 ///       shredded envelope (§3.4); bindings released.
-pub unsafe fn destroy_channel<E: Env>(ch: *mut Channel, env: &mut E) {
+pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId) {
+    let depth = store.chan_depth(ch);
     for ring in 0..2 {
-        let depth = (*ch).depth;
         for i in 0..depth {
-            let slot = Channel::slot(ch, ring, i);
             for c in 0..MSG_CAPS {
-                let cs = core::ptr::addr_of_mut!((*slot).caps[c]);
-                if !(*cs).cap.is_empty() {
-                    cspace::delete(cs, env);
+                let cs = store.chan_ring_cap(ch, ring, i, c);
+                if !store.slot(cs).cap.is_empty() {
+                    cspace::delete(store, cs);
                 }
             }
         }
     }
     for end in 0..2 {
         for ev in 0..3 {
-            let b = (*ch).bindings[end][ev];
-            if !b.notif.is_null() {
-                (*b.notif).hdr.refs -= 1;
+            let b = store.chan_binding(ch, end, ev);
+            if let Some(n) = b.notif {
+                store.set_obj_refs(n, store.obj_refs(n) - 1);
             }
         }
     }

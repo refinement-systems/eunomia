@@ -15,10 +15,10 @@
 //!
 //! Mapping state lives in the frame cap, not here (§2.5): one mapping per cap
 //! copy, and deleting or revoking the cap unmaps it (via [`unmap_in`] behind
-//! [`crate::env::Env::aspace_unmap`]).
+//! [`crate::store::Store::aspace_unmap`]).
 
 use crate::cspace::ObjHeader;
-use crate::env::Env;
+use crate::store::Store;
 
 pub const PAGE: u64 = 4096;
 /// Lowest VA a process may map — everything below belongs to the shared
@@ -204,12 +204,12 @@ pub(crate) fn lookup(l1: &[u64; 512], pool: &[[u64; 512]], pool_base: u64, va: u
 /// pass 1 allocates the tables along the range and rejects any already-mapped
 /// page; pass 2 writes the leaves. Because pass 1 walked the whole range, pass
 /// 2 allocates nothing and cannot return `NeedMemory` (proven by
-/// `check_map_model`). Issues the post-map barrier through `env`.
+/// `check_map_model`). Issues the post-map barrier through `store`.
 ///
 /// pre:  `pool` is the aspace's table pool, `pool_used` its high-water mark,
 ///       `pool_base` its PA; `l1` the aspace's L1 table.
 /// post: PTEs installed or an atomic failure; `*pool_used` only ever grows.
-pub unsafe fn map_in<E: Env>(
+pub fn map_in<S: Store>(
     l1: &mut [u64; 512],
     pool: &mut [[u64; 512]],
     pool_used: &mut u64,
@@ -218,7 +218,7 @@ pub unsafe fn map_in<E: Env>(
     va: u64,
     pages: u64,
     perms: u64,
-    env: &mut E,
+    store: &mut S,
 ) -> Result<(), MapError> {
     if !va_range_ok(va, pages) {
         return Err(MapError::BadVa);
@@ -233,30 +233,30 @@ pub unsafe fn map_in<E: Env>(
         let (l3, e) = walk_alloc(l1, pool, pool_used, pool_base, va + i * PAGE)?;
         pool[l3][e] = pte_encode(pa + i * PAGE, perms);
     }
-    env.barrier_after_map();
+    store.barrier_after_map();
     Ok(())
 }
 
 /// Unmap `pages` frames at `va`, invalidating each cleared page's TLB entry
-/// through `env`. Mirrors the old `unmap` (clear + per-page TLBI wherever the
+/// through `store`. Mirrors the old `unmap` (clear + per-page TLBI wherever the
 /// L3 table exists, then a single trailing barrier).
-pub unsafe fn unmap_in<E: Env>(
+pub fn unmap_in<S: Store>(
     l1: &[u64; 512],
     pool: &mut [[u64; 512]],
     pool_base: u64,
     asid: u16,
     va: u64,
     pages: u64,
-    env: &mut E,
+    store: &mut S,
 ) {
     for i in 0..pages {
         let page_va = va + i * PAGE;
         if let Some((l3, e)) = lookup(l1, pool, pool_base, page_va) {
             pool[l3][e] = 0;
-            env.tlb_invalidate_page(asid, page_va);
+            store.tlb_invalidate_page(asid, page_va);
         }
     }
-    env.barrier_after_unmap();
+    store.barrier_after_unmap();
 }
 
 /// Is `[va, va+len)` fully mapped (and writable, if asked)? The predicate the
