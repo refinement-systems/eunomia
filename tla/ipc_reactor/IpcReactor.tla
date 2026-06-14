@@ -14,6 +14,16 @@
 \* (MoveSemantics / FireSafe). This spec owns only the genuinely-new wakeup +
 \* backpressure protocol — the design risk the reactor (plan §4.2) introduces.
 \*
+\* Scope limitation (single source; review doc/results/19_ipc-review.md gap #5).
+\* This spec models ONE source on ONE notification bit (word in {0,1}), and the
+\* Loom fragment (ipc model.rs reactor_no_lost_wakeup_loom) likewise drives a
+\* single source. The reactor's MULTI-source dispatch — the `used`-mask bit
+\* allocation, the `pending` drain, and the `trailing_zeros` lowest-bit-first scan
+\* (ipc/src/reactor.rs) — is exercised only by Shuttle harness #5 (fairness_smoke,
+\* a best-effort smoke), and that lowest-bit ordering bias has NO fairness /
+\* starvation property in any tier. Recorded rather than modelled: extending this
+\* spec (or Loom) to multiple bits is a deliberate future step, not an MVP gate.
+\*
 \* Properties (plan §5.1, framing "both"):
 \*   Safety (the gate; ports to the §5.2 Shuttle harness):
 \*     - NoLostWakeup: a blocked receiver has nothing pending — no queued

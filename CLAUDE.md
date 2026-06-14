@@ -376,7 +376,12 @@ harnesses run under a **pinned seed** (`check_pinned`, a seeded
 `RandomScheduler`) so a CI failure reproduces from source, with a
 `shuttle_replay_corpus` landing spot for committing a failing schedule as a
 `shuttle::replay` regression (the fuzz-corpus discipline; loom-shuttle §5).
-The wire decoder is also a cargo-fuzz target (`ipc/fuzz`). **`storaged`**
+The wire decoder is also a cargo-fuzz target (`ipc/fuzz`). Kani
+(`ipc/src/proofs.rs`) verifies the pure codecs and the quota — the `Header`,
+the §4.6 session codecs (`ConnectReq`/`GrantReply`), and `Admission`'s
+no-over-grant invariant (review rec 4); the reactor's multi-source dispatch is a
+recorded caveat (single-source TLA/Loom; multi-bit rests on harness #5 — see
+`IpcReactor.tla`). **`storaged`**
 (`user/storaged/src/main.rs`) is the first production consumer: its
 drain-then-wait loop is now `Reactor::wait` + `Endpoint` over
 `SyscallTransport`, dispatching by opaque key — no notification bit named

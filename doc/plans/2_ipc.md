@@ -240,7 +240,15 @@ loom-shuttle plan §3 argues.
 The postcard body **decoders** become cargo-fuzz targets (`ipc/fuzz`, reject
 trailing bytes, §3.7) alongside the existing CAS/loader/storage corpora. The
 fixed `Header` codec stays Kani-verified (`ipc/src/proofs.rs`, done); any new
-*pure* codec helper gets a Kani harness in the same module.
+*pure* codec helper gets a Kani harness in the same module. **Done (review
+rec 4):** the §4.6 session codecs (`ConnectReq`/`GrantReply` — decode-total +
+round-trip) and `Admission` (the `granted ≤ budget` no-over-grant invariant, so
+`remaining()`'s subtraction can never underflow) are Kani-verified in
+`ipc/src/proofs.rs`. The reactor's **multi-source dispatch** stays a recorded
+caveat, not a modelled property: `IpcReactor.tla` (§5.1) and the Loom fragment
+(§5.3) model a single source/bit, so multi-bit allocation/drain/scan — and its
+lowest-bit fairness bias — rest only on Shuttle harness #5 (a smoke). See the
+`IpcReactor.tla` "Scope limitation" note and `doc/results/19_ipc-review.md` gap #5.
 
 ---
 
