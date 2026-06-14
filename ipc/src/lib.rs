@@ -13,10 +13,13 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
-// no_std + alloc: the wire codec (§3.7) (de)serializes owned, variable-length
-// bodies, so the crate needs the heap (urt provides it on the OS), exactly like
-// storage-server. The model + its sync seam are host-only (std-backed) and
-// compiled solely for the test/loom/shuttle builds (plan §3.2).
+// alloc rides with the `wire` feature: the wire codec (§3.7) (de)serializes
+// owned, variable-length bodies, so it needs the heap (urt provides it on the
+// OS), exactly like storage-server. Minimal binaries that use only `ipc::sys`
+// (hello/selftest/init) build without `wire` and stay no-alloc. The model + its
+// sync seam are host-only (std-backed) and compiled solely for the
+// test/loom/shuttle builds (plan §3.2).
+#[cfg(feature = "wire")]
 extern crate alloc;
 #[cfg(any(test, loom, shuttle))]
 extern crate std;
@@ -26,6 +29,7 @@ pub mod header;
 pub mod reactor;
 pub mod sys;
 pub mod transport;
+#[cfg(feature = "wire")]
 pub mod wire;
 
 // The server-facing surface (§4.1, §4.2, §4.5): the typed non-blocking
@@ -36,6 +40,7 @@ pub use reactor::{Key, Reactor, RegisterErr, Signals};
 pub use transport::{
     Chan, Event, RecvErr, RecvOk, SendErr, SyscallTransport, Transport,
 };
+#[cfg(feature = "wire")]
 pub use wire::{decode, encode, WireError};
 
 /// Representative body type + round-trip oracle for fuzzing the wire codec
