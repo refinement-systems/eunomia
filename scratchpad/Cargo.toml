@@ -3,10 +3,11 @@ name = "scratchpad"
 version.workspace = true
 edition.workspace = true
 
-[dev-dependencies]
-loom = "0.7"
-shuttle = "0.7"
+[dependencies]
+vstd = "=0.0.0-2026-05-31-0205"
 
-# cfg(loom) is injected via RUSTFLAGS="--cfg loom"; teach plain cargo it's expected.
+[package.metadata.verus]
+verify = true
+
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)'] }

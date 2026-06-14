@@ -104,6 +104,21 @@ A harness that does not terminate (CBMC blow-up — e.g. symbolic `u128`
 division, a large symbolic free-list, or `Vec`-parsing) must be bounded,
 made concrete, or scoped to another tier and documented — never left to hang.
 
+### Verus (scratchpad)
+
+**Pinned at `0.2026.06.07.cd03505`** — installed at `/Users/mjm/inst/verus/`;
+`vstd` companion pinned at `=0.0.0-2026-05-31-0205` (in
+`scratchpad/Cargo.toml`). Verus is unstable software: both the binary and the
+`vstd` version must be upgraded together and any upgrade is a deliberate PR.
+Run with `cargo verus verify -p scratchpad`; the `scratchpad` crate also builds
+under plain `cargo build` (the `verus!{}` macro erases ghost code on normal
+builds). Not CI-gated today — a CI job is a future step when production
+harnesses are added.
+
+```sh
+cargo verus verify -p scratchpad   # verify the spec fn min example
+```
+
 **Deep, off-CI supplements (`scripts/deep-verify.sh`, ⚠ HEAVY — run
 sparingly).** The "more exhaustive" tier from `doc/results/14_kani-review-2.md`.
 The per-PR `ci.yml` runs the replays at a *cheap* depth (`host-tests`) and Kani
@@ -438,7 +453,7 @@ non-`#[inline(always)]` helpers in user.rs.
 |------|-------|------|
 | TLA+ / TLC | commit protocol, cap revocation | Before respective milestone |
 | Kani | kernel object core (`kcore`): cspace/CDT, untyped, channels, notifications, thread reports, aspace walker, syscall decode; + host chokepoints (`urt`, `ipc`, `cas`, `dma-pool`) | During kernel development |
-| ~~Verus~~ | (superseded — see note) | — |
+| Verus | `scratchpad` (example; future deductive tier for host crates) | `cargo verus verify -p scratchpad` (not CI-gated) |
 | Loom / Shuttle | IPC crate, userspace servers | During M1+ development |
 | Miri + proptest | everything; chunker + prolly tree esp. | Continuous |
 | cargo-fuzz | IPC decoder, postcard payloads | From M1 |
@@ -458,7 +473,9 @@ reports, the §2.4 page-table-walker rewrite, and the §2.5 syscall-decode split
 and fixed real defects (a `carve` overflow DoS; a `PERM_DEVICE | PERM_X`
 executable-MMIO encoding). The rewrite's shape (explicit `wf()` predicates,
 the `Env`/`Hal` seam, no int→ptr in the core) is also what a later Verus port
-would need, so Verus is preserved as an option, not foreclosed. Findings and
+would need, so Verus is now wired in (`scratchpad` crate) as a live starting
+point; the version is pinned and future production harnesses can extend from
+there. Findings and
 bounds: `doc/results/2_kani-findings.md` … `8_kani-findings-7.md`.
 
 ### Continuous integration
