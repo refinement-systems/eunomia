@@ -14,7 +14,7 @@ MODE="${1:-smoke}"
 SECS="${2:-300}"
 ONLY="${3:-}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-CRATES=(cas storage-server loader)
+CRATES=(cas storage-server loader ipc)
 
 # A low per-allocation cap turns a length-field-driven allocation into a
 # reportable crash; a generous RSS limit avoids false trips on libFuzzer's

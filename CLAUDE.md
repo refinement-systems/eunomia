@@ -163,10 +163,12 @@ bash tools/tla/tla-model-check.sh tla/ipc_reactor/IpcReactor.tla
 
 ### Fuzzing (cargo-fuzz, host)
 
-Harnesses live in `cas/fuzz`, `storage-server/fuzz`, `loader/fuzz` (each a
-standalone workspace, excluded from the host workspace). Needs nightly +
+Harnesses live in `cas/fuzz`, `storage-server/fuzz`, `loader/fuzz`, `ipc/fuzz`
+(each a standalone workspace, excluded from the host workspace). Needs nightly +
 `cargo install cargo-fuzz`. See `doc/guidelines/fuzzing.md`; findings in
-`doc/results/1_fuzzing-findings.md`.
+`doc/results/1_fuzzing-findings.md`. `ipc/fuzz` fuzzes the §3.7 wire codec
+(`wire_decode`); its corpus replay is `fuzzing`-gated, so run it with
+`cargo test -p ipc --features fuzzing --test fuzz_corpus`.
 
 ```sh
 scripts/fuzz.sh smoke              # replay committed corpus through every target
@@ -177,8 +179,9 @@ cargo run -p cas --example gen_cas_corpus   # regenerate that crate's seed corpu
 The committed corpus is replayed by `cargo test` (`--test fuzz_corpus`); run
 that test under Miri with `MIRIFLAGS=-Zmiri-disable-isolation` to UB-check
 every seed (the replay reads files, which Miri isolation otherwise blocks).
-`cas`/`storage-server` gain a `fuzzing` feature (fuzz-only `fuzz_support`
-helpers / `Arbitrary` derives); never enable it in normal builds.
+`cas`/`storage-server`/`ipc` gain a `fuzzing` feature (fuzz-only `fuzz_support`
+helpers / `Arbitrary` derives / the `ipc` codec's `DemoMsg`); never enable it in
+normal builds.
 
 ---
 

@@ -1,0 +1,32 @@
+# cargo-fuzz harnesses for the IPC wire codec (spec §3.7, plan §5.4).
+# Standalone workspace (see the empty [workspace] table): own target dir, own
+# profile. Run with: cargo +nightly fuzz run wire_decode
+[package]
+name = "ipc-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ipc = { path = "..", features = ["std", "fuzzing"] }
+
+# Arithmetic on untrusted lengths must trap, not wrap; a length-driven
+# allocation that survives because nothing panicked is still an OOM primitive.
+# Keep both checks on, with debug info for readable crash traces.
+[profile.release]
+debug = true
+debug-assertions = true
+overflow-checks = true
+
+[workspace]
+
+[[bin]]
+name = "wire_decode"
+path = "fuzz_targets/wire_decode.rs"
+test = false
+doc = false
+bench = false

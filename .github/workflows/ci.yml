@@ -23,6 +23,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo test (workspace minus kernel)
         run: cargo test --workspace --exclude kernel
+      - name: ipc wire codec tests (feature-gated)
+        # The wire codec (§3.7) is behind the opt-in `wire` feature so minimal
+        # user binaries stay no-alloc; `cargo test --workspace` builds ipc
+        # default-features, so its unit tests need this explicit pass.
+        run: cargo test -p ipc --features wire
       - name: exhaustive CDT replays (cheap depth — continuous regression guard)
         # The mini-TLC replays (kcore::proofs::exhaustive) are #[ignore]d so the
         # deep depths stay off the per-PR path (scripts/deep-verify.sh / the
