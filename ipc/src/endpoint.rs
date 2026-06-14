@@ -8,9 +8,11 @@
 //! the Shuttle/Loom harnesses drive `ModelTransport` — the same `send_nb`/
 //! `recv_nb` code, checked over a model.
 //!
-//! Blocking send, bounded-retry send, and the reactor are later phases (§4.2,
-//! §4.3); these primitives are strictly non-blocking (`Full`/`Empty`/`NoSlot`).
+//! The non-blocking `send_nb`/`recv_nb` are strictly non-blocking
+//! (`Full`/`Empty`/`NoSlot`); the blocking + bounded-retry sends below (§4.3)
+//! layer backpressure over them using the reactor's writable signal.
 
+use crate::reactor::{Reactor, Signals};
 use crate::sys::SLOT_NONE;
 use crate::transport::{Chan, RecvErr, SendErr, Transport};
 
@@ -122,5 +124,59 @@ impl<'t, T: Transport> Endpoint<'t, T> {
             }
         }
         Ok(())
+    }
+
+    /// Blocking send over backpressure (§4.3): on `Full`, wait for the channel's
+    /// writable signal (the receiver draining a slot) and retry. Never drops the
+    /// message; returns any non-`Full` error (`Closed`, …) immediately.
+    ///
+    /// `reactor` must already have this channel registered for
+    /// `Signals::WRITABLE` (register once at setup — registering per call would
+    /// exhaust the reactor's bits). It is treated as the **sender's backpressure
+    /// reactor**: `wait()` results are consumed as writable wakeups, so a
+    /// multiplexing server should instead fold backpressure into its own
+    /// `wait`/dispatch loop. Lost-wakeup safety is the reactor's (harness #1):
+    /// `notif_wait` checks the accumulated word before sleeping, so a drain that
+    /// races the wait is never slept through.
+    pub fn send_blocking<'r>(
+        &self,
+        reactor: &mut Reactor<'r, T>,
+        msg: &Message,
+    ) -> Result<(), SendErr> {
+        debug_assert!(Signals::WRITABLE.writable());
+        loop {
+            match self.send_nb(msg) {
+                Ok(()) => return Ok(()),
+                Err(SendErr::Full) => {
+                    let _ = reactor.wait();
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Bounded-retry send (§4.3): like [`send_blocking`](Self::send_blocking) but
+    /// waits for writability at most `max_waits` times before giving up with
+    /// `Err(SendErr::Full)`. Still never drops — `Full` means "not sent".
+    pub fn send_retry<'r>(
+        &self,
+        reactor: &mut Reactor<'r, T>,
+        msg: &Message,
+        max_waits: u32,
+    ) -> Result<(), SendErr> {
+        let mut waits = 0;
+        loop {
+            match self.send_nb(msg) {
+                Ok(()) => return Ok(()),
+                Err(SendErr::Full) => {
+                    if waits == max_waits {
+                        return Err(SendErr::Full);
+                    }
+                    waits += 1;
+                    let _ = reactor.wait();
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 }
