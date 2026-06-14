@@ -16,6 +16,17 @@
 //!      block (`kcore::notification`'s `wait`) never sleeps through a signal that
 //!      already arrived.
 //!
+//! Two kinds of source register here. [`Reactor::register`] takes a **channel**
+//! and is **level-triggered**: it `bind`s the channel's events and self-signals
+//! a poll-once so a message queued before the bind still surfaces.
+//! [`Reactor::register_bound`] takes an **externally-bound, edge-triggered**
+//! source — a thread on-exit/on-fault binding (`thread_bind`, §5.1), a timer, an
+//! IRQ — already wired to a caller-chosen bit; it neither binds nor self-signals
+//! (a poll-once would fabricate a one-shot event), so lost-wakeup safety there
+//! rests on the caller binding before the source can fire plus `wait`'s
+//! word-check. The shell's spawn/reap loop is the first `register_bound`
+//! consumer; storaged is the first `register` consumer.
+//!
 //! Generic over `Transport`: production drives `SyscallTransport`, the harnesses
 //! drive `ModelTransport`. Single-threaded per process (`wait` takes `&mut`), so
 //! the reactor itself holds no locks (§2 of the plan).
@@ -56,13 +67,15 @@ impl BitOr for Signals {
 /// returns it from `wait` so the server dispatches without ever seeing a bit.
 pub type Key = usize;
 
-/// `register` failure: the 64-bit word is exhausted, or a `bind` syscall failed.
+/// `register`/`register_bound` failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegisterErr {
     /// No free bit — at most 64 sources for the MVP (bit-groups come with scale).
     Full,
     /// A `Transport::bind` returned a kernel error.
     Bind(i64),
+    /// A `register_bound` requested a bit already allocated to another source.
+    Taken,
 }
 
 /// Width of the notification word — the MVP per-thread source limit (§3.6).
@@ -79,7 +92,10 @@ pub struct Reactor<'t, T: Transport> {
     transport: &'t T,
     notif: Notif,
     slots: [Option<Reg>; WORD_BITS],
-    next_bit: u32,
+    /// Allocated bits. A source owns a bit for life (there is no deregister), so
+    /// the lowest clear bit is the next free one — `register` allocates that way,
+    /// and `register_bound` claims caller-chosen bits, both recorded here.
+    used: u64,
     /// Set bits observed by the last `notif_wait` but not yet returned — drained
     /// across `wait` calls so several ready sources surface without re-signaling.
     pending: u64,
@@ -88,7 +104,18 @@ pub struct Reactor<'t, T: Transport> {
 impl<'t, T: Transport> Reactor<'t, T> {
     /// A reactor over `notif`, the notification all its sources bind into.
     pub fn new(transport: &'t T, notif: Notif) -> Reactor<'t, T> {
-        Reactor { transport, notif, slots: [None; WORD_BITS], next_bit: 0, pending: 0 }
+        Reactor { transport, notif, slots: [None; WORD_BITS], used: 0, pending: 0 }
+    }
+
+    /// The lowest free bit, marking it allocated; `None` when the 64-bit word is
+    /// exhausted (`RegisterErr::Full`).
+    fn alloc_bit(&mut self) -> Option<usize> {
+        let bit = (!self.used).trailing_zeros() as usize;
+        if bit >= WORD_BITS {
+            return None;
+        }
+        self.used |= 1u64 << bit;
+        Some(bit)
     }
 
     /// Register `source` for `signals`, dispatched as `key`. Binds each requested
@@ -97,10 +124,7 @@ impl<'t, T: Transport> Reactor<'t, T> {
     /// message). Idempotent re-registration is not supported — each call consumes
     /// a bit.
     pub fn register(&mut self, source: Chan, signals: Signals, key: Key) -> Result<(), RegisterErr> {
-        let bit = self.next_bit as usize;
-        if bit >= WORD_BITS {
-            return Err(RegisterErr::Full);
-        }
+        let bit = self.alloc_bit().ok_or(RegisterErr::Full)?;
         let mask = 1u64 << bit;
 
         if signals.readable() {
@@ -114,10 +138,40 @@ impl<'t, T: Transport> Reactor<'t, T> {
         }
 
         self.slots[bit] = Some(Reg { key, signals });
-        self.next_bit += 1;
         // Poll once: surface this source on the first wait, so a message already
         // queued before the bind is not slept through.
         self.transport.notif_signal(self.notif, mask);
+        Ok(())
+    }
+
+    /// Register a source whose events are bound to `mask` **outside** the reactor
+    /// and are **edge-triggered**: a thread on-exit/on-fault binding (a
+    /// `thread_bind` into the TCB, §5.1), a timer (`timer_arm`), or an IRQ —
+    /// anything the kernel signals into this notification at a bit the caller
+    /// controls. Each set bit in `mask` dispatches to `key`.
+    ///
+    /// Unlike [`register`], this does **no** `bind` (it is not a channel event)
+    /// and does **no** poll-once self-signal: an edge-triggered source fires
+    /// exactly once when the event actually happens, so a fabricated poll-once
+    /// would deliver a spurious wakeup (e.g. report a thread dead before it is).
+    /// The reactor therefore owns only the bit→key dispatch and the
+    /// word-check-before-block half of the lost-wakeup discipline; **the caller
+    /// must bind the source before it can fire** (e.g. `SpawnRec::arm` before
+    /// `start`), so a `wait` cannot sleep through a signal that already arrived.
+    ///
+    /// `Err(Taken)` if any requested bit is already allocated.
+    pub fn register_bound(&mut self, mask: u64, key: Key) -> Result<(), RegisterErr> {
+        if mask & self.used != 0 {
+            return Err(RegisterErr::Taken);
+        }
+        self.used |= mask;
+        let mut bits = mask;
+        while bits != 0 {
+            let bit = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            // Bound sources carry no channel signals; the key alone names them.
+            self.slots[bit] = Some(Reg { key, signals: Signals(0) });
+        }
         Ok(())
     }
 
