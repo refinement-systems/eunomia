@@ -36,6 +36,14 @@ use loom::sync::atomic::{fence, AtomicI64, AtomicU64, Ordering};
 #[cfg(not(loom))]
 use core::sync::atomic::{fence, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 
+// The reader's seqlock spin hint rides the same seam: loom's mocked spin_loop
+// yields to its scheduler, which bounds the model (a raw core::hint::spin_loop
+// is opaque to loom and blows its branch budget); native keeps the CPU hint.
+#[cfg(loom)]
+use loom::hint::spin_loop;
+#[cfg(not(loom))]
+use core::hint::spin_loop;
+
 const NANOS_PER_SEC: u64 = 1_000_000_000;
 
 /// Byte length of the populated page prefix (the four u64-wide fields).
@@ -104,7 +112,7 @@ impl TimePage {
             if s1 & 1 == 1 {
                 // Writer mid-update (future clock setting); spin, the
                 // critical section is a handful of stores.
-                core::hint::spin_loop();
+                spin_loop();
                 continue;
             }
             let wall_base_ns = self.wall_base_ns.load(Ordering::Relaxed);
@@ -226,7 +234,12 @@ pub fn now_utc_ns() -> i64 {
     page.sample().utc_ns_at(cntvct())
 }
 
-#[cfg(test)]
+// The native tier: conversion proptests (breadth) + the probabilistic
+// std-thread seqlock race (also the Miri weak-memory pass). Excluded under
+// loom, which constructs its atomics inside loom::model — the std-thread test
+// would build a TimePage outside one and panic. The exhaustive ordering proof
+// of the same seqlock lives in `loom_tests` below (plan 1_loom-shuttle §4.1).
+#[cfg(all(test, not(loom)))]
 mod tests {
     use super::*;
     extern crate std;
@@ -399,5 +412,53 @@ mod tests {
             let s = Sample { wall_base_ns, cntvct_base, cntfrq };
             let _ = s.utc_ns_at(cntvct);
         }
+    }
+}
+
+/// Exhaustive Loom proof of the seqlock protocol (plan 1_loom-shuttle-rewrite
+/// §4.1): under every C11-permitted interleaving *and reordering* of one
+/// writer's odd→stagger→even update and one reader's `sample()`, the reader
+/// never observes a torn `(k, 2k, 3k+1)` triple. Where the native
+/// `torn_writes_are_never_observed` only *hopes* to hit a tear over 50k real
+/// races, Loom enumerates them — and would flag a missing/weakened fence (it
+/// does; see the fence-removal negative control in the part-3 PR).
+///
+/// Bounded to a single write: the torn-read invariant is per-critical-section,
+/// not cumulative, so one writer epoch over the initial one is the whole
+/// proof, and it keeps Loom's state space small. Run with
+/// `RUSTFLAGS="--cfg loom" cargo test -p urt`.
+#[cfg(all(test, loom))]
+mod loom_tests {
+    use super::*;
+    use loom::sync::Arc;
+    use loom::thread;
+
+    #[test]
+    fn no_torn_sample_under_any_interleaving() {
+        loom::model(|| {
+            // Initial epoch k=0: (wall, cntvct, cntfrq) = (0, 0, 1).
+            let page = Arc::new(TimePage::new(0, 0, 1));
+
+            let writer = {
+                let page = Arc::clone(&page);
+                thread::spawn(move || {
+                    // One seqlock write to epoch k=1 → (1, 2, 4).
+                    page.seq.fetch_add(1, Ordering::Relaxed); // odd: writer in
+                    fence(Ordering::Release);
+                    page.wall_base_ns.store(1, Ordering::Relaxed);
+                    page.cntvct_base.store(2, Ordering::Relaxed);
+                    page.cntfrq.store(4, Ordering::Relaxed);
+                    page.seq.fetch_add(1, Ordering::Release); // even: writer out
+                })
+            };
+
+            // The invariant `cntvct == 2·wall && cntfrq == 3·wall + 1` holds for
+            // both epochs (0,0,1) and (1,2,4); any torn mix of the two breaks it.
+            let s = page.sample();
+            assert_eq!(s.cntvct_base, 2 * s.wall_base_ns as u64, "torn sample: {s:?}");
+            assert_eq!(s.cntfrq, (3 * s.wall_base_ns + 1) as u64, "torn sample: {s:?}");
+
+            writer.join().unwrap();
+        });
     }
 }
