@@ -103,22 +103,31 @@ impl Transport for ModelTransport {
     }
 
     fn recv_nb(&self, _ch: Chan, buf: &mut [u8], _dests: Option<&[u32; 4]>) -> Result<RecvOk, RecvErr> {
-        let mut ring = self.ring.lock().unwrap();
-        match ring.msgs.pop_front() {
-            Some(msg) => {
-                let len = msg.data.len().min(buf.len());
-                buf[..len].copy_from_slice(&msg.data[..len]);
-                let mut cap_mask = 0u64;
-                for (i, c) in msg.caps.iter().enumerate() {
-                    if *c != crate::sys::SLOT_NONE {
-                        cap_mask |= 1 << i;
+        let (result, writable) = {
+            let mut ring = self.ring.lock().unwrap();
+            match ring.msgs.pop_front() {
+                Some(msg) => {
+                    let len = msg.data.len().min(buf.len());
+                    buf[..len].copy_from_slice(&msg.data[..len]);
+                    let mut cap_mask = 0u64;
+                    for (i, c) in msg.caps.iter().enumerate() {
+                        if *c != crate::sys::SLOT_NONE {
+                            cap_mask |= 1 << i;
+                        }
                     }
+                    // A slot freed up: fire the on-writable binding (§3.3) so a
+                    // sender blocked on backpressure is woken (phase-3 §4.3).
+                    (Ok(RecvOk { len, cap_mask }), ring.on_writable)
                 }
-                Ok(RecvOk { len, cap_mask })
+                None if ring.peer_closed => (Err(RecvErr::Closed), None),
+                None => (Err(RecvErr::Empty), None),
             }
-            None if ring.peer_closed => Err(RecvErr::Closed),
-            None => Err(RecvErr::Empty),
+        };
+        // Signal after releasing the ring lock (as send_nb does for readable).
+        if let Some((n, bits)) = writable {
+            self.notif_signal(n, bits);
         }
+        result
     }
 
     fn bind(&self, _ch: Chan, ev: Event, notif: Notif, bits: u64) -> Result<(), i64> {
@@ -363,5 +372,67 @@ mod tests {
     #[test]
     fn reactor_no_lost_wakeup_loom() {
         loom::model(reactor_no_lost_wakeup);
+    }
+
+    // Harness #2 (plan §5.2): Full backpressure + retry, no drop, over the real
+    // Endpoint::send_blocking (phase-3 §4.3). The channel capacity is 1, so a
+    // sender pushing n > 1 ids hits Full and blocks on the writable signal; the
+    // receiver drains, each recv firing on_writable to wake the sender. The
+    // receiver must get [1, 2, .., n] — no drop, FIFO, and the sender made
+    // progress (a lost writable wakeup would deadlock). Removing recv_nb's
+    // on_writable signal (model.rs) makes this hang — the negative control.
+    #[cfg(not(loom))]
+    fn full_backpressure_no_drop(n: u8) {
+        use crate::endpoint::{Endpoint, Message};
+        use crate::reactor::{Reactor, Signals};
+        use crate::transport::Chan;
+        const CHAN: Chan = 0;
+        const NOTIF: crate::transport::Notif = 0;
+        const KEY: crate::reactor::Key = 9;
+        let t = ModelTransport::shared(1, 1); // capacity 1 forces backpressure
+
+        let ts = Arc::clone(&t);
+        let sender = thread::spawn(move || {
+            let ep = Endpoint::new(&*ts, CHAN);
+            let mut reactor = Reactor::new(&*ts, NOTIF);
+            reactor.register(CHAN, Signals::WRITABLE, KEY).unwrap();
+            for i in 1..=n {
+                ep.send_blocking(&mut reactor, &Message::bytes(&[i])).unwrap();
+            }
+        });
+
+        let tr = Arc::clone(&t);
+        let receiver = thread::spawn(move || -> std::vec::Vec<u8> {
+            let ep = Endpoint::new(&*tr, CHAN);
+            let mut got = std::vec::Vec::new();
+            let mut msg = Message::new();
+            while got.len() < n as usize {
+                match ep.recv_nb(&mut msg) {
+                    Ok(()) => got.push(msg.payload()[0]),
+                    Err(RecvErr::Empty) => thread::yield_now(),
+                    Err(e) => panic!("unexpected recv error: {:?}", e),
+                }
+            }
+            got
+        });
+
+        sender.join().unwrap();
+        let got = receiver.join().unwrap();
+        let expected: std::vec::Vec<u8> = (1..=n).collect();
+        assert_eq!(got, expected, "no drop, FIFO, and the sender made progress");
+    }
+
+    #[cfg(all(not(loom), not(shuttle)))]
+    #[test]
+    fn full_backpressure_no_drop_std() {
+        full_backpressure_no_drop(3);
+    }
+
+    // Shuttle tier (interleaving/progress); the lost-wakeup memory ordering is
+    // harness #1's loom job (§5.3), so there is no loom variant here.
+    #[cfg(shuttle)]
+    #[test]
+    fn full_backpressure_no_drop_shuttle() {
+        shuttle::check_random(|| full_backpressure_no_drop(3), 1000);
     }
 }
