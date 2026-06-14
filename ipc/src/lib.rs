@@ -13,8 +13,22 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+// The model + its sync seam are host-only (std-backed) and compiled solely for
+// the test/loom/shuttle builds (plan §3.2); production stays no_std.
+#[cfg(any(test, loom, shuttle))]
+extern crate std;
+
 pub mod header;
 pub mod sys;
+pub mod transport;
+
+/// The cfg-swappable concurrency seam + the deterministic in-memory kernel
+/// (`ModelTransport`) the Shuttle/Loom harnesses drive (plan §3.2–§3.4). Not in
+/// the production no_std build.
+#[cfg(any(test, loom, shuttle))]
+mod sync;
+#[cfg(any(test, loom, shuttle))]
+pub mod model;
 
 /// Kani harnesses (plan §4.7), compiled only under `cargo kani`.
 #[cfg(kani)]
