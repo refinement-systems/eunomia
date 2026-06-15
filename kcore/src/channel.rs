@@ -163,19 +163,41 @@ pub fn endpoint_cap_added<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
     store.set_chan_end_caps(ch, e, store.chan_end_caps(ch, e) + 1);
 }
 
-} // verus!
-
 /// Called on every endpoint-cap deletion; the last cap of an end raises
 /// the other end's peer-closed event (§3.3, session cleanup §2.4).
-pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd) {
+///
+/// Verified (plan §3e): decrements `end_caps[end]`, then — only when that count
+/// reaches zero — fires the *other* end's peer-closed event through the verified
+/// `fire` (3b). The `requires` bound (`> 0`) discharges the `- 1` (no `u32`
+/// wrap). The `slot_view`/`chan_view` frames hold on every path (`fire` keeps
+/// both); the `refs_view` frame is **conditional** — the non-firing branch
+/// leaves it untouched (the only mutation, `set_chan_end_caps`, frames it), but
+/// the firing branch delegates to `signal`, which is permitted to perturb
+/// `refs_view` (a waiter's queued ref), so nothing is asserted there.
+pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
+    requires
+        old(store).chan_view().dom().contains(ch),
+        old(store).chan_view()[ch].end_caps.len() == 2,
+        old(store).chan_view()[ch].end_caps[end_idx_spec(end)] > 0,
+    ensures
+        final(store).slot_view() == old(store).slot_view(),
+        final(store).chan_view() == old(store).chan_view().insert(
+            ch,
+            ChanView {
+                end_caps: old(store).chan_view()[ch].end_caps.update(
+                    end_idx_spec(end),
+                    (old(store).chan_view()[ch].end_caps[end_idx_spec(end)] - 1) as nat),
+                ..old(store).chan_view()[ch]
+            }),
+        old(store).chan_view()[ch].end_caps[end_idx_spec(end)] != 1
+            ==> final(store).refs_view() == old(store).refs_view(),
+{
     let e = end_idx(end);
     store.set_chan_end_caps(ch, e, store.chan_end_caps(ch, e) - 1);
     if store.chan_end_caps(ch, e) == 0 {
         fire(store, ch, 1 - e, EV_PEER_CLOSED);
     }
 }
-
-verus! {
 
 /// Raise an endpoint's event into its bound notification, if bound (§3.6).
 ///
@@ -200,10 +222,35 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
     }
 }
 
-} // verus!
+/// The `refs_view` after `bind` releases `old_notif`'s ref and then adds
+/// `new_notif`'s — the decrement-before-increment order the body performs, so a
+/// rebind to the *same* notification (`old_notif == new_notif`) is provably
+/// net-zero (the second `insert` reads the already-decremented count). The first
+/// installment of `refcount_sound`'s binding term; the full census lands
+/// phases 4–5.
+pub open spec fn bind_refs_post(
+    r0: Map<ObjId, nat>,
+    old_notif: Option<ObjId>,
+    new_notif: Option<ObjId>,
+) -> Map<ObjId, nat> {
+    let r1 = match old_notif {
+        Some(no) => r0.insert(no, (r0[no] - 1) as nat),
+        None => r0,
+    };
+    match new_notif {
+        Some(nn) => r1.insert(nn, (r1[nn] + 1) as nat),
+        None => r1,
+    }
+}
 
 /// Configure an endpoint's event binding (holder-configured, §3.6).
-/// Replacing a binding releases the old notification's ref.
+/// Replacing a binding releases the old notification's ref and adds the new
+/// one's (§3.6 binding-refcount discipline).
+///
+/// Verified (plan §3e): installs `Binding { notif, bits }` at `(end, event)`,
+/// leaving `slot_view` and every other channel field untouched; the `refs_view`
+/// delta is `bind_refs_post`. The `requires` refcount bounds discharge the
+/// `- 1` (old notif's ref, `> 0`) and `+ 1` (new notif's ref, `< u32::MAX`).
 pub fn bind<S: Store>(
     store: &mut S,
     ch: ObjId,
@@ -211,10 +258,35 @@ pub fn bind<S: Store>(
     event: usize,
     notif: Option<ObjId>,
     bits: u64,
-) {
+)
+    requires
+        old(store).chan_view().dom().contains(ch),
+        event < 3,
+        old(store).chan_view()[ch].bindings[(end_idx_spec(end), event as int)].notif is Some
+            ==> old(store).refs_view().dom().contains(
+                    old(store).chan_view()[ch].bindings[(end_idx_spec(end), event as int)].notif->Some_0)
+                && old(store).refs_view()[
+                    old(store).chan_view()[ch].bindings[(end_idx_spec(end), event as int)].notif->Some_0] > 0,
+        notif is Some ==> old(store).refs_view().dom().contains(notif->Some_0)
+            && old(store).refs_view()[notif->Some_0] < u32::MAX as nat,
+    ensures
+        final(store).slot_view() == old(store).slot_view(),
+        final(store).chan_view() == old(store).chan_view().insert(
+            ch,
+            ChanView {
+                bindings: old(store).chan_view()[ch].bindings.insert(
+                    (end_idx_spec(end), event as int),
+                    Binding { notif, bits }),
+                ..old(store).chan_view()[ch]
+            }),
+        final(store).refs_view() == bind_refs_post(
+            old(store).refs_view(),
+            old(store).chan_view()[ch].bindings[(end_idx_spec(end), event as int)].notif,
+            notif),
+{
     let e = end_idx(end);
-    let old = store.chan_binding(ch, e, event);
-    if let Some(n) = old.notif {
+    let old_b = store.chan_binding(ch, e, event);
+    if let Some(n) = old_b.notif {
         store.set_obj_refs(n, store.obj_refs(n) - 1);
     }
     if let Some(n) = notif {
@@ -222,8 +294,6 @@ pub fn bind<S: Store>(
     }
     store.set_chan_binding(ch, e, event, Binding { notif, bits });
 }
-
-verus! {
 
 /// Send: copy the payload into the ring and move caps from the sender's
 /// slots into the message's CDT-visible slots (§3.4 move semantics).
@@ -901,10 +971,37 @@ pub fn recv<S: Store>(
 
 } // verus!
 
-/// pre:  refs == 0 (both ends' caps all deleted).
-/// post: queued caps destroyed with ordinary CDT cleanup — cash in a
-///       shredded envelope (§3.4); bindings released.
-pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId) {
+verus! {
+
+/// Tear a channel down once its last endpoint cap is gone (`refs == 0`): delete
+/// every queued cap with ordinary CDT cleanup — cashing a shredded envelope
+/// (§3.4) — and release every event binding's notification ref.
+///
+/// **Assumed, host-test-checked (plan §3e — the declared scope-out, §1.3).** The
+/// body recurses through the still-`external_body` `cspace::delete` (the
+/// cross-object teardown) and releases binding refs whose soundness needs the
+/// full `refcount_sound` census — both of which land in phases 4–5. So like
+/// `delete` and `signal`, it carries an `external_body` contract checked against
+/// its real body in `test_store.rs` (`check_destroy_channel`), not a Verus body
+/// proof. The contract states the robustly-true, checkable core — `cspace_wf`
+/// preserved, the arena unchanged in extent, and **every ring-cap slot emptied**.
+/// The per-binding ref release is entangled with the deletes' own refcount
+/// effects (no clean closed form here), so it is asserted directly on the
+/// concrete store by the host test.
+#[verifier::external_body]
+pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
+    requires
+        cspace::cspace_wf(old(store).slot_view()),
+        cspace::chan_wf(old(store).chan_view(), old(store).slot_view(), ch),
+    ensures
+        cspace::cspace_wf(final(store).slot_view()),
+        final(store).slot_view().dom() == old(store).slot_view().dom(),
+        forall|r: int, i: int, c: int|
+            (0 <= r < 2 && 0 <= i < old(store).chan_view()[ch].depth && 0 <= c < 4)
+                ==> cspace::is_empty_cap(
+                    final(store).slot_view()[
+                        #[trigger] old(store).chan_view()[ch].ring_cap[(r, i, c)]].cap),
+{
     let depth = store.chan_depth(ch);
     for ring in 0..2 {
         for i in 0..depth {
@@ -925,3 +1022,5 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId) {
         }
     }
 }
+
+} // verus!

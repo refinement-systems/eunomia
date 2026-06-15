@@ -17,7 +17,10 @@
 //! plain-Rust re-expression. Shapes are built with the *verified* `derive`, so
 //! the generator cannot manufacture a non-`cspace_wf` start state.
 
-use crate::channel::{recv, send, ChanError, MSG_PAYLOAD};
+use crate::channel::{
+    bind, destroy_channel, endpoint_cap_dropped, recv, send, ChanError, EV_PEER_CLOSED,
+    EV_READABLE, MSG_PAYLOAD,
+};
 use crate::cspace::{
     cdt_unlink, delete, derive, revoke, slot_move, Cap, CapKind, CapSlot, ChanEnd, Rights,
 };
@@ -769,6 +772,99 @@ fn check_signal_frame(st: &mut ArrayStore, n: ObjId, bits: u64) {
     assert!(st.chans == chans, "signal post: chan_view unchanged");
 }
 
+// A→0, B→1: the exec mirror of `end_idx`/`end_idx_spec` (both private/ghost in
+// channel.rs, so unreachable from test code).
+fn end_idx_exec(end: ChanEnd) -> usize {
+    match end {
+        ChanEnd::A => 0,
+        ChanEnd::B => 1,
+    }
+}
+
+// Run the real `endpoint_cap_dropped` and assert its §3e contract against the
+// body: `slot_view` unchanged; `end_caps[end]` decremented with every other
+// channel field untouched (the `..old` frame); and `refs_view` unchanged **iff**
+// the count did not reach zero (the conditional frame — a zero drop fires the
+// peer-closed event via `signal`, which is permitted to perturb `refs_view`).
+fn check_endpoint_cap_dropped(st: &mut ArrayStore, ch: ObjId, end: ChanEnd) {
+    let e = end_idx_exec(end);
+    assert!(chan_wf_exec(st, ch), "endpoint_cap_dropped pre: chan_wf");
+    let before = st.chan(ch).end_caps[e];
+    assert!(before > 0, "endpoint_cap_dropped pre: end_caps[end] > 0");
+    let fp = fingerprint(st);
+    let refs_before = st.refs.clone();
+    let mut expect_chan = st.chan(ch).clone();
+    expect_chan.end_caps[e] = before - 1;
+
+    endpoint_cap_dropped(st, ch, end);
+
+    assert!(fingerprint(st) == fp, "endpoint_cap_dropped: slot_view unchanged");
+    assert!(*st.chan(ch) == expect_chan, "endpoint_cap_dropped: only end_caps[end] decremented");
+    if before != 1 {
+        assert!(st.refs == refs_before, "endpoint_cap_dropped: refs_view unchanged (no fire)");
+    }
+}
+
+// Run the real `bind` and assert its §3e contract against the body: `slot_view`
+// unchanged; the `(end, event)` binding installed with every other channel field
+// untouched; and the `refs_view` delta — old notif released, new acquired, in the
+// decrement-then-increment order so a same-notif rebind is net-zero
+// (`bind_refs_post`).
+fn check_bind(st: &mut ArrayStore, ch: ObjId, end: ChanEnd, event: usize, notif: Option<ObjId>, bits: u64) {
+    let e = end_idx_exec(end);
+    let old_notif = st.chan(ch).bindings.get(&(e, event)).copied().unwrap_or(Binding::UNBOUND).notif;
+    let fp = fingerprint(st);
+    let refs_before = st.refs.clone();
+    let mut expect_chan = st.chan(ch).clone();
+    expect_chan.bindings.insert((e, event), Binding { notif, bits });
+    let mut expect_refs = refs_before.clone();
+    if let Some(no) = old_notif {
+        *expect_refs.get_mut(&no.0).unwrap() -= 1;
+    }
+    if let Some(nn) = notif {
+        *expect_refs.get_mut(&nn.0).unwrap() += 1;
+    }
+
+    bind(st, ch, end, event, notif, bits);
+
+    assert!(fingerprint(st) == fp, "bind: slot_view unchanged");
+    assert!(*st.chan(ch) == expect_chan, "bind: only the (end,event) binding changed");
+    assert_eq!(st.refs, expect_refs, "bind: refs delta (old -1, new +1)");
+}
+
+// Run the real `destroy_channel` and assert its assumed §3e contract against the
+// body — the `external_body`-vs-real-body discipline (`delete`/`signal`). The
+// contract's checkable core: `cspace_wf` preserved, the arena unchanged in
+// extent, and **every ring-cap slot emptied**. The host test also checks the part
+// kept out of the formal contract: each bound binding's notif ref released once.
+fn check_destroy_channel(st: &mut ArrayStore, ch: ObjId) {
+    assert!(cspace_wf_exec(st), "destroy_channel pre: cspace_wf");
+    assert!(chan_wf_exec(st, ch), "destroy_channel pre: chan_wf");
+    let n = st.n();
+    let depth = st.chan(ch).depth;
+    let ring_caps: Vec<SlotId> = (0..2usize)
+        .flat_map(|r| (0..depth).flat_map(move |i| (0..4usize).map(move |c| (r, i, c))))
+        .map(|(r, i, c)| st.chan(ch).ring_cap[&(r, i, c)])
+        .collect();
+    let mut expect_refs = st.refs.clone();
+    for ev in 0..2usize {
+        for v in 0..3usize {
+            if let Some(notif) = st.chan(ch).bindings[&(ev, v)].notif {
+                *expect_refs.get_mut(&notif.0).unwrap() -= 1;
+            }
+        }
+    }
+
+    destroy_channel(st, ch);
+
+    assert!(cspace_wf_exec(st), "destroy_channel post: cspace_wf preserved");
+    assert_eq!(st.n(), n, "destroy_channel: arena extent unchanged");
+    for cs in ring_caps {
+        assert!(st.at(cs).cap.is_empty(), "destroy_channel: every ring cap slot emptied");
+    }
+    assert_eq!(st.refs, expect_refs, "destroy_channel: each binding's notif ref released once");
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[test]
@@ -1419,4 +1515,79 @@ fn randomized_fifo_sweep() {
         }
     }
     assert!(trials > 300, "sweep should exercise hundreds of ops, ran {trials}");
+}
+
+#[test]
+fn endpoint_cap_dropped_decrement_and_fire() {
+    // Non-firing: end_caps[A] = 2 → 1, no peer-closed fire — `refs_view` and the
+    // rest of the channel untouched.
+    let (mut st, ch, _) = chan_fixture(1, 0);
+    st.chan_mut(ch).end_caps = [2, 1];
+    check_endpoint_cap_dropped(&mut st, ch, ChanEnd::A);
+    assert_eq!(st.chan(ch).end_caps, [1, 1]);
+
+    // Firing: end_caps[A] = 1 → 0 fires the *other* end's (1 - e = 1) peer-closed
+    // binding into a live notif; the bits land in the notif word (signal
+    // delivered) while the slot/chan frame still holds.
+    let (mut st, ch, _) = chan_fixture(1, 0);
+    let n = ObjId(100);
+    st.refs.insert(100, 1);
+    st.notifs.insert(100, NotifState { word: 0, wait_head: None, wait_tail: None });
+    st.chan_mut(ch).bindings.insert((1, EV_PEER_CLOSED), Binding { notif: Some(n), bits: 0b100 });
+    check_endpoint_cap_dropped(&mut st, ch, ChanEnd::A);
+    assert_eq!(st.chan(ch).end_caps, [0, 1]);
+    assert_eq!(st.notifs[&100].word, 0b100, "peer-closed fired into the bound notif");
+}
+
+#[test]
+fn bind_install_rebind_unbind() {
+    // The four refcount cases on one binding, in sequence (each `check_bind`
+    // snapshots and asserts its own delta): install onto unbound, rebind to a
+    // different notif, rebind to the *same* notif (net-zero), unbind.
+    let (mut st, ch, _) = chan_fixture(1, 0);
+    let n1 = ObjId(100);
+    let n2 = ObjId(101);
+    st.refs.insert(100, 5);
+    st.refs.insert(101, 5);
+
+    // install (old None → +1 on n1).
+    check_bind(&mut st, ch, ChanEnd::A, EV_READABLE, Some(n1), 0b1);
+    assert_eq!(st.refs[&100], 6);
+
+    // rebind to a different notif (−1 n1, +1 n2).
+    check_bind(&mut st, ch, ChanEnd::A, EV_READABLE, Some(n2), 0b10);
+    assert_eq!(st.refs[&100], 5, "old notif released");
+    assert_eq!(st.refs[&101], 6, "new notif acquired");
+
+    // rebind to the same notif (−1 then +1 on n2 == net zero).
+    check_bind(&mut st, ch, ChanEnd::A, EV_READABLE, Some(n2), 0b11);
+    assert_eq!(st.refs[&101], 6, "same-notif rebind is net-zero");
+
+    // unbind (old n2 → −1, no new).
+    check_bind(&mut st, ch, ChanEnd::A, EV_READABLE, None, 0);
+    assert_eq!(st.refs[&101], 5, "unbind released the notif");
+}
+
+#[test]
+fn destroy_channel_deletes_caps_and_releases_bindings() {
+    // depth-1 channel with a queued cap in each ring (count = 1 keeps index 0
+    // in-window, so the non-empty caps satisfy chan_wf) and two event bindings to
+    // live notifs. Teardown deletes every ring cap and releases each binding ref.
+    let (mut st, ch, _) = chan_fixture(1, 0);
+    st.chan_mut(ch).count = [1, 1];
+    let c0 = st.chan(ch).ring_cap[&(0, 0, 0)];
+    let c1 = st.chan(ch).ring_cap[&(1, 0, 0)];
+    st.slots[c0.0 as usize] = detached(frame_cap(1));
+    st.slots[c1.0 as usize] = detached(frame_cap(2));
+    let n1 = ObjId(100);
+    let n2 = ObjId(101);
+    st.refs.insert(100, 3);
+    st.refs.insert(101, 3);
+    st.chan_mut(ch).bindings.insert((0, EV_PEER_CLOSED), Binding { notif: Some(n1), bits: 0b1 });
+    st.chan_mut(ch).bindings.insert((1, EV_READABLE), Binding { notif: Some(n2), bits: 0b1 });
+
+    check_destroy_channel(&mut st, ch);
+
+    assert_eq!(st.refs[&100], 2, "peer-closed binding's notif released");
+    assert_eq!(st.refs[&101], 2, "readable binding's notif released");
 }
