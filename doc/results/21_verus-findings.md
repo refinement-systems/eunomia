@@ -78,9 +78,11 @@ the aarch64 kernel cross-build.
 
 `spec fn`s (the migrated `wf`):
 
-- `cdt_wf(m)` — the **structural** CDT invariant (the executable `TypeOK`, now
-  total and ∀): `links_in_domain`, `siblings_doubly_consistent` (both
-  directions), `first_child_parent_agree`, `empty_slots_detached`.
+- `cdt_wf(m)` — the **structural** CDT invariant (the structural half of the TLA
+  `TypeOK`, total and ∀; acyclicity is layered on as `cspace_wf` in §9):
+  `links_in_domain`, `siblings_doubly_consistent` (both directions),
+  `first_child_parent_agree` (+ its converse `head_is_first_child`),
+  `empty_slots_detached`.
 - `slot_refs(m, obj)` — the refcount **census**: the count of slots designating
   `obj` (`m.dom().filter(|k| cap_obj(m[k].cap) == Some(obj)).len()`).
 
@@ -242,3 +244,85 @@ Acknowledged-and-deferred (documented, not fixed this increment): full acyclic
 `Store` contract rather than as a `derive` precondition; and a host-test guard
 that `KernelStore`'s slot/refcount storage is disjoint (the trusted-layout
 assumption the abstract contract rests on, §5).
+
+---
+
+## 9. Phase 2b — acyclicity + the revoke-walk termination
+
+A second increment (PR #2, stacked on the phase-2 PR) lands the **termination**
+headline the plan promised over Kani's `debug_assert`.
+
+**Acyclicity.** `acyclic(m) = exists r. valid_prank(m, r)` — an existential
+parent-rank witness, where a strict decrease parent→child makes the parent
+relation well-founded (no cycle; the adversarial review confirmed in Verus that
+2-cycles, 3-cycles, and self-cycles are all provably non-acyclic). The rank is
+**ghost-only**, so it needs no home in the abstract `Store`; a proof that needs
+termination *chooses* a witness. `cspace_wf = cdt_wf && acyclic` is the invariant
+the recursive ops require. `count_nonempty` is the live-slot measure.
+
+**Proven (no assumptions):** `descend_to_leaf` — the inner descent of `revoke`
+terminates `decreases prank[leaf]`: each `first_child` step lands on a node whose
+parent-rank is strictly lower (acyclicity), and returns a true non-empty leaf.
+The acyclicity witness is *used*, proven unbounded for all tree shapes.
+
+**Proven against an assumed contract:** `revoke` terminates
+`decreases count_nonempty` and preserves `cspace_wf` — each iteration descends to
+a live leaf and `delete`s it, strictly lowering the live-slot count.
+
+**The trusted boundary, made explicit:** `delete` is `#[verifier::external_body]`
+with a contract (`cspace_wf` preserved, domain preserved, the slot emptied, live
+count strictly drops). Its body is the real teardown whose last-ref path recurses
+across objects (`destroy_cspace` → `delete`) — the seL4-zombie measure that needs
+the channel/notification/thread destructors ported (plan phases 3–5) before its
+body can be verified. The adversarial review **stress-tested this assumed
+contract against the real body** (array-backed store; hand-built non-leaf,
+middle-sibling, foreign-child, self-resident, cspace-in-cspace, refcount>1 shapes
++ a 400-trial randomized sweep, 96 of which drove cross-object teardown) — all
+five ensures held every time, so the contract is honest, not a hollow assumption.
+
+### Key design discovery (why the structural ops are still deferred)
+
+Acyclicity is easy to **use** (choose a witness, `decreases`) but hard to
+**construct** (re-exhibit a witness after a mutation) — and construction is what
+`cdt_insert_child`/`derive`/`slot_move`/`cdt_unlink` would need to *preserve*
+`acyclic`. The blocker: the structural `cdt_wf` does **not** pin parent↔child-list
+reachability — a node can name a parent while being absent from that parent's
+child list (a non-head sibling), so "`first_child` is `None`" does **not** imply
+"no node has this as parent." Without that, the `insert_child` acyclicity witness
+(give the fresh leaf the lowest rank) is unsound — a phantom child would need a
+still-lower rank. So the next increment is a **`cdt_wf` strengthening** (siblings
+share a parent; a node's children are exactly its first_child→next_sib chain),
+after which construction-side acyclicity preservation — and with it
+`slot_move`/`cdt_unlink` full `cspace_wf` preservation and `delete`'s body —
+become provable.
+
+### Adversarial review of this increment (findings + dispositions)
+
+Two lenses confirmed the increment **sound** (the assumed `delete` contract is
+honest per the sweep above; the acyclicity encoding genuinely excludes cycles;
+`descend_to_leaf`/`revoke` decreases are real and non-vacuous; erasure is clean —
+`delete`'s erased body is byte-identical to the original, `revoke`'s restructuring
+behaviorally equivalent, the kernel builds and calls through unchanged). The
+findings were omissions/overclaims, dispositioned:
+
+- **Fixed — revoke "the cap itself survives" (§2.2) overclaim.** The coded
+  postcondition omits `slot` non-emptiness, and the review *demonstrated* the real
+  `revoke` emptying its own root via cross-object teardown (the root is a resident
+  of a cspace whose last cap is in the root's CDT subtree) while the green
+  postcondition passed vacuously. The doc comment no longer claims cap-survival;
+  it documents the gap, which closes only with `delete`'s frame (the reachability
+  strengthening above).
+- **Documented — acyclicity doesn't compose.** `derive`/`cdt_insert_child` ensure
+  only `cdt_wf` (not `acyclic`), so no verified op hands `revoke` a provably
+  acyclic store; the precondition is discharged only at the trusted kernel
+  boundary. Closing it is the same construction-side work (blocked on the `cdt_wf`
+  strengthening).
+- **Documented — `delete`'s contract is silent on `refs_view`** (refcount effects
+  of teardown) and its `dom`/finiteness clauses rest on the production invariant
+  that destroyed-object slot memory stays addressable until untyped reset (the
+  trusted Store layout, §5). Both land with the body proof.
+- **Recommended follow-up — a CI host-test** (array-backed `Store`) that runs the
+  real `delete`/teardown and asserts the five `delete` ensures, making the
+  external_body contract continuously checked against the body (the executable
+  counterpart of the deferred proof). The review's 400-trial sweep is the interim
+  evidence; kcore still lacks a concrete host `Store`, so this is its own task.

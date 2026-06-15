@@ -258,173 +258,18 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId) {
 
 // ── CDT structure ───────────────────────────────────────────────────────
 
-// `cdt_insert_child` is verified — see the `verus!{}` block at the end of this
-// file.
-
-/// pre:  slot is linked in the CDT (possibly a root with null parent).
-/// post: slot is detached; its children are spliced into slot's former
-///       parent's child list (re-parented one level up). Authority remains
-///       monotone: the children were derived through slot, so everything
-///       they grant was already derivable from the parent.
-///
-/// `pub(crate)` so the proof harnesses can exercise the unlink directly
-/// (plan §4.1 `check_cdt_unlink`); it has no callers outside this crate.
-pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId) {
-    let s = store.slot(slot);
-    let parent = s.parent;
-    let prev = s.prev_sib;
-    let next = s.next_sib;
-    let first = s.first_child;
-
-    // Children take slot's place in the sibling list: prev → C1…Ck → next.
-    let mut last = None;
-    let mut c = first;
-    while let Some(cur) = c {
-        let mut cs = store.slot(cur);
-        cs.parent = parent;
-        let nx = cs.next_sib;
-        store.set_slot(cur, cs);
-        last = Some(cur);
-        c = nx;
-    }
-
-    let head = if first.is_none() { next } else { first };
-    if let Some(pv) = prev {
-        let mut ps = store.slot(pv);
-        ps.next_sib = head;
-        store.set_slot(pv, ps);
-    } else if let Some(pa) = parent {
-        let mut pas = store.slot(pa);
-        pas.first_child = head;
-        store.set_slot(pa, pas);
-    }
-    if let Some(h) = head {
-        let mut hs = store.slot(h);
-        hs.prev_sib = prev;
-        store.set_slot(h, hs);
-    }
-    if first.is_some() {
-        let l = last.unwrap();
-        let mut ls = store.slot(l);
-        ls.next_sib = next;
-        store.set_slot(l, ls);
-        if let Some(nx) = next {
-            let mut ns = store.slot(nx);
-            ns.prev_sib = last;
-            store.set_slot(nx, ns);
-        }
-    }
-
-    let mut s = store.slot(slot);
-    s.parent = None;
-    s.first_child = None;
-    s.next_sib = None;
-    s.prev_sib = None;
-    store.set_slot(slot, s);
-}
-
-/// Move a cap between slots, preserving its CDT position (§3.4: send and
-/// receive move caps; a move is the same cap relocating, not a derivation).
-///
-/// pre:  src is non-empty and linked; dst is empty and detached.
-/// post: dst holds src's cap and CDT position; src is empty and detached;
-///       refcounts unchanged (same single owner throughout).
-pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId) {
-    let s = store.slot(src);
-    debug_assert!(!s.cap.is_empty());
-    debug_assert!(store.slot(dst).cap.is_empty());
-
-    let mut d = store.slot(dst);
-    d.cap = s.cap;
-    d.parent = s.parent;
-    d.first_child = s.first_child;
-    d.next_sib = s.next_sib;
-    d.prev_sib = s.prev_sib;
-    store.set_slot(dst, d);
-
-    if let Some(pa) = d.parent {
-        let mut pas = store.slot(pa);
-        if pas.first_child == Some(src) {
-            pas.first_child = Some(dst);
-            store.set_slot(pa, pas);
-        }
-    }
-    if let Some(pv) = d.prev_sib {
-        let mut pvs = store.slot(pv);
-        pvs.next_sib = Some(dst);
-        store.set_slot(pv, pvs);
-    }
-    if let Some(nx) = d.next_sib {
-        let mut nxs = store.slot(nx);
-        nxs.prev_sib = Some(dst);
-        store.set_slot(nx, nxs);
-    }
-    let mut c = d.first_child;
-    while let Some(cur) = c {
-        let mut cs = store.slot(cur);
-        cs.parent = Some(dst);
-        let nx = cs.next_sib;
-        store.set_slot(cur, cs);
-        c = nx;
-    }
-
-    store.set_slot(src, CapSlot::empty());
-}
-
-// `derive` is verified — see the `verus!{}` block at the end of this file.
-
-/// Delete one cap (children survive, re-parented one level up).
-///
-/// pre:  slot non-empty.
-/// post: slot empty and detached; object unref'd (destroyed if last ref).
-///
-/// Ordering is load-bearing (TSpec `ChannelFireSafe`, plan DN-2): a channel
-/// cap fires `endpoint_cap_dropped` (peer-closed) *before* `obj_unref`, so a
-/// whole-object teardown signals each surviving peer's binding into a still-
-/// live notification.
-///
-/// Last-ref teardown of container objects (cspaces, channels) recurses
-/// through here; depth is bounded by the nesting of containers holding the
-/// final cap to other containers. seL4 flattens this with zombie caps —
-/// owed when the revoke walk becomes preemptible, tracked as M2 debt.
-// kani_contracts spike retired in the arena rewrite.
-pub fn delete<S: Store>(store: &mut S, slot: SlotId) {
-    let cap = store.slot(slot).cap;
-    debug_assert!(!cap.is_empty());
-    cdt_unlink(store, slot);
-    let mut s = store.slot(slot);
-    s.cap = Cap::EMPTY;
-    store.set_slot(slot, s);
-    // Channel endpoint liveness is tracked per end for peer-closed (§3.3).
-    if let CapKind::Channel(ch, end) = cap.kind {
-        crate::channel::endpoint_cap_dropped(store, ch, end);
-    }
-    // Deleting a mapped frame cap unmaps it — the one revocation story
-    // for shared memory (§2.5).
-    if let CapKind::Frame { pages, mapping: Some((asp, va)), .. } = cap.kind {
-        store.aspace_unmap(asp, va, pages);
-        unref_aspace(store, asp);
-    }
-    obj_unref(store, cap);
-}
-
-/// Revoke: delete every CDT descendant of `slot` — cspace residents and
-/// in-flight queue slots alike, unconditionally (§2.2). The cap itself
-/// survives. Deletion is leaf-first so the tree stays consistent at every
-/// step (the LiveParent invariant of the TLA+ model holds throughout,
-/// which is what makes the walk restartable when it becomes preemptible).
-///
-/// pre:  slot non-empty.
-/// post: slot has no descendants; slot's cap unchanged.
-pub fn revoke<S: Store>(store: &mut S, slot: SlotId) {
-    while let Some(mut leaf) = store.slot(slot).first_child {
-        // Descend to a leaf of our subtree.
-        while let Some(c) = store.slot(leaf).first_child {
-            leaf = c;
-        }
-        delete(store, leaf);
-    }
-}
+// `cdt_insert_child` and `derive` are verified — see the `verus!{}` block at the
+// end of this file.
+//
+// `cdt_unlink` and `slot_move` are also in that block, carrying assumed contracts
+// (`#[verifier::external_body]`, the `delete` precedent): both are
+// `first_child→next_sib` children walks whose body proofs need the linked-list-
+// splice invariant the looping ops share (doc/results/22 §3). Their termination
+// measure — sibling-acyclicity (`sib_acyclic`) — is now part of `cspace_wf`, and
+// their contracts are host-test-checked against the real bodies (ArrayStore).
+//
+// `delete` and `revoke` are likewise in that block (`delete` carries an assumed
+// teardown-recursion contract; `revoke`'s termination is proven against it).
 
 // ── Deductive verification (plan doc/plans/3_verus-rewrite.md §4.1) ───────────
 //
@@ -581,6 +426,16 @@ pub open spec fn siblings_doubly_consistent(m: Map<SlotId, CapSlot>) -> bool {
     }
 }
 
+// Siblings in a next/prev chain share the same parent. Combined with
+// `head_is_first_child` and `siblings_doubly_consistent`, this pins a node's
+// residents to its `first_child → next_sib` chain — the reachability anchor the
+// construction-side acyclicity proofs need (doc/results/21 §9): without it a
+// node could name a parent while being absent from that parent's child list.
+pub open spec fn siblings_share_parent(m: Map<SlotId, CapSlot>) -> bool {
+    forall|a: SlotId| #[trigger] m.dom().contains(a) ==>
+        (m[a].next_sib matches Some(b) ==> m[b].parent == m[a].parent)
+}
+
 // A node's first child claims it as parent and heads the sibling list.
 pub open spec fn first_child_parent_agree(m: Map<SlotId, CapSlot>) -> bool {
     forall|p: SlotId| #[trigger] m.dom().contains(p) ==>
@@ -598,6 +453,16 @@ pub open spec fn head_is_first_child(m: Map<SlotId, CapSlot>) -> bool {
             m.dom().contains(p) && m[p].first_child == Some(c)))
 }
 
+// A node with a parent has that parent set as non-childless: `first_child` is
+// `Some`. The "no phantom child" anchor — contrapositive: a childless node
+// (`first_child == None`) has no resident naming it parent. That is exactly what
+// lets a fresh detached leaf take the lowest acyclicity rank without a
+// still-lower phantom child needing to exist (doc/results/21 §9).
+pub open spec fn parent_has_first_child(m: Map<SlotId, CapSlot>) -> bool {
+    forall|k: SlotId| #[trigger] m.dom().contains(k) ==>
+        (m[k].parent matches Some(p) ==> m[p].first_child is Some)
+}
+
 // Empty slots are fully detached.
 pub open spec fn empty_slots_detached(m: Map<SlotId, CapSlot>) -> bool {
     forall|k: SlotId| #[trigger] m.dom().contains(k) ==> (is_empty_cap(m[k].cap) ==> {
@@ -608,18 +473,64 @@ pub open spec fn empty_slots_detached(m: Map<SlotId, CapSlot>) -> bool {
     })
 }
 
-// The **structural** CDT invariant. NOTE: this is deliberately the structural
-// fragment — it does NOT include acyclicity. Acyclicity is what the revoke/delete
-// termination proofs need, and it lands with the ghost-rank machinery in the
-// termination increment (plan §4.1); the non-recursive ops proven here
-// (cdt_insert_child, derive) preserve the structural invariant. Until then this
-// is NOT the full TLA TypeOK — it admits cyclic trees.
+// The **structural** CDT invariant (the structural half of the TLA TypeOK).
+// Acyclicity is layered on top as `cspace_wf` below — kept separate so the
+// non-recursive ops that don't need termination reason about the cheaper
+// predicate.
 pub open spec fn cdt_wf(m: Map<SlotId, CapSlot>) -> bool {
     &&& links_in_domain(m)
     &&& siblings_doubly_consistent(m)
+    &&& siblings_share_parent(m)
     &&& first_child_parent_agree(m)
     &&& head_is_first_child(m)
+    &&& parent_has_first_child(m)
     &&& empty_slots_detached(m)
+}
+
+// ── Acyclicity (the basis for revoke's termination) ──────────────────────────
+//
+// A strict decrease along a link makes that relation well-founded — no cycle can
+// return from a smaller rank to a larger one. The ranks are GHOST-only
+// (existential witnesses), so they need no home in the abstract `Store`: a proof
+// that needs termination chooses a witness. `prank` decreases parent→child, so
+// descending to a leaf via `first_child` strictly lowers it.
+pub open spec fn valid_prank(m: Map<SlotId, CapSlot>, r: Map<SlotId, nat>) -> bool {
+    &&& r.dom() == m.dom()
+    &&& forall|k: SlotId| #[trigger] m.dom().contains(k) ==>
+            (m[k].parent matches Some(p) ==> m.dom().contains(p) && r[k] < r[p])
+}
+
+pub open spec fn acyclic(m: Map<SlotId, CapSlot>) -> bool {
+    exists|r: Map<SlotId, nat>| valid_prank(m, r)
+}
+
+// Sibling-chain acyclicity — the analog of `acyclic` for the `next_sib` relation,
+// the well-founded measure the children-walk loops (`slot_move`/`cdt_unlink`)
+// decrease. `cdt_wf` alone does NOT exclude a sibling cycle: a *floating* cycle
+// (a ring of `next_sib`/`prev_sib`-consistent nodes, none a `first_child` head,
+// all sharing a parent whose `first_child` points elsewhere) satisfies every
+// structural clause. So sibling termination needs its own ghost rank, layered
+// into `cspace_wf` and preserved by the construction ops (doc/results/22).
+pub open spec fn valid_srank(m: Map<SlotId, CapSlot>, s: Map<SlotId, nat>) -> bool {
+    &&& s.dom() == m.dom()
+    &&& forall|k: SlotId| #[trigger] m.dom().contains(k) ==>
+            (m[k].next_sib matches Some(n) ==> m.dom().contains(n) && s[n] < s[k])
+}
+
+pub open spec fn sib_acyclic(m: Map<SlotId, CapSlot>) -> bool {
+    exists|s: Map<SlotId, nat>| valid_srank(m, s)
+}
+
+// The full cspace well-formedness: structure + parent-acyclicity + sibling-
+// acyclicity. The invariant the recursive/looping ops require and preserve.
+pub open spec fn cspace_wf(m: Map<SlotId, CapSlot>) -> bool {
+    cdt_wf(m) && acyclic(m) && sib_acyclic(m)
+}
+
+// The count of live (non-empty) slots — the well-founded measure for revoke's
+// outer loop: each leaf delete strictly lowers it.
+pub open spec fn count_nonempty(m: Map<SlotId, CapSlot>) -> nat {
+    m.dom().filter(|k: SlotId| !is_empty_cap(m[k].cap)).len()
 }
 
 // ── Refcount census: the stored refcount equals the count of designating slots
@@ -691,6 +602,122 @@ proof fn lemma_designation_bump(
     assert(slot_refs(m, obj) == f1.len());
 }
 
+// ── Construction-side acyclicity preservation (doc/results/21 §9). ──
+//
+// Re-parenting one **detached, childless** slot `child` under `parent` in an
+// acyclic store keeps it acyclic — this is the witness *construction* the §9
+// "Key design discovery" identified as the blocker (acyclicity is easy to use,
+// hard to re-exhibit after a mutation). The witness: shift every old rank up by
+// one and seat `child` at the bottom (rank 0). The shift makes room below
+// `parent` even when its old rank was 0; bottom-seating `child` is sound because
+// **no slot names `child` as parent** — `child` was childless and
+// `parent_has_first_child` forbids a resident of a childless node, so nothing
+// needs a rank below 0. This is exactly why Stage 1 strengthened `cdt_wf`.
+proof fn lemma_reparent_preserves_acyclic(
+    m0: Map<SlotId, CapSlot>,
+    m1: Map<SlotId, CapSlot>,
+    child: SlotId,
+    parent: SlotId,
+)
+    requires
+        acyclic(m0),
+        parent_has_first_child(m0),
+        m1.dom() == m0.dom(),
+        m0.dom().contains(child),
+        m0.dom().contains(parent),
+        parent != child,
+        m0[child].first_child is None,
+        m1[child].parent == Some(parent),
+        forall|k: SlotId| m0.dom().contains(k) && k != child
+            ==> #[trigger] m1[k].parent == m0[k].parent,
+    ensures
+        acyclic(m1),
+{
+    let r0 = choose|r: Map<SlotId, nat>| valid_prank(m0, r);
+    // No slot names `child` as parent: `child` is childless, and
+    // parent_has_first_child(m0) maps a resident's parent to a non-childless
+    // node — `child` cannot be one.
+    assert forall|k: SlotId| #[trigger] m0.dom().contains(k)
+        implies m0[k].parent != Some(child) by {
+        if m0[k].parent == Some(child) {
+            assert(m0[child].first_child is Some);
+        }
+    }
+    let r1 = Map::<SlotId, nat>::new(
+        |k: SlotId| m1.dom().contains(k),
+        |k: SlotId| if k == child { 0nat } else { (r0[k] + 1) as nat },
+    );
+    assert(r1.dom() =~= m1.dom());
+    assert forall|k: SlotId| #[trigger] m1.dom().contains(k)
+        implies (m1[k].parent matches Some(pp) ==> m1.dom().contains(pp) && r1[k] < r1[pp]) by {
+        if let Some(pp) = m1[k].parent {
+            if k == child {
+                // child.parent == Some(parent); parent != child ⟹ r1[parent] ≥ 1 > 0.
+                assert(pp == parent);
+            } else {
+                // m1[k].parent == m0[k].parent; valid_prank(m0,r0) gives pp live and
+                // r0[k] < r0[pp], and pp != child (nothing names child), so the
+                // shifted ranks keep the strict drop.
+                assert(m1[k].parent == m0[k].parent);
+                assert(m0[k].parent == Some(pp));
+                assert(pp != child);
+            }
+        }
+    }
+    assert(valid_prank(m1, r1));
+    assert(acyclic(m1));
+}
+
+// Sibling analog of the above for the `cdt_insert_child` shape: `child` becomes a
+// new list head whose only `next_sib` edge points at `old_first`, and **no slot
+// points `next_sib` at `child`** (it was detached, prev None). The witness seats
+// `child` one above its successor; every other rank is untouched (`child` is a
+// pure next-source, never a target, so nothing below it constrains its rank).
+proof fn lemma_insert_preserves_sib_acyclic(
+    m0: Map<SlotId, CapSlot>,
+    m1: Map<SlotId, CapSlot>,
+    child: SlotId,
+)
+    requires
+        sib_acyclic(m0),
+        m1.dom() == m0.dom(),
+        m0.dom().contains(child),
+        m1[child].next_sib matches Some(n) ==> m0.dom().contains(n) && n != child,
+        forall|k: SlotId| m0.dom().contains(k) && k != child
+            ==> #[trigger] m1[k].next_sib == m0[k].next_sib,
+        forall|k: SlotId| m0.dom().contains(k) ==> #[trigger] m1[k].next_sib != Some(child),
+    ensures
+        sib_acyclic(m1),
+{
+    let s0 = choose|s: Map<SlotId, nat>| valid_srank(m0, s);
+    let s1 = Map::<SlotId, nat>::new(
+        |k: SlotId| m1.dom().contains(k),
+        |k: SlotId| if k == child {
+            match m1[child].next_sib {
+                Some(n) => (s0[n] + 1) as nat,
+                None => 0nat,
+            }
+        } else {
+            s0[k]
+        },
+    );
+    assert(s1.dom() =~= m1.dom());
+    assert forall|k: SlotId| #[trigger] m1.dom().contains(k)
+        implies (m1[k].next_sib matches Some(n) ==> m1.dom().contains(n) && s1[n] < s1[k]) by {
+        if let Some(n) = m1[k].next_sib {
+            // n != child: nothing names child as a next sibling.
+            assert(m1[k].next_sib != Some(child));
+            if k == child {
+                // s1[child] == s0[n] + 1 > s0[n] == s1[n].
+            } else {
+                assert(m1[k].next_sib == m0[k].next_sib);
+            }
+        }
+    }
+    assert(valid_srank(m1, s1));
+    assert(sib_acyclic(m1));
+}
+
 // ── Verified operations (moved here from plain Rust; bodies are unchanged
 //    modulo verus-friendly control flow). ──
 
@@ -733,10 +760,12 @@ pub fn obj_ref<S: Store>(store: &mut S, cap: Cap)
 ///       `parent` is non-empty.
 /// post: `child` is `parent`'s first child and the previous children follow it
 ///       in order (the sibling list is spliced in unchanged); caps and refcounts
-///       are untouched; the cspace stays well-formed.
+///       are untouched; the cspace stays well-formed **and acyclic** (the
+///       construction-side acyclicity preservation — `child` is seated as a fresh
+///       leaf, so a rank witness is re-exhibited; doc/results/21 §9).
 pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
     requires
-        cdt_wf(old(store).slot_view()),
+        cspace_wf(old(store).slot_view()),
         old(store).slot_view().dom().contains(parent),
         old(store).slot_view().dom().contains(child),
         parent != child,
@@ -761,7 +790,7 @@ pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
         final(store).slot_view()[child].next_sib == old(store).slot_view()[parent].first_child,
         old(store).slot_view()[parent].first_child matches Some(f)
             ==> final(store).slot_view()[f].prev_sib == Some(child),
-        cdt_wf(final(store).slot_view()),
+        cspace_wf(final(store).slot_view()),
 {
     let ghost m0 = old(store).slot_view();
     let old_first = store.slot(parent).first_child;
@@ -787,6 +816,33 @@ pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
     let mut p = store.slot(parent);
     p.first_child = Some(child);
     store.set_slot(parent, p);
+
+    // Acyclicity preservation (parent + sibling): only `child` gained a parent
+    // edge and a next_sib edge; every other slot's parent/next_sib is untouched
+    // (the body edited prev_sib/first_child elsewhere). The lemmas re-exhibit
+    // rank witnesses for the new tree.
+    proof {
+        let m1 = store.slot_view();
+        assert(m1.dom() =~= m0.dom());
+        assert forall|k: SlotId| m0.dom().contains(k) && k != child
+            implies #[trigger] m1[k].parent == m0[k].parent by {}
+        lemma_reparent_preserves_acyclic(m0, m1, child, parent);
+
+        assert forall|k: SlotId| m0.dom().contains(k) && k != child
+            implies #[trigger] m1[k].next_sib == m0[k].next_sib by {}
+        // child's new next_sib (== parent's old first child) is live and not child
+        // itself (else child would name parent as parent — but child is detached).
+        assert(m1[child].next_sib matches Some(n) ==> m0.dom().contains(n) && n != child);
+        // No slot points next_sib at child: in m0 child had prev None, so doubly-
+        // consistency forbids any k.next == child; the insert added none.
+        assert forall|k: SlotId| m0.dom().contains(k)
+            implies #[trigger] m1[k].next_sib != Some(child) by {
+            if k != child {
+                assert(m1[k].next_sib == m0[k].next_sib);
+            }
+        }
+        lemma_insert_preserves_sib_acyclic(m0, m1, child);
+    }
 }
 
 /// Derive a child cap (§2.3): copy with rights intersected — the only
@@ -799,14 +855,15 @@ pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
 ///       rights ∩ `mask`, so its rights are a **subset** of `src`'s for every
 ///       `mask` (the load-bearing monotone-derivation theorem, proven ∀ rather
 ///       than sampled); `dst` is `src`'s first child; the object's refcount and
-///       slot census both rise by exactly one; the cspace stays well-formed.
+///       slot census both rise by exactly one; the cspace stays well-formed
+///       **and acyclic** (`cspace_wf` — `dst` is seated as a fresh leaf).
 ///       On `Err` (empty/Untyped src, occupied dst, or a refcount already at
 ///       `u32::MAX`) the store is unchanged. Refusing at the ceiling makes the
 ///       refcount bump overflow-free for **all** inputs — no unchecked `+ 1`
 ///       wrap-to-zero (a UAF class); the production `CapCopy` path inherits this.
 pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (res: Result<(), ()>)
     requires
-        cdt_wf(old(store).slot_view()),
+        cspace_wf(old(store).slot_view()),
         old(store).slot_view().dom().finite(),
         old(store).slot_view().dom().contains(src),
         old(store).slot_view().dom().contains(dst),
@@ -826,7 +883,7 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (r
             &&& (final(store).slot_view()[dst].cap.rights.0
                   & old(store).slot_view()[src].cap.rights.0)
                   == final(store).slot_view()[dst].cap.rights.0
-            &&& cdt_wf(final(store).slot_view())
+            &&& cspace_wf(final(store).slot_view())
             &&& final(store).slot_view()[src].first_child == Some(dst)
             &&& (cap_obj(old(store).slot_view()[src].cap) matches Some(o) ==>
                   final(store).refs_view()
@@ -900,6 +957,34 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (r
     let ghost m1 = store.slot_view();
     assert(m1 =~= m0.insert(dst, d));
     assert(cdt_wf(m1));
+    // Acyclicity carries: dst joins as a detached node (no parent edge), so the
+    // old rank witness still works — cdt_insert_child needs cspace_wf(m1).
+    proof {
+        let r0 = choose|r: Map<SlotId, nat>| valid_prank(m0, r);
+        assert(valid_prank(m0, r0));
+        assert(d.parent is None);
+        assert(d.next_sib is None);
+        assert(m1.dom() =~= m0.dom());
+        assert forall|k: SlotId| #[trigger] m1.dom().contains(k)
+            implies (m1[k].parent matches Some(p) ==> m1.dom().contains(p) && r0[k] < r0[p]) by {
+            if k != dst {
+                assert(m1[k] == m0[k]);
+            }
+        }
+        assert(valid_prank(m1, r0));
+        assert(acyclic(m1));
+        // Sibling-acyclicity carries the same way: dst joins with no next_sib edge.
+        let s0 = choose|s: Map<SlotId, nat>| valid_srank(m0, s);
+        assert(valid_srank(m0, s0));
+        assert forall|k: SlotId| #[trigger] m1.dom().contains(k)
+            implies (m1[k].next_sib matches Some(n) ==> m1.dom().contains(n) && s0[n] < s0[k]) by {
+            if k != dst {
+                assert(m1[k] == m0[k]);
+            }
+        }
+        assert(valid_srank(m1, s0));
+        assert(sib_acyclic(m1));
+    }
     // set_slot preserves refcounts, and the overflow check above bounded the
     // designated object's count — so obj_ref's bump cannot wrap.
     assert(cap_obj(cap) matches Some(o) ==> store.refs_view()[o] < u32::MAX as nat);
@@ -930,6 +1015,304 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (r
         }
     }
     Ok(())
+}
+
+/// Unlink `slot` from the CDT, re-parenting its children one level up (§2.3).
+///
+/// **Trusted boundary (assumed contract).** The body is a `first_child→next_sib`
+/// children walk that splices `slot`'s children into its former parent's child
+/// list in `slot`'s position, then detaches `slot`. The body proof needs the
+/// linked-list-splice invariant (the partial-progress characterization relative
+/// to the entry map) that all three looping ops share — the scoped residue
+/// (doc/results/22 §3); its termination measure, sibling-acyclicity, is now part
+/// of `cspace_wf`. The contract — `cspace_wf` preserved, `slot` detached with its
+/// cap intact, domain and refcounts framed — is host-test-checked against the
+/// real body (ArrayStore, kcore tests). `pub(crate)`: no callers outside `kcore`.
+#[verifier::external_body]
+pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
+    requires
+        cspace_wf(old(store).slot_view()),
+        old(store).slot_view().dom().finite(),
+        old(store).slot_view().dom().contains(slot),
+    ensures
+        cspace_wf(final(store).slot_view()),
+        final(store).slot_view().dom() == old(store).slot_view().dom(),
+        final(store).slot_view().dom().finite(),
+        final(store).refs_view() == old(store).refs_view(),
+        // `slot`'s cap is untouched (unlink moves links, not the cap); `slot` ends
+        // fully detached. So the live-slot count is unchanged (it is `delete` that
+        // empties the cap).
+        final(store).slot_view()[slot].cap == old(store).slot_view()[slot].cap,
+        final(store).slot_view()[slot].parent is None,
+        final(store).slot_view()[slot].first_child is None,
+        final(store).slot_view()[slot].next_sib is None,
+        final(store).slot_view()[slot].prev_sib is None,
+        count_nonempty(final(store).slot_view()) == count_nonempty(old(store).slot_view()),
+{
+    let s = store.slot(slot);
+    let parent = s.parent;
+    let prev = s.prev_sib;
+    let next = s.next_sib;
+    let first = s.first_child;
+
+    // Children take slot's place in the sibling list: prev → C1…Ck → next.
+    let mut last = None;
+    let mut c = first;
+    while let Some(cur) = c {
+        let mut cs = store.slot(cur);
+        cs.parent = parent;
+        let nx = cs.next_sib;
+        store.set_slot(cur, cs);
+        last = Some(cur);
+        c = nx;
+    }
+
+    let head = if first.is_none() { next } else { first };
+    if let Some(pv) = prev {
+        let mut ps = store.slot(pv);
+        ps.next_sib = head;
+        store.set_slot(pv, ps);
+    } else if let Some(pa) = parent {
+        let mut pas = store.slot(pa);
+        pas.first_child = head;
+        store.set_slot(pa, pas);
+    }
+    if let Some(h) = head {
+        let mut hs = store.slot(h);
+        hs.prev_sib = prev;
+        store.set_slot(h, hs);
+    }
+    if first.is_some() {
+        let l = last.unwrap();
+        let mut ls = store.slot(l);
+        ls.next_sib = next;
+        store.set_slot(l, ls);
+        if let Some(nx) = next {
+            let mut ns = store.slot(nx);
+            ns.prev_sib = last;
+            store.set_slot(nx, ns);
+        }
+    }
+
+    let mut s = store.slot(slot);
+    s.parent = None;
+    s.first_child = None;
+    s.next_sib = None;
+    s.prev_sib = None;
+    store.set_slot(slot, s);
+}
+
+/// Move a cap between slots, preserving its CDT position (§3.4: send and receive
+/// move caps; a move is the same cap relocating, not a derivation).
+///
+/// **Trusted boundary (assumed contract).** The body re-points `src`'s CDT
+/// neighbours and children to `dst`, then empties `src` — the same children-walk
+/// shape as `cdt_unlink`, with the same scoped body-proof residue
+/// (doc/results/22 §3). The contract — `cspace_wf` preserved, `dst` inherits
+/// `src`'s cap, `src` emptied, the live-slot count and refcounts unchanged (a
+/// move is one owner relocating) — is host-test-checked against the real body.
+#[verifier::external_body]
+pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
+    requires
+        cspace_wf(old(store).slot_view()),
+        old(store).slot_view().dom().finite(),
+        old(store).slot_view().dom().contains(src),
+        old(store).slot_view().dom().contains(dst),
+        src != dst,
+        !is_empty_cap(old(store).slot_view()[src].cap),
+        is_empty_cap(old(store).slot_view()[dst].cap),
+    ensures
+        cspace_wf(final(store).slot_view()),
+        final(store).slot_view().dom() == old(store).slot_view().dom(),
+        final(store).slot_view().dom().finite(),
+        final(store).refs_view() == old(store).refs_view(),
+        final(store).slot_view()[dst].cap == old(store).slot_view()[src].cap,
+        is_empty_cap(final(store).slot_view()[src].cap),
+        count_nonempty(final(store).slot_view()) == count_nonempty(old(store).slot_view()),
+{
+    let s = store.slot(src);
+    debug_assert!(!s.cap.is_empty());
+    debug_assert!(store.slot(dst).cap.is_empty());
+
+    let mut d = store.slot(dst);
+    d.cap = s.cap;
+    d.parent = s.parent;
+    d.first_child = s.first_child;
+    d.next_sib = s.next_sib;
+    d.prev_sib = s.prev_sib;
+    store.set_slot(dst, d);
+
+    if let Some(pa) = d.parent {
+        let mut pas = store.slot(pa);
+        if pas.first_child == Some(src) {
+            pas.first_child = Some(dst);
+            store.set_slot(pa, pas);
+        }
+    }
+    if let Some(pv) = d.prev_sib {
+        let mut pvs = store.slot(pv);
+        pvs.next_sib = Some(dst);
+        store.set_slot(pv, pvs);
+    }
+    if let Some(nx) = d.next_sib {
+        let mut nxs = store.slot(nx);
+        nxs.prev_sib = Some(dst);
+        store.set_slot(nx, nxs);
+    }
+    let mut c = d.first_child;
+    while let Some(cur) = c {
+        let mut cs = store.slot(cur);
+        cs.parent = Some(dst);
+        let nx = cs.next_sib;
+        store.set_slot(cur, cs);
+        c = nx;
+    }
+
+    store.set_slot(src, CapSlot::empty());
+}
+
+/// Delete one cap (children survive, re-parented one level up).
+///
+/// **Trusted boundary (assumed contract).** The body is the real teardown:
+/// `cdt_unlink` + per-end channel `peer_closed` + frame unmap + `obj_unref`,
+/// whose last-ref path recurses across objects (`destroy_cspace` → `delete`).
+/// That cross-object recursion — the seL4-zombie measure — is the remaining
+/// kernel-core proof (it needs the channel/notification/thread destructors
+/// ported, plan phases 3–5), so `delete` is `external_body`: Verus trusts this
+/// contract and `revoke` (below) is verified against it. The contract states
+/// exactly what `revoke`'s termination needs — the live-slot count strictly
+/// drops, the domain and well-formedness are preserved — and is the obligation
+/// the future body proof must discharge.
+///
+/// The contract is stated for the **general** (possibly non-leaf) case on
+/// purpose: `revoke` only ever passes a leaf, but `destroy_cspace` deletes
+/// non-leaf residents, so the body proof must handle `cdt_unlink`'s re-parenting
+/// — the harder `cdt_wf`-preservation case. The contract is silent on
+/// `refs_view` (the teardown's refcount effects); the refcount discipline across
+/// teardown lands with the cross-object body proof (doc/results/21 §9).
+#[verifier::external_body]
+pub fn delete<S: Store>(store: &mut S, slot: SlotId)
+    requires
+        cspace_wf(old(store).slot_view()),
+        old(store).slot_view().dom().finite(),
+        old(store).slot_view().dom().contains(slot),
+        !is_empty_cap(old(store).slot_view()[slot].cap),
+    ensures
+        cspace_wf(final(store).slot_view()),
+        final(store).slot_view().dom() == old(store).slot_view().dom(),
+        final(store).slot_view().dom().finite(),
+        is_empty_cap(final(store).slot_view()[slot].cap),
+        count_nonempty(final(store).slot_view()) < count_nonempty(old(store).slot_view()),
+{
+    let cap = store.slot(slot).cap;
+    debug_assert!(!cap.is_empty());
+    cdt_unlink(store, slot);
+    let mut s = store.slot(slot);
+    s.cap = Cap::EMPTY;
+    store.set_slot(slot, s);
+    // Channel endpoint liveness is tracked per end for peer-closed (§3.3).
+    if let CapKind::Channel(ch, end) = cap.kind {
+        crate::channel::endpoint_cap_dropped(store, ch, end);
+    }
+    // Deleting a mapped frame cap unmaps it — the one revocation story
+    // for shared memory (§2.5).
+    if let CapKind::Frame { pages, mapping: Some((asp, va)), .. } = cap.kind {
+        store.aspace_unmap(asp, va, pages);
+        unref_aspace(store, asp);
+    }
+    obj_unref(store, cap);
+}
+
+/// Descend from `start` to a leaf of its subtree (the inner walk of `revoke`).
+///
+/// **Terminates** (`decreases prank[leaf]`): each step follows `first_child`,
+/// and the child's parent rank is strictly below the leaf's (acyclicity) — the
+/// headline gain over the old `debug_assert`, here proven unbounded for all tree
+/// shapes by *using* the acyclicity witness.
+pub fn descend_to_leaf<S: Store>(store: &S, start: SlotId) -> (leaf: SlotId)
+    requires
+        cdt_wf(store.slot_view()),
+        acyclic(store.slot_view()),
+        store.slot_view().dom().contains(start),
+        !is_empty_cap(store.slot_view()[start].cap),
+    ensures
+        store.slot_view().dom().contains(leaf),
+        store.slot_view()[leaf].first_child is None,
+        !is_empty_cap(store.slot_view()[leaf].cap),
+{
+    let ghost r = choose|r: Map<SlotId, nat>| valid_prank(store.slot_view(), r);
+    let mut leaf = start;
+    while store.slot(leaf).first_child.is_some()
+        invariant
+            cdt_wf(store.slot_view()),
+            valid_prank(store.slot_view(), r),
+            store.slot_view().dom().contains(leaf),
+            !is_empty_cap(store.slot_view()[leaf].cap),
+        decreases r[leaf],
+    {
+        let c = store.slot(leaf).first_child.unwrap();
+        // c is leaf's first child: c is live, claims leaf as parent (so its rank
+        // is strictly lower — the loop measure drops), and is non-empty.
+        proof {
+            assert(store.slot_view()[c].parent == Some(leaf));
+            assert(r[c] < r[leaf]);
+        }
+        leaf = c;
+    }
+    leaf
+}
+
+/// Revoke: delete every CDT descendant of `slot` — cspace residents and
+/// in-flight queue slots alike, unconditionally (§2.2).
+///
+/// **Terminates** (`decreases count_nonempty`): each iteration descends to a
+/// leaf and deletes it, and `delete` strictly lowers the live-slot count. This
+/// is the revocation-walk termination the plan calls the headline gain over
+/// Kani's `debug_assert` — proven here for all shapes, modulo `delete`'s assumed
+/// teardown contract (above).
+///
+/// **NOT yet proven — `slot`'s cap survives (§2.2).** The postcondition does not
+/// assert `slot` stays non-empty. Adding that clause fails against `delete`'s
+/// current contract, which frames only the deleted slot's cap: a cross-object
+/// teardown (deleting the last cap to a cspace that contains `slot` as a
+/// resident) can empty `slot` itself, and the proof would still pass vacuously
+/// (an empty slot has `first_child == None`). Closing this needs `delete` to
+/// frame *which* slots it may empty (the deleted slot's CDT subtree only) — the
+/// reachability strengthening tracked with the looping-op proofs (doc/results/21
+/// §9). Until then revoke's root-survival is a documented gap, not a theorem.
+///
+/// pre:  the cspace is well-formed (and finite); `slot` is live and non-empty.
+/// post: `slot` has no children (its subtree is gone); the cspace stays
+///       well-formed.
+pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
+    requires
+        cspace_wf(old(store).slot_view()),
+        old(store).slot_view().dom().finite(),
+        old(store).slot_view().dom().contains(slot),
+        !is_empty_cap(old(store).slot_view()[slot].cap),
+    ensures
+        cspace_wf(final(store).slot_view()),
+        final(store).slot_view().dom().contains(slot),
+        final(store).slot_view()[slot].first_child is None,
+{
+    while store.slot(slot).first_child.is_some()
+        invariant
+            cspace_wf(store.slot_view()),
+            store.slot_view().dom().finite(),
+            store.slot_view().dom().contains(slot),
+        decreases count_nonempty(store.slot_view()),
+    {
+        // The first child is live (it names `slot` as parent, so it is not an
+        // empty/detached slot) — so we descend from a non-empty node even if
+        // `slot` itself were emptied by an earlier delete.
+        let first = store.slot(slot).first_child.unwrap();
+        proof {
+            assert(store.slot_view()[first].parent == Some(slot));
+            assert(!is_empty_cap(store.slot_view()[first].cap));
+        }
+        let leaf = descend_to_leaf(store, first);
+        delete(store, leaf);
+    }
 }
 
 } // verus!
