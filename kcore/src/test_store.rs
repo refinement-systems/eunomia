@@ -17,6 +17,7 @@
 //! plain-Rust re-expression. Shapes are built with the *verified* `derive`, so
 //! the generator cannot manufacture a non-`cspace_wf` start state.
 
+use crate::channel::{recv, send, ChanError, MSG_PAYLOAD};
 use crate::cspace::{
     cdt_unlink, delete, derive, revoke, slot_move, Cap, CapKind, CapSlot, ChanEnd, Rights,
 };
@@ -25,7 +26,7 @@ use crate::notification::signal;
 use crate::untyped::{reset, retype_check, retype_install, ObjType, RetypeError};
 use crate::store::{Binding, Store};
 use crate::thread::{Report, ThreadState};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 // ── The concrete store ────────────────────────────────────────────────────
 //
@@ -393,7 +394,7 @@ fn chan_wf_exec(st: &ArrayStore, ch: ObjId) -> bool {
         Some(c) => c,
         None => return false,
     };
-    if cs.depth == 0 {
+    if cs.depth == 0 || cs.depth > 0x8000_0000 {
         return false;
     }
     for r in 0..2 {
@@ -417,6 +418,18 @@ fn chan_wf_exec(st: &ArrayStore, ch: ObjId) -> bool {
             }
             if !cs.msg_len.contains_key(&(ring, i)) {
                 return false; // msg_len domain incomplete
+            }
+        }
+    }
+    // ring-cap injectivity (the §3d clause): distinct positions, distinct handles.
+    let mut seen: BTreeMap<u64, (usize, u32, usize)> = BTreeMap::new();
+    for ring in 0..2usize {
+        for i in 0..cs.depth {
+            for c in 0..4usize {
+                let sid = cs.ring_cap[&(ring, i, c)];
+                if seen.insert(sid.0, (ring, i, c)).is_some() {
+                    return false; // two ring positions alias one arena slot
+                }
             }
         }
     }
@@ -1162,6 +1175,13 @@ fn chan_wf_exec_has_teeth() {
     st.chans.get_mut(&7).unwrap().ring_cap.insert((1, 0, 0), SlotId(999));
     assert!(!chan_wf_exec(&st, ch), "ring cap handle outside the arena must be rejected");
 
+    // Injectivity (§3d): (1,0,1) aliases (1,0,0)'s slot 5. Both ring-1 caps are
+    // out-of-window and slot 5 is empty, so the windowing clause is satisfied —
+    // only the injectivity clause rejects this.
+    let mut st = signal_fixture(false).0;
+    st.chans.get_mut(&7).unwrap().ring_cap.insert((1, 0, 1), SlotId(5));
+    assert!(!chan_wf_exec(&st, ch), "two ring positions aliasing one slot must be rejected");
+
     let mut st = signal_fixture(false).0;
     st.chans.get_mut(&7).unwrap().bindings.remove(&(1, 2));
     assert!(!chan_wf_exec(&st, ch), "incomplete bindings domain must be rejected");
@@ -1231,4 +1251,172 @@ fn revoke_can_empty_its_own_root_zombie() {
     // The headline: the revoked root itself was emptied by the cross-object
     // teardown — the documented gap, here a concrete witness.
     assert!(st.at(SlotId(0)).cap.is_empty(), "revoke emptied its own root (zombie)");
+}
+
+// ── Channel send/recv (plan §3d): the FIFO core, host-differential ──────────
+//
+// `send`/`recv` carry full Verus contracts (FIFO `Seq` push/pop, move totality,
+// two-pass atomicity, null-slot tolerance) — proven, not assumed. These run the
+// real bodies on `ArrayStore` and assert the observable effects, keeping the
+// `test_store` cadence and guarding against spec/body drift.
+
+// A well-formed empty channel (ObjId 7) of the given depth: the `2*depth*4` ring
+// cap slots occupy arena indices `[0, 2*depth*4)`, with `scratch` spare slots
+// after them for sender/dest caps. Both ends live (`end_caps [1,1]`) so `send`
+// never PeerCloses. Returns the store, the channel id, and the first scratch idx.
+fn chan_fixture(depth: u32, scratch: usize) -> (ArrayStore, ObjId, usize) {
+    let ring_slots = (2 * depth as usize) * 4;
+    let mut st = ArrayStore::new(ring_slots + scratch);
+    let mut ring_cap = BTreeMap::new();
+    let mut slot = 0u64;
+    for ring in 0..2usize {
+        for i in 0..depth {
+            for c in 0..4usize {
+                ring_cap.insert((ring, i, c), SlotId(slot));
+                slot += 1;
+            }
+        }
+    }
+    let mut bindings = BTreeMap::new();
+    for e in 0..2usize {
+        for v in 0..3usize {
+            bindings.insert((e, v), Binding::UNBOUND);
+        }
+    }
+    let mut msg_len = BTreeMap::new();
+    for ring in 0..2usize {
+        for i in 0..depth {
+            msg_len.insert((ring, i), 0u16);
+        }
+    }
+    st.chans.insert(
+        7,
+        ChanState { depth, end_caps: [1, 1], head: [0, 0], count: [0, 0], bindings, msg_len, ring_cap },
+    );
+    (st, ObjId(7), ring_slots)
+}
+
+#[test]
+fn send_recv_roundtrip() {
+    // depth 2; A sends two messages (the first carrying a cap), B receives both
+    // FIFO — the cap is moved out of the sender and into the receiver's dest.
+    let (mut st, ch, scratch0) = chan_fixture(2, 4);
+    assert!(chan_wf_exec(&st, ch));
+    let send_cap = SlotId(scratch0 as u64);
+    st.slots[scratch0] = detached(frame_cap(99));
+    // msg 1: len 3 + a cap in slot 0.
+    assert_eq!(send(&mut st, ch, ChanEnd::A, &[1u8, 2, 3], &[Some(send_cap), None, None, None]), Ok(()));
+    assert!(chan_wf_exec(&st, ch));
+    assert_eq!(st.chan(ch).count[0], 1, "A sends on ring 0");
+    assert!(st.at(send_cap).cap.is_empty(), "sender slot emptied (move totality)");
+    // msg 2: len 5, no caps.
+    assert_eq!(send(&mut st, ch, ChanEnd::A, &[0u8; 5], &[None; 4]), Ok(()));
+    assert_eq!(st.chan(ch).count[0], 2);
+
+    // B receives on ring 0 (1 - end_idx(B)); the head (msg 1) comes out first.
+    let dest = SlotId((scratch0 + 1) as u64);
+    let mut buf = [0u8; MSG_PAYLOAD];
+    assert_eq!(
+        recv(&mut st, ch, ChanEnd::B, &mut buf, &[Some(dest), None, None, None]),
+        Ok((3, 0b1)),
+        "FIFO head delivered first, carrying its cap (mask bit 0)"
+    );
+    assert!(!st.at(dest).cap.is_empty(), "cap delivered to the dest slot");
+    assert_eq!(st.chan(ch).count[0], 1);
+    assert!(chan_wf_exec(&st, ch));
+    // msg 2 next, in order.
+    let mut buf = [0u8; MSG_PAYLOAD];
+    assert_eq!(recv(&mut st, ch, ChanEnd::B, &mut buf, &[None; 4]), Ok((5, 0)), "second message in order");
+    assert_eq!(st.chan(ch).count[0], 0);
+}
+
+#[test]
+fn send_full_and_recv_empty() {
+    // recv on an empty ring → Empty (unchanged); fill the depth-1 ring; the next
+    // send → Full (unchanged) — the read-only guard frames.
+    let (mut st, ch, _) = chan_fixture(1, 0);
+    let chans0 = st.chans.clone();
+    let mut buf = [0u8; MSG_PAYLOAD];
+    assert_eq!(recv(&mut st, ch, ChanEnd::B, &mut buf, &[None; 4]), Err(ChanError::Empty));
+    assert!(st.chans == chans0, "recv Empty: channel unchanged");
+
+    assert_eq!(send(&mut st, ch, ChanEnd::A, &[7u8], &[None; 4]), Ok(()));
+    assert_eq!(st.chan(ch).count[0], 1);
+    let fp = fingerprint(&st);
+    let chans1 = st.chans.clone();
+    assert_eq!(send(&mut st, ch, ChanEnd::A, &[8u8], &[None; 4]), Err(ChanError::Full));
+    assert_eq!(fingerprint(&st), fp, "send Full: arena unchanged");
+    assert!(st.chans == chans1, "send Full: channel unchanged");
+}
+
+#[test]
+fn recv_nocapslot_atomic() {
+    // A sends a cap; B recvs with no dest for it → NoCapSlot, and the message
+    // stays fully queued (two-pass atomicity: pass 1 is read-only).
+    let (mut st, ch, scratch0) = chan_fixture(1, 2);
+    let send_cap = SlotId(scratch0 as u64);
+    st.slots[scratch0] = detached(frame_cap(42));
+    assert_eq!(send(&mut st, ch, ChanEnd::A, &[1u8], &[Some(send_cap), None, None, None]), Ok(()));
+    let fp = fingerprint(&st);
+    let chans = st.chans.clone();
+    let mut buf = [0u8; MSG_PAYLOAD];
+    assert_eq!(recv(&mut st, ch, ChanEnd::B, &mut buf, &[None; 4]), Err(ChanError::NoCapSlot));
+    assert_eq!(fingerprint(&st), fp, "NoCapSlot: arena unchanged");
+    assert!(st.chans == chans, "NoCapSlot: message fully queued");
+    assert_eq!(st.chan(ch).count[0], 1);
+}
+
+#[test]
+fn recv_null_slot_tolerance() {
+    // A sends a cap; revocation empties the queued ring cap in flight; B's recv
+    // delivers it as absent (mask bit clear) — never a panic (§3.4 null slots).
+    let (mut st, ch, scratch0) = chan_fixture(1, 2);
+    let send_cap = SlotId(scratch0 as u64);
+    st.slots[scratch0] = detached(frame_cap(7));
+    assert_eq!(send(&mut st, ch, ChanEnd::A, &[0u8; 3], &[Some(send_cap), None, None, None]), Ok(()));
+    // simulate a revoke emptying the queued ring cap (an in-window slot may be empty).
+    let rc = st.chan(ch).ring_cap[&(0, 0, 0)];
+    st.slots[rc.0 as usize] = CapSlot::empty();
+    assert!(chan_wf_exec(&st, ch));
+    let dest = SlotId((scratch0 + 1) as u64);
+    let mut buf = [0u8; MSG_PAYLOAD];
+    assert_eq!(
+        recv(&mut st, ch, ChanEnd::B, &mut buf, &[Some(dest), None, None, None]),
+        Ok((3, 0)),
+        "null cap delivered as absent (mask 0), no panic"
+    );
+    assert!(st.at(dest).cap.is_empty(), "dest stays empty (nothing moved)");
+    assert_eq!(st.chan(ch).count[0], 0, "still dequeued");
+}
+
+#[test]
+fn randomized_fifo_sweep() {
+    // Random send/recv on the A→B ring against a reference deque of message
+    // lengths; assert FIFO order, count tracking, and chan_wf_exec throughout —
+    // the executable counterpart of the ring_fifo Seq proof, across wraparound.
+    let mut trials = 0usize;
+    for seed in 0..120u64 {
+        let depth = 1 + (seed % 4) as u32; // 1..=4
+        let (mut st, ch, _) = chan_fixture(depth, 0);
+        let mut model: VecDeque<u16> = VecDeque::new();
+        let mut rng = seed.wrapping_mul(2654435761).wrapping_add(1);
+        for _ in 0..30 {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let do_send = (rng >> 33) & 1 == 0;
+            if do_send && model.len() < depth as usize {
+                let len = ((rng >> 3) % 200) as u16;
+                assert_eq!(send(&mut st, ch, ChanEnd::A, &vec![0u8; len as usize], &[None; 4]), Ok(()));
+                model.push_back(len);
+                trials += 1;
+            } else if !model.is_empty() {
+                let mut buf = [0u8; MSG_PAYLOAD];
+                let r = recv(&mut st, ch, ChanEnd::B, &mut buf, &[None; 4]);
+                assert_eq!(r, Ok((model.pop_front().unwrap() as usize, 0)), "FIFO head len matches model");
+                trials += 1;
+            }
+            assert!(chan_wf_exec(&st, ch), "chan_wf preserved through the sweep");
+            assert_eq!(st.chan(ch).count[0], model.len() as u32, "count tracks the model");
+        }
+    }
+    assert!(trials > 300, "sweep should exercise hundreds of ops, ran {trials}");
 }
