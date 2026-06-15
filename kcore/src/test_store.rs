@@ -28,7 +28,7 @@ use crate::id::{ObjId, SlotId};
 use crate::notification::{destroy_notif, remove_waiter, signal, wait};
 use crate::untyped::{reset, retype_check, retype_install, ObjType, RetypeError};
 use crate::store::{Binding, Store};
-use crate::thread::{Report, ThreadState};
+use crate::thread::{bind as thread_bind, report_terminal, Report, ThreadState, BIND_EXIT, BIND_FAULT};
 use std::collections::{BTreeMap, VecDeque};
 
 // ── The concrete store ────────────────────────────────────────────────────
@@ -536,6 +536,9 @@ fn cspace_cap(o: u64) -> Cap {
 fn untyped_cap(base: u64, size: u64, watermark: u64) -> Cap {
     Cap { kind: CapKind::Untyped { base, size, watermark }, rights: Rights(0xff) }
 }
+fn notif_cap(o: u64) -> Cap {
+    Cap { kind: CapKind::Notification(ObjId(o)), rights: Rights(0xff) }
+}
 
 // The exec mirror of the spec `CapKind::Untyped { base, size, watermark }`
 // projection — `Some(geometry)` iff the cap is an untyped, used both to compute
@@ -993,6 +996,121 @@ fn check_destroy_channel(st: &mut ArrayStore, ch: ObjId) {
     assert_eq!(st.refs, expect_refs, "destroy_channel: each binding's notif ref released once");
 }
 
+// Run the real `delete` on a **notification** cap and assert the §4d conditional
+// frame against the body — the mandatory executable check of `delete`'s new assumed
+// `ensures` (the `external_body`-vs-real-body discipline): the TCB/channel/timer/notif
+// views and every *other* slot's cap are untouched, and the designated `refs[n]` drops
+// by one (the part the formal contract leaves to the host test). Refs start > 1 so the
+// delete just decrements (no `destroy_notif`), isolating the frame.
+fn check_delete_notif(st: &mut ArrayStore, slot: SlotId, n: ObjId) {
+    assert!(cspace_wf_exec(st), "delete_notif pre: cspace_wf");
+    assert!(matches!(st.at(slot).cap.kind, CapKind::Notification(_)), "delete_notif pre: notif cap");
+    let (n0, c0) = (st.n(), count_nonempty_exec(st));
+    let fp = fingerprint(st);
+    let tcbs0 = st.tcbs.clone();
+    let chans0 = st.chans.clone();
+    let timers0 = st.timers.clone();
+    let head0 = st.timer_armed_head;
+    let notifs0 = st.notifs.clone();
+    let refs0 = st.refs.clone();
+
+    delete(st, slot);
+
+    // base `delete` contract
+    assert!(cspace_wf_exec(st), "delete_notif post: cspace_wf preserved");
+    assert_eq!(st.n(), n0, "delete_notif post: dom preserved");
+    assert!(st.at(slot).cap.is_empty(), "delete_notif post: target slot emptied");
+    assert!(count_nonempty_exec(st) < c0, "delete_notif post: count_nonempty drops");
+    // the §4d conditional-notification object-view frame
+    assert!(st.tcbs == tcbs0, "delete_notif: tcb_view unchanged");
+    assert!(st.chans == chans0, "delete_notif: chan_view unchanged");
+    assert!(st.timers == timers0, "delete_notif: timer_view unchanged");
+    assert!(st.timer_armed_head == head0, "delete_notif: timer_head_view unchanged");
+    assert!(st.notifs == notifs0, "delete_notif: notif_view unchanged");
+    // every *other* slot is untouched (a notif delete re-parents nothing — it is a leaf).
+    let fp_after = fingerprint(st);
+    for i in 0..st.n() {
+        if SlotId(i as u64) != slot {
+            assert!(fp_after[i] == fp[i], "delete_notif: other slot unchanged");
+        }
+    }
+    // refs: the designated notif dropped by one (host-checked, kept out of the frame).
+    let mut expect_refs = refs0.clone();
+    *expect_refs.get_mut(&n.0).unwrap() -= 1;
+    assert_eq!(st.refs, expect_refs, "delete_notif: refs[n] -= 1");
+}
+
+// Run the real `thread::bind` and assert its §4d contract against the body: `cspace_wf`
+// preserved; only `bind_bits[which]` changes in `tcb_view`; the bind slot ends holding
+// the moved cap (or empty on a `None` src) with `src` emptied; and the refs delta —
+// the displaced notification released (`-1`), the moved-in cap net-zero (a move, not a
+// copy, unlike `channel::bind`'s `+1`). The TCB analog of `check_bind`.
+fn check_thread_bind(st: &mut ArrayStore, t: ObjId, which: usize, notif_src: Option<SlotId>, bits: u64) {
+    assert!(cspace_wf_exec(st), "thread_bind pre: cspace_wf");
+    let slot = st.tcbs[&t.0].bind_slots[which];
+    let old_displaced = match st.at(slot).cap.kind {
+        CapKind::Notification(no) => Some(no),
+        _ => None,
+    };
+    let refs0 = st.refs.clone();
+    let tcbs0 = st.tcbs.clone();
+
+    thread_bind(st, t, which, notif_src, bits);
+
+    assert!(cspace_wf_exec(st), "thread_bind post: cspace_wf preserved");
+    // tcb_view: only bind_bits[which] changed.
+    let mut expect_tcbs = tcbs0.clone();
+    expect_tcbs.get_mut(&t.0).unwrap().bind_bits[which] = bits;
+    assert!(st.tcbs == expect_tcbs, "thread_bind: only bind_bits[which] changed in tcb_view");
+    // slot effect.
+    match notif_src {
+        Some(src) => {
+            assert!(!st.at(slot).cap.is_empty(), "thread_bind: moved cap now in the bind slot");
+            assert!(st.at(src).cap.is_empty(), "thread_bind: src emptied by the move");
+        }
+        None => assert!(st.at(slot).cap.is_empty(), "thread_bind: unbind leaves the bind slot empty"),
+    }
+    // refs delta: displaced notif -1; the moved cap is net-zero.
+    let mut expect_refs = refs0.clone();
+    if let Some(no) = old_displaced {
+        *expect_refs.get_mut(&no.0).unwrap() -= 1;
+    }
+    assert_eq!(st.refs, expect_refs, "thread_bind: displaced notif -1, move net-zero");
+}
+
+// A halted thread (ObjId 200) with two bind slots (1 = EXIT, 2 = FAULT). With
+// `with_binding`, slot `1+which` holds a notification cap (ObjId 100, bits 0b101) the
+// thread's death will fire; with `with_waiter`, a separate thread (ObjId 201) is
+// blocked on that notification (holding a queued ref) so the fire takes the wake path.
+fn report_terminal_fixture(which: usize, with_binding: bool, with_waiter: bool) -> (ArrayStore, ObjId) {
+    let mut st = ArrayStore::new(4);
+    let t = ObjId(200);
+    let mut tcb = TcbState {
+        state: ThreadState::Halted,
+        report: Report::Running,
+        bind_slots: [SlotId(1), SlotId(2)],
+        ..tcb_state_default()
+    };
+    if with_binding {
+        tcb.bind_bits[which] = 0b101;
+        st.slots[1 + which] = detached(notif_cap(100));
+        if with_waiter {
+            let w = ObjId(201);
+            st.tcbs.insert(
+                201,
+                TcbState { state: ThreadState::BlockedNotif, wait_notif: Some(ObjId(100)), ..tcb_state_default() },
+            );
+            st.notifs.insert(100, NotifState { word: 0, wait_head: Some(w), wait_tail: Some(w) });
+            st.refs.insert(100, 2); // the bind cap's ref + the queued waiter's ref
+        } else {
+            st.notifs.insert(100, NotifState { word: 0, wait_head: None, wait_tail: None });
+            st.refs.insert(100, 1); // the bind cap's ref
+        }
+    }
+    st.tcbs.insert(200, tcb);
+    (st, t)
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[test]
@@ -1015,6 +1133,106 @@ fn delete_non_leaf_reparents() {
         .or_else(|| (0..st.n()).map(|i| SlotId(i as u64)).find(|s| st.at(*s).first_child.is_some()))
         .expect("a non-leaf node");
     check_delete(&mut st, target);
+}
+
+#[test]
+fn delete_notif_frame() {
+    // Deleting a notification cap leaves every object view and every other slot
+    // untouched (the §4d conditional `delete` frame `thread::bind` reads off), and
+    // drops only the designated notif's refcount. Refs start at 2 so the delete just
+    // decrements (no destroy), isolating the frame.
+    let mut st = ArrayStore::new(3);
+    st.slots[0] = detached(frame_cap(0)); // an unrelated witness slot
+    st.slots[1] = detached(notif_cap(100)); // the notification cap to delete
+    st.slots[2] = detached(frame_cap(2)); // another unrelated cap
+    st.refs.insert(100, 2);
+    st.notifs.insert(100, NotifState { word: 7, wait_head: None, wait_tail: None });
+    // a second notification + a TCB + a timer, present only to witness the frame.
+    st.notifs.insert(101, NotifState { word: 0, wait_head: None, wait_tail: None });
+    st.refs.insert(101, 1);
+    st.tcbs.insert(200, tcb_state_default());
+    st.timers.insert(300, TimerState { armed: false, deadline: 0, notif: None, bits: 0, next: None });
+    check_delete_notif(&mut st, SlotId(1), ObjId(100));
+}
+
+#[test]
+fn thread_bind_install_rebind_unbind() {
+    // The TCB-binding analog of `bind_install_rebind_unbind` (channel): install onto an
+    // unbound slot (move-in, ref unchanged), rebind to a different notif (displaced
+    // notif released, new moved in), unbind (displaced notif released, slot empties).
+    let mut st = ArrayStore::new(6);
+    st.slots[0] = detached(frame_cap(0)); // witness; slots 1/2 are the bind slots (empty)
+    st.slots[3] = detached(notif_cap(100));
+    st.slots[4] = detached(notif_cap(101));
+    st.refs.insert(100, 1);
+    st.refs.insert(101, 1);
+    st.notifs.insert(100, NotifState { word: 0, wait_head: None, wait_tail: None });
+    st.notifs.insert(101, NotifState { word: 0, wait_head: None, wait_tail: None });
+    let t = ObjId(200);
+    st.tcbs.insert(200, TcbState { bind_slots: [SlotId(1), SlotId(2)], ..tcb_state_default() });
+
+    // install onto the unbound EXIT slot: move notif 100 (slot 3) into bind slot 1.
+    check_thread_bind(&mut st, t, BIND_EXIT, Some(SlotId(3)), 0b1);
+    assert_eq!(st.refs[&100], 1, "a move keeps the cap's ref (move, not copy — no +1)");
+    assert!(st.at(SlotId(3)).cap.is_empty(), "src slot emptied");
+
+    // rebind EXIT to a different notif (slot 4): old notif 100 released, 101 moved in.
+    check_thread_bind(&mut st, t, BIND_EXIT, Some(SlotId(4)), 0b10);
+    assert_eq!(st.refs[&100], 0, "displaced notif 100 released");
+    assert_eq!(st.refs[&101], 1, "new notif moved in (net-zero)");
+
+    // unbind EXIT (None src): displaced notif 101 released, the bind slot empties.
+    check_thread_bind(&mut st, t, BIND_EXIT, None, 0);
+    assert_eq!(st.refs[&101], 0, "unbind released the displaced notif");
+    assert!(st.at(SlotId(1)).cap.is_empty(), "unbind leaves the bind slot empty");
+}
+
+#[test]
+fn report_terminal_first_call_wins_and_fires() {
+    // ReportMonotone + the fire: a Running thread's first `report_terminal` records the
+    // report and fires the EXIT binding (the queued waiter is woken); a second call is
+    // an absorbing no-op.
+    let (mut st, t) = report_terminal_fixture(BIND_EXIT, true, true);
+    let w = ObjId(201);
+    report_terminal(&mut st, t, Report::Exited(42));
+    assert_eq!(st.tcbs[&t.0].report, Report::Exited(42), "first call records the report");
+    assert_eq!(st.tcbs[&w.0].state, ThreadState::Runnable, "the bound waiter was woken (binding fired)");
+    assert_eq!(st.tcbs[&w.0].retval, 0b101, "the waiter received the binding bits");
+    assert_eq!(st.refs[&100], 1, "the woken waiter's queued ref released");
+
+    let refs_before = st.refs.clone();
+    let tcbs_before = st.tcbs.clone();
+    report_terminal(&mut st, t, Report::Exited(99));
+    assert_eq!(st.tcbs[&t.0].report, Report::Exited(42), "second call no-op: report unchanged (absorbing)");
+    assert!(st.refs == refs_before && st.tcbs == tcbs_before, "second call touches nothing");
+}
+
+#[test]
+fn report_terminal_fault_arm_fires_fault_binding() {
+    // A Faulted report fires the FAULT binding (BIND_FAULT), not EXIT.
+    let (mut st, t) = report_terminal_fixture(BIND_FAULT, true, true);
+    let w = ObjId(201);
+    report_terminal(&mut st, t, Report::Faulted { cause: 0x96, far: 0xdead_0000 });
+    assert!(matches!(st.tcbs[&t.0].report, Report::Faulted { .. }), "fault recorded");
+    assert_eq!(st.tcbs[&w.0].state, ThreadState::Runnable, "the FAULT binding fired");
+}
+
+#[test]
+fn report_terminal_accumulate_no_waiter() {
+    // Firing a binding with no queued waiter accumulates the bits into the word.
+    let (mut st, t) = report_terminal_fixture(BIND_EXIT, true, false);
+    report_terminal(&mut st, t, Report::Exited(7));
+    assert_eq!(st.tcbs[&t.0].report, Report::Exited(7), "report recorded");
+    assert_eq!(st.notifs[&100].word, 0b101, "no waiter: the binding bits accumulate in the word");
+}
+
+#[test]
+fn report_terminal_firesafe_empty_slot() {
+    // FireSafe: an empty bind slot (a revoke raced the death and cleared it) ⇒ the fire
+    // is a no-op, no panic, and the report still records.
+    let (mut st, t) = report_terminal_fixture(BIND_EXIT, false, false);
+    report_terminal(&mut st, t, Report::Exited(5));
+    assert_eq!(st.tcbs[&t.0].report, Report::Exited(5), "report recorded even with an empty bind slot");
 }
 
 #[test]
