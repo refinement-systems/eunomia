@@ -56,10 +56,30 @@ pub enum ObjType {
     Untyped,
 }
 
-} // verus!
-
 impl ObjType {
-    pub fn from_u64(v: u64) -> Option<ObjType> {
+    /// Ghost model of [`from_u64`](Self::from_u64): the discriminant decode as a
+    /// total `spec fn`, so the exec decoder can be used in `requires`/`ensures`
+    /// (via `when_used_as_spec`) and the §4.6 "`from_u64` total" obligation is a
+    /// theorem. `Some` for exactly the eight valid discriminants `0..8`, `None`
+    /// otherwise — the characterization `decode` leans on for its BadObjType arm.
+    pub open spec fn spec_from_u64(v: u64) -> Option<ObjType> {
+        match v {
+            0 => Some(ObjType::CSpace),
+            1 => Some(ObjType::Thread),
+            2 => Some(ObjType::Channel),
+            3 => Some(ObjType::Notification),
+            4 => Some(ObjType::Timer),
+            5 => Some(ObjType::Frame),
+            6 => Some(ObjType::Aspace),
+            7 => Some(ObjType::Untyped),
+            _ => None,
+        }
+    }
+
+    #[verifier::when_used_as_spec(spec_from_u64)]
+    pub fn from_u64(v: u64) -> (r: Option<ObjType>)
+        ensures r == Self::spec_from_u64(v),
+    {
         Some(match v {
             0 => ObjType::CSpace,
             1 => ObjType::Thread,
@@ -73,9 +93,27 @@ impl ObjType {
         })
     }
 
+    /// `from_u64` is a left inverse of the discriminant cast: every `ObjType`
+    /// round-trips through its `u64` discriminant. The enum is field-less, so
+    /// `ty as u64` is the discriminant `0..8` and the match in `spec_from_u64`
+    /// recovers it. Stated as a `proof fn` so callers can invoke it where the
+    /// round-trip is needed (none yet — `decode` only needs the `None`-iff-`v>=8`
+    /// direction — but it pins the encode/decode pairing as a theorem).
+    pub proof fn lemma_from_u64_roundtrip(ty: ObjType)
+        ensures Self::spec_from_u64(ty as u64) == Some(ty),
+    {
+        match ty {
+            ObjType::CSpace => {}
+            ObjType::Thread => {}
+            ObjType::Channel => {}
+            ObjType::Notification => {}
+            ObjType::Timer => {}
+            ObjType::Frame => {}
+            ObjType::Aspace => {}
+            ObjType::Untyped => {}
+        }
+    }
 }
-
-verus! {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetypeError {
