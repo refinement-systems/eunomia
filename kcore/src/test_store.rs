@@ -19,6 +19,7 @@
 
 use crate::cspace::{cdt_unlink, delete, derive, revoke, slot_move, Cap, CapKind, CapSlot, Rights};
 use crate::id::{ObjId, SlotId};
+use crate::untyped::{reset, retype_check, ObjType, RetypeError};
 use crate::store::{Binding, Store};
 use crate::thread::{Report, ThreadState};
 use std::collections::BTreeMap;
@@ -340,6 +341,41 @@ fn frame_cap(base: u64) -> Cap {
 fn cspace_cap(o: u64) -> Cap {
     Cap { kind: CapKind::CSpace(ObjId(o)), rights: Rights(0xff) }
 }
+fn untyped_cap(base: u64, size: u64, watermark: u64) -> Cap {
+    Cap { kind: CapKind::Untyped { base, size, watermark }, rights: Rights(0xff) }
+}
+
+// The exec mirror of the spec `CapKind::Untyped { base, size, watermark }`
+// projection — `Some(geometry)` iff the cap is an untyped, used both to compute
+// `retype_check`'s expected `Ok` triple and to read `reset`'s watermark edit.
+fn untyped_geom(c: Cap) -> Option<(u64, u64, u64)> {
+    match c.kind {
+        CapKind::Untyped { base, size, watermark } => Some((base, size, watermark)),
+        _ => None,
+    }
+}
+
+// A Debug+PartialEq snapshot of everything the two ops can observably touch
+// (emptiness, the four CDT links, and any untyped geometry). `SlotId`s are
+// flattened to `u64` because `SlotId` is not `Debug` (so `assert_eq!` on the
+// raw handle would not compile). Used to assert the read-only / single-slot
+// frames against the real bodies.
+type SlotFp = (bool, Option<u64>, Option<u64>, Option<u64>, Option<u64>, Option<(u64, u64, u64)>);
+fn fingerprint(st: &ArrayStore) -> Vec<SlotFp> {
+    (0..st.n())
+        .map(|i| {
+            let s = st.slots[i];
+            (
+                s.cap.is_empty(),
+                s.parent.map(|x| x.0),
+                s.first_child.map(|x| x.0),
+                s.next_sib.map(|x| x.0),
+                s.prev_sib.map(|x| x.0),
+                untyped_geom(s.cap),
+            )
+        })
+        .collect()
+}
 
 // A tiny deterministic LCG — Rust tests may not use a wall clock, and a fixed
 // seed makes any failure reproducible (the fuzz-corpus discipline).
@@ -420,6 +456,57 @@ fn check_slot_move(st: &mut ArrayStore, src: SlotId, dst: SlotId) {
     assert_eq!(count_nonempty_exec(st), c0, "slot_move post: count_nonempty unchanged (one owner relocates)");
 }
 
+// Re-derive `retype_check`'s spec result from the store state, then assert the
+// real body returns exactly that AND left the arena untouched (the read-only
+// frame, which holds on every path). Covers the geometry, the error precedence
+// (NotUntyped before DestOccupied), and the channel `dst2` validity.
+fn check_retype_check(st: &mut ArrayStore, ut: SlotId, ty: ObjType, dst: SlotId, dst2: Option<SlotId>) {
+    let fp = fingerprint(st);
+    let geom = untyped_geom(st.at(ut).cap);
+    let dst_empty = st.at(dst).cap.is_empty();
+    let chan_ok = if matches!(ty, ObjType::Channel) {
+        match dst2 {
+            Some(d2) => d2 != dst && st.at(d2).cap.is_empty(),
+            None => false,
+        }
+    } else {
+        true
+    };
+    let res = retype_check(st, ut, ty, dst, dst2);
+    assert_eq!(fingerprint(st), fp, "retype_check post: read-only on every path");
+    match (geom, dst_empty, chan_ok) {
+        (None, _, _) => assert_eq!(res, Err(RetypeError::NotUntyped), "non-Untyped ut → NotUntyped (precedence)"),
+        (Some(g), true, true) => assert_eq!(res, Ok(g), "Ok returns the untyped's geometry"),
+        (Some(_), _, _) => assert_eq!(res, Err(RetypeError::DestOccupied), "occupied/aliased/missing dst(2) → DestOccupied"),
+    }
+}
+
+// Assert `reset`'s per-arm contract against the real body: `Ok` zeroes only
+// `ut`'s watermark (base/size/links/all other slots intact); both `Err` arms
+// are read-only.
+fn check_reset(st: &mut ArrayStore, ut: SlotId) {
+    let fp = fingerprint(st);
+    let geom = untyped_geom(st.at(ut).cap);
+    let had_child = st.at(ut).first_child.is_some();
+    let res = reset(st, ut);
+    match (geom, had_child) {
+        (None, _) => {
+            assert_eq!(res, Err(RetypeError::NotUntyped), "non-Untyped → NotUntyped");
+            assert_eq!(fingerprint(st), fp, "reset NotUntyped: read-only");
+        }
+        (Some(_), true) => {
+            assert_eq!(res, Err(RetypeError::BadArg), "children present → BadArg");
+            assert_eq!(fingerprint(st), fp, "reset BadArg: read-only");
+        }
+        (Some((base, size, _)), false) => {
+            assert_eq!(res, Ok(()), "Untyped, no children → Ok");
+            let mut expected = fp.clone();
+            expected[ut.0 as usize].5 = Some((base, size, 0));
+            assert_eq!(fingerprint(st), expected, "reset Ok: only ut's watermark zeroed, all else intact");
+        }
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[test]
@@ -471,6 +558,59 @@ fn slot_move_subtree_root() {
         .find(|s| st.at(*s).cap.is_empty())
         .expect("a free slot");
     check_slot_move(&mut st, src, dst);
+}
+
+#[test]
+fn retype_check_arms() {
+    // slot 0: untyped; 1,3: empty dsts; 2: an occupied (non-untyped) slot.
+    let mut st = ArrayStore::new(4);
+    st.slots[0] = detached(untyped_cap(0x1000, 0x4000, 0x100));
+    st.slots[2] = detached(frame_cap(2));
+    // Ok: non-channel, empty dst → the untyped's geometry, store untouched.
+    check_retype_check(&mut st, SlotId(0), ObjType::Frame, SlotId(1), None);
+    // NotUntyped: ut slot is a frame (precedence — even though dst would be ok).
+    check_retype_check(&mut st, SlotId(2), ObjType::Frame, SlotId(1), None);
+    // DestOccupied: dst slot is occupied.
+    check_retype_check(&mut st, SlotId(0), ObjType::Frame, SlotId(2), None);
+    // Channel Ok: two distinct empty dsts.
+    check_retype_check(&mut st, SlotId(0), ObjType::Channel, SlotId(1), Some(SlotId(3)));
+    // Channel DestOccupied: dst2 missing.
+    check_retype_check(&mut st, SlotId(0), ObjType::Channel, SlotId(1), None);
+    // Channel DestOccupied: dst2 aliases dst.
+    check_retype_check(&mut st, SlotId(0), ObjType::Channel, SlotId(1), Some(SlotId(1)));
+    // Channel DestOccupied: dst2 occupied.
+    check_retype_check(&mut st, SlotId(0), ObjType::Channel, SlotId(1), Some(SlotId(2)));
+}
+
+#[test]
+fn reset_arms() {
+    // Ok: untyped with a nonzero watermark and no children → watermark zeroed.
+    let mut st = ArrayStore::new(1);
+    st.slots[0] = detached(untyped_cap(0x1000, 0x4000, 0x200));
+    check_reset(&mut st, SlotId(0));
+
+    // BadArg: untyped with a CDT child (caller has not revoked yet) → unchanged.
+    let mut st = ArrayStore::new(2);
+    st.slots[0] = CapSlot {
+        cap: untyped_cap(0x1000, 0x4000, 0x200),
+        parent: None,
+        first_child: Some(SlotId(1)),
+        next_sib: None,
+        prev_sib: None,
+    };
+    st.slots[1] = CapSlot {
+        cap: frame_cap(1),
+        parent: Some(SlotId(0)),
+        first_child: None,
+        next_sib: None,
+        prev_sib: None,
+    };
+    check_reset(&mut st, SlotId(0));
+
+    // NotUntyped: a non-untyped slot → unchanged.
+    let mut st = ArrayStore::new(1);
+    st.slots[0] = detached(frame_cap(0));
+    check_reset(&mut st, SlotId(0));
 }
 
 #[test]

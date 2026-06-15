@@ -17,6 +17,12 @@
 //! baked into the image.
 
 use crate::cspace::{self, Cap, CapKind, ChanEnd, CSpaceObj, Rights};
+// The `Store` ghost-view extension (`slot_view`/`refs_view`) the §3a contracts
+// quantify over. Only referenced from `requires`/`ensures`, which erase in a
+// normal build — hence unused there (the `spec fn`s `is_empty_cap`/`reset_slot`
+// and `CapKind` matches are reached by full path / module import respectively).
+#[allow(unused_imports)]
+use crate::cspace::StoreSpec;
 use crate::id::SlotId;
 use crate::store::Store;
 use vstd::prelude::*;
@@ -84,35 +90,69 @@ pub struct Carve {
 
 } // verus!
 
+verus! {
+
 /// Slot-state half of retype's validation: `ut_slot` must hold an Untyped
 /// cap, `dst` (and `dst2` for channels) must be empty and detached. Runs
 /// before [`carve`], so the error precedence is NotUntyped → DestOccupied →
 /// (BadArg | NoMemory).
 ///
-/// post: returns the untyped's `(base, size, watermark)` unchanged.
+/// Verified (plan doc/plans/3_verus-rewrite_phase3-detail.md §3a): pure
+/// `slot_view` reasoning, no channel/notification coupling. It calls no `set_*`,
+/// so the store is provably unchanged on **every** path; on `Ok` the returned
+/// triple is the untyped's geometry and the destination(s) are empty and
+/// distinct. The `Err` arms pin the precedence (NotUntyped before DestOccupied).
 pub fn retype_check<S: Store>(
     store: &mut S,
     ut_slot: SlotId,
     ty: ObjType,
     dst: SlotId,
     dst2: Option<SlotId>,
-) -> Result<(u64, u64, u64), RetypeError> {
-    let CapKind::Untyped { base, size, watermark } = store.slot(ut_slot).cap.kind else {
-        return Err(RetypeError::NotUntyped);
+) -> (result: Result<(u64, u64, u64), RetypeError>)
+    requires
+        old(store).slot_view().dom().contains(ut_slot),
+        old(store).slot_view().dom().contains(dst),
+        dst2 matches Some(d2) ==> old(store).slot_view().dom().contains(d2),
+    ensures
+        final(store).slot_view() == old(store).slot_view(),
+        final(store).refs_view() == old(store).refs_view(),
+        (result matches Ok((b, s, w)) ==> (
+            old(store).slot_view()[ut_slot].cap.kind matches CapKind::Untyped { base, size, watermark }
+                && b == base && s == size && w == watermark
+                && crate::cspace::is_empty_cap(old(store).slot_view()[dst].cap)
+                && (ty == ObjType::Channel ==> (
+                        dst2 matches Some(d2) && d2 != dst
+                            && crate::cspace::is_empty_cap(old(store).slot_view()[d2].cap)))
+        )),
+        (result matches Err(RetypeError::NotUntyped) ==>
+            !(old(store).slot_view()[ut_slot].cap.kind matches CapKind::Untyped { .. })),
+        (result matches Err(RetypeError::DestOccupied) ==> (
+            old(store).slot_view()[ut_slot].cap.kind matches CapKind::Untyped { .. }
+                && (!crate::cspace::is_empty_cap(old(store).slot_view()[dst].cap)
+                    || (ty == ObjType::Channel
+                        && !(dst2 matches Some(d2) && d2 != dst
+                                && crate::cspace::is_empty_cap(old(store).slot_view()[d2].cap))))
+        )),
+{
+    let (base, size, watermark) = match store.slot(ut_slot).cap.kind {
+        CapKind::Untyped { base, size, watermark } => (base, size, watermark),
+        _ => return Err(RetypeError::NotUntyped),
     };
-    if !store.slot(dst).cap.is_empty() {
+    if !matches!(store.slot(dst).cap.kind, CapKind::Empty) {
         return Err(RetypeError::DestOccupied);
     }
-    if ty == ObjType::Channel {
+    if matches!(ty, ObjType::Channel) {
         match dst2 {
-            Some(d2) if d2 != dst && store.slot(d2).cap.is_empty() => {}
-            _ => return Err(RetypeError::DestOccupied),
+            Some(d2) => {
+                if d2.0 == dst.0 || !matches!(store.slot(d2).cap.kind, CapKind::Empty) {
+                    return Err(RetypeError::DestOccupied);
+                }
+            }
+            None => return Err(RetypeError::DestOccupied),
         }
     }
     Ok((base, size, watermark))
 }
-
-verus! {
 
 impl ObjType {
     /// The object's required alignment as a ghost value, so [`align`](Self::align)
@@ -390,6 +430,28 @@ pub fn retype_install<S: Store>(
     }
 }
 
+verus! {
+
+/// The slot `reset` produces: an Untyped slot's watermark zeroed, every other
+/// field (rights + CDT links) unchanged; a non-Untyped slot is left as-is (the
+/// `Ok` arm is unreachable for it, so this branch is only a totality fallback).
+pub open spec fn reset_slot(s: crate::cspace::CapSlot) -> crate::cspace::CapSlot {
+    crate::cspace::CapSlot {
+        cap: Cap {
+            kind: match s.cap.kind {
+                CapKind::Untyped { base, size, watermark } =>
+                    CapKind::Untyped { base, size, watermark: 0 },
+                _ => s.cap.kind,
+            },
+            rights: s.cap.rights,
+        },
+        parent: s.parent,
+        first_child: s.first_child,
+        next_sib: s.next_sib,
+        prev_sib: s.prev_sib,
+    }
+}
+
 /// Reset the watermark once exclusivity is proven — the second half of the
 /// reclaim primitive (§2.5: "reclaiming the range is revoke(untyped) then
 /// watermark reset"). A parent reuses one child-sized donation across many
@@ -397,15 +459,47 @@ pub fn retype_install<S: Store>(
 ///
 /// pre:  ut_slot holds an Untyped cap with no CDT children (caller revoked).
 /// post: watermark = 0; the whole range is reusable.
-pub fn reset<S: Store>(store: &mut S, ut_slot: SlotId) -> Result<(), RetypeError> {
+///
+/// Verified (plan §3a). It mirrors [`retype_check`]'s read-only-on-error
+/// discipline: the contract is stated per-arm rather than via a
+/// `requires`-Untyped (which would make the NotUntyped path dead and drop its
+/// store-unchanged guarantee). On `Ok` the arena differs from entry by exactly
+/// `reset_slot` at `ut_slot`; both `Err` arms leave it untouched.
+pub fn reset<S: Store>(store: &mut S, ut_slot: SlotId) -> (result: Result<(), RetypeError>)
+    requires
+        old(store).slot_view().dom().contains(ut_slot),
+    ensures
+        final(store).refs_view() == old(store).refs_view(),
+        (result is Ok ==> (
+            old(store).slot_view()[ut_slot].cap.kind matches CapKind::Untyped { .. }
+                && old(store).slot_view()[ut_slot].first_child is None
+                && final(store).slot_view()
+                    == old(store).slot_view().insert(ut_slot, reset_slot(old(store).slot_view()[ut_slot]))
+        )),
+        (result matches Err(RetypeError::NotUntyped) ==> (
+            !(old(store).slot_view()[ut_slot].cap.kind matches CapKind::Untyped { .. })
+                && final(store).slot_view() == old(store).slot_view()
+        )),
+        (result matches Err(RetypeError::BadArg) ==> (
+            old(store).slot_view()[ut_slot].cap.kind matches CapKind::Untyped { .. }
+                && old(store).slot_view()[ut_slot].first_child is Some
+                && final(store).slot_view() == old(store).slot_view()
+        )),
+{
     let mut ut = store.slot(ut_slot);
-    let CapKind::Untyped { base, size, .. } = ut.cap.kind else {
-        return Err(RetypeError::NotUntyped);
+    let (base, size) = match ut.cap.kind {
+        CapKind::Untyped { base, size, .. } => (base, size),
+        _ => return Err(RetypeError::NotUntyped),
     };
     if ut.first_child.is_some() {
         return Err(RetypeError::BadArg);
     }
-    ut.cap.kind = CapKind::Untyped { base, size, watermark: 0 };
+    ut.cap = Cap { kind: CapKind::Untyped { base, size, watermark: 0 }, rights: ut.cap.rights };
+    proof {
+        assert(ut == reset_slot(old(store).slot_view()[ut_slot]));
+    }
     store.set_slot(ut_slot, ut);
     Ok(())
 }
+
+} // verus!
