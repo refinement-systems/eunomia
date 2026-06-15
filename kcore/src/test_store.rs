@@ -66,9 +66,24 @@ struct NotifState {
 
 #[derive(Clone, PartialEq)]
 struct TcbState {
+    state: ThreadState,
     qnext: Option<ObjId>,
     wait_notif: Option<ObjId>,
+    report: Report,
     retval: u64,
+    cspace: Option<ObjId>,
+    aspace: Option<ObjId>,
+    bind_bits: [u64; 2],
+    bind_slots: [SlotId; 2],
+}
+
+#[derive(Clone, PartialEq)]
+struct TimerState {
+    armed: bool,
+    deadline: u64,
+    notif: Option<ObjId>,
+    bits: u64,
+    next: Option<ObjId>,
 }
 
 struct ArrayStore {
@@ -78,6 +93,8 @@ struct ArrayStore {
     chans: BTreeMap<u64, ChanState>,
     notifs: BTreeMap<u64, NotifState>,
     tcbs: BTreeMap<u64, TcbState>,
+    timers: BTreeMap<u64, TimerState>,
+    timer_armed_head: Option<ObjId>,
 }
 
 impl ArrayStore {
@@ -89,6 +106,8 @@ impl ArrayStore {
             chans: BTreeMap::new(),
             notifs: BTreeMap::new(),
             tcbs: BTreeMap::new(),
+            timers: BTreeMap::new(),
+            timer_armed_head: None,
         }
     }
     fn n(&self) -> usize {
@@ -188,11 +207,11 @@ impl Store for ArrayStore {
     fn set_notif_wait_tail(&mut self, n: ObjId, t: Option<ObjId>) {
         self.notifs.get_mut(&n.0).unwrap().wait_tail = t;
     }
-    fn tcb_state(&self, _: ObjId) -> ThreadState {
-        unimplemented!()
+    fn tcb_state(&self, t: ObjId) -> ThreadState {
+        self.tcbs[&t.0].state
     }
-    fn set_tcb_state(&mut self, _: ObjId, _: ThreadState) {
-        unimplemented!()
+    fn set_tcb_state(&mut self, t: ObjId, s: ThreadState) {
+        self.tcbs.get_mut(&t.0).unwrap().state = s;
     }
     fn tcb_qnext(&self, t: ObjId) -> Option<ObjId> {
         self.tcbs[&t.0].qnext
@@ -206,69 +225,74 @@ impl Store for ArrayStore {
     fn set_tcb_wait_notif(&mut self, t: ObjId, n: Option<ObjId>) {
         self.tcbs.get_mut(&t.0).unwrap().wait_notif = n;
     }
-    fn tcb_report(&self, _: ObjId) -> Report {
-        unimplemented!()
+    fn tcb_report(&self, t: ObjId) -> Report {
+        self.tcbs[&t.0].report
     }
-    fn set_tcb_report(&mut self, _: ObjId, _: Report) {
-        unimplemented!()
+    fn set_tcb_report(&mut self, t: ObjId, r: Report) {
+        self.tcbs.get_mut(&t.0).unwrap().report = r;
     }
-    fn tcb_bind_slot(&self, _: ObjId, _: usize) -> SlotId {
-        unimplemented!()
+    fn tcb_bind_slot(&self, t: ObjId, which: usize) -> SlotId {
+        self.tcbs[&t.0].bind_slots[which]
     }
-    fn tcb_bind_bits(&self, _: ObjId, _: usize) -> u64 {
-        unimplemented!()
+    fn tcb_bind_bits(&self, t: ObjId, which: usize) -> u64 {
+        self.tcbs[&t.0].bind_bits[which]
     }
-    fn set_tcb_bind_bits(&mut self, _: ObjId, _: usize, _: u64) {
-        unimplemented!()
+    fn set_tcb_bind_bits(&mut self, t: ObjId, which: usize, b: u64) {
+        self.tcbs.get_mut(&t.0).unwrap().bind_bits[which] = b;
     }
-    fn tcb_cspace(&self, _: ObjId) -> Option<ObjId> {
-        unimplemented!()
+    fn tcb_cspace(&self, t: ObjId) -> Option<ObjId> {
+        self.tcbs[&t.0].cspace
     }
-    fn set_tcb_cspace(&mut self, _: ObjId, _: Option<ObjId>) {
-        unimplemented!()
+    fn set_tcb_cspace(&mut self, t: ObjId, cs: Option<ObjId>) {
+        self.tcbs.get_mut(&t.0).unwrap().cspace = cs;
     }
-    fn tcb_aspace(&self, _: ObjId) -> Option<ObjId> {
-        unimplemented!()
+    fn tcb_aspace(&self, t: ObjId) -> Option<ObjId> {
+        self.tcbs[&t.0].aspace
     }
-    fn set_tcb_aspace(&mut self, _: ObjId, _: Option<ObjId>) {
-        unimplemented!()
+    fn set_tcb_aspace(&mut self, t: ObjId, a: Option<ObjId>) {
+        self.tcbs.get_mut(&t.0).unwrap().aspace = a;
     }
     fn set_tcb_retval(&mut self, t: ObjId, v: u64) {
         self.tcbs.get_mut(&t.0).unwrap().retval = v;
     }
-    fn timer_armed(&self, _: ObjId) -> bool {
-        unimplemented!()
+    fn timer_armed(&self, t: ObjId) -> bool {
+        self.timers[&t.0].armed
     }
-    fn set_timer_armed(&mut self, _: ObjId, _: bool) {
-        unimplemented!()
+    fn set_timer_armed(&mut self, t: ObjId, v: bool) {
+        self.timers.get_mut(&t.0).unwrap().armed = v;
     }
-    fn timer_deadline(&self, _: ObjId) -> u64 {
-        unimplemented!()
+    fn timer_deadline(&self, t: ObjId) -> u64 {
+        self.timers[&t.0].deadline
     }
-    fn set_timer_deadline(&mut self, _: ObjId, _: u64) {
-        unimplemented!()
+    fn set_timer_deadline(&mut self, t: ObjId, v: u64) {
+        self.timers.get_mut(&t.0).unwrap().deadline = v;
     }
-    fn timer_notif(&self, _: ObjId) -> Option<ObjId> {
-        unimplemented!()
+    fn timer_notif(&self, t: ObjId) -> Option<ObjId> {
+        self.timers[&t.0].notif
     }
-    fn set_timer_notif(&mut self, _: ObjId, _: Option<ObjId>) {
-        unimplemented!()
+    fn set_timer_notif(&mut self, t: ObjId, n: Option<ObjId>) {
+        self.timers.get_mut(&t.0).unwrap().notif = n;
     }
-    fn timer_bits(&self, _: ObjId) -> u64 {
-        unimplemented!()
+    fn timer_bits(&self, t: ObjId) -> u64 {
+        self.timers[&t.0].bits
     }
-    fn set_timer_bits(&mut self, _: ObjId, _: u64) {
-        unimplemented!()
+    fn set_timer_bits(&mut self, t: ObjId, v: u64) {
+        self.timers.get_mut(&t.0).unwrap().bits = v;
     }
-    fn timer_next(&self, _: ObjId) -> Option<ObjId> {
-        unimplemented!()
+    fn timer_next(&self, t: ObjId) -> Option<ObjId> {
+        self.timers[&t.0].next
     }
-    fn set_timer_next(&mut self, _: ObjId, _: Option<ObjId>) {
-        unimplemented!()
+    fn set_timer_next(&mut self, t: ObjId, n: Option<ObjId>) {
+        self.timers.get_mut(&t.0).unwrap().next = n;
     }
-    // The scheduler hooks `signal` calls; they touch neither `slots` nor `chans`
-    // (the whole point of the §3b frame), so a no-op faithfully models the frame.
-    fn make_runnable(&mut self, _: ObjId) {}
+    // `make_runnable` flips the woken thread to Runnable and touches nothing else —
+    // the faithful counterpart of its §4a contract (the ready-queue linkage is
+    // scheduler state below the abstract `tcb_view`; a thread is off every kcore
+    // queue once Runnable, so a no-op on the rest models the frame). `unqueue_ready`
+    // stays a no-op (its contract is phase 4e).
+    fn make_runnable(&mut self, t: ObjId) {
+        self.tcbs.get_mut(&t.0).unwrap().state = ThreadState::Runnable;
+    }
     fn unqueue_ready(&mut self, _: ObjId) {}
     fn tlb_invalidate_page(&mut self, _: u16, _: u64) {
         unimplemented!()
@@ -280,10 +304,10 @@ impl Store for ArrayStore {
         unimplemented!()
     }
     fn timer_armed_head(&self) -> Option<ObjId> {
-        unimplemented!()
+        self.timer_armed_head
     }
-    fn set_timer_armed_head(&mut self, _: Option<ObjId>) {
-        unimplemented!()
+    fn set_timer_armed_head(&mut self, h: Option<ObjId>) {
+        self.timer_armed_head = h;
     }
 }
 
@@ -446,10 +470,62 @@ fn chan_wf_exec(st: &ArrayStore, ch: ObjId) -> bool {
     true
 }
 
+// The exec mirror of the spec `notif_wf(nv, tv, n)` (cspace.rs) — ghost, so erased
+// and uncallable from test code, hence the plain-Rust re-expression (the
+// `chan_wf_exec` discipline). Walks `wait_head` via `qnext`: empty-queue head/tail
+// agreement; acyclicity/finiteness (a walk longer than the TCB count repeated a
+// node — the `no_cycle` pattern); the walk ends exactly at `wait_tail` (its `qnext`
+// is `None`); and every charted node is a live TCB naming `n` and `BlockedNotif`.
+fn notif_wf_exec(st: &ArrayStore, n: ObjId) -> bool {
+    let nv = match st.notifs.get(&n.0) {
+        Some(v) => v,
+        None => return false,
+    };
+    if nv.wait_head.is_none() != nv.wait_tail.is_none() {
+        return false; // empty-queue head/tail agreement
+    }
+    let mut cur = nv.wait_head;
+    let mut last: Option<ObjId> = None;
+    let mut steps = 0usize;
+    while let Some(c) = cur {
+        steps += 1;
+        if steps > st.tcbs.len() + 1 {
+            return false; // a cycle (walk longer than the TCB count)
+        }
+        let tcb = match st.tcbs.get(&c.0) {
+            Some(t) => t,
+            None => return false, // a charted node is not a live TCB
+        };
+        if tcb.wait_notif != Some(n) || tcb.state != ThreadState::BlockedNotif {
+            return false; // per-node: names n and is BlockedNotif
+        }
+        last = cur;
+        cur = tcb.qnext;
+    }
+    // the walk ended at the chain's last node (its qnext == None); it must be wait_tail.
+    last == nv.wait_tail
+}
+
 // ── Shape builders ─────────────────────────────────────────────────────────
 
 fn detached(cap: Cap) -> CapSlot {
     CapSlot { cap, parent: None, first_child: None, next_sib: None, prev_sib: None }
+}
+// A blank TCB (the `Tcb::empty` analog) so fixtures set only the fields under test
+// with `..tcb_state_default()`. `bind_slots` default to SlotId(0); they are unread
+// unless a test wires up a real binding.
+fn tcb_state_default() -> TcbState {
+    TcbState {
+        state: ThreadState::Inactive,
+        qnext: None,
+        wait_notif: None,
+        report: Report::Running,
+        retval: 0,
+        cspace: None,
+        aspace: None,
+        bind_bits: [0, 0],
+        bind_slots: [SlotId(0), SlotId(0)],
+    }
 }
 fn frame_cap(base: u64) -> Cap {
     Cap { kind: CapKind::Frame { base, pages: 1, mapping: None }, rights: Rights(0xff) }
@@ -752,7 +828,10 @@ fn signal_fixture(with_waiter: bool) -> (ArrayStore, ObjId) {
     st.refs.insert(100, 1);
     if with_waiter {
         let t = ObjId(200);
-        st.tcbs.insert(200, TcbState { qnext: None, wait_notif: Some(n), retval: 0 });
+        st.tcbs.insert(
+            200,
+            TcbState { state: ThreadState::BlockedNotif, wait_notif: Some(n), ..tcb_state_default() },
+        );
         st.notifs.insert(100, NotifState { word: 0, wait_head: Some(t), wait_tail: Some(t) });
     } else {
         st.notifs.insert(100, NotifState { word: 0, wait_head: None, wait_tail: None });
@@ -1238,6 +1317,8 @@ fn signal_frame() {
     assert_eq!(st.tcbs[&200].retval, 0b110, "waiter received the whole word");
     assert!(st.notifs[&100].wait_head.is_none(), "waiter dequeued");
     assert_eq!(st.refs[&100], 0, "waiter's queued ref released");
+    // The §4a `make_runnable` contract, host-checked: the woken thread is Runnable.
+    assert_eq!(st.tcbs[&200].state, ThreadState::Runnable, "woken waiter made Runnable");
 }
 
 #[test]
@@ -1283,6 +1364,66 @@ fn chan_wf_exec_has_teeth() {
     assert!(!chan_wf_exec(&st, ch), "incomplete bindings domain must be rejected");
 
     assert!(!chan_wf_exec(&signal_fixture(false).0, ObjId(999)), "unknown channel must be rejected");
+}
+
+// ── Notification waiter-queue well-formedness (plan §4a) ────────────────────
+
+// A notification (ObjId 100) with a two-deep FIFO waiter chain 200 → 201: the
+// `notif_wf` fixture for the teeth test. `notif_wf_exec` must accept it.
+fn notif_fixture() -> ArrayStore {
+    let mut st = ArrayStore::new(0);
+    let n = ObjId(100);
+    st.notifs.insert(100, NotifState { word: 0, wait_head: Some(ObjId(200)), wait_tail: Some(ObjId(201)) });
+    st.tcbs.insert(
+        200,
+        TcbState { state: ThreadState::BlockedNotif, wait_notif: Some(n), qnext: Some(ObjId(201)), ..tcb_state_default() },
+    );
+    st.tcbs.insert(
+        201,
+        TcbState { state: ThreadState::BlockedNotif, wait_notif: Some(n), qnext: None, ..tcb_state_default() },
+    );
+    st
+}
+
+#[test]
+fn notif_wf_exec_has_teeth() {
+    // `notif_wf_exec` (the precondition 4b/4c's `signal`/`wait`/`remove_waiter`
+    // proofs rest on) is only meaningful if it rejects malformed queues. Each shape
+    // violates exactly one clause; a well-formed queue is accepted.
+    let n = ObjId(100);
+    assert!(notif_wf_exec(&notif_fixture(), n), "a well-formed waiter queue must be accepted");
+
+    // empty-queue head/tail disagreement: head Some, tail None.
+    let mut st = notif_fixture();
+    st.notifs.get_mut(&100).unwrap().wait_tail = None;
+    assert!(!notif_wf_exec(&st, n), "head/tail disagreement must be rejected");
+
+    // a qnext cycle (201 → 200 → 201 …): the walk never terminates.
+    let mut st = notif_fixture();
+    st.tcbs.get_mut(&201).unwrap().qnext = Some(ObjId(200));
+    assert!(!notif_wf_exec(&st, n), "a qnext cycle must be rejected");
+
+    // a charted node naming the wrong notification.
+    let mut st = notif_fixture();
+    st.tcbs.get_mut(&201).unwrap().wait_notif = Some(ObjId(999));
+    assert!(!notif_wf_exec(&st, n), "a waiter naming another notification must be rejected");
+
+    // a charted node not in BlockedNotif.
+    let mut st = notif_fixture();
+    st.tcbs.get_mut(&201).unwrap().state = ThreadState::Runnable;
+    assert!(!notif_wf_exec(&st, n), "a non-BlockedNotif waiter must be rejected");
+
+    // wait_tail names a node that is not the chain's end.
+    let mut st = notif_fixture();
+    st.notifs.get_mut(&100).unwrap().wait_tail = Some(ObjId(200));
+    assert!(!notif_wf_exec(&st, n), "wait_tail off the chain end must be rejected");
+
+    // a charted node that is not a live TCB (201 removed, 200 still points at it).
+    let mut st = notif_fixture();
+    st.tcbs.remove(&201);
+    assert!(!notif_wf_exec(&st, n), "a charted node with no live TCB must be rejected");
+
+    assert!(!notif_wf_exec(&notif_fixture(), ObjId(999)), "unknown notification must be rejected");
 }
 
 // ── §C: evidence that doc/results/21 §9's proposed fix for revoke's "revoked cap

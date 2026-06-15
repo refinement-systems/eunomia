@@ -23,6 +23,7 @@
 
 use crate::id::{ObjId, SlotId};
 use crate::store::{Binding, Store};
+use crate::thread::{Report, ThreadState};
 use vstd::prelude::*;
 
 /// Rights bits — monotone under derivation (§2.3): `derive` may only clear
@@ -349,6 +350,20 @@ pub struct ExCapSlot(CapSlot);
 #[allow(dead_code)]
 pub struct ExBinding(Binding);
 
+// `ThreadState`/`Report` are plain Rust enums (`crate::thread`); give them Verus
+// type-specs so they can live in `TcbView` and be compared with structural `==`
+// (the phase-4a `tcb_view` analog of `ExChanEnd`, plan §4a). (`allow(dead_code)`:
+// Verus-only scaffolding, erased in a normal build.)
+#[verifier::external_type_specification]
+#[verifier::ext_equal]
+#[allow(dead_code)]
+pub struct ExThreadState(ThreadState);
+
+#[verifier::external_type_specification]
+#[verifier::ext_equal]
+#[allow(dead_code)]
+pub struct ExReport(Report);
+
 // ── The channel ghost view (plan §3b) ───────────────────────────────────────
 //
 // `ChanView` mirrors a `Channel`'s *mutable* state (`channel.rs`) at the
@@ -379,6 +394,48 @@ pub struct ChanView {
     pub ring_cap: Map<(int, int, int), SlotId>,
 }
 
+// ── The notification / TCB / timer ghost views (plan §4a) ────────────────────
+//
+// The phase-4 analogs of `ChanView` (§3b, doc 27): each mirrors an object's
+// *mutable* state (the `hdr.refs` count is already in `refs_view`). `word`/
+// `retval`/`bind_bits`/`bits`/`deadline` are `u64` (not `nat`) so 4b's
+// `word | bits` and 4e's `deadline <= now` are expressible directly — the one
+// deliberate departure from `ChanView`'s all-`nat` choice, justified by the
+// bitwise/comparison semantics those ops need.
+#[verifier::ext_equal]
+pub struct NotifView {
+    pub word: u64,
+    pub wait_head: Option<ObjId>,
+    pub wait_tail: Option<ObjId>,
+}
+
+// The TCB mutable fields the verified ops read/write. `bind_slots` holds the cap
+// *slot handles* (length-2 `Seq`) — an immutable projection, since `Store` has a
+// `tcb_bind_slot` getter and no setter; the cap *contents* live in `slot_view`,
+// exactly as `ChanView.ring_cap` does (§4a, doc 27 §1) — so the TCB binding caps
+// stay revoke-visible through the single arena.
+#[verifier::ext_equal]
+pub struct TcbView {
+    pub state: ThreadState,
+    pub qnext: Option<ObjId>,
+    pub wait_notif: Option<ObjId>,
+    pub report: Report,
+    pub retval: u64,
+    pub cspace: Option<ObjId>,
+    pub aspace: Option<ObjId>,
+    pub bind_bits: Seq<u64>,     // len 2
+    pub bind_slots: Seq<SlotId>, // len 2 — immutable handles into slot_view
+}
+
+#[verifier::ext_equal]
+pub struct TimerView {
+    pub armed: bool,
+    pub deadline: u64,
+    pub notif: Option<ObjId>,
+    pub bits: u64,
+    pub next: Option<ObjId>,
+}
+
 // The abstract `Store` model: a slot arena + a refcount map. The trait stays
 // plain Rust (the kernel impls it without ghost members); this `external_trait
 // _specification` attaches the contract, and `external_trait_extension` adds the
@@ -398,6 +455,16 @@ pub trait ExStore {
     // the slot/refs setters frame it unchanged and the channel setters frame
     // slot/refs unchanged, so the §4.3 ops can reason about one without the others.
     spec fn chan_view(&self) -> Map<ObjId, ChanView>;
+    // Notification / TCB / timer state (plan §4a) — three more independent views.
+    // Every setter frames the *other* five views (+ the `timer_head_view` scalar)
+    // unchanged, so a §4.4 op reasons about one without re-establishing the rest
+    // (the mutual-frame discipline, doc 27 §1, extended to a six-view world).
+    spec fn notif_view(&self) -> Map<ObjId, NotifView>;
+    spec fn tcb_view(&self) -> Map<ObjId, TcbView>;
+    spec fn timer_view(&self) -> Map<ObjId, TimerView>;
+    // The armed-timer list head — a `Store`-seam scalar (the kernel static,
+    // store.rs:130); the list *logic* is in `crate::timer` (phase 4e).
+    spec fn timer_head_view(&self) -> Option<ObjId>;
 
     fn slot(&self, s: SlotId) -> (r: CapSlot)
         requires self.slot_view().dom().contains(s),
@@ -408,7 +475,11 @@ pub trait ExStore {
         ensures
             final(self).slot_view() == old(self).slot_view().insert(s, v),
             final(self).refs_view() == old(self).refs_view(),
-            final(self).chan_view() == old(self).chan_view();
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
 
     fn obj_refs(&self, o: ObjId) -> (r: u32)
         requires self.refs_view().dom().contains(o),
@@ -419,7 +490,11 @@ pub trait ExStore {
         ensures
             final(self).refs_view() == old(self).refs_view().insert(o, r as nat),
             final(self).slot_view() == old(self).slot_view(),
-            final(self).chan_view() == old(self).chan_view();
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
 
     // ── channel accessors (plan §3b) ────────────────────────────────────────
     //
@@ -450,7 +525,11 @@ pub trait ExStore {
                     ..old(self).chan_view()[ch]
                 }),
             final(self).slot_view() == old(self).slot_view(),
-            final(self).refs_view() == old(self).refs_view();
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
 
     fn chan_head(&self, ch: ObjId, ring: usize) -> (r: u32)
         requires
@@ -471,7 +550,11 @@ pub trait ExStore {
                     ..old(self).chan_view()[ch]
                 }),
             final(self).slot_view() == old(self).slot_view(),
-            final(self).refs_view() == old(self).refs_view();
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
 
     fn chan_count(&self, ch: ObjId, ring: usize) -> (r: u32)
         requires
@@ -492,7 +575,11 @@ pub trait ExStore {
                     ..old(self).chan_view()[ch]
                 }),
             final(self).slot_view() == old(self).slot_view(),
-            final(self).refs_view() == old(self).refs_view();
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
 
     fn chan_binding(&self, ch: ObjId, end: usize, ev: usize) -> (r: Binding)
         requires
@@ -514,7 +601,11 @@ pub trait ExStore {
                     ..old(self).chan_view()[ch]
                 }),
             final(self).slot_view() == old(self).slot_view(),
-            final(self).refs_view() == old(self).refs_view();
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
 
     // The ring cap-slot handle — immutable channel layout, so getter only.
     fn chan_ring_cap(&self, ch: ObjId, ring: usize, i: u32, c: usize) -> (r: SlotId)
@@ -542,7 +633,11 @@ pub trait ExStore {
                     ..old(self).chan_view()[ch]
                 }),
             final(self).slot_view() == old(self).slot_view(),
-            final(self).refs_view() == old(self).refs_view();
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
 
     // Payload is abstracted out, so the write is a frame-only no-op on the
     // abstract state; `chan_msg_read` is `&self` (no obligation, omitted).
@@ -550,12 +645,332 @@ pub trait ExStore {
         ensures
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
-            final(self).chan_view() == old(self).chan_view();
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
 
     // `&self` (only `buf` is written), so the store is unchanged automatically; the
     // payload is abstracted out, so no spec on `buf`. Needed in `verus!` since 3d's
     // `recv` calls it (3b omitted it as frame-only).
     fn chan_msg_read(&self, ch: ObjId, ring: usize, i: u32, len: usize, buf: &mut [u8]);
+
+    // ── notification accessors (plan §4a) ───────────────────────────────────
+    //
+    // Each relates to `notif_view` exactly as `slot`/`set_slot` relate to
+    // `slot_view`: getters project a field; setters update one key and frame the
+    // *other* five views + the `timer_head_view` scalar unchanged.
+    fn notif_word(&self, n: ObjId) -> (r: u64)
+        requires self.notif_view().dom().contains(n),
+        ensures r == self.notif_view()[n].word;
+
+    fn set_notif_word(&mut self, n: ObjId, v: u64)
+        requires old(self).notif_view().dom().contains(n),
+        ensures
+            final(self).notif_view() == old(self).notif_view().insert(
+                n, NotifView { word: v, ..old(self).notif_view()[n] }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
+
+    fn notif_wait_head(&self, n: ObjId) -> (r: Option<ObjId>)
+        requires self.notif_view().dom().contains(n),
+        ensures r == self.notif_view()[n].wait_head;
+
+    fn set_notif_wait_head(&mut self, n: ObjId, t: Option<ObjId>)
+        requires old(self).notif_view().dom().contains(n),
+        ensures
+            final(self).notif_view() == old(self).notif_view().insert(
+                n, NotifView { wait_head: t, ..old(self).notif_view()[n] }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
+
+    fn notif_wait_tail(&self, n: ObjId) -> (r: Option<ObjId>)
+        requires self.notif_view().dom().contains(n),
+        ensures r == self.notif_view()[n].wait_tail;
+
+    fn set_notif_wait_tail(&mut self, n: ObjId, t: Option<ObjId>)
+        requires old(self).notif_view().dom().contains(n),
+        ensures
+            final(self).notif_view() == old(self).notif_view().insert(
+                n, NotifView { wait_tail: t, ..old(self).notif_view()[n] }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
+
+    // ── thread (TCB) accessors (plan §4a) ───────────────────────────────────
+    //
+    // Setters update one `tcb_view` field and frame the other five views + the
+    // `timer_head_view` scalar unchanged. `tcb_bind_slot` is a getter only — the
+    // bind-slot *handles* are immutable channel-layout-style projections (the cap
+    // contents live in `slot_view`); `set_tcb_retval` is a setter only (the seam
+    // has no `tcb_retval` getter — it writes `frame.x[0]`).
+    fn tcb_state(&self, t: ObjId) -> (r: ThreadState)
+        requires self.tcb_view().dom().contains(t),
+        ensures r == self.tcb_view()[t].state;
+
+    fn set_tcb_state(&mut self, t: ObjId, s: ThreadState)
+        requires old(self).tcb_view().dom().contains(t),
+        ensures
+            final(self).tcb_view() == old(self).tcb_view().insert(
+                t, TcbView { state: s, ..old(self).tcb_view()[t] }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
+
+    fn tcb_qnext(&self, t: ObjId) -> (r: Option<ObjId>)
+        requires self.tcb_view().dom().contains(t),
+        ensures r == self.tcb_view()[t].qnext;
+
+    fn set_tcb_qnext(&mut self, t: ObjId, q: Option<ObjId>)
+        requires old(self).tcb_view().dom().contains(t),
+        ensures
+            final(self).tcb_view() == old(self).tcb_view().insert(
+                t, TcbView { qnext: q, ..old(self).tcb_view()[t] }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
+
+    fn tcb_wait_notif(&self, t: ObjId) -> (r: Option<ObjId>)
+        requires self.tcb_view().dom().contains(t),
+        ensures r == self.tcb_view()[t].wait_notif;
+
+    fn set_tcb_wait_notif(&mut self, t: ObjId, n: Option<ObjId>)
+        requires old(self).tcb_view().dom().contains(t),
+        ensures
+            final(self).tcb_view() == old(self).tcb_view().insert(
+                t, TcbView { wait_notif: n, ..old(self).tcb_view()[t] }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
+
+    fn tcb_report(&self, t: ObjId) -> (r: Report)
+        requires self.tcb_view().dom().contains(t),
+        ensures r == self.tcb_view()[t].report;
+
+    fn set_tcb_report(&mut self, t: ObjId, r: Report)
+        requires old(self).tcb_view().dom().contains(t),
+        ensures
+            final(self).tcb_view() == old(self).tcb_view().insert(
+                t, TcbView { report: r, ..old(self).tcb_view()[t] }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
+
+    fn tcb_bind_slot(&self, t: ObjId, which: usize) -> (r: SlotId)
+        requires
+            self.tcb_view().dom().contains(t),
+            which < 2,
+        ensures r == self.tcb_view()[t].bind_slots[which as int];
+
+    fn tcb_bind_bits(&self, t: ObjId, which: usize) -> (r: u64)
+        requires
+            self.tcb_view().dom().contains(t),
+            which < 2,
+        ensures r == self.tcb_view()[t].bind_bits[which as int];
+
+    fn set_tcb_bind_bits(&mut self, t: ObjId, which: usize, b: u64)
+        requires
+            old(self).tcb_view().dom().contains(t),
+            which < 2,
+            old(self).tcb_view()[t].bind_bits.len() == 2,
+        ensures
+            final(self).tcb_view() == old(self).tcb_view().insert(
+                t, TcbView {
+                    bind_bits: old(self).tcb_view()[t].bind_bits.update(which as int, b),
+                    ..old(self).tcb_view()[t]
+                }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
+
+    fn tcb_cspace(&self, t: ObjId) -> (r: Option<ObjId>)
+        requires self.tcb_view().dom().contains(t),
+        ensures r == self.tcb_view()[t].cspace;
+
+    fn set_tcb_cspace(&mut self, t: ObjId, cs: Option<ObjId>)
+        requires old(self).tcb_view().dom().contains(t),
+        ensures
+            final(self).tcb_view() == old(self).tcb_view().insert(
+                t, TcbView { cspace: cs, ..old(self).tcb_view()[t] }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
+
+    fn tcb_aspace(&self, t: ObjId) -> (r: Option<ObjId>)
+        requires self.tcb_view().dom().contains(t),
+        ensures r == self.tcb_view()[t].aspace;
+
+    fn set_tcb_aspace(&mut self, t: ObjId, a: Option<ObjId>)
+        requires old(self).tcb_view().dom().contains(t),
+        ensures
+            final(self).tcb_view() == old(self).tcb_view().insert(
+                t, TcbView { aspace: a, ..old(self).tcb_view()[t] }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
+
+    fn set_tcb_retval(&mut self, t: ObjId, v: u64)
+        requires old(self).tcb_view().dom().contains(t),
+        ensures
+            final(self).tcb_view() == old(self).tcb_view().insert(
+                t, TcbView { retval: v, ..old(self).tcb_view()[t] }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
+
+    // ── timer accessors (plan §4a; the armed-list logic is phase 4e) ─────────
+    //
+    // Setters update one `timer_view` field (or the `timer_head_view` scalar) and
+    // frame the other five views unchanged.
+    fn timer_armed(&self, t: ObjId) -> (r: bool)
+        requires self.timer_view().dom().contains(t),
+        ensures r == self.timer_view()[t].armed;
+
+    fn set_timer_armed(&mut self, t: ObjId, v: bool)
+        requires old(self).timer_view().dom().contains(t),
+        ensures
+            final(self).timer_view() == old(self).timer_view().insert(
+                t, TimerView { armed: v, ..old(self).timer_view()[t] }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
+
+    fn timer_deadline(&self, t: ObjId) -> (r: u64)
+        requires self.timer_view().dom().contains(t),
+        ensures r == self.timer_view()[t].deadline;
+
+    fn set_timer_deadline(&mut self, t: ObjId, v: u64)
+        requires old(self).timer_view().dom().contains(t),
+        ensures
+            final(self).timer_view() == old(self).timer_view().insert(
+                t, TimerView { deadline: v, ..old(self).timer_view()[t] }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
+
+    fn timer_notif(&self, t: ObjId) -> (r: Option<ObjId>)
+        requires self.timer_view().dom().contains(t),
+        ensures r == self.timer_view()[t].notif;
+
+    fn set_timer_notif(&mut self, t: ObjId, n: Option<ObjId>)
+        requires old(self).timer_view().dom().contains(t),
+        ensures
+            final(self).timer_view() == old(self).timer_view().insert(
+                t, TimerView { notif: n, ..old(self).timer_view()[t] }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
+
+    fn timer_bits(&self, t: ObjId) -> (r: u64)
+        requires self.timer_view().dom().contains(t),
+        ensures r == self.timer_view()[t].bits;
+
+    fn set_timer_bits(&mut self, t: ObjId, v: u64)
+        requires old(self).timer_view().dom().contains(t),
+        ensures
+            final(self).timer_view() == old(self).timer_view().insert(
+                t, TimerView { bits: v, ..old(self).timer_view()[t] }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
+
+    fn timer_next(&self, t: ObjId) -> (r: Option<ObjId>)
+        requires self.timer_view().dom().contains(t),
+        ensures r == self.timer_view()[t].next;
+
+    fn set_timer_next(&mut self, t: ObjId, n: Option<ObjId>)
+        requires old(self).timer_view().dom().contains(t),
+        ensures
+            final(self).timer_view() == old(self).timer_view().insert(
+                t, TimerView { next: n, ..old(self).timer_view()[t] }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
+
+    fn timer_armed_head(&self) -> (r: Option<ObjId>)
+        ensures r == self.timer_head_view();
+
+    fn set_timer_armed_head(&mut self, h: Option<ObjId>)
+        ensures
+            final(self).timer_head_view() == h,
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_view() == old(self).timer_view();
+
+    // ── scheduler seam (plan §4a; §1.3) ─────────────────────────────────────
+    //
+    // The single assumed scheduler contract phase 4 adds: `signal`'s body proof
+    // (4b) needs to know the wake touches only the woken thread's `state`. The
+    // ready queue is scheduler state *below* the abstract `tcb_view` (a thread is
+    // off every kcore queue once Runnable — `signal` sets `qnext = None` before
+    // calling this), so modeling it as "state → Runnable, all else fixed" is
+    // faithful; host-test-checked against `ArrayStore`. `unqueue_ready`'s contract
+    // waits for 4e.
+    fn make_runnable(&mut self, t: ObjId)
+        requires old(self).tcb_view().dom().contains(t),
+        ensures
+            final(self).tcb_view() == old(self).tcb_view().insert(
+                t, TcbView { state: ThreadState::Runnable, ..old(self).tcb_view()[t] }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
 }
 
 // The refcounted object a cap designates (the spec mirror of `Cap::obj`).
@@ -815,6 +1230,74 @@ pub open spec fn ring_msg(cv: ChanView, sv: Map<SlotId, CapSlot>, ring: int, idx
 pub open spec fn ring_fifo(cv: ChanView, sv: Map<SlotId, CapSlot>, ring: int)
     -> Seq<(nat, Seq<Cap>)> {
     Seq::new(cv.count[ring], |j: int| ring_msg(cv, sv, ring, (cv.head[ring] + j) % (cv.depth as int)))
+}
+
+// ── Notification waiter-queue well-formedness + the FIFO Seq model (plan §4a) ─
+//
+// The waiter queue is a SINGLY-linked intrusive list threaded through the TCBs:
+// `NotifView` holds `wait_head`/`wait_tail`, each waiting TCB holds `qnext` (next
+// waiter) + `wait_notif` (its notification). Unlike the CDT sibling list it has no
+// back-pointer, so the doubly-consistent membership trick does not apply — the clean
+// model is an explicit FIFO `Seq` witness (the §3d `ring_fifo` analog). `wait` pushes
+// the tail (`Seq::push`, 4b), `signal` pops the head (`Seq::drop_first`, 4b),
+// `remove_waiter` splices out one element (4c) — so "wake order = block order" (§4.4)
+// is FIFO-ness of `waiter_seq`.
+
+// A generic singly-linked-list acyclicity rank over an abstract successor map — the
+// `valid_srank`/`sib_acyclic` analog, shared by the waiter queue (`succ` = `qnext`)
+// and, in phase 4e, the armed-timer list (`succ` = `timer_next`): a strict decrease
+// along `succ` makes the relation well-founded, so an unlink loop walking `succ`
+// terminates. GHOST-only (the rank is an existential witness, no `Store` home). Over
+// the `qnext` projection it is implied by `waiter_chain`'s `no_duplicates` (rank =
+// position in the chain), so `notif_wf` need not assert it separately; it is the
+// decreases mechanism phase 4c/4e instantiate.
+pub open spec fn valid_list_rank(succ: Map<ObjId, Option<ObjId>>, r: Map<ObjId, nat>) -> bool {
+    &&& r.dom() == succ.dom()
+    &&& forall|k: ObjId| #[trigger] succ.dom().contains(k) ==>
+            (succ[k] matches Some(nx) ==> succ.dom().contains(nx) && r[nx] < r[k])
+}
+
+pub open spec fn list_acyclic(succ: Map<ObjId, Option<ObjId>>) -> bool {
+    exists|r: Map<ObjId, nat>| valid_list_rank(succ, r)
+}
+
+// `ws` is notification `n`'s waiter chain in FIFO (block) order. Pins the imperative
+// `wait_head`/`wait_tail`/`qnext` links to the `Seq`: distinct elements (acyclicity —
+// the index IS the rank), the head/tail agree with `ws`'s ends, `qnext` threads each
+// element to the next (and the last to `None`), and every charted node names `n` and
+// is `BlockedNotif`.
+pub open spec fn waiter_chain(
+    nv: Map<ObjId, NotifView>,
+    tv: Map<ObjId, TcbView>,
+    n: ObjId,
+    ws: Seq<ObjId>,
+) -> bool {
+    &&& ws.no_duplicates()
+    &&& forall|i: int| #![trigger ws[i]] 0 <= i < ws.len() ==> tv.dom().contains(ws[i])
+    &&& (ws.len() == 0 ==> nv[n].wait_head is None && nv[n].wait_tail is None)
+    &&& (ws.len() > 0 ==> nv[n].wait_head == Some(ws[0])
+                       && nv[n].wait_tail == Some(ws[ws.len() - 1]))
+    &&& forall|i: int| #![trigger ws[i]] 0 <= i < ws.len() ==>
+            tv[ws[i]].qnext == (if i + 1 < ws.len() { Some(ws[i + 1]) } else { None })
+    &&& forall|i: int| #![trigger ws[i]] 0 <= i < ws.len() ==>
+            tv[ws[i]].wait_notif == Some(n) && tv[ws[i]].state == ThreadState::BlockedNotif
+}
+
+// Notification `n` is well-formed: empty-queue head/tail agreement, and a waiter
+// chain witness exists. No op PROVES this in 4a — defined for 4b/4c, exercised by
+// `notif_wf_exec` (the `chan_wf` discipline, doc 27 §1).
+pub open spec fn notif_wf(nv: Map<ObjId, NotifView>, tv: Map<ObjId, TcbView>, n: ObjId) -> bool {
+    &&& nv.dom().contains(n)
+    &&& (nv[n].wait_head is None <==> nv[n].wait_tail is None)
+    &&& exists|ws: Seq<ObjId>| waiter_chain(nv, tv, n, ws)
+}
+
+// The FIFO waiter `Seq` — well-defined when `notif_wf` holds (the chain is unique
+// given the `qnext` threading). `wait` ⇒ `Seq::push`, `signal` ⇒ `Seq::drop_first`,
+// `remove_waiter` ⇒ a splice (4b/4c — where the push/pop/splice lemmas land).
+pub open spec fn waiter_seq(nv: Map<ObjId, NotifView>, tv: Map<ObjId, TcbView>, n: ObjId)
+    -> Seq<ObjId> {
+    choose|ws: Seq<ObjId>| waiter_chain(nv, tv, n, ws)
 }
 
 // `s` is one of channel-view `cv`'s ring cap slots. `send`/`recv` require the
