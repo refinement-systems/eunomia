@@ -158,12 +158,26 @@ peer-closed), `bind` (the §3.6 binding-refcount delta `bind_refs_post` — the 
 `refcount_sound` installment), and `fire` are all proven against `cspace_wf` + the new
 `chan_wf`.
 
+**Phase 4 (notification + thread/reports + timer, `doc/results/31`…`35`):** the
+notification ops `signal`/`wait`/`remove_waiter`/`destroy_notif` against the FIFO
+`waiter_seq` model (so **wake order = block order** is a theorem — `signal` graduates from
+its phase-3 `external_body` to a **proven** body); the thread ops `report_terminal` (the
+§5.1 **ReportMonotone** — at most one `Running → Exited|Faulted`, terminal absorbing — and
+**FireSafe** — a terminal fire reads an empty slot or a live notification, never freed
+memory) and `bind`; and the timer ops `arm`/`disarm`/`check_expired`/`destroy_timer`
+against the head-only armed-list `timer_wf` (`check_expired`'s multi-fire census tension
+resolved by a distinct-notification precondition, `doc/results/35`). The **waiter** and
+**armed-timer** refcount deltas are the second/third `refcount_sound` installments after
+3e's binding term; the full census stays deferred (the recommended cross-object-teardown
+phase after phase 5).
+
 **Trusted (assumed `external_body` contract, host-test-checked against the real body —
 `kcore/src/test_store.rs`):** `delete` (a full strengthened-`cspace_wf` contract; its
-cross-object-teardown body is the residue), `notification::signal` (the minimal
-`slot_view`/`chan_view`-unchanged frame; body proof phase 4), and
-`channel::destroy_channel` (ring caps emptied + bindings released; recurses through
-`delete`) — the cross-object-teardown residue (plan phases 4–5). (Phase 2 closeout,
+cross-object-teardown body is the residue), `channel::destroy_channel` (ring caps emptied +
+bindings released; recurses through `delete`), and `thread::destroy_tcb` (the §4e
+scope-out: `t` Halted, queue link + both bind slots cleared, **report unchanged**; recurses
+through `delete`/`unref_*`) — the cross-object-teardown residue (the recommended dedicated
+phase after phase 5, `doc/results/35`). (Phase 2 closeout,
 doc 23, also **retracted doc 21 §9's** proposed revoke-cap-survival fix as unsound
 — cross-object teardown empties slots outside the deleted subtree and can empty
 revoke's own root in the seL4-zombie case; two `test_store` cases witness it.) The `verus`
@@ -481,7 +495,7 @@ non-`#[inline(always)]` helpers in user.rs.
 |------|-------|------|
 | TLA+ / TLC | commit protocol, cap revocation | Before respective milestone |
 | Kani | host chokepoints (`urt`, `ipc`, `cas`, `dma-pool`); the `kcore` kernel-core harnesses were migrated to Verus (plan `doc/plans/3_verus-rewrite.md` phase 2) | During kernel development |
-| Verus | **mechanized implementation tier for `kcore`** (plan `doc/plans/3_verus-rewrite.md`): unbounded/functional proofs on the real handle/`Store` code — `untyped::carve` (phase 0); the non-recursive cspace/CDT ops `derive`/`cdt_insert_child`/`obj_ref`, now preserving full `cspace_wf` (parent+sibling acyclicity composition, phase 2c); `revoke`/`descend_to_leaf` termination (phase 2b); `slot_move` and `cdt_unlink` in full (body proofs — `slot_move`'s transposition lands the renaming, `doc/results/24`; `cdt_unlink`'s sibling-list merge lands `unlinked`, parent-rank witness reused / sibling-rank rescaled, `doc/results/25`); **phase 3** the untyped remainder `retype_check`/`retype_install`/`reset` (the §2.5 sub-`Untyped`-never-`PHYS` rights theorem) + the channel ops `send`/`recv`/`endpoint_cap_added`/`endpoint_cap_dropped`/`bind`/`fire` against `chan_wf` + the FIFO `Seq` model (`doc/results/26`…`30`). `delete`, `notification::signal`, and `channel::destroy_channel` carry assumed `external_body` contracts, host-test-checked (`kcore/src/test_store.rs`); their cross-object-teardown bodies are the residue (phases 4–5). + `scratchpad` smoke | CI `verus` job (`cargo verus verify -p kcore`); during the Verus rewrite |
+| Verus | **mechanized implementation tier for `kcore`** (plan `doc/plans/3_verus-rewrite.md`): unbounded/functional proofs on the real handle/`Store` code — `untyped::carve` (phase 0); the non-recursive cspace/CDT ops `derive`/`cdt_insert_child`/`obj_ref`, now preserving full `cspace_wf` (parent+sibling acyclicity composition, phase 2c); `revoke`/`descend_to_leaf` termination (phase 2b); `slot_move` and `cdt_unlink` in full (body proofs — `slot_move`'s transposition lands the renaming, `doc/results/24`; `cdt_unlink`'s sibling-list merge lands `unlinked`, parent-rank witness reused / sibling-rank rescaled, `doc/results/25`); **phase 3** the untyped remainder `retype_check`/`retype_install`/`reset` (the §2.5 sub-`Untyped`-never-`PHYS` rights theorem) + the channel ops `send`/`recv`/`endpoint_cap_added`/`endpoint_cap_dropped`/`bind`/`fire` against `chan_wf` + the FIFO `Seq` model (`doc/results/26`…`30`); **phase 4** the notification ops `signal`/`wait`/`remove_waiter`/`destroy_notif` (the `waiter_seq` FIFO model — wake order = block order; `signal` graduates `external_body` → proven), the thread ops `report_terminal` (ReportMonotone + FireSafe) / `bind`, and the timer ops `arm`/`disarm`/`check_expired`/`destroy_timer` (the head-only armed-list `timer_wf`; the waiter + armed-timer `refcount_sound` terms) (`doc/results/31`…`35`). `delete`, `channel::destroy_channel`, and `thread::destroy_tcb` carry assumed `external_body` contracts, host-test-checked (`kcore/src/test_store.rs`); their cross-object-teardown bodies are the residue (the recommended dedicated phase after phase 5). + `scratchpad` smoke | CI `verus` job (`cargo verus verify -p kcore`); during the Verus rewrite |
 | Loom / Shuttle | IPC crate, userspace servers | During M1+ development |
 | Miri + proptest | everything; chunker + prolly tree esp. | Continuous |
 | cargo-fuzz | IPC decoder, postcard payloads | From M1 |
@@ -533,11 +547,13 @@ deleted. The historical findings/bounds remain recorded:
   full `cspace_wf`; `revoke`/`descend_to_leaf` termination; the full body proofs of
   `slot_move` and `cdt_unlink`; the phase-3 untyped `retype_check`/`retype_install`/
   `reset` and channel `send`/`recv`/`endpoint_cap_added`/`endpoint_cap_dropped`/
-  `bind`/`fire` against `chan_wf` + the FIFO `Seq` model). No per-proof filter, so a
-  new `verus!{}` obligation gates automatically. The `host-tests` job's `kcore` leg
-  now also runs `test_store` — the executable check of the assumed `external_body`
-  contracts (`delete`, `notification::signal`, `channel::destroy_channel`) against
-  their real bodies.
+  `bind`/`fire` against `chan_wf` + the FIFO `Seq` model; the phase-4 notification
+  `signal`/`wait`/`remove_waiter`/`destroy_notif`, thread `report_terminal`/`bind`,
+  and timer `arm`/`disarm`/`check_expired`/`destroy_timer` against `notif_wf` +
+  `timer_wf`). No per-proof filter, so a new `verus!{}` obligation gates automatically.
+  The `host-tests` job's `kcore` leg now also runs `test_store` — the executable check
+  of the assumed `external_body` contracts (`delete`, `channel::destroy_channel`,
+  `thread::destroy_tcb`) against their real bodies.
 - **concurrency** — the Loom/Shuttle models under `RUSTFLAGS="--cfg loom"` /
   `"--cfg shuttle"` (plan `doc/plans/1_loom-shuttle-rewrite.md` §6):
   `cargo test -p urt -p ipc --lib`. Loom is the certifying exhaustive proof
