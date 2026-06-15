@@ -312,29 +312,183 @@ pub fn destroy_notif<S: Store>(store: &mut S, n: ObjId)
     let _ = n;
 }
 
-} // verus!
+/// Unlink waiter `t` from notification `n`'s queue (the thread-teardown path).
+///
+/// Verified (plan §4c, doc/results/33): the mid-queue unlink — the `cdt_unlink` analog
+/// (doc 25) but singly-linked with no re-parenting, so the removal is a plain `Seq`
+/// splice. If `t` is queued on `n` it is spliced out (`waiter_seq(n)` loses exactly the
+/// `t` element, the FIFO order of the rest preserved — `Seq::remove`), its `qnext`/
+/// `wait_notif` are cleared, and the queued ref is released (`refs[n] -= 1`, the second
+/// installment of `refcount_sound`'s waiter term after `signal`'s pop-release); if `t`
+/// is absent the store is unchanged. `notif_wf(n)` is preserved either way. The walk is
+/// read-only — the only writes are on the found path, which returns. The `refs > 0`
+/// precondition (a non-empty queue ⇒ live) discharges the release `-1`, exactly as in
+/// `signal`.
+pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
+    requires
+        old(store).notif_view().dom().contains(n),
+        cspace::notif_wf(old(store).notif_view(), old(store).tcb_view(), n),
+        old(store).notif_view()[n].wait_head is Some
+            ==> old(store).refs_view().dom().contains(n) && old(store).refs_view()[n] > 0,
+    ensures
+        final(store).slot_view() == old(store).slot_view(),
+        final(store).chan_view() == old(store).chan_view(),
+        final(store).timer_view() == old(store).timer_view(),
+        final(store).timer_head_view() == old(store).timer_head_view(),
+        final(store).notif_view().dom() == old(store).notif_view().dom(),
+        final(store).tcb_view().dom() == old(store).tcb_view().dom(),
+        cspace::notif_wf(final(store).notif_view(), final(store).tcb_view(), n),
+        ({
+            let ws0 = cspace::waiter_seq(old(store).notif_view(), old(store).tcb_view(), n);
+            // Absent: `t` not on `n`'s queue ⇒ the store is unchanged.
+            &&& !ws0.contains(t) ==> {
+                    &&& final(store).notif_view() == old(store).notif_view()
+                    &&& final(store).tcb_view() == old(store).tcb_view()
+                    &&& final(store).refs_view() == old(store).refs_view()
+                }
+            // Present: `t` spliced out (FIFO order of the rest preserved), its links
+            // cleared, the queued ref released.
+            &&& ws0.contains(t) ==> {
+                    &&& cspace::waiter_seq(final(store).notif_view(), final(store).tcb_view(), n)
+                            == ws0.remove(ws0.index_of(t))
+                    &&& final(store).tcb_view()[t].qnext is None
+                    &&& final(store).tcb_view()[t].wait_notif is None
+                    &&& final(store).refs_view()
+                            == old(store).refs_view().insert(n, (old(store).refs_view()[n] - 1) as nat)
+                }
+        }),
+{
+    let ghost nv0 = old(store).notif_view();
+    let ghost tv0 = old(store).tcb_view();
+    let ghost ws0 = cspace::waiter_seq(nv0, tv0, n);
+    assert(cspace::waiter_chain(nv0, tv0, n, ws0));
 
-/// Unlink a waiter (thread teardown path). Phase 4c verifies this body; today it is
-/// plain Rust outside the verified block.
-pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId) {
     let mut cur = store.notif_wait_head(n);
     let mut prev: Option<ObjId> = None;
-    while let Some(c) = cur {
-        if c == t {
+    let ghost mut k: int = 0;
+
+    while cur.is_some()
+        invariant
+            // the walk is read-only: all seven views pinned to `old`.
+            store.slot_view() == old(store).slot_view(),
+            store.refs_view() == old(store).refs_view(),
+            store.chan_view() == old(store).chan_view(),
+            store.notif_view() == nv0,
+            store.tcb_view() == tv0,
+            store.timer_view() == old(store).timer_view(),
+            store.timer_head_view() == old(store).timer_head_view(),
+            // pin the pre-loop ghosts to the function entry state — a loop body only
+            // assumes the invariant, so without this the `nv0 == old(store)...` links
+            // (needed for the dom/contract postconditions at the in-loop return) are lost.
+            nv0 == old(store).notif_view(),
+            tv0 == old(store).tcb_view(),
+            ws0 == cspace::waiter_seq(nv0, tv0, n),
+            // the chain + the refs side-condition survive into the body.
+            cspace::waiter_chain(nv0, tv0, n, ws0),
+            nv0.dom().contains(n),
+            nv0[n].wait_head is Some
+                ==> store.refs_view().dom().contains(n) && store.refs_view()[n] > 0,
+            // `cur`/`prev` track position `k` in `ws0`, no `t` seen yet.
+            0 <= k <= ws0.len(),
+            cur == (if k < ws0.len() { Some(ws0[k]) } else { None::<ObjId> }),
+            prev == (if k == 0 { None::<ObjId> } else { Some(ws0[k - 1]) }),
+            forall|i: int| 0 <= i < k ==> ws0[i] != t,
+        decreases ws0.len() - k,
+    {
+        let c = cur.unwrap();
+        assert(k < ws0.len());
+        assert(c == ws0[k]);
+        // `ObjId`'s exec `==` is external (cspace.rs:4094); compare the u64 tag. In spec,
+        // `c == ws0[k]` ⇒ `c.0 == t.0` reflects `ws0[k] == t`.
+        if c.0 == t.0 {
+            // `c == ws0[k]` and `c.0 == t.0` ⇒ `t == ws0[k]` (single-field struct eq),
+            // the bridge from the tag test to the chain element under `t`.
+            assert(t == ws0[k]);
+            let ghost len = ws0.len() as int;
+            assert(ws0.len() > 0);
+            assert(nv0[n].wait_head == Some(ws0[0]));
+            assert(nv0[n].wait_tail == Some(ws0[len - 1]));
+            // The tail names `t` iff `t` is the last element (no_duplicates).
+            assert((ws0[len - 1] == t) == (k == len - 1)) by {
+                if ws0[len - 1] == t {
+                    assert(ws0[len - 1] == ws0[k]);
+                }
+                if k == len - 1 {
+                    assert(ws0[len - 1] == ws0[k]);
+                }
+            }
+
             let next = store.tcb_qnext(c);
+            assert(next == tv0[t].qnext);
+
+            // The branchy writes make the views conditional, so dom-preservation is
+            // asserted *inside* each arm (where the inserted key is in scope) and
+            // path-merges, rather than relying on the merged conditional (which loses
+            // the match-bound predecessor key).
             match prev {
-                None => store.set_notif_wait_head(n, next),
-                Some(p) => store.set_tcb_qnext(p, next),
+                None => {
+                    store.set_notif_wait_head(n, next);       // notif insert on resident `n`
+                    proof { assert(store.notif_view().dom() =~= nv0.dom()); }
+                }
+                Some(p) => {
+                    proof { assert(k > 0); assert(p == ws0[k - 1]); assert(tv0.dom().contains(p)); }
+                    store.set_tcb_qnext(p, next);             // tcb insert on resident `p`
+                    proof { assert(store.tcb_view().dom() =~= tv0.dom()); }
+                }
             }
-            if store.notif_wait_tail(n) == Some(t) {
-                store.set_notif_wait_tail(n, prev);
+            proof {
+                assert(store.notif_view().dom() =~= nv0.dom());
+                assert(store.tcb_view().dom() =~= tv0.dom());
             }
-            store.set_tcb_qnext(t, None);
+            // The match left `n`'s tail untouched, so the test below reads `nv0`'s tail.
+            assert(store.notif_view()[n].wait_tail == nv0[n].wait_tail);
+
+            // `Option<ObjId>`'s exec `==` is external; match on the tag instead.
+            let tail_is_t = match store.notif_wait_tail(n) {
+                Some(tl) => tl.0 == t.0,
+                None => false,
+            };
+            if tail_is_t {
+                store.set_notif_wait_tail(n, prev);           // notif insert on resident `n`
+                proof { assert(store.notif_view().dom() =~= nv0.dom()); }
+            }
+            store.set_tcb_qnext(t, None);                     // tcb inserts on resident `t`
             store.set_tcb_wait_notif(t, None);
             store.set_obj_refs(n, store.obj_refs(n) - 1);
+            proof {
+                assert(store.tcb_view().dom() =~= tv0.dom());
+                assert(store.notif_view().dom() =~= nv0.dom());
+            }
+
+            proof {
+                let nvf = store.notif_view();
+                let tvf = store.tcb_view();
+                // `t == ws0[k]` ⇒ `index_of(t) == k` (no_duplicates), so the splice the
+                // contract states (`ws0.remove(index_of(t))`) is `ws0.remove(k)`.
+                assert(ws0.contains(t));
+                assert(ws0.index_of(t) == k) by {
+                    let idx = ws0.index_of(t);
+                    assert(0 <= idx < ws0.len() && ws0[idx] == t);
+                }
+                cspace::lemma_remove_chain(nv0, tv0, nvf, tvf, n, t, ws0, k);
+                cspace::lemma_waiter_chain_unique(nvf, tvf, n,
+                    cspace::waiter_seq(nvf, tvf, n), ws0.remove(k));
+                assert(cspace::notif_wf(nvf, tvf, n));
+            }
             return;
         }
         prev = cur;
         cur = store.tcb_qnext(c);
+        proof {
+            k = k + 1;
+        }
+    }
+    // Fell off the end ⇒ k == ws0.len() ⇒ `t` was never on the queue; store == old.
+    proof {
+        assert(k == ws0.len());
+        assert(!ws0.contains(t));
+        assert(cspace::notif_wf(store.notif_view(), store.tcb_view(), n));
     }
 }
+
+} // verus!

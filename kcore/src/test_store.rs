@@ -25,7 +25,7 @@ use crate::cspace::{
     cdt_unlink, delete, derive, revoke, slot_move, Cap, CapKind, CapSlot, ChanEnd, Rights,
 };
 use crate::id::{ObjId, SlotId};
-use crate::notification::{destroy_notif, signal, wait};
+use crate::notification::{destroy_notif, remove_waiter, signal, wait};
 use crate::untyped::{reset, retype_check, retype_install, ObjType, RetypeError};
 use crate::store::{Binding, Store};
 use crate::thread::{Report, ThreadState};
@@ -853,6 +853,28 @@ fn check_signal_frame(st: &mut ArrayStore, n: ObjId, bits: u64) {
     assert!(notif_wf_exec(st, n), "signal post: notif_wf preserved");
 }
 
+// Run the real `notification::remove_waiter` and assert its proven (§4c) frame: the
+// `slot_view`/`chan_view` are untouched, `notif_wf` is preserved, and the queued-ref
+// release happens iff `t` was on the queue (the host check of the per-op refcount
+// delta + the splice). The executable counterpart of the proven contract.
+fn check_remove_waiter(st: &mut ArrayStore, n: ObjId, t: ObjId, queued: bool) {
+    assert!(notif_wf_exec(st, n), "remove_waiter pre: notif_wf");
+    let fp = fingerprint(st);
+    let chans = st.chans.clone();
+    let refs0 = st.refs[&n.0];
+    remove_waiter(st, n, t);
+    assert!(fingerprint(st) == fp, "remove_waiter post: slot_view unchanged");
+    assert!(st.chans == chans, "remove_waiter post: chan_view unchanged");
+    assert!(notif_wf_exec(st, n), "remove_waiter post: notif_wf preserved");
+    if queued {
+        assert!(st.tcbs[&t.0].qnext.is_none(), "removed waiter's qnext cleared");
+        assert!(st.tcbs[&t.0].wait_notif.is_none(), "removed waiter's wait_notif cleared");
+        assert_eq!(st.refs[&n.0], refs0 - 1, "queued ref released");
+    } else {
+        assert_eq!(st.refs[&n.0], refs0, "absent removal touches no ref");
+    }
+}
+
 // The exec mirror of `cspace::binding_notif_wf`: every bound endpoint event of `ch`
 // names a notification that is resident and `notif_wf`. The plain-Rust re-expression
 // of the §4b named binding invariant (the `notif_wf_exec` discipline).
@@ -1534,6 +1556,83 @@ fn destroy_notif_noop() {
     destroy_notif(&mut st, n);
     assert!(st.notifs[&100] == before, "destroy_notif leaves the notification untouched");
     assert_eq!(st.refs, refs_before, "destroy_notif touches no refcount");
+}
+
+// `remove_waiter` splices a waiter out of the FIFO queue at head / middle / tail and
+// is a no-op when `t` is absent — the executable check of the proven §4c splice +
+// the per-op refcount delta. Queue 200 → 201 → 202 on notification 100.
+#[test]
+fn remove_waiter_unlink() {
+    let n = ObjId(100);
+    let mk = || -> ArrayStore {
+        let mut st = ArrayStore::new(0);
+        st.refs.insert(100, 4); // a binding ref + three queued waiters
+        st.notifs.insert(
+            100,
+            NotifState { word: 0, wait_head: Some(ObjId(200)), wait_tail: Some(ObjId(202)) },
+        );
+        for (id, nxt) in [(200u64, Some(ObjId(201))), (201, Some(ObjId(202))), (202, None)] {
+            st.tcbs.insert(
+                id,
+                TcbState {
+                    state: ThreadState::BlockedNotif,
+                    wait_notif: Some(n),
+                    qnext: nxt,
+                    ..tcb_state_default()
+                },
+            );
+        }
+        st
+    };
+
+    // Middle: 201 unlinked; 200 re-threads to 202; head/tail unchanged.
+    let mut st = mk();
+    check_remove_waiter(&mut st, n, ObjId(201), true);
+    assert!(st.notifs[&100].wait_head == Some(ObjId(200)), "head unchanged");
+    assert!(st.notifs[&100].wait_tail == Some(ObjId(202)), "tail unchanged");
+    assert!(st.tcbs[&200].qnext == Some(ObjId(202)), "predecessor re-threaded past 201");
+
+    // Head: 200 unlinked; 201 becomes the head.
+    let mut st = mk();
+    check_remove_waiter(&mut st, n, ObjId(200), true);
+    assert!(st.notifs[&100].wait_head == Some(ObjId(201)), "201 is the new head");
+    assert!(st.notifs[&100].wait_tail == Some(ObjId(202)), "tail unchanged");
+
+    // Tail: 202 unlinked; tail drops to 201, whose qnext becomes None.
+    let mut st = mk();
+    check_remove_waiter(&mut st, n, ObjId(202), true);
+    assert!(st.notifs[&100].wait_head == Some(ObjId(200)), "head unchanged");
+    assert!(st.notifs[&100].wait_tail == Some(ObjId(201)), "tail dropped to 201");
+    assert!(st.tcbs[&201].qnext.is_none(), "new tail's qnext cleared");
+
+    // Absent: a TCB not on the queue — store unchanged.
+    let mut st = mk();
+    st.tcbs.insert(300, TcbState { state: ThreadState::Inactive, ..tcb_state_default() });
+    let before = st.notifs[&100].clone();
+    check_remove_waiter(&mut st, n, ObjId(300), false);
+    assert!(st.notifs[&100] == before, "absent removal leaves the queue untouched");
+
+    // Single-element queue: removing the sole waiter empties head and tail.
+    let mut st = ArrayStore::new(0);
+    st.refs.insert(100, 2);
+    st.notifs.insert(
+        100,
+        NotifState { word: 0, wait_head: Some(ObjId(200)), wait_tail: Some(ObjId(200)) },
+    );
+    st.tcbs.insert(
+        200,
+        TcbState {
+            state: ThreadState::BlockedNotif,
+            wait_notif: Some(n),
+            qnext: None,
+            ..tcb_state_default()
+        },
+    );
+    check_remove_waiter(&mut st, n, ObjId(200), true);
+    assert!(
+        st.notifs[&100].wait_head.is_none() && st.notifs[&100].wait_tail.is_none(),
+        "queue emptied"
+    );
 }
 
 #[test]

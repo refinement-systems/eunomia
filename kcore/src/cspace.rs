@@ -1513,6 +1513,129 @@ pub proof fn lemma_drop_first_chain(
     }
 }
 
+// `remove_waiter`'s splice step (plan §4c): unlinking `t == ws0[k]` from a waiter
+// chain yields `ws0.remove(k)` in the post-state, given the imperative link fixups —
+// the head re-pointed past `t` when `t` was the head (`k == 0`), the predecessor's
+// `qnext` re-threaded past `t` otherwise (`k > 0`), the tail dropped to the
+// predecessor when `t` was the tail (`k == len-1`), and `t` itself cleared. The
+// mid-list analog of `lemma_drop_first_chain` (which is the `k == 0` head-pop special
+// case); singly-linked with no re-parenting, so a plain `Seq::remove`, not the
+// rank-rescaled merge `cdt_unlink` needed. Extracted so `remove_waiter`'s own body
+// query stays under the solver rlimit (the doc 25 §2 decomposition discipline).
+pub proof fn lemma_remove_chain(
+    nv0: Map<ObjId, NotifView>,
+    tv0: Map<ObjId, TcbView>,
+    nvf: Map<ObjId, NotifView>,
+    tvf: Map<ObjId, TcbView>,
+    n: ObjId,
+    t: ObjId,
+    ws0: Seq<ObjId>,
+    k: int,
+)
+    requires
+        waiter_chain(nv0, tv0, n, ws0),
+        0 <= k < ws0.len(),
+        ws0[k] == t,
+        tvf.dom() == tv0.dom(),
+        // `t` cleared (set_tcb_qnext(t, None); set_tcb_wait_notif(t, None)).
+        tvf[t].qnext is None,
+        tvf[t].wait_notif is None,
+        // predecessor re-threaded past `t` (k>0: set_tcb_qnext(ws0[k-1], tv0[t].qnext)),
+        // its other fields framed.
+        k > 0 ==> tvf[ws0[k - 1]].qnext == tv0[t].qnext,
+        k > 0 ==> tvf[ws0[k - 1]].wait_notif == tv0[ws0[k - 1]].wait_notif,
+        k > 0 ==> tvf[ws0[k - 1]].state == tv0[ws0[k - 1]].state,
+        // every other TCB unchanged.
+        forall|j: ObjId| #![trigger tvf[j]]
+            j != t && (k == 0 || j != ws0[k - 1]) ==> tvf[j] == tv0[j],
+        // head fix: k==0 ⇒ new head is `t`'s old qnext; else unchanged.
+        k == 0 ==> nvf[n].wait_head == tv0[t].qnext,
+        k > 0 ==> nvf[n].wait_head == nv0[n].wait_head,
+        // tail fix: `t` was the tail (k==len-1) ⇒ tail drops to the predecessor; else
+        // unchanged.
+        k == ws0.len() - 1 ==> nvf[n].wait_tail
+            == (if k == 0 { None::<ObjId> } else { Some(ws0[k - 1]) }),
+        k < ws0.len() - 1 ==> nvf[n].wait_tail == nv0[n].wait_tail,
+    ensures
+        waiter_chain(nvf, tvf, n, ws0.remove(k)),
+{
+    let dws = ws0.remove(k);
+    let len = ws0.len() as int;
+    ws0.remove_ensures(k);
+    // dws.len() == len - 1; dws[i] == ws0[i] for i<k, ws0[i+1] for k<=i<len-1.
+
+    // Clause 1: no_duplicates. Each dws index maps to a distinct ws0 index.
+    assert(dws.no_duplicates()) by {
+        assert forall|i: int, j: int|
+            0 <= i < dws.len() && 0 <= j < dws.len() && i != j implies dws[i] != dws[j] by {
+            let ii = if i < k { i } else { i + 1 };
+            let jj = if j < k { j } else { j + 1 };
+            assert(dws[i] == ws0[ii] && dws[j] == ws0[jj]);
+            assert(ii != jj);
+        }
+    }
+
+    // Clauses 2, 5, 6: per-node domain / qnext-threading / wait_notif+state.
+    assert forall|i: int| #![trigger dws[i]] 0 <= i < dws.len() implies
+        tvf.dom().contains(dws[i])
+        && tvf[dws[i]].qnext == (if i + 1 < dws.len() { Some(dws[i + 1]) } else { None::<ObjId> })
+        && tvf[dws[i]].wait_notif == Some(n)
+        && tvf[dws[i]].state == ThreadState::BlockedNotif by {
+        let ii = if i < k { i } else { i + 1 };
+        assert(dws[i] == ws0[ii]);
+        // ws0 chain facts at index `ii` (clauses 2/5/6 of the source chain).
+        assert(tv0.dom().contains(ws0[ii]));
+        assert(tv0[ws0[ii]].qnext == (if ii + 1 < len { Some(ws0[ii + 1]) } else { None::<ObjId> }));
+        assert(tv0[ws0[ii]].wait_notif == Some(n) && tv0[ws0[ii]].state == ThreadState::BlockedNotif);
+        if k > 0 && i == k - 1 {
+            // dws[i] is the predecessor ws0[k-1]; qnext re-threaded to tv0[t].qnext.
+            assert(ii == k - 1);
+            assert(tv0[t].qnext == (if k + 1 < len { Some(ws0[k + 1]) } else { None::<ObjId> }));
+            if i + 1 < dws.len() {
+                assert(dws[i + 1] == ws0[k + 1]);   // i+1 == k, k <= k so dws[k] = ws0[k+1]
+            } else {
+                assert(k + 1 == len);               // i+1 == k == dws.len() == len-1
+            }
+        } else {
+            // tvf[dws[i]] == tv0[dws[i]] (not `t`, not the predecessor).
+            assert(tvf[ws0[ii]] == tv0[ws0[ii]]);
+            if i + 1 < dws.len() {
+                let i1 = if i + 1 < k { i + 1 } else { i + 2 };
+                assert(dws[i + 1] == ws0[i1]);      // and i1 == ii + 1
+            }
+        }
+    }
+
+    // Clauses 3, 4: head / tail of `dws`.
+    if dws.len() == 0 {
+        // len == 1 ⇒ k == 0: head == t's (None) qnext; tail == None (k==len-1==0).
+        assert(tv0[ws0[0]].qnext is None);
+        assert(nvf[n].wait_head is None);
+        assert(nvf[n].wait_tail is None);
+    } else {
+        if k == 0 {
+            assert(dws[0] == ws0[1]);
+            assert(tv0[ws0[0]].qnext == Some(ws0[1]));
+            assert(nvf[n].wait_head == Some(dws[0]));
+        } else {
+            assert(dws[0] == ws0[0]);
+            assert(nv0[n].wait_head == Some(ws0[0]));
+            assert(nvf[n].wait_head == Some(dws[0]));
+        }
+        let last = dws.len() - 1;
+        if k == len - 1 {
+            assert(k > 0);                          // dws nonempty ⇒ len>=2 ⇒ k>=1
+            assert(last == k - 1);
+            assert(dws[last] == ws0[k - 1]);
+            assert(nvf[n].wait_tail == Some(dws[last]));
+        } else {
+            assert(nv0[n].wait_tail == Some(ws0[len - 1]));
+            assert(dws[last] == ws0[len - 1]);      // last >= k ⇒ dws[last] = ws0[last+1]
+            assert(nvf[n].wait_tail == Some(dws[last]));
+        }
+    }
+}
+
 // `s` is one of channel-view `cv`'s ring cap slots. `send`/`recv` require the
 // caller's source/destination slots are NOT ring caps of the channel (the
 // kernel naturally supplies cspace residents), so moving them disturbs no other
