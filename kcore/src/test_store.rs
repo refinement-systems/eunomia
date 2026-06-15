@@ -19,6 +19,7 @@
 
 use crate::cspace::{cdt_unlink, delete, derive, revoke, slot_move, Cap, CapKind, CapSlot, Rights};
 use crate::id::{ObjId, SlotId};
+use crate::notification::signal;
 use crate::untyped::{reset, retype_check, ObjType, RetypeError};
 use crate::store::{Binding, Store};
 use crate::thread::{Report, ThreadState};
@@ -27,27 +28,74 @@ use std::collections::BTreeMap;
 // ── The concrete store ────────────────────────────────────────────────────
 //
 // Slots are a `Vec<CapSlot>` (a `SlotId` is its index); object refcounts and
-// cspace resident lists are keyed maps. Only the handful of accessors the CDT /
-// teardown path touches for Frame/Untyped/CSpace/Aspace caps are real; the
-// channel/notification/thread/timer seam is `unimplemented!()` — these tests use
-// none of those cap kinds, so the teardown never reaches them (a stray call
-// would panic loudly rather than silently model nothing).
+// cspace resident lists are keyed maps. The CDT/teardown path needs only the
+// Frame/Untyped/CSpace/Aspace accessors.
+//
+// Phase 3b adds **real channel state** (`chans`) — the `chan_*` accessors model
+// the `ChanView` ghost view: per-end cap counts, per-ring FIFO cursors, event
+// bindings, per-message lengths, and the ring cap-slot *handles* (the cap
+// contents stay in `slots`, the single arena). It also adds the minimal
+// notification + TCB state `notification::signal` touches, so the
+// `external_body` `signal` contract (`slot_view`/`chan_view` unchanged) can be
+// checked against the real body (`check_signal_frame`). The thread/timer seam
+// `signal` never reaches stays `unimplemented!()` — a stray call panics loudly.
+
+#[derive(Clone, PartialEq)]
+struct ChanState {
+    depth: u32,
+    end_caps: [u32; 2],
+    head: [u32; 2],
+    count: [u32; 2],
+    bindings: BTreeMap<(usize, usize), Binding>,      // (end, ev)
+    msg_len: BTreeMap<(usize, u32), u16>,             // (ring, index)
+    ring_cap: BTreeMap<(usize, u32, usize), SlotId>,  // (ring, index, cap) -> arena handle
+}
+
+#[derive(Clone, PartialEq)]
+struct NotifState {
+    word: u64,
+    wait_head: Option<ObjId>,
+    wait_tail: Option<ObjId>,
+}
+
+#[derive(Clone, PartialEq)]
+struct TcbState {
+    qnext: Option<ObjId>,
+    wait_notif: Option<ObjId>,
+    retval: u64,
+}
 
 struct ArrayStore {
     slots: Vec<CapSlot>,
     refs: BTreeMap<u64, u32>,
     cspaces: BTreeMap<u64, Vec<SlotId>>,
+    chans: BTreeMap<u64, ChanState>,
+    notifs: BTreeMap<u64, NotifState>,
+    tcbs: BTreeMap<u64, TcbState>,
 }
 
 impl ArrayStore {
     fn new(n: usize) -> Self {
-        ArrayStore { slots: vec![CapSlot::empty(); n], refs: BTreeMap::new(), cspaces: BTreeMap::new() }
+        ArrayStore {
+            slots: vec![CapSlot::empty(); n],
+            refs: BTreeMap::new(),
+            cspaces: BTreeMap::new(),
+            chans: BTreeMap::new(),
+            notifs: BTreeMap::new(),
+            tcbs: BTreeMap::new(),
+        }
     }
     fn n(&self) -> usize {
         self.slots.len()
     }
     fn at(&self, s: SlotId) -> CapSlot {
         self.slots[s.0 as usize]
+    }
+    fn chan(&self, ch: ObjId) -> &ChanState {
+        self.chans.get(&ch.0).expect("chan_*: channel not registered in this test store")
+    }
+    fn chan_mut(&mut self, ch: ObjId) -> &mut ChanState {
+        self.chans.get_mut(&ch.0).expect("set_chan_*: channel not registered in this test store")
     }
 }
 
@@ -73,67 +121,66 @@ impl Store for ArrayStore {
     fn aspace_destroy(&mut self, _a: ObjId) {}
     fn aspace_unmap(&mut self, _a: ObjId, _va: u64, _pages: u64) {}
 
-    // ── unexercised by the CDT/teardown tests (no channel/notif/thread/timer
-    //    caps are built), so left unimplemented; reaching one is a test bug. ──
-    fn chan_depth(&self, _: ObjId) -> u32 {
-        unimplemented!()
+    // ── channel state (plan §3b): the `chan_*` accessors backed by `chans` ──
+    fn chan_depth(&self, ch: ObjId) -> u32 {
+        self.chan(ch).depth
     }
-    fn chan_end_caps(&self, _: ObjId, _: usize) -> u32 {
-        unimplemented!()
+    fn chan_end_caps(&self, ch: ObjId, end: usize) -> u32 {
+        self.chan(ch).end_caps[end]
     }
-    fn set_chan_end_caps(&mut self, _: ObjId, _: usize, _: u32) {
-        unimplemented!()
+    fn set_chan_end_caps(&mut self, ch: ObjId, end: usize, v: u32) {
+        self.chan_mut(ch).end_caps[end] = v;
     }
-    fn chan_head(&self, _: ObjId, _: usize) -> u32 {
-        unimplemented!()
+    fn chan_head(&self, ch: ObjId, ring: usize) -> u32 {
+        self.chan(ch).head[ring]
     }
-    fn set_chan_head(&mut self, _: ObjId, _: usize, _: u32) {
-        unimplemented!()
+    fn set_chan_head(&mut self, ch: ObjId, ring: usize, v: u32) {
+        self.chan_mut(ch).head[ring] = v;
     }
-    fn chan_count(&self, _: ObjId, _: usize) -> u32 {
-        unimplemented!()
+    fn chan_count(&self, ch: ObjId, ring: usize) -> u32 {
+        self.chan(ch).count[ring]
     }
-    fn set_chan_count(&mut self, _: ObjId, _: usize, _: u32) {
-        unimplemented!()
+    fn set_chan_count(&mut self, ch: ObjId, ring: usize, v: u32) {
+        self.chan_mut(ch).count[ring] = v;
     }
-    fn chan_binding(&self, _: ObjId, _: usize, _: usize) -> Binding {
-        unimplemented!()
+    fn chan_binding(&self, ch: ObjId, end: usize, ev: usize) -> Binding {
+        self.chan(ch).bindings.get(&(end, ev)).copied().unwrap_or(Binding::UNBOUND)
     }
-    fn set_chan_binding(&mut self, _: ObjId, _: usize, _: usize, _: Binding) {
-        unimplemented!()
+    fn set_chan_binding(&mut self, ch: ObjId, end: usize, ev: usize, b: Binding) {
+        self.chan_mut(ch).bindings.insert((end, ev), b);
     }
-    fn chan_ring_cap(&self, _: ObjId, _: usize, _: u32, _: usize) -> SlotId {
-        unimplemented!()
+    fn chan_ring_cap(&self, ch: ObjId, ring: usize, i: u32, c: usize) -> SlotId {
+        self.chan(ch).ring_cap[&(ring, i, c)]
     }
-    fn chan_msg_len(&self, _: ObjId, _: usize, _: u32) -> u16 {
-        unimplemented!()
+    fn chan_msg_len(&self, ch: ObjId, ring: usize, i: u32) -> u16 {
+        self.chan(ch).msg_len.get(&(ring, i)).copied().unwrap_or(0)
     }
-    fn set_chan_msg_len(&mut self, _: ObjId, _: usize, _: u32, _: u16) {
-        unimplemented!()
+    fn set_chan_msg_len(&mut self, ch: ObjId, ring: usize, i: u32, v: u16) {
+        self.chan_mut(ch).msg_len.insert((ring, i), v);
     }
-    fn chan_msg_write(&mut self, _: ObjId, _: usize, _: u32, _: &[u8]) {
-        unimplemented!()
+    // Payload bytes are abstracted out of the ghost view, so the write/read are
+    // no-ops on the modelled state (the §3b frame: `chan_view` unchanged).
+    fn chan_msg_write(&mut self, _: ObjId, _: usize, _: u32, _: &[u8]) {}
+    fn chan_msg_read(&self, _: ObjId, _: usize, _: u32, _: usize, _: &mut [u8]) {}
+
+    // ── notification + TCB state `signal` touches (plan §3b) ────────────────
+    fn notif_word(&self, n: ObjId) -> u64 {
+        self.notifs[&n.0].word
     }
-    fn chan_msg_read(&self, _: ObjId, _: usize, _: u32, _: usize, _: &mut [u8]) {
-        unimplemented!()
+    fn set_notif_word(&mut self, n: ObjId, v: u64) {
+        self.notifs.get_mut(&n.0).unwrap().word = v;
     }
-    fn notif_word(&self, _: ObjId) -> u64 {
-        unimplemented!()
+    fn notif_wait_head(&self, n: ObjId) -> Option<ObjId> {
+        self.notifs[&n.0].wait_head
     }
-    fn set_notif_word(&mut self, _: ObjId, _: u64) {
-        unimplemented!()
+    fn set_notif_wait_head(&mut self, n: ObjId, t: Option<ObjId>) {
+        self.notifs.get_mut(&n.0).unwrap().wait_head = t;
     }
-    fn notif_wait_head(&self, _: ObjId) -> Option<ObjId> {
-        unimplemented!()
+    fn notif_wait_tail(&self, n: ObjId) -> Option<ObjId> {
+        self.notifs[&n.0].wait_tail
     }
-    fn set_notif_wait_head(&mut self, _: ObjId, _: Option<ObjId>) {
-        unimplemented!()
-    }
-    fn notif_wait_tail(&self, _: ObjId) -> Option<ObjId> {
-        unimplemented!()
-    }
-    fn set_notif_wait_tail(&mut self, _: ObjId, _: Option<ObjId>) {
-        unimplemented!()
+    fn set_notif_wait_tail(&mut self, n: ObjId, t: Option<ObjId>) {
+        self.notifs.get_mut(&n.0).unwrap().wait_tail = t;
     }
     fn tcb_state(&self, _: ObjId) -> ThreadState {
         unimplemented!()
@@ -141,17 +188,17 @@ impl Store for ArrayStore {
     fn set_tcb_state(&mut self, _: ObjId, _: ThreadState) {
         unimplemented!()
     }
-    fn tcb_qnext(&self, _: ObjId) -> Option<ObjId> {
-        unimplemented!()
+    fn tcb_qnext(&self, t: ObjId) -> Option<ObjId> {
+        self.tcbs[&t.0].qnext
     }
-    fn set_tcb_qnext(&mut self, _: ObjId, _: Option<ObjId>) {
-        unimplemented!()
+    fn set_tcb_qnext(&mut self, t: ObjId, q: Option<ObjId>) {
+        self.tcbs.get_mut(&t.0).unwrap().qnext = q;
     }
-    fn tcb_wait_notif(&self, _: ObjId) -> Option<ObjId> {
-        unimplemented!()
+    fn tcb_wait_notif(&self, t: ObjId) -> Option<ObjId> {
+        self.tcbs[&t.0].wait_notif
     }
-    fn set_tcb_wait_notif(&mut self, _: ObjId, _: Option<ObjId>) {
-        unimplemented!()
+    fn set_tcb_wait_notif(&mut self, t: ObjId, n: Option<ObjId>) {
+        self.tcbs.get_mut(&t.0).unwrap().wait_notif = n;
     }
     fn tcb_report(&self, _: ObjId) -> Report {
         unimplemented!()
@@ -180,8 +227,8 @@ impl Store for ArrayStore {
     fn set_tcb_aspace(&mut self, _: ObjId, _: Option<ObjId>) {
         unimplemented!()
     }
-    fn set_tcb_retval(&mut self, _: ObjId, _: u64) {
-        unimplemented!()
+    fn set_tcb_retval(&mut self, t: ObjId, v: u64) {
+        self.tcbs.get_mut(&t.0).unwrap().retval = v;
     }
     fn timer_armed(&self, _: ObjId) -> bool {
         unimplemented!()
@@ -213,12 +260,10 @@ impl Store for ArrayStore {
     fn set_timer_next(&mut self, _: ObjId, _: Option<ObjId>) {
         unimplemented!()
     }
-    fn make_runnable(&mut self, _: ObjId) {
-        unimplemented!()
-    }
-    fn unqueue_ready(&mut self, _: ObjId) {
-        unimplemented!()
-    }
+    // The scheduler hooks `signal` calls; they touch neither `slots` nor `chans`
+    // (the whole point of the §3b frame), so a no-op faithfully models the frame.
+    fn make_runnable(&mut self, _: ObjId) {}
+    fn unqueue_ready(&mut self, _: ObjId) {}
     fn tlb_invalidate_page(&mut self, _: u16, _: u64) {
         unimplemented!()
     }
@@ -328,6 +373,59 @@ fn cspace_wf_exec(st: &ArrayStore) -> bool {
 
 fn count_nonempty_exec(st: &ArrayStore) -> usize {
     (0..st.n()).filter(|&i| !st.slots[i].cap.is_empty()).count()
+}
+
+// The exec mirror of the spec `in_live_window` (cspace.rs): ring index `i` is one
+// of the `count[ring]` positions starting at `head[ring]`, wrapping mod `depth`.
+fn in_live_window_exec(cs: &ChanState, ring: usize, i: u32) -> bool {
+    (0..cs.count[ring]).any(|j| i == (cs.head[ring] + j) % cs.depth)
+}
+
+// The exec mirror of the spec `chan_wf(cv, sv, ch)` (cspace.rs) — ghost, so erased
+// and uncallable from test code, hence the plain-Rust re-expression (the
+// `cspace_wf_exec` discipline). Checks every clause incl. the load-bearing ring
+// coupling: each ring cap handle is a live arena slot, and a cap outside the live
+// window is empty in `slots` (== `slot_view`).
+fn chan_wf_exec(st: &ArrayStore, ch: ObjId) -> bool {
+    let cs = match st.chans.get(&ch.0) {
+        Some(c) => c,
+        None => return false,
+    };
+    if cs.depth == 0 {
+        return false;
+    }
+    for r in 0..2 {
+        if cs.count[r] > cs.depth || cs.head[r] >= cs.depth {
+            return false;
+        }
+    }
+    for ring in 0..2usize {
+        for i in 0..cs.depth {
+            for c in 0..4usize {
+                let sid = match cs.ring_cap.get(&(ring, i, c)) {
+                    Some(s) => *s,
+                    None => return false, // ring_cap domain incomplete
+                };
+                if (sid.0 as usize) >= st.n() {
+                    return false; // handle escapes the arena (slot_view domain)
+                }
+                if !in_live_window_exec(cs, ring, i) && !st.slots[sid.0 as usize].cap.is_empty() {
+                    return false; // windowing coupling: out-of-window slot must be empty
+                }
+            }
+            if !cs.msg_len.contains_key(&(ring, i)) {
+                return false; // msg_len domain incomplete
+            }
+        }
+    }
+    for e in 0..2usize {
+        for v in 0..3usize {
+            if !cs.bindings.contains_key(&(e, v)) {
+                return false; // bindings domain incomplete
+            }
+        }
+    }
+    true
 }
 
 // ── Shape builders ─────────────────────────────────────────────────────────
@@ -505,6 +603,65 @@ fn check_reset(st: &mut ArrayStore, ut: SlotId) {
             assert_eq!(fingerprint(st), expected, "reset Ok: only ut's watermark zeroed, all else intact");
         }
     }
+}
+
+// A well-formed one-deep channel (ObjId 7) + a notification (ObjId 100), the
+// fixture for the assumed-`signal` frame check. The arena holds the channel's 8
+// ring cap slots (1..=8) plus a non-empty witness at slot 0; ring 0 has one
+// in-window queued cap (slot 1 non-empty), ring 1 is empty — so `chan_wf_exec`
+// holds. With `with_waiter`, the notification has one blocked waiter (TCB 200, a
+// queued ref on the notification) so `signal` takes the full delivery path;
+// without, it takes the accumulate-and-return path. Either way `signal` must
+// leave the arena and the channel state untouched.
+fn signal_fixture(with_waiter: bool) -> (ArrayStore, ObjId) {
+    let mut st = ArrayStore::new(9);
+    st.slots[0] = detached(frame_cap(0)); // a non-empty witness slot
+    st.slots[1] = detached(frame_cap(1)); // ring 0 / idx 0 / cap 0 — in window, queued
+
+    let mut ring_cap = BTreeMap::new();
+    let mut slot = 1u64;
+    for ring in 0..2usize {
+        for c in 0..4usize {
+            ring_cap.insert((ring, 0u32, c), SlotId(slot));
+            slot += 1;
+        }
+    }
+    let mut bindings = BTreeMap::new();
+    for e in 0..2usize {
+        for v in 0..3usize {
+            bindings.insert((e, v), Binding::UNBOUND);
+        }
+    }
+    let mut msg_len = BTreeMap::new();
+    msg_len.insert((0usize, 0u32), 5u16);
+    msg_len.insert((1usize, 0u32), 0u16);
+    st.chans.insert(
+        7,
+        ChanState { depth: 1, end_caps: [1, 1], head: [0, 0], count: [1, 0], bindings, msg_len, ring_cap },
+    );
+
+    let n = ObjId(100);
+    st.refs.insert(100, 1);
+    if with_waiter {
+        let t = ObjId(200);
+        st.tcbs.insert(200, TcbState { qnext: None, wait_notif: Some(n), retval: 0 });
+        st.notifs.insert(100, NotifState { word: 0, wait_head: Some(t), wait_tail: Some(t) });
+    } else {
+        st.notifs.insert(100, NotifState { word: 0, wait_head: None, wait_tail: None });
+    }
+    (st, n)
+}
+
+// Run the real `notification::signal` and assert its assumed §3b frame holds:
+// `slot_view` (the `fingerprint` observable) and `chan_view` (`chans`) are both
+// unchanged. The executable counterpart of the `external_body` contract — the
+// `delete`/`signal`-against-its-body discipline.
+fn check_signal_frame(st: &mut ArrayStore, n: ObjId, bits: u64) {
+    let fp = fingerprint(st);
+    let chans = st.chans.clone();
+    signal(st, n, bits);
+    assert!(fingerprint(st) == fp, "signal post: slot_view unchanged");
+    assert!(st.chans == chans, "signal post: chan_view unchanged");
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
@@ -753,6 +910,68 @@ fn randomized_sweep() {
         }
     }
     assert!(trials > 500, "sweep should exercise hundreds of trials, ran {trials}");
+}
+
+// ── Channel ghost view (plan §3b) ──────────────────────────────────────────
+
+#[test]
+fn signal_frame() {
+    // The assumed `signal` contract: the real body leaves `slot_view`/`chan_view`
+    // untouched on BOTH paths, while its intended effects (accumulate / deliver)
+    // still happen — so the frame is real, not a no-op masquerading as one.
+
+    // No-waiter: the bits accumulate in the word; nothing else moves.
+    let (mut st, n) = signal_fixture(false);
+    assert!(chan_wf_exec(&st, ObjId(7)), "fixture channel is well-formed");
+    check_signal_frame(&mut st, n, 0b101);
+    assert_eq!(st.notifs[&100].word, 0b101, "no-waiter signal accumulated the bits");
+
+    // One waiter: the whole word is delivered, cleared, and the queued ref freed
+    // — all OUTSIDE the slot/chan frame the contract pins.
+    let (mut st, n) = signal_fixture(true);
+    check_signal_frame(&mut st, n, 0b110);
+    assert_eq!(st.notifs[&100].word, 0, "delivered word cleared");
+    assert_eq!(st.tcbs[&200].retval, 0b110, "waiter received the whole word");
+    assert!(st.notifs[&100].wait_head.is_none(), "waiter dequeued");
+    assert_eq!(st.refs[&100], 0, "waiter's queued ref released");
+}
+
+#[test]
+fn chan_wf_exec_has_teeth() {
+    // `chan_wf_exec` (and so `check_signal_frame`'s precondition) is only
+    // meaningful if it rejects malformed channels. Each shape violates exactly
+    // one clause; the windowing coupling (out-of-window slot non-empty) is the
+    // load-bearing §3b clause.
+    let ch = ObjId(7);
+    assert!(chan_wf_exec(&signal_fixture(false).0, ch), "a well-formed channel must be accepted");
+
+    let mut st = signal_fixture(false).0;
+    st.chans.get_mut(&7).unwrap().count[1] = 2;
+    assert!(!chan_wf_exec(&st, ch), "count > depth must be rejected");
+
+    let mut st = signal_fixture(false).0;
+    st.chans.get_mut(&7).unwrap().head[0] = 1;
+    assert!(!chan_wf_exec(&st, ch), "head >= depth must be rejected");
+
+    let mut st = signal_fixture(false).0;
+    st.chans.get_mut(&7).unwrap().depth = 0;
+    assert!(!chan_wf_exec(&st, ch), "depth 0 must be rejected");
+
+    // ring 1 (count 0) idx 0 cap 0 is slot 5 — out of every live window, so it
+    // must be empty; make it non-empty.
+    let mut st = signal_fixture(false).0;
+    st.slots[5] = detached(frame_cap(5));
+    assert!(!chan_wf_exec(&st, ch), "out-of-window non-empty ring cap must be rejected");
+
+    let mut st = signal_fixture(false).0;
+    st.chans.get_mut(&7).unwrap().ring_cap.insert((1, 0, 0), SlotId(999));
+    assert!(!chan_wf_exec(&st, ch), "ring cap handle outside the arena must be rejected");
+
+    let mut st = signal_fixture(false).0;
+    st.chans.get_mut(&7).unwrap().bindings.remove(&(1, 2));
+    assert!(!chan_wf_exec(&st, ch), "incomplete bindings domain must be rejected");
+
+    assert!(!chan_wf_exec(&signal_fixture(false).0, ObjId(999)), "unknown channel must be rejected");
 }
 
 // ── §C: evidence that doc/results/21 §9's proposed fix for revoke's "revoked cap

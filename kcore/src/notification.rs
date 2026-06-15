@@ -7,6 +7,12 @@ use crate::cspace::ObjHeader;
 use crate::id::ObjId;
 use crate::store::Store;
 use crate::thread::ThreadState;
+use vstd::prelude::*;
+// `StoreSpec` (the `external_trait_extension`) must be in scope to resolve
+// `store.slot_view()`/`chan_view()` in `signal`'s contract; it erases in a
+// normal build, so it is otherwise unused here (the doc/results/26 §2.3 idiom).
+#[allow(unused_imports)]
+use crate::cspace::StoreSpec;
 
 #[repr(C)]
 pub struct NotifObj {
@@ -32,13 +38,29 @@ impl NotifObj {
     }
 }
 
+verus! {
+
 /// OR bits into the word and deliver to the first waiter, if any.
 /// Safe from any kernel context (syscall, timer IRQ, channel binding).
 ///
 /// post: either a waiter was dequeued, made Runnable, with the whole word
 ///       in its return register and word == 0 — or no waiter existed and
 ///       the word accumulates.
-pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64) {
+///
+/// Verified boundary (plan §3b, doc/results/27): the body is the **first new
+/// assumed contract** of phase 3 — it touches notification/TCB/scheduler state
+/// (none of it ported), so it is `external_body`, trusted to satisfy the single
+/// frame the channel ops in §4.3 need: **`slot_view` and `chan_view` unchanged**
+/// (it may perturb `refs_view`/notif/TCB/scheduler — phase 3 asserts nothing
+/// about those). The body proof lands in phase 4; the contract is host-test-
+/// checked against the real body in `test_store.rs` (`check_signal_frame`), the
+/// same discipline that lets `revoke` be verified against `delete`.
+#[verifier::external_body]
+pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
+    ensures
+        final(store).slot_view() == old(store).slot_view(),
+        final(store).chan_view() == old(store).chan_view(),
+{
     let word = store.notif_word(n) | bits;
     store.set_notif_word(n, word);
     let head = store.notif_wait_head(n);
@@ -59,6 +81,8 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64) {
     store.set_obj_refs(n, store.obj_refs(n) - 1);
     store.make_runnable(t);
 }
+
+} // verus!
 
 /// Wait: consume the word if nonzero, else block the current thread.
 ///

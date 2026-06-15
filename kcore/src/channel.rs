@@ -23,6 +23,14 @@ use crate::cspace::{self, CapSlot, ChanEnd, ObjHeader};
 use crate::id::{ObjId, SlotId};
 use crate::notification;
 use crate::store::{Binding, Store};
+use vstd::prelude::*;
+// `StoreSpec` (the `external_trait_extension`) must be in scope to resolve the
+// `slot_view`/`chan_view`/`refs_view` views the §3b contracts quantify over, and
+// `ChanView` names the channel ghost view in those contracts; both appear only in
+// `requires`/`ensures`, which erase in a normal build — hence unused there (the
+// doc/results/26 §2.3 idiom).
+#[allow(unused_imports)]
+use crate::cspace::{ChanView, StoreSpec};
 
 pub const MSG_PAYLOAD: usize = 256;
 pub const MSG_CAPS: usize = 4;
@@ -59,12 +67,29 @@ pub enum ChanError {
     PeerClosed,
 }
 
-fn end_idx(e: ChanEnd) -> usize {
+verus! {
+
+/// Ghost mirror of [`end_idx`]: A → 0, B → 1. Lets the §3b contracts name the
+/// `end_caps`/ring index a `ChanEnd` selects.
+pub open spec fn end_idx_spec(e: ChanEnd) -> int {
     match e {
         ChanEnd::A => 0,
         ChanEnd::B => 1,
     }
 }
+
+fn end_idx(e: ChanEnd) -> (r: usize)
+    ensures
+        r < 2,
+        r as int == end_idx_spec(e),
+{
+    match e {
+        ChanEnd::A => 0,
+        ChanEnd::B => 1,
+    }
+}
+
+} // verus!
 
 impl Channel {
     pub const fn bytes_for(depth: u32) -> usize {
@@ -100,10 +125,37 @@ impl Channel {
     }
 }
 
-pub fn endpoint_cap_added<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd) {
+verus! {
+
+/// Account a newly installed endpoint cap (retype's channel arm, §2.5; §3.3
+/// peer-closed accounting).
+///
+/// Verified (plan §3b): bumps `end_caps[end]` by one, leaving `slot_view`/
+/// `refs_view` and every other channel field untouched. The `requires` bound on
+/// the count discharges the `+ 1` (no `u32` wrap); the caller (3c's
+/// `retype_install`) supplies it from the freshly carved channel's zero counts.
+pub fn endpoint_cap_added<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
+    requires
+        old(store).chan_view().dom().contains(ch),
+        old(store).chan_view()[ch].end_caps.len() == 2,
+        old(store).chan_view()[ch].end_caps[end_idx_spec(end)] < u32::MAX as nat,
+    ensures
+        final(store).slot_view() == old(store).slot_view(),
+        final(store).refs_view() == old(store).refs_view(),
+        final(store).chan_view() == old(store).chan_view().insert(
+            ch,
+            ChanView {
+                end_caps: old(store).chan_view()[ch].end_caps.update(
+                    end_idx_spec(end),
+                    (old(store).chan_view()[ch].end_caps[end_idx_spec(end)] + 1) as nat),
+                ..old(store).chan_view()[ch]
+            }),
+{
     let e = end_idx(end);
     store.set_chan_end_caps(ch, e, store.chan_end_caps(ch, e) + 1);
 }
+
+} // verus!
 
 /// Called on every endpoint-cap deletion; the last cap of an end raises
 /// the other end's peer-closed event (§3.3, session cleanup §2.4).
@@ -115,12 +167,32 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd) {
     }
 }
 
-fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize) {
+verus! {
+
+/// Raise an endpoint's event into its bound notification, if bound (§3.6).
+///
+/// Verified (plan §3b): reads a binding (a getter) and conditionally calls the
+/// assumed `signal`, whose frame is `slot_view`/`chan_view` unchanged — so
+/// `fire` leaves both unchanged too (it may perturb `refs_view`/notif state via
+/// `signal`, which it asserts nothing about). This is the frame `send`/`recv`
+/// (3d) need: firing the readable/writable event perturbs no cap slot or any
+/// channel's queue structure.
+fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
+    requires
+        old(store).chan_view().dom().contains(ch),
+        end < 2,
+        event < 3,
+    ensures
+        final(store).slot_view() == old(store).slot_view(),
+        final(store).chan_view() == old(store).chan_view(),
+{
     let b = store.chan_binding(ch, end, event);
     if let Some(n) = b.notif {
         notification::signal(store, n, b.bits);
     }
 }
+
+} // verus!
 
 /// Configure an endpoint's event binding (holder-configured, §3.6).
 /// Replacing a binding releases the old notification's ref.
