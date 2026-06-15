@@ -129,22 +129,23 @@ derivation — rights ⊆ source ∀ masks; faithful copy; overflow-free refcoun
 bump), `cdt_insert_child` (structural splice), and `obj_ref` — these now preserve
 the **full `cspace_wf`** (strengthened `cdt_wf` + **parent- and sibling-
 acyclicity composition**, the construction-side witnesses; phase 2c,
-`doc/results/22_verus-findings.md`); and `revoke`/`descend_to_leaf` **termination**
-(phase 2b). The strengthened `cdt_wf` adds the reachability anchors
+`doc/results/22_verus-findings.md`); `revoke`/`descend_to_leaf` **termination**
+(phase 2b); and the **looping op `slot_move`** in full — body proof closed
+(`doc/results/24_verus-findings.md`): the move is the identity transposition
+π=(src dst), and the imperative neighbour-fixups are shown to land exactly the
+renaming `relabeled(m0, src, dst)` (`lemma_transpose_preserves_cspace_wf` keeps
+`cspace_wf`; `lemma_child_on_chain` + a `next_reach`-split loop invariant make the
+children-walk re-parent every child), so its `external_body` is **gone**. The
+strengthened `cdt_wf` adds the reachability anchors
 (`siblings_share_parent`/`parent_has_first_child`) that make acyclicity
 constructible. **Trusted (assumed `external_body` contracts, host-test-checked
-against the real bodies — `kcore/src/test_store.rs`):** `delete`, `slot_move`,
-`cdt_unlink` — all carry full strengthened-`cspace_wf` contracts; their bodies
-(the linked-list-splice walk; for `delete`, the cross-object teardown) are the
-scoped residue. The **structural core** of `slot_move`'s body proof is now proven
-(phase 2 closeout, `doc/results/23_verus-findings.md`): `slot_move` is the
-identity transposition π=(src dst), and `lemma_transpose_preserves_cspace_wf` +
-`lemma_child_on_chain` (every child lies on the `next_sib` chain) are verified —
-the remaining body-match (the conditional fixups equal the renaming) is the
-residue, so `slot_move`/`cdt_unlink` stay `external_body`. (That increment also
-**retracted doc 21 §9's** proposed revoke-cap-survival fix as unsound — cross-
-object teardown empties slots outside the deleted subtree and can empty revoke's
-own root in the seL4-zombie case; two `test_store` cases witness it.) The `verus`
+against the real bodies — `kcore/src/test_store.rs`):** `delete` and `cdt_unlink`
+— both carry full strengthened-`cspace_wf` contracts; their bodies (for
+`cdt_unlink`, a sibling-list *merge* — harder than `slot_move`'s transposition;
+for `delete`, the cross-object teardown) are the scoped residue. (Phase 2 closeout,
+doc 23, also **retracted doc 21 §9's** proposed revoke-cap-survival fix as unsound
+— cross-object teardown empties slots outside the deleted subtree and can empty
+revoke's own root in the seL4-zombie case; two `test_store` cases witness it.) The `verus`
 CI job runs `cargo verus verify -p kcore` with no per-proof filter, so a new
 `verus!{}` obligation auto-gates. `scratchpad` keeps the toolchain-smoke `spec fn
 min` example.
@@ -459,7 +460,7 @@ non-`#[inline(always)]` helpers in user.rs.
 |------|-------|------|
 | TLA+ / TLC | commit protocol, cap revocation | Before respective milestone |
 | Kani | host chokepoints (`urt`, `ipc`, `cas`, `dma-pool`); the `kcore` kernel-core harnesses were migrated to Verus (plan `doc/plans/3_verus-rewrite.md` phase 2) | During kernel development |
-| Verus | **mechanized implementation tier for `kcore`** (plan `doc/plans/3_verus-rewrite.md`): unbounded/functional proofs on the real handle/`Store` code — `untyped::carve` (phase 0); the non-recursive cspace/CDT ops `derive`/`cdt_insert_child`/`obj_ref`, now preserving full `cspace_wf` (parent+sibling acyclicity composition, phase 2c); `revoke`/`descend_to_leaf` termination (phase 2b). `delete`/`slot_move`/`cdt_unlink` carry assumed `external_body` contracts, host-test-checked (`kcore/src/test_store.rs`); their body proofs are the residue. + `scratchpad` smoke | CI `verus` job (`cargo verus verify -p kcore`); during the Verus rewrite |
+| Verus | **mechanized implementation tier for `kcore`** (plan `doc/plans/3_verus-rewrite.md`): unbounded/functional proofs on the real handle/`Store` code — `untyped::carve` (phase 0); the non-recursive cspace/CDT ops `derive`/`cdt_insert_child`/`obj_ref`, now preserving full `cspace_wf` (parent+sibling acyclicity composition, phase 2c); `revoke`/`descend_to_leaf` termination (phase 2b); `slot_move` in full (body proof — the transposition lands the renaming, phase 2, `doc/results/24`). `delete`/`cdt_unlink` carry assumed `external_body` contracts, host-test-checked (`kcore/src/test_store.rs`); their body proofs are the residue. + `scratchpad` smoke | CI `verus` job (`cargo verus verify -p kcore`); during the Verus rewrite |
 | Loom / Shuttle | IPC crate, userspace servers | During M1+ development |
 | Miri + proptest | everything; chunker + prolly tree esp. | Continuous |
 | cargo-fuzz | IPC decoder, postcard payloads | From M1 |
@@ -508,10 +509,10 @@ deleted. The historical findings/bounds remain recorded:
 - **verus** — `cargo verus verify -p kcore` (pinned Verus `0.2026.06.07.cd03505`,
   release zip cached): the deductive kernel-core proofs (`untyped::carve`; the
   non-recursive cspace/CDT ops `derive`/`cdt_insert_child`/`obj_ref` preserving
-  full `cspace_wf`; `revoke`/`descend_to_leaf` termination). No per-proof filter,
-  so a new `verus!{}` obligation gates automatically. The `host-tests` job's
-  `kcore` leg now also runs `test_store` — the executable check of the
-  `delete`/`slot_move`/`cdt_unlink` assumed contracts against their real bodies.
+  full `cspace_wf`; `revoke`/`descend_to_leaf` termination; `slot_move`'s full body
+  proof). No per-proof filter, so a new `verus!{}` obligation gates automatically.
+  The `host-tests` job's `kcore` leg now also runs `test_store` — the executable
+  check of the `delete`/`cdt_unlink` assumed contracts against their real bodies.
 - **concurrency** — the Loom/Shuttle models under `RUSTFLAGS="--cfg loom"` /
   `"--cfg shuttle"` (plan `doc/plans/1_loom-shuttle-rewrite.md` §6):
   `cargo test -p urt -p ipc --lib`. Loom is the certifying exhaustive proof
