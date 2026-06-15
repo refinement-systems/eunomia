@@ -540,6 +540,11 @@ pub trait ExStore {
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).chan_view() == old(self).chan_view();
+
+    // `&self` (only `buf` is written), so the store is unchanged automatically; the
+    // payload is abstracted out, so no spec on `buf`. Needed in `verus!` since 3d's
+    // `recv` calls it (3b omitted it as frame-only).
+    fn chan_msg_read(&self, ch: ObjId, ring: usize, i: u32, len: usize, buf: &mut [u8]);
 }
 
 // The refcounted object a cap designates (the spec mirror of `Cap::obj`).
@@ -557,6 +562,15 @@ pub open spec fn cap_obj(c: Cap) -> Option<ObjId> {
 
 pub open spec fn is_empty_cap(c: Cap) -> bool {
     c.kind matches CapKind::Empty
+}
+
+// Exec emptiness check tied to the `is_empty_cap` spec — `Cap::is_empty` is plain
+// Rust (outside `verus!`), so verified exec code (channel `recv`, §3d) uses this.
+pub fn cap_is_empty(c: Cap) -> (r: bool)
+    ensures
+        r == is_empty_cap(c),
+{
+    matches!(c.kind, CapKind::Empty)
 }
 
 // The kind a derivation produces from `k`: identical (same object, same channel
@@ -743,6 +757,10 @@ pub open spec fn in_live_window(c: ChanView, ring: int, i: int) -> bool {
 pub open spec fn chan_wf(cv: Map<ObjId, ChanView>, sv: Map<SlotId, CapSlot>, ch: ObjId) -> bool {
     &&& cv.dom().contains(ch)
     &&& cv[ch].depth > 0
+    // `send` forms `(head + count) % depth` in u32; with head < depth and
+    // count <= depth this bound keeps the sum within u32 (a channel cannot have
+    // 2^31 256-byte message slots — that is 500+ GiB of ring).
+    &&& cv[ch].depth <= 0x8000_0000
     &&& cv[ch].end_caps.len() == 2
     &&& cv[ch].head.len() == 2
     &&& cv[ch].count.len() == 2
@@ -757,10 +775,113 @@ pub open spec fn chan_wf(cv: Map<ObjId, ChanView>, sv: Map<SlotId, CapSlot>, ch:
     &&& forall|r: int, i: int, c: int|
             (0 <= r < 2 && 0 <= i < cv[ch].depth && 0 <= c < 4 && !in_live_window(cv[ch], r, i))
                 ==> is_empty_cap(sv[#[trigger] cv[ch].ring_cap[(r, i, c)]].cap)
+    // Ring-cap injectivity: distinct ring positions map to distinct arena handles
+    // (3b deferred this to 3d; doc 27 §3). Load-bearing for `send`/`recv` — it is
+    // what lets filling the new tail slot (or emptying the head slot) leave every
+    // other in-window message untouched.
+    &&& forall|r1: int, i1: int, c1: int, r2: int, i2: int, c2: int|
+            #![trigger cv[ch].ring_cap[(r1, i1, c1)], cv[ch].ring_cap[(r2, i2, c2)]]
+            (0 <= r1 < 2 && 0 <= i1 < cv[ch].depth && 0 <= c1 < 4
+                && 0 <= r2 < 2 && 0 <= i2 < cv[ch].depth && 0 <= c2 < 4
+                && cv[ch].ring_cap[(r1, i1, c1)] == cv[ch].ring_cap[(r2, i2, c2)])
+                ==> (r1 == r2 && i1 == i2 && c1 == c2)
     &&& forall|r: int, i: int|
             (0 <= r < 2 && 0 <= i < cv[ch].depth) ==> #[trigger] cv[ch].msg_len.dom().contains((r, i))
     &&& forall|e: int, v: int|
             (0 <= e < 2 && 0 <= v < 3) ==> #[trigger] cv[ch].bindings.dom().contains((e, v))
+}
+
+// ── The FIFO Seq model (the §4.3 centerpiece; plan §3d) ──────────────────────
+//
+// A queued message is `(len, caps)` — payload bytes abstracted (doc 27), so its
+// observable content is the length and the four cap *contents*, read from the
+// arena at the ring handles. `ring_fifo` projects a ring's live window
+// `[head, head+count) mod depth` to a `Seq` in FIFO order: `send` appends
+// (`Seq::push`), `recv` pops the head (`Seq::drop_first`).
+pub open spec fn ring_msg(cv: ChanView, sv: Map<SlotId, CapSlot>, ring: int, idx: int)
+    -> (nat, Seq<Cap>) {
+    (cv.msg_len[(ring, idx)], Seq::new(4, |c: int| sv[cv.ring_cap[(ring, idx, c)]].cap))
+}
+
+pub open spec fn ring_fifo(cv: ChanView, sv: Map<SlotId, CapSlot>, ring: int)
+    -> Seq<(nat, Seq<Cap>)> {
+    Seq::new(cv.count[ring], |j: int| ring_msg(cv, sv, ring, (cv.head[ring] + j) % (cv.depth as int)))
+}
+
+// `s` is one of channel-view `cv`'s ring cap slots. `send`/`recv` require the
+// caller's source/destination slots are NOT ring caps of the channel (the
+// kernel naturally supplies cspace residents), so moving them disturbs no other
+// queued message. Stated as an existential; its negation is the universal that
+// auto-instantiates on a `ring_cap[(r,i,c)]` term.
+pub open spec fn is_ring_cap_of(cv: ChanView, s: SlotId) -> bool {
+    exists|r: int, i: int, c: int| #![trigger cv.ring_cap[(r, i, c)]]
+        0 <= r < 2 && 0 <= i < cv.depth && 0 <= c < 4 && cv.ring_cap[(r, i, c)] == s
+}
+
+// Modular helpers (doc 25 §2: quarantine `%` reasoning in tiny lemmas so the big
+// send/recv case analyses stay first-order). `lemma_window_index_distinct`: the
+// new tail offset `b = count` (< depth) lands on a different ring index than any
+// in-window offset `a < count` — the fact that lets a `send` leave every prior
+// in-window message untouched. `lemma_mod_shift_head`: after `recv` advances
+// `head' = (head+1) % depth`, the after-window offset `j` reads the old index
+// `j+1` — the fact behind the `drop_first` pop.
+pub proof fn lemma_window_index_distinct(head: int, depth: int, a: int, b: int)
+    requires
+        depth > 0,
+        0 <= a,
+        a < b,
+        b < depth,
+    ensures
+        (head + a) % depth != (head + b) % depth,
+{
+    if (head + a) % depth == (head + b) % depth {
+        // ((head+b)%depth - (head+a)%depth) % depth == ((head+b)-(head+a)) % depth;
+        // the LHS inner difference is 0 (if-hyp), and 0 % depth == 0, so
+        // (b - a) % depth == 0 — but 0 < b - a < depth forces b - a >= depth.
+        vstd::arithmetic::div_mod::lemma_sub_mod_noop(head + b, head + a, depth);
+        vstd::arithmetic::div_mod::lemma_small_mod(0nat, depth as nat);
+        assert((b - a) % depth == 0);
+        vstd::arithmetic::div_mod::lemma_mod_is_zero((b - a) as nat, depth as nat);
+        assert(false);
+    }
+}
+
+pub proof fn lemma_mod_shift_head(head: int, depth: int, j: int)
+    requires
+        depth > 0,
+    ensures
+        ((head + 1) % depth + j) % depth == (head + 1 + j) % depth,
+{
+    vstd::arithmetic::div_mod::lemma_add_mod_noop_right(j, head + 1, depth);
+}
+
+// A value already in `[0, depth)` is its own residue — used to identify the head
+// index `(head + 0) % depth == head` in `recv`'s pop proof.
+pub proof fn lemma_self_mod(x: int, depth: int)
+    requires
+        0 <= x < depth,
+    ensures
+        x % depth == x,
+{
+    vstd::arithmetic::div_mod::lemma_small_mod(x as nat, depth as nat);
+}
+
+// Two ring messages are equal when their length and their four cap *contents*
+// agree — the per-message congruence the FIFO `Seq`-extensionality steps in
+// `send`/`recv` lean on (a message unchanged by a move stays put in the queue).
+pub proof fn lemma_ring_msg_eq(
+    cva: ChanView, sva: Map<SlotId, CapSlot>,
+    cvb: ChanView, svb: Map<SlotId, CapSlot>,
+    ring: int, idx: int,
+)
+    requires
+        cva.msg_len[(ring, idx)] == cvb.msg_len[(ring, idx)],
+        forall|c: int| 0 <= c < 4 ==>
+            sva[#[trigger] cva.ring_cap[(ring, idx, c)]].cap == svb[cvb.ring_cap[(ring, idx, c)]].cap,
+    ensures
+        ring_msg(cva, sva, ring, idx) == ring_msg(cvb, svb, ring, idx),
+{
+    assert(ring_msg(cva, sva, ring, idx).1 =~= ring_msg(cvb, svb, ring, idx).1);
 }
 
 // The count of live (non-empty) slots — the well-founded measure for revoke's
@@ -2978,12 +3099,22 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
         final(store).slot_view().dom() == old(store).slot_view().dom(),
         final(store).slot_view().dom().finite(),
         final(store).refs_view() == old(store).refs_view(),
+        // The channel view is untouched: the body mutates only via `set_slot`,
+        // which frames `chan_view` unchanged. 3d's `send`/`recv` rely on this —
+        // without it a `slot_move` call havocs every channel cursor (detail §1.1).
+        final(store).chan_view() == old(store).chan_view(),
         final(store).slot_view()[dst].cap == old(store).slot_view()[src].cap,
         is_empty_cap(final(store).slot_view()[src].cap),
+        // The cap-content frame: only `src`/`dst` change cap; the neighbour fixups
+        // touch CDT *link* fields, never `.cap`. 3d's `send`/`recv` need this to
+        // know a queued-cap move leaves every other ring slot's content alone.
+        forall|x: SlotId| old(store).slot_view().dom().contains(x) && x != src && x != dst
+            ==> #[trigger] final(store).slot_view()[x].cap == old(store).slot_view()[x].cap,
         count_nonempty(final(store).slot_view()) == count_nonempty(old(store).slot_view()),
 {
     let ghost m0 = old(store).slot_view();
     let ghost r0 = old(store).refs_view();
+    let ghost cv0 = old(store).chan_view();
     let ghost srk = choose|s: Map<SlotId, nat>| valid_srank(m0, s);
     // The transposition renaming. Every slot but `src` lands on `rl[k]`; `src`
     // ends emptied (cleared below). `rl[dst] == m0[src]` (lemma_dst_relabeled).
@@ -3176,6 +3307,7 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
             store.slot_view().dom() == m0.dom(),
             store.slot_view().dom().finite(),
             store.refs_view() == r0,
+            store.chan_view() == cv0,
             cspace_wf(m0),
             valid_srank(m0, srk),
             rl == relabeled(m0, src, dst),
@@ -3284,6 +3416,12 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
         assert forall|k: SlotId| m0.dom().contains(k) && k != src && k != dst
             implies #[trigger] is_empty_cap(mfin[k].cap) == is_empty_cap(m0[k].cap) by {
             lemma_generic_relabeled(m0, src, dst, k);
+        }
+        // The cap-content frame (above): mfin[k] == rl[k] (k != src) and
+        // rl[k].cap == m0[k].cap (k != src, k != dst).
+        assert forall|x: SlotId| m0.dom().contains(x) && x != src && x != dst
+            implies #[trigger] mfin[x].cap == m0[x].cap by {
+            lemma_generic_relabeled(m0, src, dst, x);
         }
         lemma_move_count(m0, mfin, src, dst);
         // dst inherits src's cap (rl[dst] == m0[src]).
