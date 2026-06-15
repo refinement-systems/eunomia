@@ -258,21 +258,21 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId) {
 
 // ── CDT structure ───────────────────────────────────────────────────────
 
-// `cdt_insert_child`, `derive`, and `slot_move` are verified — see the `verus!{}`
-// block at the end of this file. `slot_move`'s full body proof (doc/results/24)
-// shows the move is the identity transposition π=(src dst) and lands exactly the
-// renaming, so its `external_body` is gone.
+// `cdt_insert_child`, `derive`, `slot_move`, and `cdt_unlink` are verified — see
+// the `verus!{}` block at the end of this file. `slot_move`'s body proof
+// (doc/results/24) shows the move is the identity transposition π=(src dst) and
+// lands exactly the renaming. `cdt_unlink`'s body proof (doc/results/25) shows the
+// sibling-list *merge* lands exactly `unlinked(m0, slot, last)` (children spliced
+// into the parent's list — strictly harder than the transposition): the parent-
+// rank acyclicity witness is reused unchanged, the sibling-rank witness is
+// rescaled to fit the re-parented child band into the `prev..next` gap, so its
+// `external_body` is gone too. Both ops' termination/structure rest on
+// sibling-acyclicity (`sib_acyclic`), part of `cspace_wf`.
 //
-// `cdt_unlink` is still in that block carrying an assumed contract
-// (`#[verifier::external_body]`, the `delete` precedent): it is a `first_child→
-// next_sib` children walk whose body proof needs the linked-list-*merge* invariant
-// (children spliced into the parent's list, not a transposition — strictly harder
-// than `slot_move`; doc/results/24 §residue). Its termination measure —
-// sibling-acyclicity (`sib_acyclic`) — is part of `cspace_wf`, and its contract is
-// host-test-checked against the real body (ArrayStore).
-//
-// `delete` and `revoke` are likewise in that block (`delete` carries an assumed
-// teardown-recursion contract; `revoke`'s termination is proven against it).
+// `delete` and `revoke` are likewise in that block: `delete` still carries an
+// assumed teardown-recursion contract (the cross-object destructors are not yet
+// in `verus!{}`, plan phases 3–5), and `revoke`'s termination is proven against
+// it. `delete`'s contract is host-test-checked against the real body (ArrayStore).
 
 // ── Deductive verification (plan doc/plans/3_verus-rewrite.md §4.1) ───────────
 //
@@ -1361,6 +1361,777 @@ proof fn lemma_generic_relabeled(m: Map<SlotId, CapSlot>, src: SlotId, dst: Slot
         == (if m[k].prev_sib == Some(src) { Some(dst) } else { m[k].prev_sib }));
 }
 
+// ── cdt_unlink body-match support (doc/results/25): the sibling-list *merge*.
+//    Unlike slot_move's transposition, unlink grafts `slot`'s child chain into
+//    `slot`'s former sibling position one level up. `unlinked(m, slot, last)` is
+//    the closed-form result; `lemma_unlink_preserves_cspace_wf` proves it keeps
+//    `cspace_wf`. The structural clauses are factored per-clause (the per-clause
+//    SMT discipline of the transpose family); the sibling-acyclicity witness is
+//    the crux (a constant additive shift fails — the child band must be rescaled
+//    into the `prev..next` gap). ──
+
+// A rank map over a finite domain has a strict upper bound. The sib-acyclicity
+// splice witness scales non-children by `b+1` to open a gap wide enough to drop
+// the re-parented child band into; `b` is that bound.
+proof fn lemma_rank_bounded(dom: Set<SlotId>, s: Map<SlotId, nat>) -> (b: nat)
+    requires
+        dom.finite(),
+        forall|k: SlotId| dom.contains(k) ==> s.dom().contains(k),
+    ensures
+        forall|k: SlotId| dom.contains(k) ==> s[k] < b,
+    decreases dom.len(),
+{
+    if dom.len() == 0 {
+        0
+    } else {
+        let x = dom.choose();
+        assert(dom.contains(x));
+        let rest = dom.remove(x);
+        assert(rest.len() < dom.len());
+        assert forall|k: SlotId| rest.contains(k) implies s.dom().contains(k) by {
+            assert(dom.contains(k));
+        }
+        let b0 = lemma_rank_bounded(rest, s);
+        let b: nat = if s[x] < b0 { b0 } else { (s[x] + 1) as nat };
+        assert forall|k: SlotId| dom.contains(k) implies s[k] < b by {
+            if k != x {
+                assert(rest.contains(k));
+            }
+        }
+        b
+    }
+}
+
+// The result of unlinking `slot`: cap kept everywhere; `slot` fully detached;
+// each child re-parented to `slot`'s parent (the grandparent), with the chain
+// head's `prev_sib` and the chain tail's `next_sib` rewired to `slot`'s old
+// neighbours; the neighbour fixups (`prev.next`/`parent.first_child` → head,
+// head.prev → prev, next.prev → tail) applied. `last` is the chain tail (the
+// child with `next_sib is None`, or `None` when `slot` is childless) — it appears
+// only in `next`'s `prev_sib`, so `next_sib` structure (hence sib-acyclicity) is
+// independent of it.
+pub open spec fn unlinked(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<SlotId>) -> Map<SlotId, CapSlot> {
+    let p = m[slot].parent;
+    let pv = m[slot].prev_sib;
+    let nx = m[slot].next_sib;
+    let fc = m[slot].first_child;
+    let head = if fc is None { nx } else { fc };
+    Map::new(
+        |k: SlotId| m.dom().contains(k),
+        |k: SlotId| if k == slot {
+            CapSlot { cap: m[slot].cap, parent: None, first_child: None, next_sib: None, prev_sib: None }
+        } else if m[k].parent == Some(slot) {
+            CapSlot {
+                cap: m[k].cap,
+                parent: p,
+                first_child: m[k].first_child,
+                next_sib: if m[k].next_sib is None { nx } else { m[k].next_sib },
+                prev_sib: if m[k].prev_sib is None { pv } else { m[k].prev_sib },
+            }
+        } else {
+            CapSlot {
+                cap: m[k].cap,
+                parent: m[k].parent,
+                first_child: if m[k].first_child == Some(slot) { head } else { m[k].first_child },
+                next_sib: if m[k].next_sib == Some(slot) { head } else { m[k].next_sib },
+                prev_sib: if m[k].prev_sib == Some(slot) {
+                    if fc is None { pv } else { last }
+                } else {
+                    m[k].prev_sib
+                },
+            }
+        },
+    )
+}
+
+// The neighbour roles are pairwise distinct and well-placed: `slot` has no self
+// link; `prev`/`next` are non-children of `slot` (their parent is `slot`'s
+// parent) living in the domain; `prev != next`; the grandparent is a non-child.
+proof fn lemma_unlink_roles(m: Map<SlotId, CapSlot>, slot: SlotId)
+    requires
+        cspace_wf(m),
+        m.dom().contains(slot),
+    ensures
+        m[slot].parent != Some(slot),
+        m[slot].first_child != Some(slot),
+        m[slot].next_sib != Some(slot),
+        m[slot].prev_sib != Some(slot),
+        m[slot].prev_sib matches Some(pv) ==> m.dom().contains(pv) && m[pv].parent != Some(slot),
+        m[slot].next_sib matches Some(nx) ==> m.dom().contains(nx) && m[nx].parent != Some(slot),
+        m[slot].parent matches Some(g) ==> m.dom().contains(g) && m[g].parent != Some(slot),
+        (m[slot].prev_sib matches Some(pv) ==> m[slot].next_sib != Some(pv)),
+{
+    lemma_src_no_self_link(m, slot);
+    let r = choose|r: Map<SlotId, nat>| valid_prank(m, r);
+    assert(valid_prank(m, r));
+    let sr = choose|sr: Map<SlotId, nat>| valid_srank(m, sr);
+    assert(valid_srank(m, sr));
+    assert(links_in_domain(m));
+    assert(siblings_doubly_consistent(m));
+    assert(siblings_share_parent(m));
+    if let Some(pv) = m[slot].prev_sib {
+        // doubly: pv.next == slot; share_parent: pv.parent == slot.parent ≠ Some(slot).
+        assert(m[pv].next_sib == Some(slot));
+        assert(m[pv].parent == m[slot].parent);
+    }
+    if let Some(nx) = m[slot].next_sib {
+        // share_parent on slot.next: nx.parent == slot.parent ≠ Some(slot).
+        assert(m[nx].parent == m[slot].parent);
+    }
+    if let Some(g) = m[slot].parent {
+        // a 2-cycle slot↔g would break the parent rank.
+        if m[g].parent == Some(slot) {
+            assert(r[slot] < r[g]);
+            assert(r[g] < r[slot]);
+        }
+    }
+    // prev == next would give pv.next == slot and slot.next == pv: a srank 2-cycle.
+    if let Some(pv) = m[slot].prev_sib {
+        if m[slot].next_sib == Some(pv) {
+            assert(sr[pv] < sr[slot]);
+            assert(sr[slot] < sr[pv]);
+        }
+    }
+}
+
+// Scaling by a positive `w` preserves strict order. (The non-child rank band.)
+proof fn lemma_scaled_lt(x: nat, y: nat, w: nat)
+    requires
+        x < y,
+        w > 0,
+    ensures
+        x * w < y * w,
+{
+    vstd::arithmetic::mul::lemma_mul_strict_inequality(x as int, y as int, w as int);
+}
+
+// The child band `(d+1)*w + e + 1` lands strictly below `(r+1)*w` when the inner
+// offset `e+1` is below the band width `w` and `d+1 <= r`. This is the splice's
+// "the rescaled child chain fits in the gap below `prev`" inequality.
+proof fn lemma_band_below(d: nat, e: nat, r: nat, w: nat)
+    requires
+        e + 1 < w,
+        d + 1 <= r,
+        w > 0,
+    ensures
+        (d + 1) * w + e + 1 < (r + 1) * w,
+{
+    broadcast use vstd::arithmetic::mul::group_mul_is_commutative_and_distributive;
+    // (d+1)*w + (e+1) < (d+1)*w + w == (d+2)*w <= (r+1)*w
+    assert((d + 1) * w + w == (d + 2) * w);
+    vstd::arithmetic::mul::lemma_mul_inequality((d + 2) as int, (r + 1) as int, w as int);
+}
+
+// Sibling-acyclicity survives the splice. The witness *rescales*: non-children
+// sit at `(s0[k]+1)*(B+1)` (multiples of the band width `B+1`), and re-parented
+// children sit in the band just above `next`'s scaled rank,
+// `(D+1)*(B+1) + s0[k] + 1` (D = s0[next] or 0) — `B`'s bound keeps that band
+// strictly inside the gap below `prev`. A constant additive shift cannot do this
+// (the child chain's rank span can exceed the `prev..next` gap). (doc/results/25.)
+proof fn lemma_unlink_sib(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<SlotId>)
+    requires
+        cdt_wf(m),
+        sib_acyclic(m),
+        m.dom().finite(),
+        m.dom().contains(slot),
+        m[slot].parent != Some(slot),
+    ensures
+        sib_acyclic(unlinked(m, slot, last)),
+{
+    let mf = unlinked(m, slot, last);
+    assert(mf.dom() =~= m.dom());
+    let s0 = choose|s: Map<SlotId, nat>| valid_srank(m, s);
+    assert(valid_srank(m, s0));
+    let bnd = lemma_rank_bounded(m.dom(), s0);
+    let nx = m[slot].next_sib;
+    let d: nat = match nx {
+        Some(n) => s0[n],
+        None => 0,
+    };
+    let bb: nat = (bnd + 1) as nat;
+    let sf = Map::<SlotId, nat>::new(
+        |k: SlotId| mf.dom().contains(k),
+        |k: SlotId| if k != slot && m[k].parent == Some(slot) {
+            ((d + 1) * bb + s0[k] + 1) as nat
+        } else {
+            ((s0[k] + 1) * bb) as nat
+        },
+    );
+    assert(sf.dom() =~= mf.dom());
+    assert(links_in_domain(m));
+    assert(siblings_doubly_consistent(m));
+    assert(siblings_share_parent(m));
+    assert(first_child_parent_agree(m));
+    // `slot`'s next sibling (if any) is a non-child: share_parent puts its parent
+    // at `slot.parent`, which is not `slot` (no self-loop).
+    assert(nx is Some ==> m[nx->0].parent == m[slot].parent);
+    assert(nx is Some ==> m[nx->0].parent != Some(slot));
+    let fc = m[slot].first_child;
+    let head = if fc is None { nx } else { fc };
+
+    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies
+        (mf[k].next_sib matches Some(n) ==> mf.dom().contains(n) && sf[n] < sf[k]) by {
+        if let Some(n) = mf[k].next_sib {
+            if k == slot {
+                assert(mf[slot].next_sib is None);
+            } else if m[k].parent == Some(slot) {
+                // ── k is a child of slot ──
+                if let Some(c) = m[k].next_sib {
+                    assert(n == c);
+                    assert(m[c].parent == Some(slot));   // share_parent
+                    assert(m.dom().contains(c));         // links_in_domain
+                    assert(s0[c] < s0[k]);               // valid_srank
+                    // both children: same `(d+1)*bb` term, ordered by s0.
+                } else {
+                    // last child: next_sib rewired to nx == Some(n), a non-child.
+                    assert(nx == Some(n));
+                    assert(m[n].parent != Some(slot));   // roles: slot.next non-child
+                    assert(m.dom().contains(n));
+                    assert(d == s0[n]);
+                    // sf[n] == (s0[n]+1)*bb == (d+1)*bb < (d+1)*bb + s0[k] + 1 == sf[k].
+                }
+            } else {
+                // ── k is a non-child (and != slot) ──
+                if m[k].next_sib == Some(slot) {
+                    // k == prev; next_sib rewired to head == Some(n).
+                    assert(m[slot].prev_sib == Some(k));  // doubly (k.next == slot)
+                    assert(s0[slot] < s0[k]);             // valid_srank
+                    assert(d < s0[k]) by {
+                        if let Some(nn) = nx {
+                            assert(s0[nn] < s0[slot]);    // valid_srank slot.next
+                        }
+                    }
+                    if let Some(f) = fc {
+                        assert(head == Some(f));
+                        assert(n == f);
+                        assert(m[f].parent == Some(slot)); // first_child_parent_agree
+                        assert(m.dom().contains(f));
+                        assert(s0[f] < bnd);               // bound
+                        lemma_band_below(d, s0[f], s0[k], bb);
+                    } else {
+                        // fc None ⟹ head == nx == Some(n), a non-child below prev.
+                        assert(nx == Some(n));
+                        assert(m[n].parent != Some(slot)); // roles
+                        assert(m.dom().contains(n));
+                        assert(s0[n] < s0[k]);             // s0[n] < s0[slot] < s0[k]
+                        lemma_scaled_lt((s0[n] + 1) as nat, (s0[k] + 1) as nat, bb);
+                    }
+                } else {
+                    // next_sib unchanged: n is a non-child below k.
+                    assert(m[k].next_sib == Some(n));
+                    assert(m.dom().contains(n));           // links_in_domain
+                    assert(s0[n] < s0[k]);                 // valid_srank
+                    assert(m[k].parent == m[n].parent);    // share_parent ⟹ n non-child
+                    assert(m[n].parent != Some(slot));
+                    lemma_scaled_lt((s0[n] + 1) as nat, (s0[k] + 1) as nat, bb);
+                }
+            }
+        }
+    }
+    assert(valid_srank(mf, sf));
+    assert(sib_acyclic(mf));
+}
+
+// `last` is `slot`'s child-chain tail (the unique child with `next_sib is None`),
+// or `None` when `slot` is childless. The body computes it by walking the chain;
+// these clauses are what the wf proof needs of it (it appears only in `next`'s
+// new `prev_sib`). Uniqueness (clause 3) is discharged in the body via
+// `lemma_child_on_chain` (the chain is linear, so its tail is unique).
+pub open spec fn last_wf(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<SlotId>) -> bool {
+    &&& (m[slot].first_child is None <==> last is None)
+    &&& (last matches Some(l) ==> m.dom().contains(l) && m[l].parent == Some(slot) && m[l].next_sib is None)
+    &&& (forall|x: SlotId| #[trigger] m.dom().contains(x) && m[x].parent == Some(slot) && m[x].next_sib is None
+            ==> last == Some(x))
+}
+
+// Parent-acyclicity survives with the *same* witness `r0` (the nice asymmetry vs.
+// the sibling side): each child moves from `parent=slot` to `parent=grandparent`,
+// and `r0[child] < r0[slot] < r0[grandparent]` already holds, so the strict drop
+// is preserved; `slot` becomes a root (no constraint). No reseating needed.
+proof fn lemma_unlink_acyclic(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<SlotId>)
+    requires
+        links_in_domain(m),
+        acyclic(m),
+        m.dom().contains(slot),
+    ensures
+        acyclic(unlinked(m, slot, last)),
+{
+    let mf = unlinked(m, slot, last);
+    assert(mf.dom() =~= m.dom());
+    let r0 = choose|r: Map<SlotId, nat>| valid_prank(m, r);
+    assert(valid_prank(m, r0));
+    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies
+        (mf[k].parent matches Some(pp) ==> mf.dom().contains(pp) && r0[k] < r0[pp]) by {
+        if let Some(pp) = mf[k].parent {
+            if k == slot {
+                assert(mf[slot].parent is None);
+            } else if m[k].parent == Some(slot) {
+                // child: parent rewired to slot's parent (the grandparent) == pp.
+                assert(m[slot].parent == Some(pp));
+                assert(r0[k] < r0[slot]);    // k.parent == slot
+                assert(r0[slot] < r0[pp]);   // slot.parent == pp
+            } else {
+                assert(m[k].parent == Some(pp));   // non-child: parent unchanged
+            }
+        }
+    }
+    assert(valid_prank(mf, r0));
+}
+
+// Empty slots stay detached: a slot's cap is unchanged, and an empty slot was
+// already detached in `m` (so it is none of slot/child/neighbour), hence its
+// links — all `None` in `m` — are untouched.
+proof fn lemma_unlink_empty(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<SlotId>)
+    requires
+        empty_slots_detached(m),
+        m.dom().contains(slot),
+    ensures
+        empty_slots_detached(unlinked(m, slot, last)),
+{
+    let mf = unlinked(m, slot, last);
+    assert(mf.dom() =~= m.dom());
+    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies
+        (is_empty_cap(mf[k].cap) ==> {
+            &&& mf[k].parent == None
+            &&& mf[k].first_child == None
+            &&& mf[k].next_sib == None
+            &&& mf[k].prev_sib == None
+        }) by {
+        if is_empty_cap(mf[k].cap) {
+            // cap is framed: mf[k].cap == m[k].cap, so m[k] is empty ⟹ detached.
+            assert(m[k].cap == mf[k].cap);
+            assert(m[k].parent == None);
+            assert(m[k].first_child == None);
+            assert(m[k].next_sib == None);
+            assert(m[k].prev_sib == None);
+            // k detached ⟹ not a child (parent None) and not slot's prev/next/parent
+            // target, so every fixup condition is false and links stay None.
+        }
+    }
+}
+
+// Every link in the spliced map lands in the domain: the new targets are `slot`'s
+// own neighbours (`parent`/`prev`/`next`/`first_child` — all in `m`'s domain) and
+// the chain tail `last` (in domain by `last_wf`); every other field is unchanged.
+proof fn lemma_unlink_links(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<SlotId>)
+    requires
+        links_in_domain(m),
+        m.dom().contains(slot),
+        last_wf(m, slot, last),
+    ensures
+        links_in_domain(unlinked(m, slot, last)),
+{
+    let mf = unlinked(m, slot, last);
+    assert(mf.dom() =~= m.dom());
+    assert(link_in_dom(m, m[slot].parent));
+    assert(link_in_dom(m, m[slot].first_child));
+    assert(link_in_dom(m, m[slot].next_sib));
+    assert(link_in_dom(m, m[slot].prev_sib));
+    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies {
+        &&& link_in_dom(mf, mf[k].parent)
+        &&& link_in_dom(mf, mf[k].first_child)
+        &&& link_in_dom(mf, mf[k].next_sib)
+        &&& link_in_dom(mf, mf[k].prev_sib)
+    } by {
+        assert(link_in_dom(m, m[k].parent));
+        assert(link_in_dom(m, m[k].first_child));
+        assert(link_in_dom(m, m[k].next_sib));
+        assert(link_in_dom(m, m[k].prev_sib));
+    }
+}
+
+// The spliced sibling list is doubly consistent and shares a parent. The merged
+// chain is `… prev → first → … → last → next → …`: `prev.next`/`first.prev`
+// reconnect, `last.next`/`next.prev` reconnect (the `next.prev → last` rewire is
+// why `last` is threaded into `unlinked`), and the re-parented children now share
+// the grandparent with the slot-level siblings. Every other edge is `m`'s.
+proof fn lemma_unlink_siblings(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<SlotId>)
+    requires
+        cspace_wf(m),
+        m.dom().contains(slot),
+        last_wf(m, slot, last),
+    ensures
+        siblings_doubly_consistent(unlinked(m, slot, last)),
+        siblings_share_parent(unlinked(m, slot, last)),
+{
+    let mf = unlinked(m, slot, last);
+    assert(mf.dom() =~= m.dom());
+    let p = m[slot].parent;
+    let pv = m[slot].prev_sib;
+    let nx = m[slot].next_sib;
+    let fc = m[slot].first_child;
+    let head = if fc is None { nx } else { fc };
+    assert(siblings_doubly_consistent(m));
+    assert(siblings_share_parent(m));
+    assert(first_child_parent_agree(m));
+    assert(head_is_first_child(m));
+    lemma_unlink_roles(m, slot);
+
+    // ── doubly consistent (both directions per node) ──
+    assert forall|a: SlotId| #[trigger] mf.dom().contains(a) implies {
+        &&& (mf[a].next_sib matches Some(b) ==> mf.dom().contains(b) && mf[b].prev_sib == Some(a))
+        &&& (mf[a].prev_sib matches Some(b) ==> mf.dom().contains(b) && mf[b].next_sib == Some(a))
+    } by {
+        // next direction
+        if let Some(b) = mf[a].next_sib {
+            if a == slot {
+                assert(mf[slot].next_sib is None);
+            } else if m[a].parent == Some(slot) {
+                if let Some(c) = m[a].next_sib {
+                    assert(b == c);
+                    assert(m[c].parent == Some(slot));    // share_parent
+                    assert(m[c].prev_sib == Some(a));      // doubly
+                    assert(c != slot);
+                    assert(mf[c].prev_sib == Some(a));
+                } else {
+                    assert(nx == Some(b));                  // last child → nx
+                    assert(m[b].parent == m[slot].parent);  // share_parent slot.next
+                    assert(m[b].prev_sib == Some(slot));    // doubly slot.next
+                    assert(b != slot);
+                    assert(fc is Some);
+                    assert(last == Some(a));                // uniqueness: a is a tail child
+                    assert(mf[b].prev_sib == Some(a));
+                }
+            } else {
+                if m[a].next_sib == Some(slot) {
+                    assert(m[slot].prev_sib == Some(a));    // doubly: a == prev
+                    if let Some(f) = fc {
+                        assert(head == Some(f) && b == f);
+                        assert(m[f].parent == Some(slot));  // agree
+                        assert(m[f].prev_sib is None);       // agree
+                        assert(f != slot);
+                        assert(pv == Some(a));
+                        assert(mf[f].prev_sib == Some(a));
+                    } else {
+                        assert(nx == Some(b));               // head == nx
+                        assert(m[b].prev_sib == Some(slot)); // doubly slot.next
+                        assert(m[b].parent != Some(slot));
+                        assert(b != slot);
+                        assert(pv == Some(a));
+                        assert(mf[b].prev_sib == Some(a));
+                    }
+                } else {
+                    assert(m[a].next_sib == Some(b));
+                    assert(b != slot);
+                    assert(m[b].prev_sib == Some(a));        // doubly
+                    assert(m[b].parent == m[a].parent);      // share_parent
+                    assert(m[b].parent != Some(slot));
+                    assert(mf[b].prev_sib == Some(a));
+                }
+            }
+        }
+        // prev direction
+        if let Some(b) = mf[a].prev_sib {
+            if a == slot {
+                assert(mf[slot].prev_sib is None);
+            } else if m[a].parent == Some(slot) {
+                if let Some(c) = m[a].prev_sib {
+                    assert(b == c);
+                    assert(m[c].next_sib == Some(a));        // doubly
+                    assert(m[c].parent == Some(slot));        // share_parent (c.next==a)
+                    assert(c != slot);
+                    assert(mf[c].next_sib == Some(a));
+                } else {
+                    assert(pv == Some(b));                    // first child → pv
+                    assert(fc == Some(a));                    // head_is_first_child
+                    assert(m[b].next_sib == Some(slot));      // doubly slot.prev
+                    assert(b != slot);
+                    assert(m[b].parent != Some(slot));
+                    assert(head == Some(a));
+                    assert(mf[b].next_sib == Some(a));
+                }
+            } else {
+                if m[a].prev_sib == Some(slot) {
+                    assert(m[slot].next_sib == Some(a));      // doubly: a == next
+                    if fc is Some {
+                        assert(last == Some(b));               // a==next.prev rewired to last
+                        assert(m[b].parent == Some(slot));     // last_wf
+                        assert(m[b].next_sib is None);          // last_wf
+                        assert(b != slot);
+                        assert(nx == Some(a));
+                        assert(mf[b].next_sib == Some(a));
+                    } else {
+                        assert(pv == Some(b));
+                        assert(m[b].next_sib == Some(slot));   // doubly slot.prev
+                        assert(b != slot);
+                        assert(m[b].parent != Some(slot));
+                        assert(head == nx && nx == Some(a));
+                        assert(mf[b].next_sib == Some(a));
+                    }
+                } else {
+                    assert(m[a].prev_sib == Some(b));
+                    assert(b != slot);
+                    assert(m[b].next_sib == Some(a));          // doubly
+                    assert(m[a].parent == m[b].parent);        // share_parent (b.next==a)
+                    assert(m[b].parent != Some(slot));
+                    assert(mf[b].next_sib == Some(a));
+                }
+            }
+        }
+    }
+
+    // ── share parent: merged-chain nodes all share the grandparent ──
+    assert forall|a: SlotId| #[trigger] mf.dom().contains(a) implies
+        (mf[a].next_sib matches Some(b) ==> mf[b].parent == mf[a].parent) by {
+        if let Some(b) = mf[a].next_sib {
+            if a == slot {
+                assert(mf[slot].next_sib is None);
+            } else if m[a].parent == Some(slot) {
+                // a child → b child (share_parent) or b == next (re-parented to share p).
+                if let Some(c) = m[a].next_sib {
+                    assert(b == c && m[c].parent == Some(slot) && c != slot);
+                    assert(mf[a].parent == p && mf[b].parent == p);
+                } else {
+                    assert(nx == Some(b) && m[b].parent == m[slot].parent && b != slot);
+                    assert(mf[a].parent == p && mf[b].parent == p);
+                }
+            } else if m[a].next_sib == Some(slot) {
+                // a == prev → b == head; both end at the grandparent p.
+                assert(m[a].parent == m[slot].parent);  // share_parent a.next==slot
+                if let Some(f) = fc {
+                    assert(head == Some(f) && b == f && m[f].parent == Some(slot) && f != slot);
+                    assert(mf[a].parent == p && mf[b].parent == p);
+                } else {
+                    assert(nx == Some(b) && m[b].parent == m[slot].parent && b != slot);
+                    assert(mf[a].parent == p && mf[b].parent == p);
+                }
+            } else {
+                assert(m[a].next_sib == Some(b) && b != slot);
+                assert(m[b].parent == m[a].parent);     // share_parent
+                assert(m[b].parent != Some(slot) && m[a].parent != Some(slot));
+                assert(mf[a].parent == m[a].parent && mf[b].parent == m[b].parent);
+            }
+        }
+    }
+}
+
+// The first-child relations survive: the splice keeps `first_child`/`parent`
+// agreement and the head/first-child converse, and no node is left a phantom
+// parent. `parent_has_first_child`'s one hard case — a non-child whose only child
+// was `slot`, childless — uses `lemma_child_on_chain` to show `slot` had a next
+// sibling that becomes the new first child (so the parent is not orphaned).
+proof fn lemma_unlink_children(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<SlotId>)
+    requires
+        cspace_wf(m),
+        m.dom().finite(),
+        m.dom().contains(slot),
+        last_wf(m, slot, last),
+    ensures
+        first_child_parent_agree(unlinked(m, slot, last)),
+        head_is_first_child(unlinked(m, slot, last)),
+        parent_has_first_child(unlinked(m, slot, last)),
+{
+    let mf = unlinked(m, slot, last);
+    assert(mf.dom() =~= m.dom());
+    let p = m[slot].parent;
+    let pv = m[slot].prev_sib;
+    let nx = m[slot].next_sib;
+    let fc = m[slot].first_child;
+    let head = if fc is None { nx } else { fc };
+    assert(siblings_doubly_consistent(m));
+    assert(siblings_share_parent(m));
+    assert(first_child_parent_agree(m));
+    assert(head_is_first_child(m));
+    assert(parent_has_first_child(m));
+    lemma_unlink_roles(m, slot);
+    let srk = choose|s: Map<SlotId, nat>| valid_srank(m, s);
+    assert(valid_srank(m, srk));
+
+    // ── first_child_parent_agree ──
+    assert forall|q: SlotId| #[trigger] mf.dom().contains(q) implies
+        (mf[q].first_child matches Some(c) ==>
+            mf.dom().contains(c) && mf[c].parent == Some(q) && mf[c].prev_sib == None) by {
+        if let Some(c) = mf[q].first_child {
+            if q == slot {
+                assert(mf[slot].first_child is None);
+            } else if m[q].parent == Some(slot) {
+                // child q keeps its first_child c; c is a non-child of slot.
+                assert(m[q].first_child == Some(c));
+                assert(m[c].parent == Some(q) && m[c].prev_sib is None);  // agree(m)
+                assert(c != slot && m[c].parent != Some(slot));
+            } else if m[q].first_child == Some(slot) {
+                // q's first child was slot ⟹ slot.parent == Some(q), slot.prev None.
+                assert(m[slot].parent == Some(q));   // agree(m)
+                assert(m[slot].prev_sib is None);     // agree(m)
+                assert(head == Some(c));
+                if let Some(f) = fc {
+                    assert(c == f && m[f].parent == Some(slot) && m[f].prev_sib is None);
+                    assert(f != slot);
+                } else {
+                    assert(nx == Some(c));
+                    assert(m[c].parent == m[slot].parent && m[c].prev_sib == Some(slot));
+                    assert(c != slot && m[c].parent != Some(slot));
+                }
+            } else {
+                // q non-child keeps its first_child c (c != slot).
+                assert(m[q].first_child == Some(c) && c != slot);
+                assert(m[c].parent == Some(q) && m[c].prev_sib is None);  // agree(m)
+                assert(m[c].parent != Some(slot));
+            }
+        }
+    }
+
+    // ── head_is_first_child ──
+    assert forall|c: SlotId| #[trigger] mf.dom().contains(c) implies
+        (mf[c].parent matches Some(pp) ==> (mf[c].prev_sib is None ==>
+            mf.dom().contains(pp) && mf[pp].first_child == Some(c))) by {
+        if let Some(pp) = mf[c].parent {
+            if mf[c].prev_sib is None {
+                if c == slot {
+                    assert(mf[slot].parent is None);
+                } else if m[c].parent == Some(slot) {
+                    // child c with no prev ⟹ slot's first child; pp == grandparent.
+                    assert(mf[c].prev_sib == (if m[c].prev_sib is None { pv } else { m[c].prev_sib }));
+                    assert(m[c].prev_sib is None && pv is None);
+                    assert(fc == Some(c));                  // head_is_first_child(m)
+                    assert(m[slot].parent == Some(pp));
+                    assert(m[pp].parent != Some(slot));      // pp non-child (roles)
+                    assert(m[pp].first_child == Some(slot)); // slot is pp's first child
+                    assert(head == Some(c));
+                } else if m[c].prev_sib == Some(slot) {
+                    // c == next, became the new first child (pv None, fc None).
+                    assert(pv is None && fc is None);
+                    assert(m[c].parent == m[slot].parent && m[slot].parent == Some(pp));
+                    assert(m[pp].parent != Some(slot));
+                    assert(m[pp].first_child == Some(slot)); // slot first child of pp
+                    assert(nx == Some(c) && head == Some(c));
+                } else {
+                    // c unchanged head in m.
+                    assert(m[c].parent == Some(pp) && m[c].prev_sib is None && c != slot);
+                    assert(m[pp].first_child == Some(c));    // head_is_first_child(m)
+                    assert(pp != slot);
+                    if m[pp].parent == Some(slot) {
+                        // pp child of slot keeps first_child.
+                    } else {
+                        assert(m[pp].first_child != Some(slot));  // == Some(c), c != slot
+                    }
+                }
+            }
+        }
+    }
+
+    // ── parent_has_first_child ──
+    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies
+        (mf[k].parent matches Some(pp) ==> mf[pp].first_child is Some) by {
+        if let Some(pp) = mf[k].parent {
+            if k == slot {
+                assert(mf[slot].parent is None);
+            } else if m[k].parent == Some(slot) {
+                // child k ⟹ pp == grandparent; slot has children ⟹ head Some.
+                assert(m[slot].parent == Some(pp) && fc is Some);
+                assert(m[pp].parent != Some(slot));   // roles
+                assert(m[pp].first_child is Some);     // parent_has_first_child(m)
+            } else {
+                // non-child k; pp == m[k].parent, has a first child in m.
+                assert(m[k].parent == Some(pp) && pp != slot);
+                assert(m[pp].first_child is Some);     // parent_has_first_child(m)
+                if m[pp].parent == Some(slot) {
+                    // pp child of slot keeps its (Some) first_child.
+                } else if m[pp].first_child == Some(slot) {
+                    // slot was pp's first child; if slot childless, its next sibling
+                    // (which exists, since k is another child of pp) is the new head.
+                    assert(m[slot].parent == Some(pp));   // agree(m)
+                    if fc is None {
+                        lemma_child_on_chain(m, pp, k, srk);
+                        // every child of pp is reachable from pp.first_child == slot;
+                        // k != slot reachable ⟹ slot.next_sib is Some.
+                        assert(m[pp].first_child == Some(slot));
+                        assert(next_reach(m, slot, k, srk));
+                        assert(k != slot);
+                        assert(m[slot].next_sib is Some);  // reach from slot to k≠slot
+                        assert(nx is Some && head is Some);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The splice moves links only, never a cap — so the live-slot count is unchanged.
+proof fn lemma_unlink_count(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<SlotId>)
+    requires
+        m.dom().finite(),
+    ensures
+        count_nonempty(unlinked(m, slot, last)) == count_nonempty(m),
+{
+    let mf = unlinked(m, slot, last);
+    assert(mf.dom() =~= m.dom());
+    assert forall|k: SlotId| #[trigger] m.dom().contains(k) implies mf[k].cap == m[k].cap by {}
+    assert(m.dom().filter(|k: SlotId| !is_empty_cap(m[k].cap))
+        =~= mf.dom().filter(|k: SlotId| !is_empty_cap(mf[k].cap)));
+}
+
+// Unlinking preserves the full well-formedness — composed per-clause (the
+// transpose family's per-clause SMT discipline). The parent-rank witness is
+// reused unchanged (children move up, the gap shrinks); the sibling-rank witness
+// is rescaled (lemma_unlink_sib).
+proof fn lemma_unlink_preserves_cspace_wf(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<SlotId>)
+    requires
+        cspace_wf(m),
+        m.dom().finite(),
+        m.dom().contains(slot),
+        last_wf(m, slot, last),
+    ensures
+        cspace_wf(unlinked(m, slot, last)),
+        unlinked(m, slot, last).dom() == m.dom(),
+        unlinked(m, slot, last).dom().finite(),
+{
+    assert(unlinked(m, slot, last).dom() =~= m.dom());
+    lemma_src_no_self_link(m, slot);   // m[slot].parent != Some(slot) for lemma_unlink_sib
+    lemma_unlink_links(m, slot, last);
+    lemma_unlink_siblings(m, slot, last);
+    lemma_unlink_children(m, slot, last);
+    lemma_unlink_empty(m, slot, last);
+    lemma_unlink_acyclic(m, slot, last);
+    lemma_unlink_sib(m, slot, last);
+}
+
+// Two nodes reachable from a common start are comparable along the chain — the
+// `next_sib` graph is functional, so the walks cannot branch.
+proof fn lemma_reach_comparable(m: Map<SlotId, CapSlot>, a: SlotId, x: SlotId, y: SlotId, s: Map<SlotId, nat>)
+    requires
+        next_reach(m, a, x, s),
+        next_reach(m, a, y, s),
+    ensures
+        next_reach(m, x, y, s) || next_reach(m, y, x, s),
+    decreases s[a],
+{
+    if a == x {
+    } else if a == y {
+    } else {
+        assert(m[a].next_sib is Some);
+        let nn = m[a].next_sib->0;
+        assert(next_reach(m, nn, x, s));
+        assert(next_reach(m, nn, y, s));
+        lemma_reach_comparable(m, nn, x, y, s);
+    }
+}
+
+// The child chain's tail (the child with no next sibling) is unique: any two such
+// are comparable (both reachable from the first child), and a node with no next
+// reaches only itself.
+proof fn lemma_unique_tail(m: Map<SlotId, CapSlot>, slot: SlotId, x: SlotId, y: SlotId, s: Map<SlotId, nat>)
+    requires
+        cdt_wf(m),
+        valid_srank(m, s),
+        m.dom().finite(),
+        m.dom().contains(slot),
+        m.dom().contains(x),
+        m.dom().contains(y),
+        m[x].parent == Some(slot),
+        m[x].next_sib is None,
+        m[y].parent == Some(slot),
+        m[y].next_sib is None,
+    ensures
+        x == y,
+{
+    lemma_child_on_chain(m, slot, x, s);
+    lemma_child_on_chain(m, slot, y, s);
+    let h = m[slot].first_child->0;
+    lemma_reach_comparable(m, h, x, y, s);
+    // next_reach(x, y) with x.next None ⟹ x == y (and symmetric).
+}
+
 // ── Verified operations (moved here from plain Rust; bodies are unchanged
 //    modulo verus-friendly control flow). ──
 
@@ -1662,17 +2433,18 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (r
 
 /// Unlink `slot` from the CDT, re-parenting its children one level up (§2.3).
 ///
-/// **Trusted boundary (assumed contract).** The body is a `first_child→next_sib`
-/// children walk that splices `slot`'s children into its former parent's child
-/// list in `slot`'s position, then detaches `slot`. Unlike `slot_move` (now fully
-/// proven — that move is a transposition), this is a list *merge*: the children
-/// are threaded between `slot`'s old prev/next, so the body proof needs a
-/// partial-progress splice invariant over two interacting sibling lists — the
-/// scoped residue (doc/results/24); its termination measure, sibling-acyclicity,
-/// is part of `cspace_wf`. The contract — `cspace_wf` preserved, `slot` detached with its
-/// cap intact, domain and refcounts framed — is host-test-checked against the
-/// real body (ArrayStore, kcore tests). `pub(crate)`: no callers outside `kcore`.
-#[verifier::external_body]
+/// **Verified** (doc/results/25, the full body proof). Unlike `slot_move` (a
+/// transposition), this is a sibling-list *merge*: a `first_child→next_sib`
+/// children walk re-parents each child to `slot`'s parent, then the child chain
+/// is spliced into `slot`'s former sibling position and `slot` is detached. The
+/// proof shows the final arena equals `unlinked(m0, slot, last)` (the closed-form
+/// merge), then reads `cspace_wf` off `lemma_unlink_preserves_cspace_wf` (the
+/// parent-rank witness is reused unchanged; the sibling-rank witness is rescaled
+/// to fit the child band into the `prev..next` gap — `lemma_unlink_sib`) and the
+/// count off `lemma_unlink_count`. The walk re-parents *every* child
+/// (`lemma_child_on_chain` completeness; `next_reach` for per-iteration progress
+/// and termination); `last` is the chain tail (`lemma_unique_tail`). The contract
+/// is also host-test-checked (test_store). `pub(crate)`: no callers outside `kcore`.
 pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
     requires
         cspace_wf(old(store).slot_view()),
@@ -1693,49 +2465,211 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
         final(store).slot_view()[slot].prev_sib is None,
         count_nonempty(final(store).slot_view()) == count_nonempty(old(store).slot_view()),
 {
+    let ghost m0 = old(store).slot_view();
+    let ghost r0 = old(store).refs_view();
+    let ghost srk = choose|s: Map<SlotId, nat>| valid_srank(m0, s);
+    proof {
+        assert(cdt_wf(m0));
+        assert(valid_srank(m0, srk));
+        assert(parent_has_first_child(m0));
+        lemma_src_no_self_link(m0, slot);
+    }
+
     let s = store.slot(slot);
     let parent = s.parent;
     let prev = s.prev_sib;
     let next = s.next_sib;
     let first = s.first_child;
 
-    // Children take slot's place in the sibling list: prev → C1…Ck → next.
-    let mut last = None;
+    // The all-children-re-parented arena: the children walk's postcondition.
+    let ghost mw = Map::new(
+        |k: SlotId| m0.dom().contains(k),
+        |k: SlotId| if m0[k].parent == Some(slot) { set_parent(m0[k], parent) } else { m0[k] },
+    );
+
+    // ── children walk: re-parent every child to `parent`; record the tail. ──
+    proof {
+        if let Some(h) = first {
+            assert forall|x: SlotId| m0.dom().contains(x) && m0[x].parent == Some(slot)
+                implies next_reach(m0, h, x, srk) by {
+                lemma_child_on_chain(m0, slot, x, srk);
+            }
+        }
+    }
+    let mut last: Option<SlotId> = None;
     let mut c = first;
-    while let Some(cur) = c {
+    while c.is_some()
+        invariant
+            store.slot_view().dom() == m0.dom(),
+            store.slot_view().dom().finite(),
+            store.refs_view() == r0,
+            cspace_wf(m0),
+            valid_srank(m0, srk),
+            parent == m0[slot].parent,
+            first == m0[slot].first_child,
+            m0.dom().contains(slot),
+            forall|k: SlotId| #[trigger] m0.dom().contains(k) && m0[k].parent != Some(slot)
+                ==> store.slot_view()[k] == m0[k],
+            c matches Some(cur) ==> {
+                &&& m0.dom().contains(cur)
+                &&& m0[cur].parent == Some(slot)
+                &&& forall|x: SlotId| #[trigger] m0.dom().contains(x) && m0[x].parent == Some(slot)
+                        && next_reach(m0, cur, x, srk) ==> store.slot_view()[x] == m0[x]
+                &&& forall|x: SlotId| #[trigger] m0.dom().contains(x) && m0[x].parent == Some(slot)
+                        && !next_reach(m0, cur, x, srk) ==> store.slot_view()[x] == set_parent(m0[x], parent)
+            },
+            c is None ==> forall|x: SlotId| #[trigger] m0.dom().contains(x)
+                && m0[x].parent == Some(slot) ==> store.slot_view()[x] == set_parent(m0[x], parent),
+            last matches Some(l) ==> m0.dom().contains(l) && m0[l].parent == Some(slot) && m0[l].next_sib == c,
+            last is None ==> c == first,
+        decreases match c {
+            Some(cur) => (srk[cur] + 1) as nat,
+            None => 0nat,
+        },
+    {
+        let cur = c.unwrap();
+        proof {
+            assert(next_reach(m0, cur, cur, srk));
+            assert(store.slot_view()[cur] == m0[cur]);
+        }
         let mut cs = store.slot(cur);
         cs.parent = parent;
         let nx = cs.next_sib;
+        proof {
+            assert(cs == set_parent(m0[cur], parent));
+            assert(nx == m0[cur].next_sib);
+        }
         store.set_slot(cur, cs);
+        proof {
+            assert(siblings_share_parent(m0));
+            assert(links_in_domain(m0));
+            match nx {
+                Some(nn) => {
+                    assert(m0[cur].next_sib == Some(nn));
+                    assert(m0[nn].parent == Some(slot));   // share_parent
+                    assert(m0.dom().contains(nn));          // links_in_domain
+                    assert(srk[nn] < srk[cur]);             // valid_srank
+                    if next_reach(m0, nn, cur, srk) {
+                        lemma_next_reach_sr(m0, nn, cur, srk);
+                    }
+                    assert forall|x: SlotId| x != cur
+                        implies #[trigger] next_reach(m0, cur, x, srk) == next_reach(m0, nn, x, srk) by {}
+                }
+                None => {
+                    assert(m0[cur].next_sib is None);
+                }
+            }
+        }
         last = Some(cur);
         c = nx;
     }
 
+    // ── post-walk: the arena is `mw`; `last` is the unique chain tail. ──
+    assert(store.slot_view() =~= mw);
+    proof {
+        assert(m0[slot].first_child is None <==> last is None);
+        assert forall|x: SlotId| m0.dom().contains(x) && m0[x].parent == Some(slot) && m0[x].next_sib is None
+            implies last == Some(x) by {
+            assert(parent_has_first_child(m0));
+            assert(m0[slot].first_child is Some);   // x is a child
+            assert(last is Some);
+            lemma_unique_tail(m0, slot, x, last->0, srk);
+        }
+        assert(last_wf(m0, slot, last));
+        lemma_unlink_roles(m0, slot);
+    }
+
     let head = if first.is_none() { next } else { first };
+
+    // The straight-line splice maps (the spec mirror of the four fixups).
+    let ghost ma = match prev {
+        Some(pv) => mw.insert(pv, set_next_sib(mw[pv], head)),
+        None => match parent {
+            Some(pa) => mw.insert(pa, set_first_child(mw[pa], head)),
+            None => mw,
+        },
+    };
+    let ghost mb = match head {
+        Some(h) => ma.insert(h, set_prev_sib(ma[h], prev)),
+        None => ma,
+    };
+    let ghost mc = match first {
+        Some(_) => mb.insert(last->0, set_next_sib(mb[last->0], next)),
+        None => mb,
+    };
+    let ghost md = match first {
+        Some(_) => match next {
+            Some(nx) => mc.insert(nx, set_prev_sib(mc[nx], last)),
+            None => mc,
+        },
+        None => mc,
+    };
+
     if let Some(pv) = prev {
+        proof {
+            assert(m0[slot].prev_sib == Some(pv));
+            assert(m0.dom().contains(pv));        // links_in_domain
+            assert(m0[pv].parent != Some(slot));  // roles: prev is a non-child
+        }
         let mut ps = store.slot(pv);
         ps.next_sib = head;
+        proof { assert(ps == set_next_sib(mw[pv], head)); }
         store.set_slot(pv, ps);
+        proof { assert(store.slot_view() =~= ma); }
     } else if let Some(pa) = parent {
+        proof {
+            assert(m0[slot].parent == Some(pa));
+            assert(m0.dom().contains(pa));
+            assert(m0[pa].parent != Some(slot));  // roles: grandparent is a non-child
+        }
         let mut pas = store.slot(pa);
         pas.first_child = head;
+        proof { assert(pas == set_first_child(mw[pa], head)); }
         store.set_slot(pa, pas);
+        proof { assert(store.slot_view() =~= ma); }
+    } else {
+        proof { assert(store.slot_view() =~= ma); }
     }
+
     if let Some(h) = head {
+        proof { assert(m0.dom().contains(h)); }   // head is first/next, both in dom
         let mut hs = store.slot(h);
         hs.prev_sib = prev;
+        proof { assert(hs == set_prev_sib(ma[h], prev)); }
         store.set_slot(h, hs);
+        proof { assert(store.slot_view() =~= mb); }
+    } else {
+        proof { assert(store.slot_view() =~= mb); }
     }
+
     if first.is_some() {
+        proof { assert(last is Some); }   // first Some <==> last Some (last_wf)
         let l = last.unwrap();
+        proof {
+            assert(m0[l].parent == Some(slot));   // last_wf
+            assert(m0.dom().contains(l));
+        }
         let mut ls = store.slot(l);
         ls.next_sib = next;
+        proof { assert(ls == set_next_sib(mb[l], next)); }
         store.set_slot(l, ls);
+        proof { assert(store.slot_view() =~= mc); }
         if let Some(nx) = next {
+            proof {
+                assert(m0[slot].next_sib == Some(nx));
+                assert(m0.dom().contains(nx));
+                assert(m0[nx].parent != Some(slot));   // roles: next is a non-child
+            }
             let mut ns = store.slot(nx);
             ns.prev_sib = last;
+            proof { assert(ns == set_prev_sib(mc[nx], last)); }
             store.set_slot(nx, ns);
+            proof { assert(store.slot_view() =~= md); }
+        } else {
+            proof { assert(store.slot_view() =~= md); }
         }
+    } else {
+        proof { assert(store.slot_view() =~= md); }
     }
 
     let mut s = store.slot(slot);
@@ -1744,6 +2678,54 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
     s.next_sib = None;
     s.prev_sib = None;
     store.set_slot(slot, s);
+
+    proof {
+        let mfin = store.slot_view();
+        // `slot` is untouched by the splice (distinct from every fixup target),
+        // so its cap rode through; the clear lands the detached empty-links slot.
+        assert(md[slot] == m0[slot]);
+        assert(mfin =~= md.insert(slot, mfin[slot]));
+        // The final arena is exactly the closed-form merge `unlinked`.
+        assert(mfin =~= unlinked(m0, slot, last)) by {
+            let un = unlinked(m0, slot, last);
+            assert forall|k: SlotId| m0.dom().contains(k) implies mfin[k] == un[k] by {
+                if k == slot {
+                } else if m0[k].parent == Some(slot) {
+                    // ── a child: re-parented; first child gains prev=pv, tail next=nx ──
+                    assert(m0[k].parent != Some(slot) == false);
+                    assert(first is Some && head == first);   // slot has children
+                    // k is none of the non-child / slot fixup targets.
+                    assert(k != slot);
+                    // k == first ⟺ k has no prev; k is the tail ⟺ k has no next.
+                    assert((first == Some(k)) <==> (m0[k].prev_sib is None)) by {
+                        if m0[k].prev_sib is None {
+                            assert(head_is_first_child(m0));
+                        }
+                        if first == Some(k) {
+                            assert(first_child_parent_agree(m0));
+                        }
+                    }
+                    assert((last == Some(k)) <==> (m0[k].next_sib is None));
+                } else {
+                    // ── a non-child (≠ slot): apply the matching neighbour fixup ──
+                    if m0[k].next_sib == Some(slot) {
+                        assert(prev == Some(k));               // k == slot's prev
+                    } else if m0[k].prev_sib == Some(slot) {
+                        assert(next == Some(k));               // k == slot's next
+                        assert(m0[slot].next_sib == Some(k));  // doubly
+                    } else if m0[k].first_child == Some(slot) {
+                        assert(m0[slot].parent == Some(k));    // k == grandparent
+                        assert(m0[slot].prev_sib is None);     // slot is k's first child
+                        assert(prev is None);
+                    } else {
+                        // untouched: no link names slot.
+                    }
+                }
+            }
+        }
+        lemma_unlink_preserves_cspace_wf(m0, slot, last);
+        lemma_unlink_count(m0, slot, last);
+    }
 }
 
 /// Move a cap between slots, preserving its CDT position (§3.4: send and receive
