@@ -40,3 +40,8 @@ pub mod sysabi;
 pub mod thread;
 pub mod timer;
 pub mod untyped;
+
+// The array-backed `Store` + executable contract checks for the `external_body`
+// cspace ops (plan §3 host-test; doc/results/22 §4).
+#[cfg(test)]
+mod test_store;
