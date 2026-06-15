@@ -1,3 +1,4 @@
 target/*
 .claude/*
 user/*/target
+.verus-solver-log/
