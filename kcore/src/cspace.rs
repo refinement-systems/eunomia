@@ -23,6 +23,7 @@
 
 use crate::id::{ObjId, SlotId};
 use crate::store::Store;
+use vstd::prelude::*;
 
 /// Rights bits — monotone under derivation (§2.3): `derive` may only clear
 /// bits, never set them.
@@ -199,13 +200,7 @@ impl CSpaceObj {
 
 // ── Refcount plumbing ───────────────────────────────────────────────────
 
-/// pre:  cap designates a live object (or none).
-/// post: object refcount incremented.
-pub fn obj_ref<S: Store>(store: &mut S, cap: Cap) {
-    if let Some(o) = cap.obj() {
-        store.set_obj_refs(o, store.obj_refs(o) + 1);
-    }
-}
+// `obj_ref` is verified — see the `verus!{}` block at the end of this file.
 
 /// pre:  cap designates a live object (or none); refs > 0.
 /// post: refcount decremented; if it reached zero the object is destroyed
@@ -263,28 +258,8 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId) {
 
 // ── CDT structure ───────────────────────────────────────────────────────
 
-/// pre:  child is a detached slot (no links, non-empty cap already set);
-///       parent is a live slot.
-/// post: child is the first child of parent; previous children follow it.
-pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId) {
-    let old_first = store.slot(parent).first_child;
-
-    let mut c = store.slot(child);
-    c.parent = Some(parent);
-    c.prev_sib = None;
-    c.next_sib = old_first;
-    store.set_slot(child, c);
-
-    if let Some(f) = old_first {
-        let mut fs = store.slot(f);
-        fs.prev_sib = Some(child);
-        store.set_slot(f, fs);
-    }
-
-    let mut p = store.slot(parent);
-    p.first_child = Some(child);
-    store.set_slot(parent, p);
-}
+// `cdt_insert_child` is verified — see the `verus!{}` block at the end of this
+// file.
 
 /// pre:  slot is linked in the CDT (possibly a root with null parent).
 /// post: slot is detached; its children are spliced into slot's former
@@ -396,37 +371,7 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId) {
     store.set_slot(src, CapSlot::empty());
 }
 
-/// Derive a child cap (§2.3): copy with rights intersected — the only
-/// derivation; there is no amplification path.
-///
-/// pre:  src non-empty, not Untyped (watermark has one owner); dst empty
-///       and detached; mask ⊆ u8.
-/// post: dst holds src's cap with rights ∩ mask, as a CDT child of src;
-///       object refcount incremented.
-pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> Result<(), ()> {
-    let s = store.slot(src);
-    if s.cap.is_empty() || matches!(s.cap.kind, CapKind::Untyped { .. }) {
-        return Err(());
-    }
-    if !store.slot(dst).cap.is_empty() {
-        return Err(());
-    }
-    let mut kind = s.cap.kind;
-    // One mapping per cap copy (§2.5): a fresh frame copy starts unmapped.
-    if let CapKind::Frame { mapping, .. } = &mut kind {
-        *mapping = None;
-    }
-    let cap = Cap {
-        kind,
-        rights: s.cap.rights.masked(mask),
-    };
-    let mut d = store.slot(dst);
-    d.cap = cap;
-    store.set_slot(dst, d);
-    obj_ref(store, cap);
-    cdt_insert_child(store, src, dst);
-    Ok(())
-}
+// `derive` is verified — see the `verus!{}` block at the end of this file.
 
 /// Delete one cap (children survive, re-parented one level up).
 ///
@@ -480,3 +425,511 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId) {
         delete(store, leaf);
     }
 }
+
+// ── Deductive verification (plan doc/plans/3_verus-rewrite.md §4.1) ───────────
+//
+// The cspace/CDT operations are verified with Verus against an *abstract* model
+// of the `Store` seam: the kernel object store is a finite `Map<SlotId, CapSlot>`
+// (the slot arena) plus a `Map<ObjId, nat>` (object refcounts). The generic
+// `fn op<S: Store>` operations are proven once for **all** stores; the production
+// `KernelStore` (kernel crate, unverified) and any host-test store are trusted to
+// satisfy the trait contract — the seam is the TCB boundary (plan §2, §3.2).
+//
+// `verus!{}` erases to plain Rust in an ordinary build, so the moved operations
+// below compile and run exactly as the originals did.
+verus! {
+
+broadcast use {vstd::map::group_map_axioms, vstd::set::group_set_axioms};
+
+// The opaque handles and the cap/slot value types are plain Rust (shared with
+// the kernel shell); give them Verus type-specs so they can appear in spec
+// expressions. `ext_equal` makes `==` mean structural equality in spec code.
+// (`allow(dead_code)`: these wrappers are Verus-only scaffolding — after the
+// macro erases ghost code in a normal build they are unread tuple structs.)
+#[verifier::external_type_specification]
+#[verifier::ext_equal]
+#[allow(dead_code)]
+pub struct ExSlotId(SlotId);
+
+#[verifier::external_type_specification]
+#[verifier::ext_equal]
+#[allow(dead_code)]
+pub struct ExObjId(ObjId);
+
+#[verifier::external_type_specification]
+#[verifier::ext_equal]
+#[allow(dead_code)]
+pub struct ExRights(Rights);
+
+#[verifier::external_type_specification]
+#[verifier::ext_equal]
+#[allow(dead_code)]
+pub struct ExChanEnd(ChanEnd);
+
+#[verifier::external_type_specification]
+#[verifier::ext_equal]
+#[allow(dead_code)]
+pub struct ExCapKind(CapKind);
+
+#[verifier::external_type_specification]
+#[verifier::ext_equal]
+#[allow(dead_code)]
+pub struct ExCap(Cap);
+
+#[verifier::external_type_specification]
+#[verifier::ext_equal]
+#[allow(dead_code)]
+pub struct ExCapSlot(CapSlot);
+
+// The abstract `Store` model: a slot arena + a refcount map. The trait stays
+// plain Rust (the kernel impls it without ghost members); this `external_trait
+// _specification` attaches the contract, and `external_trait_extension` adds the
+// ghost views/predicates the trait never declared. Only the methods cspace/CDT
+// calls are contracted; the rest of the ~70-method seam is left unconstrained
+// (it is exercised by later phases).
+#[verifier::external_trait_specification]
+#[verifier::external_trait_extension(StoreSpec via StoreSpecImpl)]
+pub trait ExStore {
+    type ExternalTraitSpecificationFor: Store;
+
+    // The slot arena: handle → slot. Its domain is the set of live slots.
+    spec fn slot_view(&self) -> Map<SlotId, CapSlot>;
+    // Object refcounts: handle → count.
+    spec fn refs_view(&self) -> Map<ObjId, nat>;
+
+    fn slot(&self, s: SlotId) -> (r: CapSlot)
+        requires self.slot_view().dom().contains(s),
+        ensures r == self.slot_view()[s];
+
+    fn set_slot(&mut self, s: SlotId, v: CapSlot)
+        requires old(self).slot_view().dom().contains(s),
+        ensures
+            final(self).slot_view() == old(self).slot_view().insert(s, v),
+            final(self).refs_view() == old(self).refs_view();
+
+    fn obj_refs(&self, o: ObjId) -> (r: u32)
+        requires self.refs_view().dom().contains(o),
+        ensures r as nat == self.refs_view()[o];
+
+    fn set_obj_refs(&mut self, o: ObjId, r: u32)
+        requires old(self).refs_view().dom().contains(o),
+        ensures
+            final(self).refs_view() == old(self).refs_view().insert(o, r as nat),
+            final(self).slot_view() == old(self).slot_view();
+}
+
+// The refcounted object a cap designates (the spec mirror of `Cap::obj`).
+pub open spec fn cap_obj(c: Cap) -> Option<ObjId> {
+    match c.kind {
+        CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => None,
+        CapKind::Aspace(o) => Some(o),
+        CapKind::CSpace(o) => Some(o),
+        CapKind::Thread(o) => Some(o),
+        CapKind::Channel(o, _) => Some(o),
+        CapKind::Notification(o) => Some(o),
+        CapKind::Timer(o) => Some(o),
+    }
+}
+
+pub open spec fn is_empty_cap(c: Cap) -> bool {
+    c.kind matches CapKind::Empty
+}
+
+// The kind a derivation produces from `k`: identical (same object, same channel
+// end), except a Frame copy starts unmapped (§2.5, one mapping per cap copy).
+// This is the "copy" half of monotone derivation — derivation cannot change the
+// designated object or amplify via the kind.
+pub open spec fn derived_kind(k: CapKind) -> CapKind {
+    match k {
+        CapKind::Frame { base, pages, mapping: _ } => CapKind::Frame { base, pages, mapping: None },
+        _ => k,
+    }
+}
+
+// `Rights::masked` clears bits (rights ∩ mask); its bit-level spec is what makes
+// monotone derivation provable. (Trusted boundary: the method is plain Rust;
+// this states what it computes.)
+pub assume_specification [ Rights::masked ](r: Rights, mask: u8) -> (out: Rights)
+    ensures out.0 == (r.0 & mask);
+
+// ── Structural well-formedness of the CDT (the executable `TypeOK`, now total
+//    and unbounded). Acyclicity is tracked separately where termination needs
+//    it (plan §4.1); this is the structural invariant the op proofs preserve. ──
+
+pub open spec fn link_in_dom(m: Map<SlotId, CapSlot>, o: Option<SlotId>) -> bool {
+    match o {
+        None => true,
+        Some(h) => m.dom().contains(h),
+    }
+}
+
+// Every CDT link is None or points at a live slot.
+pub open spec fn links_in_domain(m: Map<SlotId, CapSlot>) -> bool {
+    forall|k: SlotId| #[trigger] m.dom().contains(k) ==> {
+        &&& link_in_dom(m, m[k].parent)
+        &&& link_in_dom(m, m[k].first_child)
+        &&& link_in_dom(m, m[k].next_sib)
+        &&& link_in_dom(m, m[k].prev_sib)
+    }
+}
+
+// The sibling list is doubly consistent in both directions.
+pub open spec fn siblings_doubly_consistent(m: Map<SlotId, CapSlot>) -> bool {
+    forall|a: SlotId| #[trigger] m.dom().contains(a) ==> {
+        &&& (m[a].next_sib matches Some(b) ==> m.dom().contains(b) && m[b].prev_sib == Some(a))
+        &&& (m[a].prev_sib matches Some(b) ==> m.dom().contains(b) && m[b].next_sib == Some(a))
+    }
+}
+
+// A node's first child claims it as parent and heads the sibling list.
+pub open spec fn first_child_parent_agree(m: Map<SlotId, CapSlot>) -> bool {
+    forall|p: SlotId| #[trigger] m.dom().contains(p) ==>
+        (m[p].first_child matches Some(c) ==>
+            m.dom().contains(c) && m[c].parent == Some(p) && m[c].prev_sib == None)
+}
+
+// The converse: a list-head node (parent set, no prev sibling) IS its parent's
+// first child. Without this a child could name a parent that has forgotten it —
+// an orphan-head the revoke walk would never reach. (Restores parity with the
+// pre-rewrite predicate.)
+pub open spec fn head_is_first_child(m: Map<SlotId, CapSlot>) -> bool {
+    forall|c: SlotId| #[trigger] m.dom().contains(c) ==>
+        (m[c].parent matches Some(p) ==> (m[c].prev_sib is None ==>
+            m.dom().contains(p) && m[p].first_child == Some(c)))
+}
+
+// Empty slots are fully detached.
+pub open spec fn empty_slots_detached(m: Map<SlotId, CapSlot>) -> bool {
+    forall|k: SlotId| #[trigger] m.dom().contains(k) ==> (is_empty_cap(m[k].cap) ==> {
+        &&& m[k].parent == None
+        &&& m[k].first_child == None
+        &&& m[k].next_sib == None
+        &&& m[k].prev_sib == None
+    })
+}
+
+// The **structural** CDT invariant. NOTE: this is deliberately the structural
+// fragment — it does NOT include acyclicity. Acyclicity is what the revoke/delete
+// termination proofs need, and it lands with the ghost-rank machinery in the
+// termination increment (plan §4.1); the non-recursive ops proven here
+// (cdt_insert_child, derive) preserve the structural invariant. Until then this
+// is NOT the full TLA TypeOK — it admits cyclic trees.
+pub open spec fn cdt_wf(m: Map<SlotId, CapSlot>) -> bool {
+    &&& links_in_domain(m)
+    &&& siblings_doubly_consistent(m)
+    &&& first_child_parent_agree(m)
+    &&& head_is_first_child(m)
+    &&& empty_slots_detached(m)
+}
+
+// ── Refcount census: the stored refcount equals the count of designating slots
+//    (cspace residents; channel-queue and TCB-bind homes ride the same arena),
+//    plus the non-slot references (bindings/waiters/armed timers) the later
+//    phases add. For phase 2 the census is the slot count; the cross-home and
+//    non-slot terms land with channel/notification/thread (plan §4.3–§4.4). ──
+
+pub open spec fn slot_refs(m: Map<SlotId, CapSlot>, obj: ObjId) -> nat {
+    m.dom().filter(|k: SlotId| cap_obj(m[k].cap) == Some(obj)).len()
+}
+
+// Two census lemmas (the spec basis for refcount soundness — the stored
+// refcount must move in lockstep with the count of designating slots):
+
+// Link-only edits (same domain, same caps) leave the census untouched.
+proof fn lemma_same_caps_same_census(
+    m1: Map<SlotId, CapSlot>,
+    m2: Map<SlotId, CapSlot>,
+    obj: ObjId,
+)
+    requires
+        m1.dom() == m2.dom(),
+        forall|k: SlotId| #[trigger] m1.dom().contains(k) ==> m1[k].cap == m2[k].cap,
+    ensures
+        slot_refs(m1, obj) == slot_refs(m2, obj),
+{
+    let s1 = m1.dom().filter(|k: SlotId| cap_obj(m1[k].cap) == Some(obj));
+    let s2 = m2.dom().filter(|k: SlotId| cap_obj(m2[k].cap) == Some(obj));
+    assert forall|k: SlotId| s1.contains(k) <==> s2.contains(k) by {
+        if m1.dom().contains(k) {
+            assert(m1[k].cap == m2[k].cap);
+        }
+    }
+    assert(s1 =~= s2);
+    assert(slot_refs(m1, obj) == s1.len());
+    assert(slot_refs(m2, obj) == s2.len());
+}
+
+// Re-pointing one slot from designating nothing-of-`obj` to designating `obj`
+// raises `obj`'s census by exactly one.
+proof fn lemma_designation_bump(
+    m: Map<SlotId, CapSlot>,
+    k: SlotId,
+    v: CapSlot,
+    obj: ObjId,
+)
+    requires
+        m.dom().finite(),
+        m.dom().contains(k),
+        cap_obj(m[k].cap) != Some(obj),
+        cap_obj(v.cap) == Some(obj),
+    ensures
+        slot_refs(m.insert(k, v), obj) == slot_refs(m, obj) + 1,
+{
+    let m2 = m.insert(k, v);
+    let f1 = m.dom().filter(|j: SlotId| cap_obj(m[j].cap) == Some(obj));
+    let f2 = m2.dom().filter(|j: SlotId| cap_obj(m2[j].cap) == Some(obj));
+    assert(m2.dom() =~= m.dom());
+    assert forall|j: SlotId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.insert(k).contains(j) by {
+        if j != k {
+            assert(m2[j] == m[j]);
+        }
+    }
+    assert(f2 =~= f1.insert(k));
+    assert(!f1.contains(k));
+    assert(f1.finite());
+    assert(slot_refs(m2, obj) == f2.len());
+    assert(slot_refs(m, obj) == f1.len());
+}
+
+// ── Verified operations (moved here from plain Rust; bodies are unchanged
+//    modulo verus-friendly control flow). ──
+
+/// Bump the refcount of the object a cap designates (no-op for bare caps).
+///
+/// pre:  if the cap designates an object, that object is live and its refcount
+///       is below `u32::MAX` (the overflow guard Verus makes explicit — an
+///       unchecked refcount bump is a known kernel vulnerability class).
+/// post: that object's refcount is +1, all others unchanged; the slot arena is
+///       untouched.
+pub fn obj_ref<S: Store>(store: &mut S, cap: Cap)
+    requires
+        cap_obj(cap) matches Some(o) ==> old(store).refs_view().dom().contains(o)
+            && old(store).refs_view()[o] < u32::MAX as nat,
+    ensures
+        final(store).slot_view() == old(store).slot_view(),
+        cap_obj(cap) matches Some(o) ==> final(store).refs_view()
+            =~= old(store).refs_view().insert(o, (old(store).refs_view()[o] + 1) as nat),
+        cap_obj(cap) is None ==> final(store).refs_view() == old(store).refs_view(),
+{
+    match cap.kind {
+        CapKind::Aspace(o)
+        | CapKind::CSpace(o)
+        | CapKind::Thread(o)
+        | CapKind::Channel(o, _)
+        | CapKind::Notification(o)
+        | CapKind::Timer(o) => {
+            let r = store.obj_refs(o);
+            store.set_obj_refs(o, r + 1);
+        }
+        CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => {}
+    }
+}
+
+/// Insert `child` as the first child of `parent` (the CDT link surgery `derive`
+/// and `retype` use).
+///
+/// pre:  the cspace is well-formed; `parent` and `child` are distinct live
+///       slots; `child` is detached (all four links null) and non-empty;
+///       `parent` is non-empty.
+/// post: `child` is `parent`'s first child and the previous children follow it
+///       in order (the sibling list is spliced in unchanged); caps and refcounts
+///       are untouched; the cspace stays well-formed.
+pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
+    requires
+        cdt_wf(old(store).slot_view()),
+        old(store).slot_view().dom().contains(parent),
+        old(store).slot_view().dom().contains(child),
+        parent != child,
+        old(store).slot_view()[child].parent is None,
+        old(store).slot_view()[child].first_child is None,
+        old(store).slot_view()[child].next_sib is None,
+        old(store).slot_view()[child].prev_sib is None,
+        !is_empty_cap(old(store).slot_view()[child].cap),
+        !is_empty_cap(old(store).slot_view()[parent].cap),
+    ensures
+        final(store).slot_view().dom() == old(store).slot_view().dom(),
+        final(store).refs_view() == old(store).refs_view(),
+        forall|k: SlotId| #[trigger] old(store).slot_view().dom().contains(k)
+            ==> final(store).slot_view()[k].cap == old(store).slot_view()[k].cap,
+        final(store).slot_view()[child].cap == old(store).slot_view()[child].cap,
+        final(store).slot_view()[parent].first_child == Some(child),
+        // the prior child list is spliced in after `child`, in order: `child`
+        // heads it (prev None), the old first child follows, and that old first
+        // child now points back at `child`.
+        final(store).slot_view()[child].parent == Some(parent),
+        final(store).slot_view()[child].prev_sib is None,
+        final(store).slot_view()[child].next_sib == old(store).slot_view()[parent].first_child,
+        old(store).slot_view()[parent].first_child matches Some(f)
+            ==> final(store).slot_view()[f].prev_sib == Some(child),
+        cdt_wf(final(store).slot_view()),
+{
+    let ghost m0 = old(store).slot_view();
+    let old_first = store.slot(parent).first_child;
+
+    let mut c = store.slot(child);
+    c.parent = Some(parent);
+    c.prev_sib = None;
+    c.next_sib = old_first;
+    store.set_slot(child, c);
+
+    if let Some(f) = old_first {
+        proof {
+            // f is a live slot (parent's first child) and distinct from child:
+            // child is detached (parent None) but f.parent == Some(parent).
+            assert(m0.dom().contains(f));
+            assert(m0[f].parent == Some(parent));
+        }
+        let mut fs = store.slot(f);
+        fs.prev_sib = Some(child);
+        store.set_slot(f, fs);
+    }
+
+    let mut p = store.slot(parent);
+    p.first_child = Some(child);
+    store.set_slot(parent, p);
+}
+
+/// Derive a child cap (§2.3): copy with rights intersected — the only
+/// derivation; there is no amplification path.
+///
+/// pre:  the cspace is well-formed; `src`/`dst` are live; if `src` designates an
+///       object, that object is live (in the refcount table).
+/// post: on `Ok`, `dst` holds a faithful copy of `src`'s cap — same kind and
+///       designated object (a fresh Frame copy starts unmapped, §2.5) — with
+///       rights ∩ `mask`, so its rights are a **subset** of `src`'s for every
+///       `mask` (the load-bearing monotone-derivation theorem, proven ∀ rather
+///       than sampled); `dst` is `src`'s first child; the object's refcount and
+///       slot census both rise by exactly one; the cspace stays well-formed.
+///       On `Err` (empty/Untyped src, occupied dst, or a refcount already at
+///       `u32::MAX`) the store is unchanged. Refusing at the ceiling makes the
+///       refcount bump overflow-free for **all** inputs — no unchecked `+ 1`
+///       wrap-to-zero (a UAF class); the production `CapCopy` path inherits this.
+pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (res: Result<(), ()>)
+    requires
+        cdt_wf(old(store).slot_view()),
+        old(store).slot_view().dom().finite(),
+        old(store).slot_view().dom().contains(src),
+        old(store).slot_view().dom().contains(dst),
+        cap_obj(old(store).slot_view()[src].cap) matches Some(o) ==>
+            old(store).refs_view().dom().contains(o),
+    ensures
+        res is Ok ==> {
+            // faithful copy: dst's kind is src's (same object / channel end),
+            // a Frame copy unmapped — derivation cannot change the object or
+            // amplify via the kind.
+            &&& final(store).slot_view()[dst].cap.kind
+                  == derived_kind(old(store).slot_view()[src].cap.kind)
+            // monotone derivation: dst's rights are src's rights masked, hence a
+            // subset for ALL masks — authority only ever shrinks.
+            &&& final(store).slot_view()[dst].cap.rights.0
+                  == (old(store).slot_view()[src].cap.rights.0 & mask)
+            &&& (final(store).slot_view()[dst].cap.rights.0
+                  & old(store).slot_view()[src].cap.rights.0)
+                  == final(store).slot_view()[dst].cap.rights.0
+            &&& cdt_wf(final(store).slot_view())
+            &&& final(store).slot_view()[src].first_child == Some(dst)
+            &&& (cap_obj(old(store).slot_view()[src].cap) matches Some(o) ==>
+                  final(store).refs_view()
+                      =~= old(store).refs_view().insert(o, (old(store).refs_view()[o] + 1) as nat))
+            // the stored refcount and the slot census rise by one in lockstep —
+            // the per-op delta refcount soundness requires (the full
+            // `refs == census` invariant, incl. non-slot refs, is deferred).
+            &&& (cap_obj(old(store).slot_view()[src].cap) matches Some(o) ==>
+                  slot_refs(final(store).slot_view(), o)
+                      == slot_refs(old(store).slot_view(), o) + 1)
+            // bare caps (no object): no refcount perturbed.
+            &&& (cap_obj(old(store).slot_view()[src].cap) is None ==>
+                  final(store).refs_view() == old(store).refs_view())
+        },
+        res is Err ==> {
+            &&& final(store).slot_view() == old(store).slot_view()
+            &&& final(store).refs_view() == old(store).refs_view()
+        },
+{
+    let ghost m0 = old(store).slot_view();
+    let s = store.slot(src);
+    if matches!(s.cap.kind, CapKind::Empty) || matches!(s.cap.kind, CapKind::Untyped { .. }) {
+        return Err(());
+    }
+    if !matches!(store.slot(dst).cap.kind, CapKind::Empty) {
+        return Err(());
+    }
+    // On this path src is non-empty and dst is empty, so src != dst, and (by
+    // empty_slots_detached) dst is fully detached.
+    assert(src != dst);
+    assert(is_empty_cap(m0[dst].cap));
+    assert(cap_obj(m0[dst].cap) == Option::<ObjId>::None);
+    assert(m0[dst].parent is None && m0[dst].first_child is None
+        && m0[dst].next_sib is None && m0[dst].prev_sib is None);
+
+    // One mapping per cap copy (§2.5): a fresh frame copy starts unmapped.
+    let kind = match s.cap.kind {
+        CapKind::Frame { base, pages, mapping: _ } => CapKind::Frame { base, pages, mapping: None },
+        k => k,
+    };
+    let cap = Cap { kind, rights: s.cap.rights.masked(mask) };
+    assert(kind == derived_kind(s.cap.kind));
+    assert(cap_obj(cap) == cap_obj(s.cap));
+    assert(!is_empty_cap(cap));
+
+    // Refuse rather than wrap: an unchecked refcount bump is a UAF class
+    // (doc/results/21). Checking here (before any mutation) discharges obj_ref's
+    // overflow precondition without trusting the caller, so the bump below is
+    // provably total — and the Err path leaves the store untouched.
+    let obj_opt = match cap.kind {
+        CapKind::Aspace(o)
+        | CapKind::CSpace(o)
+        | CapKind::Thread(o)
+        | CapKind::Channel(o, _)
+        | CapKind::Notification(o)
+        | CapKind::Timer(o) => Some(o),
+        CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => None,
+    };
+    assert(obj_opt == cap_obj(cap));
+    if let Some(o) = obj_opt {
+        if store.obj_refs(o) == u32::MAX {
+            return Err(());
+        }
+    }
+
+    let mut d = store.slot(dst);
+    d.cap = cap;
+    store.set_slot(dst, d);
+    // Setting an empty, detached slot to a non-empty cap (links still null)
+    // preserves well-formedness: dst gains no links and no slot links to it.
+    let ghost m1 = store.slot_view();
+    assert(m1 =~= m0.insert(dst, d));
+    assert(cdt_wf(m1));
+    // set_slot preserves refcounts, and the overflow check above bounded the
+    // designated object's count — so obj_ref's bump cannot wrap.
+    assert(cap_obj(cap) matches Some(o) ==> store.refs_view()[o] < u32::MAX as nat);
+
+    obj_ref(store, cap);
+    // obj_ref touches only refcounts, so the arena (hence cdt_wf and dst's cap)
+    // is exactly m1.
+    assert(store.slot_view() =~= m1);
+    cdt_insert_child(store, src, dst);
+
+    proof {
+        // dst's cap survived obj_ref (slot_view unchanged) and cdt_insert_child
+        // (child-cap preserved), so it is still the masked copy.
+        assert(m1[dst] == d);
+        assert(store.slot_view()[dst].cap == cap);
+        assert(store.slot_view()[dst].cap.kind == derived_kind(m0[src].cap.kind));
+        let r = m0[src].cap.rights.0;
+        // monotone-derivation subset corollary: (r & mask) & r == r & mask.
+        assert((r & mask) & r == (r & mask)) by (bit_vector);
+        // census delta: dst now designates the object, so its slot census rose
+        // by one (set_slot), and the link surgery left every cap unchanged.
+        match cap_obj(cap) {
+            Some(o) => {
+                lemma_designation_bump(m0, dst, d, o);
+                lemma_same_caps_same_census(m1, store.slot_view(), o);
+            }
+            None => {}
+        }
+    }
+    Ok(())
+}
+
+} // verus!
