@@ -922,6 +922,13 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (r
 /// exactly what `revoke`'s termination needs — the live-slot count strictly
 /// drops, the domain and well-formedness are preserved — and is the obligation
 /// the future body proof must discharge.
+///
+/// The contract is stated for the **general** (possibly non-leaf) case on
+/// purpose: `revoke` only ever passes a leaf, but `destroy_cspace` deletes
+/// non-leaf residents, so the body proof must handle `cdt_unlink`'s re-parenting
+/// — the harder `cdt_wf`-preservation case. The contract is silent on
+/// `refs_view` (the teardown's refcount effects); the refcount discipline across
+/// teardown lands with the cross-object body proof (doc/results/21 §9).
 #[verifier::external_body]
 pub fn delete<S: Store>(store: &mut S, slot: SlotId)
     requires
@@ -995,13 +1002,23 @@ pub fn descend_to_leaf<S: Store>(store: &S, start: SlotId) -> (leaf: SlotId)
 }
 
 /// Revoke: delete every CDT descendant of `slot` — cspace residents and
-/// in-flight queue slots alike, unconditionally (§2.2). The cap itself survives.
+/// in-flight queue slots alike, unconditionally (§2.2).
 ///
 /// **Terminates** (`decreases count_nonempty`): each iteration descends to a
 /// leaf and deletes it, and `delete` strictly lowers the live-slot count. This
 /// is the revocation-walk termination the plan calls the headline gain over
 /// Kani's `debug_assert` — proven here for all shapes, modulo `delete`'s assumed
 /// teardown contract (above).
+///
+/// **NOT yet proven — `slot`'s cap survives (§2.2).** The postcondition does not
+/// assert `slot` stays non-empty. Adding that clause fails against `delete`'s
+/// current contract, which frames only the deleted slot's cap: a cross-object
+/// teardown (deleting the last cap to a cspace that contains `slot` as a
+/// resident) can empty `slot` itself, and the proof would still pass vacuously
+/// (an empty slot has `first_child == None`). Closing this needs `delete` to
+/// frame *which* slots it may empty (the deleted slot's CDT subtree only) — the
+/// reachability strengthening tracked with the looping-op proofs (doc/results/21
+/// §9). Until then revoke's root-survival is a documented gap, not a theorem.
 ///
 /// pre:  the cspace is well-formed (and finite); `slot` is live and non-empty.
 /// post: `slot` has no children (its subtree is gone); the cspace stays
