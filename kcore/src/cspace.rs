@@ -22,7 +22,7 @@
 //! comment; the proof harnesses turn those into `cdt_wf` assertions.
 
 use crate::id::{ObjId, SlotId};
-use crate::store::Store;
+use crate::store::{Binding, Store};
 use vstd::prelude::*;
 
 /// Rights bits — monotone under derivation (§2.3): `derive` may only clear
@@ -329,6 +329,45 @@ pub struct ExCap(Cap);
 #[allow(dead_code)]
 pub struct ExCapSlot(CapSlot);
 
+// An event binding is plain Rust (`crate::store::Binding`); give it a Verus
+// type-spec so it can live in the `ChanView.bindings` map and be compared with
+// structural `==`. (`allow(dead_code)`: Verus-only scaffolding, erased in a
+// normal build — plan doc/plans/3_verus-rewrite_phase3-detail.md §3b.)
+#[verifier::external_type_specification]
+#[verifier::ext_equal]
+#[allow(dead_code)]
+pub struct ExBinding(Binding);
+
+// ── The channel ghost view (plan §3b) ───────────────────────────────────────
+//
+// `ChanView` mirrors a `Channel`'s *mutable* state (`channel.rs`) at the
+// abstraction the §4.3 proofs reason over — **payload bytes abstracted out**:
+// we model message length, cap identity, and order, not the 256 payload bytes.
+//
+// The load-bearing decision (detail §1.1): a ring message slot is a **real
+// `CapSlot` in the single `slot_view` arena** (moved by the already-verified
+// `slot_move`). So the cap *contents* live in `slot_view`; `ring_cap` here holds
+// only the slot *handles*, which are fixed at channel construction and never
+// reassigned (`Store` has a `chan_ring_cap` getter and no setter). `chan_ring_cap`
+// is therefore a deterministic projection of this view, and `chan_wf` pins the
+// handles to the arena (each in `slot_view`'s domain; window-empty coupling below).
+#[verifier::ext_equal]
+pub struct ChanView {
+    pub depth: nat,
+    // Per-end live-endpoint-cap counts (peer-closed, §3.3) and per-ring FIFO
+    // cursors. Seqs of length 2 (ring/end ∈ {0,1}).
+    pub end_caps: Seq<nat>,
+    pub head: Seq<nat>,
+    pub count: Seq<nat>,
+    // bindings[(end, ev)] — end ∈ {0,1}, ev ∈ {0,1,2} (readable/writable/peer-closed).
+    pub bindings: Map<(int, int), Binding>,
+    // msg_len[(ring, index)] — the queued payload length (bytes abstracted).
+    pub msg_len: Map<(int, int), nat>,
+    // ring_cap[(ring, index, cap)] — the CapSlot handle for that ring message's
+    // cap slot (cap ∈ {0..4}); the bridge into `slot_view` (the §4.3 coupling).
+    pub ring_cap: Map<(int, int, int), SlotId>,
+}
+
 // The abstract `Store` model: a slot arena + a refcount map. The trait stays
 // plain Rust (the kernel impls it without ghost members); this `external_trait
 // _specification` attaches the contract, and `external_trait_extension` adds the
@@ -344,6 +383,10 @@ pub trait ExStore {
     spec fn slot_view(&self) -> Map<SlotId, CapSlot>;
     // Object refcounts: handle → count.
     spec fn refs_view(&self) -> Map<ObjId, nat>;
+    // Channel state: handle → ghost view (plan §3b). The third independent view;
+    // the slot/refs setters frame it unchanged and the channel setters frame
+    // slot/refs unchanged, so the §4.3 ops can reason about one without the others.
+    spec fn chan_view(&self) -> Map<ObjId, ChanView>;
 
     fn slot(&self, s: SlotId) -> (r: CapSlot)
         requires self.slot_view().dom().contains(s),
@@ -353,7 +396,8 @@ pub trait ExStore {
         requires old(self).slot_view().dom().contains(s),
         ensures
             final(self).slot_view() == old(self).slot_view().insert(s, v),
-            final(self).refs_view() == old(self).refs_view();
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view();
 
     fn obj_refs(&self, o: ObjId) -> (r: u32)
         requires self.refs_view().dom().contains(o),
@@ -363,7 +407,139 @@ pub trait ExStore {
         requires old(self).refs_view().dom().contains(o),
         ensures
             final(self).refs_view() == old(self).refs_view().insert(o, r as nat),
-            final(self).slot_view() == old(self).slot_view();
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).chan_view() == old(self).chan_view();
+
+    // ── channel accessors (plan §3b) ────────────────────────────────────────
+    //
+    // Each relates to `chan_view` exactly as `slot`/`set_slot` relate to
+    // `slot_view`: getters project a field; setters update one key and frame the
+    // *other* two views unchanged. Index bounds (end/ring < 2, ev < 3) mirror the
+    // production fixed-array bounds.
+    fn chan_depth(&self, ch: ObjId) -> (r: u32)
+        requires self.chan_view().dom().contains(ch),
+        ensures r as nat == self.chan_view()[ch].depth;
+
+    fn chan_end_caps(&self, ch: ObjId, end: usize) -> (r: u32)
+        requires
+            self.chan_view().dom().contains(ch),
+            end < 2,
+        ensures r as nat == self.chan_view()[ch].end_caps[end as int];
+
+    fn set_chan_end_caps(&mut self, ch: ObjId, end: usize, v: u32)
+        requires
+            old(self).chan_view().dom().contains(ch),
+            end < 2,
+            old(self).chan_view()[ch].end_caps.len() == 2,
+        ensures
+            final(self).chan_view() == old(self).chan_view().insert(
+                ch,
+                ChanView {
+                    end_caps: old(self).chan_view()[ch].end_caps.update(end as int, v as nat),
+                    ..old(self).chan_view()[ch]
+                }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view();
+
+    fn chan_head(&self, ch: ObjId, ring: usize) -> (r: u32)
+        requires
+            self.chan_view().dom().contains(ch),
+            ring < 2,
+        ensures r as nat == self.chan_view()[ch].head[ring as int];
+
+    fn set_chan_head(&mut self, ch: ObjId, ring: usize, v: u32)
+        requires
+            old(self).chan_view().dom().contains(ch),
+            ring < 2,
+            old(self).chan_view()[ch].head.len() == 2,
+        ensures
+            final(self).chan_view() == old(self).chan_view().insert(
+                ch,
+                ChanView {
+                    head: old(self).chan_view()[ch].head.update(ring as int, v as nat),
+                    ..old(self).chan_view()[ch]
+                }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view();
+
+    fn chan_count(&self, ch: ObjId, ring: usize) -> (r: u32)
+        requires
+            self.chan_view().dom().contains(ch),
+            ring < 2,
+        ensures r as nat == self.chan_view()[ch].count[ring as int];
+
+    fn set_chan_count(&mut self, ch: ObjId, ring: usize, v: u32)
+        requires
+            old(self).chan_view().dom().contains(ch),
+            ring < 2,
+            old(self).chan_view()[ch].count.len() == 2,
+        ensures
+            final(self).chan_view() == old(self).chan_view().insert(
+                ch,
+                ChanView {
+                    count: old(self).chan_view()[ch].count.update(ring as int, v as nat),
+                    ..old(self).chan_view()[ch]
+                }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view();
+
+    fn chan_binding(&self, ch: ObjId, end: usize, ev: usize) -> (r: Binding)
+        requires
+            self.chan_view().dom().contains(ch),
+            end < 2,
+            ev < 3,
+        ensures r == self.chan_view()[ch].bindings[(end as int, ev as int)];
+
+    fn set_chan_binding(&mut self, ch: ObjId, end: usize, ev: usize, b: Binding)
+        requires
+            old(self).chan_view().dom().contains(ch),
+            end < 2,
+            ev < 3,
+        ensures
+            final(self).chan_view() == old(self).chan_view().insert(
+                ch,
+                ChanView {
+                    bindings: old(self).chan_view()[ch].bindings.insert((end as int, ev as int), b),
+                    ..old(self).chan_view()[ch]
+                }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view();
+
+    // The ring cap-slot handle — immutable channel layout, so getter only.
+    fn chan_ring_cap(&self, ch: ObjId, ring: usize, i: u32, c: usize) -> (r: SlotId)
+        requires
+            self.chan_view().dom().contains(ch),
+            ring < 2,
+            c < 4,
+        ensures r == self.chan_view()[ch].ring_cap[(ring as int, i as int, c as int)];
+
+    fn chan_msg_len(&self, ch: ObjId, ring: usize, i: u32) -> (r: u16)
+        requires
+            self.chan_view().dom().contains(ch),
+            ring < 2,
+        ensures r as nat == self.chan_view()[ch].msg_len[(ring as int, i as int)];
+
+    fn set_chan_msg_len(&mut self, ch: ObjId, ring: usize, i: u32, v: u16)
+        requires
+            old(self).chan_view().dom().contains(ch),
+            ring < 2,
+        ensures
+            final(self).chan_view() == old(self).chan_view().insert(
+                ch,
+                ChanView {
+                    msg_len: old(self).chan_view()[ch].msg_len.insert((ring as int, i as int), v as nat),
+                    ..old(self).chan_view()[ch]
+                }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view();
+
+    // Payload is abstracted out, so the write is a frame-only no-op on the
+    // abstract state; `chan_msg_read` is `&self` (no obligation, omitted).
+    fn chan_msg_write(&mut self, ch: ObjId, ring: usize, i: u32, data: &[u8])
+        ensures
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view();
 }
 
 // The refcounted object a cap designates (the spec mirror of `Cap::obj`).
@@ -539,6 +715,52 @@ pub open spec fn sib_acyclic(m: Map<SlotId, CapSlot>) -> bool {
 // acyclicity. The invariant the recursive/looping ops require and preserve.
 pub open spec fn cspace_wf(m: Map<SlotId, CapSlot>) -> bool {
     cdt_wf(m) && acyclic(m) && sib_acyclic(m)
+}
+
+// ── Channel well-formedness (the §4.3 `chan_wf`; plan §3b) ───────────────────
+//
+// Ring index `i` is in channel `c`'s live window for `ring` iff it is one of the
+// `count[ring]` positions starting at `head[ring]` (wrapping mod `depth`) — the
+// FIFO window 3d's `send`/`recv` `Seq` model projects through. Stated as the
+// existential so the modular arithmetic stays out of the predicate (the doc-25 §2
+// discipline: quarantine non-linear `%` into 3d's helpers, not the invariant).
+pub open spec fn in_live_window(c: ChanView, ring: int, i: int) -> bool {
+    exists|j: int| #![trigger (c.head[ring] + j) % (c.depth as int)]
+        0 <= j < c.count[ring] && i == (c.head[ring] + j) % (c.depth as int)
+}
+
+// `chan_wf(cv, sv, ch)` — channel `ch` is well-formed. Takes **both** views: the
+// detail plan (§3b) lists chan_wf with `(cv, ch)`, but its own clause "ring slots
+// outside the live window are empty (their `SlotId` empty in `slot_view`)" needs
+// the arena, so the signature is `(cv, sv, ch)` (recorded in doc/results/27 §1.1).
+//
+// Clauses: depth positive; the Seq fields have length 2; the FIFO cursors are in
+// range; `ring_cap`/`msg_len`/`bindings` have their expected domains; every ring
+// cap handle lives in the arena; and the **coupling** — a ring cap outside the
+// live window is empty in `slot_view`. Per-channel (cross-channel ring-slot
+// disjointness and ring-cap injectivity are extra invariants 3d adds when
+// `send`/`recv` need them; not part of the shape, so not asserted here).
+pub open spec fn chan_wf(cv: Map<ObjId, ChanView>, sv: Map<SlotId, CapSlot>, ch: ObjId) -> bool {
+    &&& cv.dom().contains(ch)
+    &&& cv[ch].depth > 0
+    &&& cv[ch].end_caps.len() == 2
+    &&& cv[ch].head.len() == 2
+    &&& cv[ch].count.len() == 2
+    &&& forall|r: int| #![trigger cv[ch].count[r]] 0 <= r < 2 ==> cv[ch].count[r] <= cv[ch].depth
+    &&& forall|r: int| #![trigger cv[ch].head[r]] 0 <= r < 2 ==> cv[ch].head[r] < cv[ch].depth
+    &&& forall|r: int, i: int, c: int|
+            (0 <= r < 2 && 0 <= i < cv[ch].depth && 0 <= c < 4)
+                ==> #[trigger] cv[ch].ring_cap.dom().contains((r, i, c))
+    &&& forall|r: int, i: int, c: int|
+            (0 <= r < 2 && 0 <= i < cv[ch].depth && 0 <= c < 4)
+                ==> sv.dom().contains(#[trigger] cv[ch].ring_cap[(r, i, c)])
+    &&& forall|r: int, i: int, c: int|
+            (0 <= r < 2 && 0 <= i < cv[ch].depth && 0 <= c < 4 && !in_live_window(cv[ch], r, i))
+                ==> is_empty_cap(sv[#[trigger] cv[ch].ring_cap[(r, i, c)]].cap)
+    &&& forall|r: int, i: int|
+            (0 <= r < 2 && 0 <= i < cv[ch].depth) ==> #[trigger] cv[ch].msg_len.dom().contains((r, i))
+    &&& forall|e: int, v: int|
+            (0 <= e < 2 && 0 <= v < 3) ==> #[trigger] cv[ch].bindings.dom().contains((e, v))
 }
 
 // The count of live (non-empty) slots — the well-founded measure for revoke's
