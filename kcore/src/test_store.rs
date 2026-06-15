@@ -17,7 +17,7 @@
 //! plain-Rust re-expression. Shapes are built with the *verified* `derive`, so
 //! the generator cannot manufacture a non-`cspace_wf` start state.
 
-use crate::cspace::{cdt_unlink, delete, derive, slot_move, Cap, CapKind, CapSlot, Rights};
+use crate::cspace::{cdt_unlink, delete, derive, revoke, slot_move, Cap, CapKind, CapSlot, Rights};
 use crate::id::{ObjId, SlotId};
 use crate::store::{Binding, Store};
 use crate::thread::{Report, ThreadState};
@@ -613,4 +613,68 @@ fn randomized_sweep() {
         }
     }
     assert!(trials > 500, "sweep should exercise hundreds of trials, ran {trials}");
+}
+
+// ── §C: evidence that doc/results/21 §9's proposed fix for revoke's "revoked cap
+//    survives" is UNSOUND. §9 suggested framing `delete` to "empty only the
+//    deleted slot's CDT subtree." These two tests run the real `delete`/`revoke`
+//    and show that is false under cross-object teardown. (doc/results/23 §C) ──
+
+#[test]
+fn delete_empties_slots_outside_the_deleted_subtree() {
+    // slot 0 = a CSpace(10) cap with NO CDT children (its subtree is just {0}).
+    // cspace 10's residents are slots 1, 2 — independent CDT roots, NOT in slot
+    // 0's subtree. Deleting slot 0 is the last ref to cspace 10, so destroy_cspace
+    // empties slots 1 and 2 — *outside* the deleted subtree.
+    let mut st = ArrayStore::new(3);
+    st.slots[0] = detached(cspace_cap(10));
+    st.slots[1] = detached(frame_cap(1));
+    st.slots[2] = detached(frame_cap(2));
+    st.refs.insert(10, 1);
+    st.cspaces.insert(10, vec![SlotId(1), SlotId(2)]);
+    // slot 0 has no CDT descendants — its "subtree" is itself alone.
+    assert!(st.at(SlotId(0)).first_child.is_none());
+    check_delete(&mut st, SlotId(0));
+    // Yet slots 1 and 2 — outside slot 0's subtree — were emptied by the teardown.
+    assert!(st.at(SlotId(1)).cap.is_empty(), "resident outside the subtree was emptied");
+    assert!(st.at(SlotId(2)).cap.is_empty(), "resident outside the subtree was emptied");
+    // => "delete empties only the deleted subtree" (doc 21 §9) is FALSE.
+}
+
+#[test]
+fn revoke_can_empty_its_own_root_zombie() {
+    // The seL4-zombie: the revoked root `slot 0` is itself a resident of a cspace
+    // whose last surviving cap lies in slot 0's OWN subtree (its child slot 1).
+    //   cspace 10 residents = [slot 0];  slot 0 (Frame) ── child ──▶ slot 1 = CSpace(10).
+    // revoke(slot 0) descends to the leaf slot 1 and deletes it → last ref to
+    // cspace 10 → destroy_cspace(10) → deletes its resident slot 0 → the *root* is
+    // emptied. So "revoked cap survives" does NOT hold unconditionally, and §9's
+    // subtree-frame cannot rescue it (the teardown crosses objects). cspace_wf is
+    // still preserved — that part of revoke's contract holds.
+    let mut st = ArrayStore::new(2);
+    st.slots[0] = CapSlot {
+        cap: frame_cap(0),
+        parent: None,
+        first_child: Some(SlotId(1)),
+        next_sib: None,
+        prev_sib: None,
+    };
+    st.slots[1] = CapSlot {
+        cap: cspace_cap(10),
+        parent: Some(SlotId(0)),
+        first_child: None,
+        next_sib: None,
+        prev_sib: None,
+    };
+    st.refs.insert(10, 1); // slot 1 is the one (and last) cap to cspace 10
+    st.cspaces.insert(10, vec![SlotId(0)]); // cspace 10 contains slot 0 as a resident
+    assert!(cspace_wf_exec(&st), "the zombie shape is well-formed");
+
+    revoke(&mut st, SlotId(0));
+
+    assert!(cspace_wf_exec(&st), "revoke preserves cspace_wf (its real guarantee)");
+    assert!(st.at(SlotId(0)).first_child.is_none(), "revoke: subtree empty");
+    // The headline: the revoked root itself was emptied by the cross-object
+    // teardown — the documented gap, here a concrete witness.
+    assert!(st.at(SlotId(0)).cap.is_empty(), "revoke emptied its own root (zombie)");
 }

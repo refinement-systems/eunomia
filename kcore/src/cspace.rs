@@ -718,6 +718,398 @@ proof fn lemma_insert_preserves_sib_acyclic(
     assert(sib_acyclic(m1));
 }
 
+// ── slot_move as an identity transposition (doc/results/23 §A) ──
+//
+// `slot_move` relabels identity `src` onto the previously-isolated empty slot
+// `dst`. Because nothing in a well-formed store references an empty/detached slot
+// (proven below), this equals the transposition π = (src dst) applied to the
+// whole map: swap the slot *contents* at src/dst and rename every link through π.
+// A transposition is an involution and a bijection on slot identities, so it
+// preserves every structural clause, and the acyclicity ranks transfer through π.
+
+pub open spec fn swap_id(k: SlotId, src: SlotId, dst: SlotId) -> SlotId {
+    if k == src { dst } else if k == dst { src } else { k }
+}
+
+pub open spec fn ren(o: Option<SlotId>, src: SlotId, dst: SlotId) -> Option<SlotId> {
+    match o {
+        None => None,
+        Some(h) => Some(swap_id(h, src, dst)),
+    }
+}
+
+// `m` with identities `src` and `dst` transposed (contents swapped, every link
+// renamed through π). `relabeled(relabeled(m)) == m`.
+pub open spec fn relabeled(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId) -> Map<SlotId, CapSlot> {
+    Map::new(
+        |k: SlotId| m.dom().contains(k),
+        |k: SlotId| {
+            let b = m[swap_id(k, src, dst)];
+            CapSlot {
+                cap: b.cap,
+                parent: ren(b.parent, src, dst),
+                first_child: ren(b.first_child, src, dst),
+                next_sib: ren(b.next_sib, src, dst),
+                prev_sib: ren(b.prev_sib, src, dst),
+            }
+        },
+    )
+}
+
+// The transposition proof is factored per-clause: the monolith's combined SMT
+// context blows the rlimit, so each clause gets its own solver call. Every helper
+// shares the same shape — un-rename a link via the π-involution, apply m's
+// corresponding clause, re-rename — over `mf = relabeled(m, src, dst)`.
+
+proof fn lemma_transpose_links(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId)
+    requires links_in_domain(m), m.dom().contains(src), m.dom().contains(dst),
+    ensures links_in_domain(relabeled(m, src, dst)),
+{
+    let mf = relabeled(m, src, dst);
+    assert(mf.dom() =~= m.dom());
+    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies {
+        &&& link_in_dom(mf, mf[k].parent)
+        &&& link_in_dom(mf, mf[k].first_child)
+        &&& link_in_dom(mf, mf[k].next_sib)
+        &&& link_in_dom(mf, mf[k].prev_sib)
+    } by {
+        assert(m.dom().contains(swap_id(k, src, dst)));
+    }
+}
+
+proof fn lemma_transpose_siblings(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId)
+    requires
+        siblings_doubly_consistent(m), siblings_share_parent(m),
+        m.dom().contains(src), m.dom().contains(dst),
+    ensures
+        siblings_doubly_consistent(relabeled(m, src, dst)),
+        siblings_share_parent(relabeled(m, src, dst)),
+{
+    let mf = relabeled(m, src, dst);
+    assert(mf.dom() =~= m.dom());
+    assert forall|a: SlotId| #[trigger] mf.dom().contains(a) implies {
+        &&& (mf[a].next_sib matches Some(b) ==> mf.dom().contains(b) && mf[b].prev_sib == Some(a))
+        &&& (mf[a].prev_sib matches Some(b) ==> mf.dom().contains(b) && mf[b].next_sib == Some(a))
+        &&& (mf[a].next_sib matches Some(b) ==> mf[b].parent == mf[a].parent)
+    } by {
+        let ja = swap_id(a, src, dst);
+        if let Some(b) = mf[a].next_sib {
+            assert(m[ja].next_sib == Some(swap_id(b, src, dst)));
+            assert(swap_id(swap_id(b, src, dst), src, dst) == b);
+        }
+        if let Some(b) = mf[a].prev_sib {
+            assert(m[ja].prev_sib == Some(swap_id(b, src, dst)));
+            assert(swap_id(swap_id(b, src, dst), src, dst) == b);
+        }
+    }
+}
+
+proof fn lemma_transpose_children(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId)
+    requires
+        links_in_domain(m),
+        first_child_parent_agree(m), head_is_first_child(m), parent_has_first_child(m),
+        m.dom().contains(src), m.dom().contains(dst),
+    ensures
+        first_child_parent_agree(relabeled(m, src, dst)),
+        head_is_first_child(relabeled(m, src, dst)),
+        parent_has_first_child(relabeled(m, src, dst)),
+{
+    let mf = relabeled(m, src, dst);
+    assert(mf.dom() =~= m.dom());
+    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies
+        (mf[k].first_child matches Some(c) ==>
+            mf.dom().contains(c) && mf[c].parent == Some(k) && mf[c].prev_sib == None) by {
+        let jk = swap_id(k, src, dst);
+        if let Some(c) = mf[k].first_child {
+            // m[jk].first_child == Some(swap(c)); first_child_parent_agree(m) gives
+            // swap(c) live with parent jk, prev None; re-rename back through π.
+            assert(m[jk].first_child == Some(swap_id(c, src, dst)));
+            assert(m.dom().contains(swap_id(c, src, dst)));
+            assert(swap_id(swap_id(c, src, dst), src, dst) == c);
+            assert(swap_id(swap_id(k, src, dst), src, dst) == k);
+        }
+    }
+    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies
+        (mf[k].parent matches Some(p) ==> (mf[k].prev_sib is None ==>
+            mf.dom().contains(p) && mf[p].first_child == Some(k))) by {
+        let jk = swap_id(k, src, dst);
+        if let Some(p) = mf[k].parent {
+            assert(m[jk].parent == Some(swap_id(p, src, dst)));
+            assert(m.dom().contains(swap_id(p, src, dst)));
+            assert(swap_id(swap_id(p, src, dst), src, dst) == p);
+            assert(swap_id(swap_id(k, src, dst), src, dst) == k);
+        }
+    }
+    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies
+        (mf[k].parent matches Some(p) ==> mf[p].first_child is Some) by {
+        let jk = swap_id(k, src, dst);
+        if let Some(p) = mf[k].parent {
+            assert(m[jk].parent == Some(swap_id(p, src, dst)));
+            assert(m.dom().contains(swap_id(p, src, dst)));
+            assert(swap_id(swap_id(p, src, dst), src, dst) == p);
+        }
+    }
+}
+
+proof fn lemma_transpose_empty(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId)
+    requires empty_slots_detached(m), m.dom().contains(src), m.dom().contains(dst),
+    ensures empty_slots_detached(relabeled(m, src, dst)),
+{
+    let mf = relabeled(m, src, dst);
+    assert(mf.dom() =~= m.dom());
+    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies
+        (is_empty_cap(mf[k].cap) ==> {
+            &&& mf[k].parent == None
+            &&& mf[k].first_child == None
+            &&& mf[k].next_sib == None
+            &&& mf[k].prev_sib == None
+        }) by {
+        // mf[k].cap == m[swap(k)].cap; if empty, m[swap(k)] is detached, so each
+        // link is None and ren(None) == None.
+        assert(m.dom().contains(swap_id(k, src, dst)));
+    }
+}
+
+proof fn lemma_transpose_acyclic(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId)
+    requires acyclic(m), m.dom().contains(src), m.dom().contains(dst),
+    ensures acyclic(relabeled(m, src, dst)),
+{
+    let mf = relabeled(m, src, dst);
+    assert(mf.dom() =~= m.dom());
+    let r0 = choose|r: Map<SlotId, nat>| valid_prank(m, r);
+    let rf = Map::<SlotId, nat>::new(|k: SlotId| mf.dom().contains(k), |k: SlotId| r0[swap_id(k, src, dst)]);
+    assert(rf.dom() =~= mf.dom());
+    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies
+        (mf[k].parent matches Some(p) ==> mf.dom().contains(p) && rf[k] < rf[p]) by {
+        let jk = swap_id(k, src, dst);
+        if let Some(p) = mf[k].parent {
+            assert(m[jk].parent == Some(swap_id(p, src, dst)));
+        }
+    }
+    assert(valid_prank(mf, rf));
+}
+
+proof fn lemma_transpose_sib(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId)
+    requires sib_acyclic(m), m.dom().contains(src), m.dom().contains(dst),
+    ensures sib_acyclic(relabeled(m, src, dst)),
+{
+    let mf = relabeled(m, src, dst);
+    assert(mf.dom() =~= m.dom());
+    let s0 = choose|s: Map<SlotId, nat>| valid_srank(m, s);
+    let sf = Map::<SlotId, nat>::new(|k: SlotId| mf.dom().contains(k), |k: SlotId| s0[swap_id(k, src, dst)]);
+    assert(sf.dom() =~= mf.dom());
+    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies
+        (mf[k].next_sib matches Some(n) ==> mf.dom().contains(n) && sf[n] < sf[k]) by {
+        let jk = swap_id(k, src, dst);
+        if let Some(n) = mf[k].next_sib {
+            assert(m[jk].next_sib == Some(swap_id(n, src, dst)));
+        }
+    }
+    assert(valid_srank(mf, sf));
+}
+
+// Transposing two slot identities preserves the whole well-formedness — a pure
+// renaming. (No emptiness hypothesis: holds for any two live slots; `dst`'s
+// emptiness is only what makes the transposition equal `slot_move`'s body —
+// established at the call site.)
+proof fn lemma_transpose_preserves_cspace_wf(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId)
+    requires
+        cspace_wf(m),
+        m.dom().finite(),
+        m.dom().contains(src),
+        m.dom().contains(dst),
+    ensures
+        cspace_wf(relabeled(m, src, dst)),
+        relabeled(m, src, dst).dom() == m.dom(),
+        relabeled(m, src, dst).dom().finite(),
+{
+    assert(relabeled(m, src, dst).dom() =~= m.dom());
+    lemma_transpose_links(m, src, dst);
+    lemma_transpose_siblings(m, src, dst);
+    lemma_transpose_children(m, src, dst);
+    lemma_transpose_empty(m, src, dst);
+    lemma_transpose_acyclic(m, src, dst);
+    lemma_transpose_sib(m, src, dst);
+}
+
+// ── Child-chain reachability (doc/results/23 §B): the keystone for the
+//    children-walk loops' *completeness* — every child of a node lies on its
+//    `first_child → next_sib` chain, so a walk re-parents all of them. ──
+
+// `k` is reachable from `from` by 0+ `next_sib` steps. Well-founded on a sibling
+// rank `s` (the walk strictly lowers it), so this terminates.
+pub open spec fn next_reach(m: Map<SlotId, CapSlot>, from: SlotId, k: SlotId, s: Map<SlotId, nat>) -> bool
+    decreases s[from],
+{
+    if from == k {
+        true
+    } else {
+        match m[from].next_sib {
+            Some(nx) => s[nx] < s[from] && next_reach(m, nx, k, s),
+            None => false,
+        }
+    }
+}
+
+// Reachability only ever lowers (weakly) the sibling rank — so a node cannot
+// reach a strictly higher-ranked node (used to show the just-processed `cur` is
+// not reachable from its successor).
+proof fn lemma_next_reach_sr(m: Map<SlotId, CapSlot>, from: SlotId, k: SlotId, s: Map<SlotId, nat>)
+    requires next_reach(m, from, k, s),
+    ensures s[k] <= s[from],
+    decreases s[from],
+{
+    if from == k {
+    } else {
+        let nx = m[from].next_sib->0;
+        lemma_next_reach_sr(m, nx, k, s);
+    }
+}
+
+// Append one `next_sib` edge at the tail of a reach-path.
+proof fn lemma_next_reach_extend(m: Map<SlotId, CapSlot>, h: SlotId, j: SlotId, k: SlotId, s: Map<SlotId, nat>)
+    requires
+        next_reach(m, h, j, s),
+        m[j].next_sib == Some(k),
+        s[k] < s[j],
+    ensures
+        next_reach(m, h, k, s),
+    decreases s[h],
+{
+    if h == k {
+        assert(next_reach(m, h, k, s));
+    } else if h == j {
+        // next_reach(j, k): j.next == Some(k), s[k] < s[j] == s[h], next_reach(k,k).
+        assert(next_reach(m, k, k, s));
+        assert(next_reach(m, h, k, s));
+    } else {
+        // h != j and next_reach(h,j) ⟹ h.next == Some(nx), s[nx] < s[h], next_reach(nx,j).
+        assert(m[h].next_sib is Some);
+        let nx = m[h].next_sib->0;
+        assert(s[nx] < s[h] && next_reach(m, nx, j, s));
+        lemma_next_reach_extend(m, nx, j, k, s);
+        assert(next_reach(m, nx, k, s));
+        assert(next_reach(m, h, k, s));
+    }
+}
+
+// Every child of `src` is `next_sib`-reachable from `src`'s first child. Recurses
+// toward the list head along `prev_sib`; the measure is the count of children
+// ranked above `k` (each `prev` step has strictly higher rank, so the count drops).
+proof fn lemma_child_on_chain(m: Map<SlotId, CapSlot>, src: SlotId, k: SlotId, s: Map<SlotId, nat>)
+    requires
+        cdt_wf(m),
+        valid_srank(m, s),
+        m.dom().finite(),
+        m.dom().contains(src),
+        m.dom().contains(k),
+        m[k].parent == Some(src),
+    ensures
+        m[src].first_child is Some,
+        next_reach(m, m[src].first_child->0, k, s),
+    decreases m.dom().filter(|x: SlotId| m[x].parent == Some(src) && s[x] > s[k]).len(),
+{
+    // k has a parent (src), so by parent_has_first_child src has a first child.
+    assert(m[src].first_child is Some);
+    let h = m[src].first_child->0;
+    if m[k].prev_sib is None {
+        // head_is_first_child: a parented, prev-less node IS its parent's first child.
+        assert(m[src].first_child == Some(k));
+        assert(m[src].first_child->0 == k);
+        assert(next_reach(m, k, k, s));
+    } else {
+        let j = m[k].prev_sib->0;
+        // doubly: j.next == Some(k); share_parent: j is also a child of src;
+        // valid_srank: s[k] < s[j].
+        assert(m.dom().contains(j) && m[j].next_sib == Some(k));
+        assert(m[j].parent == Some(src));
+        assert(s[k] < s[j]);
+        // measure: {child : s > s[j]} ⊊ {child : s > s[k]} (j is in the latter, not
+        // the former), so the recursive call's count is strictly smaller.
+        let f_k = m.dom().filter(|x: SlotId| m[x].parent == Some(src) && s[x] > s[k]);
+        let f_j = m.dom().filter(|x: SlotId| m[x].parent == Some(src) && s[x] > s[j]);
+        assert(f_k.contains(j));
+        assert(f_j.subset_of(f_k.remove(j))) by {
+            assert forall|x: SlotId| f_j.contains(x) implies f_k.remove(j).contains(x) by {}
+        }
+        assert(f_k.remove(j).len() == f_k.len() - 1);
+        assert(f_j.len() <= f_k.remove(j).len()) by {
+            vstd::set_lib::lemma_len_subset(f_j, f_k.remove(j));
+        }
+        lemma_child_on_chain(m, src, j, s);
+        lemma_next_reach_extend(m, h, j, k, s);
+    }
+}
+
+// Replacing a slot's empty cap with another empty cap of the *same links* is
+// invisible to `cspace_wf` (which reads only link structure + `is_empty_cap`).
+// `slot_move` clears `src` to `CapSlot::empty()` where the transposition leaves
+// `m0[dst]` — same (None) links, both empty, possibly different rights bits.
+proof fn lemma_replace_empty_cap(mf: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot)
+    requires
+        cspace_wf(mf),
+        mf.dom().finite(),
+        mf.dom().contains(k),
+        is_empty_cap(mf[k].cap),
+        is_empty_cap(v.cap),
+        v.parent == mf[k].parent,
+        v.first_child == mf[k].first_child,
+        v.next_sib == mf[k].next_sib,
+        v.prev_sib == mf[k].prev_sib,
+    ensures
+        cspace_wf(mf.insert(k, v)),
+        mf.insert(k, v).dom() == mf.dom(),
+{
+    let m2 = mf.insert(k, v);
+    assert(m2.dom() =~= mf.dom());
+    assert forall|j: SlotId| #[trigger] m2.dom().contains(j) implies {
+        &&& m2[j].parent == mf[j].parent
+        &&& m2[j].first_child == mf[j].first_child
+        &&& m2[j].next_sib == mf[j].next_sib
+        &&& m2[j].prev_sib == mf[j].prev_sib
+        &&& is_empty_cap(m2[j].cap) == is_empty_cap(mf[j].cap)
+    } by {}
+    assert(cdt_wf(m2));
+    let r = choose|r: Map<SlotId, nat>| valid_prank(mf, r);
+    assert(valid_prank(m2, r));
+    let s = choose|s: Map<SlotId, nat>| valid_srank(mf, s);
+    assert(valid_srank(m2, s));
+}
+
+// A move's live-slot count is unchanged: the non-empty set loses `src` and gains
+// `dst` (every other slot's emptiness is untouched).
+proof fn lemma_move_count(m0: Map<SlotId, CapSlot>, mfin: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId)
+    requires
+        m0.dom().finite(),
+        m0.dom() == mfin.dom(),
+        m0.dom().contains(src),
+        m0.dom().contains(dst),
+        src != dst,
+        !is_empty_cap(m0[src].cap),
+        is_empty_cap(m0[dst].cap),
+        is_empty_cap(mfin[src].cap),
+        !is_empty_cap(mfin[dst].cap),
+        forall|k: SlotId| m0.dom().contains(k) && k != src && k != dst
+            ==> #[trigger] is_empty_cap(mfin[k].cap) == is_empty_cap(m0[k].cap),
+    ensures
+        count_nonempty(mfin) == count_nonempty(m0),
+{
+    let ne0 = m0.dom().filter(|k: SlotId| !is_empty_cap(m0[k].cap));
+    let nef = mfin.dom().filter(|k: SlotId| !is_empty_cap(mfin[k].cap));
+    assert(ne0.contains(src) && !ne0.contains(dst));
+    assert(nef =~= ne0.remove(src).insert(dst)) by {
+        assert forall|k: SlotId| nef.contains(k) <==> ne0.remove(src).insert(dst).contains(k) by {
+            if k != src && k != dst && m0.dom().contains(k) {
+                assert(is_empty_cap(mfin[k].cap) == is_empty_cap(m0[k].cap));
+            }
+        }
+    }
+    assert(!ne0.remove(src).contains(dst));
+    assert(ne0.remove(src).len() == ne0.len() - 1);
+    assert(count_nonempty(mfin) == nef.len());
+    assert(count_nonempty(m0) == ne0.len());
+}
+
 // ── Verified operations (moved here from plain Rust; bodies are unchanged
 //    modulo verus-friendly control flow). ──
 
@@ -1105,12 +1497,15 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
 /// Move a cap between slots, preserving its CDT position (§3.4: send and receive
 /// move caps; a move is the same cap relocating, not a derivation).
 ///
-/// **Trusted boundary (assumed contract).** The body re-points `src`'s CDT
-/// neighbours and children to `dst`, then empties `src` — the same children-walk
-/// shape as `cdt_unlink`, with the same scoped body-proof residue
-/// (doc/results/22 §3). The contract — `cspace_wf` preserved, `dst` inherits
-/// `src`'s cap, `src` emptied, the live-slot count and refcounts unchanged (a
-/// move is one owner relocating) — is host-test-checked against the real body.
+/// **Trusted boundary (assumed contract), with the structural core proven.** The
+/// body's effect is the identity transposition π=(src dst) on the whole map —
+/// nothing references the isolated empty `dst`, so swapping `src`/`dst` is a pure
+/// renaming. That core is **proven**: `lemma_transpose_preserves_cspace_wf` (a
+/// transposition keeps `cspace_wf`) and `lemma_child_on_chain` (the children-walk
+/// re-parents *every* child) are verified above. What remains for a full body
+/// proof is the mechanical extensionality — that the conditional neighbour fixups
+/// land exactly the transposition's `ren` — left as the residue (doc/results/23
+/// §B). The contract is host-test-checked against the real body.
 #[verifier::external_body]
 pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
     requires
