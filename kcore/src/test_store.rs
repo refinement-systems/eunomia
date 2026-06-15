@@ -25,7 +25,7 @@ use crate::cspace::{
     cdt_unlink, delete, derive, revoke, slot_move, Cap, CapKind, CapSlot, ChanEnd, Rights,
 };
 use crate::id::{ObjId, SlotId};
-use crate::notification::signal;
+use crate::notification::{destroy_notif, signal, wait};
 use crate::untyped::{reset, retype_check, retype_install, ObjType, RetypeError};
 use crate::store::{Binding, Store};
 use crate::thread::{Report, ThreadState};
@@ -844,11 +844,38 @@ fn signal_fixture(with_waiter: bool) -> (ArrayStore, ObjId) {
 // unchanged. The executable counterpart of the `external_body` contract — the
 // `delete`/`signal`-against-its-body discipline.
 fn check_signal_frame(st: &mut ArrayStore, n: ObjId, bits: u64) {
+    assert!(notif_wf_exec(st, n), "signal pre: notif_wf");
     let fp = fingerprint(st);
     let chans = st.chans.clone();
     signal(st, n, bits);
     assert!(fingerprint(st) == fp, "signal post: slot_view unchanged");
     assert!(st.chans == chans, "signal post: chan_view unchanged");
+    assert!(notif_wf_exec(st, n), "signal post: notif_wf preserved");
+}
+
+// The exec mirror of `cspace::binding_notif_wf`: every bound endpoint event of `ch`
+// names a notification that is resident and `notif_wf`. The plain-Rust re-expression
+// of the §4b named binding invariant (the `notif_wf_exec` discipline).
+fn binding_notif_wf_exec(st: &ArrayStore, ch: ObjId) -> bool {
+    let cv = match st.chans.get(&ch.0) {
+        Some(c) => c,
+        None => return false,
+    };
+    for e in 0..2usize {
+        for v in 0..3usize {
+            if let Some(b) = cv.bindings.get(&(e, v)) {
+                if let Some(m) = b.notif {
+                    if !st.notifs.contains_key(&m.0) {
+                        return false; // a binding names a non-resident notification
+                    }
+                    if !notif_wf_exec(st, m) {
+                        return false; // a binding names a malformed-queue notification
+                    }
+                }
+            }
+        }
+    }
+    true
 }
 
 // A→0, B→1: the exec mirror of `end_idx`/`end_idx_spec` (both private/ghost in
@@ -1424,6 +1451,117 @@ fn notif_wf_exec_has_teeth() {
     assert!(!notif_wf_exec(&st, n), "a charted node with no live TCB must be rejected");
 
     assert!(!notif_wf_exec(&notif_fixture(), ObjId(999)), "unknown notification must be rejected");
+}
+
+// `wait` on a nonzero word consumes it without blocking; the queue and refs are
+// untouched — the executable check of `wait`'s consume-path contract (§4b).
+#[test]
+fn wait_consume() {
+    let mut st = ArrayStore::new(0);
+    let n = ObjId(100);
+    st.refs.insert(100, 1);
+    st.notifs.insert(100, NotifState { word: 0b1010, wait_head: None, wait_tail: None });
+    let cur = ObjId(200);
+    st.tcbs.insert(200, TcbState { state: ThreadState::Runnable, ..tcb_state_default() });
+
+    assert_eq!(wait(&mut st, n, cur), Some(0b1010), "a nonzero word is consumed");
+    assert_eq!(st.notifs[&100].word, 0, "word cleared");
+    assert_eq!(st.tcbs[&200].state, ThreadState::Runnable, "the thread did not block");
+    assert_eq!(st.refs[&100], 1, "no ref acquired on the consume path");
+    assert!(st.notifs[&100].wait_head.is_none(), "queue stays empty");
+    assert!(notif_wf_exec(&st, n));
+}
+
+// Block two threads, then signal twice: wake order == block order (the FIFO
+// `waiter_seq` theorem, exercised on the real `wait`/`signal` bodies). Tracks the
+// per-op refcount deltas (`wait` +1, `signal` -1) end to end.
+#[test]
+fn wait_signal_fifo() {
+    let mut st = ArrayStore::new(0);
+    let n = ObjId(100);
+    st.refs.insert(100, 1);
+    st.notifs.insert(100, NotifState { word: 0, wait_head: None, wait_tail: None });
+    let t1 = ObjId(200);
+    let t2 = ObjId(201);
+    st.tcbs.insert(200, TcbState { state: ThreadState::Runnable, ..tcb_state_default() });
+    st.tcbs.insert(201, TcbState { state: ThreadState::Runnable, ..tcb_state_default() });
+
+    // First waiter blocks at the head; acquires a ref.
+    assert_eq!(wait(&mut st, n, t1), None, "word 0 ⇒ the first thread blocks");
+    assert_eq!(st.tcbs[&200].state, ThreadState::BlockedNotif);
+    assert!(st.tcbs[&200].wait_notif == Some(n));
+    assert!(st.notifs[&100].wait_head == Some(t1));
+    assert!(st.notifs[&100].wait_tail == Some(t1));
+    assert_eq!(st.refs[&100], 2, "wait acquired the waiter's ref");
+    assert!(notif_wf_exec(&st, n));
+
+    // Second waiter blocks behind the first (FIFO tail), threaded via qnext.
+    assert_eq!(wait(&mut st, n, t2), None, "the second thread blocks behind the first");
+    assert!(st.notifs[&100].wait_head == Some(t1), "head unchanged");
+    assert!(st.notifs[&100].wait_tail == Some(t2), "tail is the new waiter");
+    assert!(st.tcbs[&200].qnext == Some(t2), "t1 → t2 threaded");
+    assert_eq!(st.refs[&100], 3);
+    assert!(notif_wf_exec(&st, n));
+
+    // First signal wakes the HEAD (t1) — block order — delivering the word; -1 ref.
+    signal(&mut st, n, 0b1);
+    assert_eq!(st.tcbs[&200].state, ThreadState::Runnable, "the head t1 wakes first");
+    assert_eq!(st.tcbs[&200].retval, 0b1, "t1 received the word");
+    assert!(st.notifs[&100].wait_head == Some(t2), "t2 is now the head");
+    assert_eq!(st.notifs[&100].word, 0, "delivered word cleared");
+    assert_eq!(st.refs[&100], 2, "the wake released t1's queued ref");
+    assert!(notif_wf_exec(&st, n));
+
+    // Second signal wakes t2, emptying the queue.
+    signal(&mut st, n, 0b10);
+    assert_eq!(st.tcbs[&201].state, ThreadState::Runnable, "t2 wakes second");
+    assert_eq!(st.tcbs[&201].retval, 0b10);
+    assert!(st.notifs[&100].wait_head.is_none(), "queue now empty");
+    assert!(st.notifs[&100].wait_tail.is_none());
+    assert_eq!(st.refs[&100], 1);
+    assert!(notif_wf_exec(&st, n));
+}
+
+// `destroy_notif` on an empty-queue notification is a no-op (§4b).
+#[test]
+fn destroy_notif_noop() {
+    let mut st = ArrayStore::new(0);
+    let n = ObjId(100);
+    st.refs.insert(100, 0);
+    st.notifs.insert(100, NotifState { word: 0, wait_head: None, wait_tail: None });
+    let before = st.notifs[&100].clone();
+    let refs_before = st.refs.clone();
+    destroy_notif(&mut st, n);
+    assert!(st.notifs[&100] == before, "destroy_notif leaves the notification untouched");
+    assert_eq!(st.refs, refs_before, "destroy_notif touches no refcount");
+}
+
+#[test]
+fn binding_notif_wf_exec_has_teeth() {
+    // `binding_notif_wf_exec` mirrors the §4b named invariant the channel ops carry;
+    // it is only meaningful if it rejects bindings naming bad notifications.
+    let ch = ObjId(7);
+    assert!(binding_notif_wf_exec(&signal_fixture(false).0, ch),
+        "all-unbound bindings are vacuously well-formed");
+
+    // A binding naming the live, well-formed notification 100 ⇒ accepted.
+    let mut st = signal_fixture(false).0;
+    st.chans.get_mut(&7).unwrap().bindings
+        .insert((0, EV_READABLE), Binding { notif: Some(ObjId(100)), bits: 1 });
+    assert!(binding_notif_wf_exec(&st, ch), "a binding to a live wf notification is accepted");
+
+    // A binding naming a non-resident notification ⇒ rejected.
+    let mut st = signal_fixture(false).0;
+    st.chans.get_mut(&7).unwrap().bindings
+        .insert((0, EV_READABLE), Binding { notif: Some(ObjId(999)), bits: 1 });
+    assert!(!binding_notif_wf_exec(&st, ch), "a binding to a non-resident notification is rejected");
+
+    // A binding naming a malformed-queue notification (head/tail disagree) ⇒ rejected.
+    let mut st = signal_fixture(false).0;
+    st.notifs.insert(100, NotifState { word: 0, wait_head: Some(ObjId(200)), wait_tail: None });
+    st.chans.get_mut(&7).unwrap().bindings
+        .insert((0, EV_READABLE), Binding { notif: Some(ObjId(100)), bits: 1 });
+    assert!(!binding_notif_wf_exec(&st, ch), "a binding to a malformed notification is rejected");
 }
 
 // ── §C: evidence that doc/results/21 §9's proposed fix for revoke's "revoked cap

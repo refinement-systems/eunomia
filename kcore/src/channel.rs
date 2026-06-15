@@ -179,6 +179,10 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
         old(store).chan_view().dom().contains(ch),
         old(store).chan_view()[ch].end_caps.len() == 2,
         old(store).chan_view()[ch].end_caps[end_idx_spec(end)] > 0,
+        cspace::binding_notif_wf(old(store).chan_view(), old(store).notif_view(),
+            old(store).tcb_view(), ch),
+        cspace::binding_refs_ok(old(store).chan_view(), old(store).notif_view(),
+            old(store).refs_view(), ch, 1 - end_idx_spec(end), EV_PEER_CLOSED as int),
     ensures
         final(store).slot_view() == old(store).slot_view(),
         final(store).chan_view() == old(store).chan_view().insert(
@@ -191,9 +195,14 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
             }),
         old(store).chan_view()[ch].end_caps[end_idx_spec(end)] != 1
             ==> final(store).refs_view() == old(store).refs_view(),
+        cspace::binding_notif_wf(final(store).chan_view(), final(store).notif_view(),
+            final(store).tcb_view(), ch),
 {
     let e = end_idx(end);
     store.set_chan_end_caps(ch, e, store.chan_end_caps(ch, e) - 1);
+    // `set_chan_end_caps` left the bindings (and notif/TCB views) untouched, so the
+    // binding invariant + the fired binding's refs side-condition carry to the fire.
+    assert(store.chan_view()[ch].bindings == old(store).chan_view()[ch].bindings);
     if store.chan_end_caps(ch, e) == 0 {
         fire(store, ch, 1 - e, EV_PEER_CLOSED);
     }
@@ -201,24 +210,57 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
 
 /// Raise an endpoint's event into its bound notification, if bound (§3.6).
 ///
-/// Verified (plan §3b): reads a binding (a getter) and conditionally calls the
-/// assumed `signal`, whose frame is `slot_view`/`chan_view` unchanged — so
-/// `fire` leaves both unchanged too (it may perturb `refs_view`/notif state via
-/// `signal`, which it asserts nothing about). This is the frame `send`/`recv`
-/// (3d) need: firing the readable/writable event perturbs no cap slot or any
-/// channel's queue structure.
+/// Verified (plan §3b frame; §4b signal discharge): reads a binding (a getter) and
+/// conditionally calls `signal` (now a *proven* body, doc/results/32). `signal`'s new
+/// preconditions — the bound notification is live + `notif_wf`, and a queued waiter
+/// implies `refs > 0` — are discharged from `cspace::binding_notif_wf` (the named
+/// binding-liveness invariant) and the per-call refs clause. `slot_view`/`chan_view`
+/// stay unchanged (the §3d frame `send`/`recv` need); `binding_notif_wf` is *preserved*
+/// (signal preserves the fired notification's `notif_wf` and, via
+/// `cspace::lemma_notif_wf_frame`, leaves every other bound notification's intact).
 fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
     requires
         old(store).chan_view().dom().contains(ch),
         end < 2,
         event < 3,
+        cspace::binding_notif_wf(old(store).chan_view(), old(store).notif_view(),
+            old(store).tcb_view(), ch),
+        cspace::binding_refs_ok(old(store).chan_view(), old(store).notif_view(),
+            old(store).refs_view(), ch, end as int, event as int),
     ensures
         final(store).slot_view() == old(store).slot_view(),
         final(store).chan_view() == old(store).chan_view(),
+        cspace::binding_notif_wf(final(store).chan_view(), final(store).notif_view(),
+            final(store).tcb_view(), ch),
 {
     let b = store.chan_binding(ch, end, event);
     if let Some(n) = b.notif {
+        // `n` is `(end, event)`'s bound notification; `binding_notif_wf(old)` makes it
+        // live + `notif_wf`, discharging `signal`'s structural preconditions.
+        assert(old(store).chan_view()[ch].bindings[(end as int, event as int)].notif is Some);
         notification::signal(store, n, b.bits);
+        proof {
+            let cvf = store.chan_view();
+            let nvf = store.notif_view();
+            let tvf = store.tcb_view();
+            assert(nvf.dom() == old(store).notif_view().dom());
+            assert forall|e: int, v: int|
+                (0 <= e < 2 && 0 <= v < 3
+                    && #[trigger] cvf[ch].bindings[(e, v)].notif is Some) implies {
+                    let m = cvf[ch].bindings[(e, v)].notif->Some_0;
+                    nvf.dom().contains(m) && cspace::notif_wf(nvf, tvf, m)
+                } by {
+                let m = cvf[ch].bindings[(e, v)].notif->Some_0;
+                // `cvf == old.cv` (signal frames chan_view), so the old invariant covers
+                // this binding; the fired notification `n` is reproven by signal, every
+                // other by the frame lemma (signal touched no waiter of `m != n`).
+                assert(old(store).chan_view()[ch].bindings[(e, v)].notif is Some);
+                if m != n {
+                    cspace::lemma_notif_wf_frame(old(store).notif_view(),
+                        old(store).tcb_view(), nvf, tvf, m);
+                }
+            }
+        }
     }
 }
 
@@ -327,7 +369,13 @@ pub fn send<S: Store>(
             0 <= c1 < 4 && 0 <= c2 < 4 && c1 != c2
                 && caps@[c1] is Some && caps@[c2] is Some
                 ==> caps@[c1]->Some_0 != caps@[c2]->Some_0,
+        cspace::binding_notif_wf(old(store).chan_view(), old(store).notif_view(),
+            old(store).tcb_view(), ch),
+        cspace::binding_refs_ok(old(store).chan_view(), old(store).notif_view(),
+            old(store).refs_view(), ch, 1 - end_idx_spec(end), EV_READABLE as int),
     ensures
+        cspace::binding_notif_wf(final(store).chan_view(), final(store).notif_view(),
+            final(store).tcb_view(), ch),
         res is Err ==> (
             final(store).slot_view() == old(store).slot_view()
             && final(store).chan_view() == old(store).chan_view()
@@ -355,6 +403,8 @@ pub fn send<S: Store>(
     let ghost sv0 = old(store).slot_view();
     let ghost cv0 = old(store).chan_view();
     let ghost r0 = old(store).refs_view();
+    let ghost nv0 = old(store).notif_view();
+    let ghost tv0 = old(store).tcb_view();
 
     let e = end_idx(end);
     if store.chan_end_caps(ch, 1 - e) == 0 {
@@ -412,6 +462,8 @@ pub fn send<S: Store>(
             cv1[ch].count == cv0[ch].count,
             cv1[ch].depth == cv0[ch].depth,
             store.refs_view() == r0,
+            store.notif_view() == nv0,
+            store.tcb_view() == tv0,
             cspace::cspace_wf(store.slot_view()),
             store.slot_view().dom() == sv0.dom(),
             store.slot_view().dom().finite(),
@@ -553,6 +605,12 @@ pub fn send<S: Store>(
 
     store.set_chan_count(ch, ring, store.chan_count(ch, ring) + 1);
     let ghost cv2 = store.chan_view();
+    // The enqueue framed the notif/TCB/refs views and the channel's bindings, so the
+    // binding invariant + the fired binding's refs side-condition carry to the fire.
+    assert(store.notif_view() == old(store).notif_view());
+    assert(store.tcb_view() == old(store).tcb_view());
+    assert(store.refs_view() == old(store).refs_view());
+    assert(store.chan_view()[ch].bindings == cv0[ch].bindings);
     fire(store, ch, 1 - e, EV_READABLE);
 
     proof {
@@ -670,7 +728,13 @@ pub fn recv<S: Store>(
             0 <= c1 < 4 && 0 <= c2 < 4 && c1 != c2
                 && dests@[c1] is Some && dests@[c2] is Some
                 ==> dests@[c1]->Some_0 != dests@[c2]->Some_0,
+        cspace::binding_notif_wf(old(store).chan_view(), old(store).notif_view(),
+            old(store).tcb_view(), ch),
+        cspace::binding_refs_ok(old(store).chan_view(), old(store).notif_view(),
+            old(store).refs_view(), ch, 1 - end_idx_spec(end), EV_WRITABLE as int),
     ensures
+        cspace::binding_notif_wf(final(store).chan_view(), final(store).notif_view(),
+            final(store).tcb_view(), ch),
         res is Err ==> (
             final(store).slot_view() == old(store).slot_view()
             && final(store).chan_view() == old(store).chan_view()
@@ -693,6 +757,8 @@ pub fn recv<S: Store>(
     let ghost sv0 = old(store).slot_view();
     let ghost cv0 = old(store).chan_view();
     let ghost r0 = old(store).refs_view();
+    let ghost nv0 = old(store).notif_view();
+    let ghost tv0 = old(store).tcb_view();
 
     let e = end_idx(end);
     let ring = 1 - e;
@@ -719,6 +785,11 @@ pub fn recv<S: Store>(
             store.slot_view() == sv0,
             store.chan_view() == cv0,
             store.refs_view() == r0,
+            store.notif_view() == nv0,
+            store.tcb_view() == tv0,
+            // Pass 1 is read-only, so the binding invariant rides through unchanged — it
+            // is what each `NoCapSlot` early-return needs to re-establish its postcondition.
+            cspace::binding_notif_wf(store.chan_view(), store.notif_view(), store.tcb_view(), ch),
             cspace::chan_wf(cv0, sv0, ch),
             0 <= hh < cv0[ch].depth,
             forall|cc: int| #![trigger dests@[cc]]
@@ -758,6 +829,8 @@ pub fn recv<S: Store>(
             dd == cv0[ch].depth as int,
             store.chan_view() == cv0,
             store.refs_view() == r0,
+            store.notif_view() == nv0,
+            store.tcb_view() == tv0,
             cspace::cspace_wf(store.slot_view()),
             store.slot_view().dom() == sv0.dom(),
             store.slot_view().dom().finite(),
@@ -877,6 +950,12 @@ pub fn recv<S: Store>(
     let ghost cv_h = store.chan_view();
     store.set_chan_count(ch, ring, store.chan_count(ch, ring) - 1);
     let ghost cv2 = store.chan_view();
+    // The dequeue framed the notif/TCB/refs views and the channel's bindings, so the
+    // binding invariant + the fired binding's refs side-condition carry to the fire.
+    assert(store.notif_view() == old(store).notif_view());
+    assert(store.tcb_view() == old(store).tcb_view());
+    assert(store.refs_view() == old(store).refs_view());
+    assert(store.chan_view()[ch].bindings == cv0[ch].bindings);
     fire(store, ch, 1 - e, EV_WRITABLE);
 
     proof {
