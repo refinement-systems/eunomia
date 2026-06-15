@@ -1300,6 +1300,219 @@ pub open spec fn waiter_seq(nv: Map<ObjId, NotifView>, tv: Map<ObjId, TcbView>, 
     choose|ws: Seq<ObjId>| waiter_chain(nv, tv, n, ws)
 }
 
+// `waiter_chain` determines `ws` uniquely (the `choose` in `waiter_seq` is therefore
+// the FIFO order, not an arbitrary pick): two chains for the same `n` agree pointwise
+// (the head fixes element 0, `qnext`-threading fixes each successor) and have equal
+// length (a strict prefix's last node would need `qnext == None` by its own chain yet
+// `Some(·)` by the longer one). This is what lets 4b/4c state `signal`/`wait`/
+// `remove_waiter`'s effect as a `waiter_seq` equality (`drop_first`/`push`/splice) —
+// the analog of `ring_fifo` being a deterministic `Seq::new` rather than a `choose`.
+
+// `ws1[k] == ws2[k]` for any in-bounds `k`: heads agree (clause 4), then `qnext`
+// threads each step (clause 5).
+proof fn lemma_chain_eq_at(
+    nv: Map<ObjId, NotifView>,
+    tv: Map<ObjId, TcbView>,
+    n: ObjId,
+    ws1: Seq<ObjId>,
+    ws2: Seq<ObjId>,
+    k: int,
+)
+    requires
+        waiter_chain(nv, tv, n, ws1),
+        waiter_chain(nv, tv, n, ws2),
+        0 <= k < ws1.len(),
+        k < ws2.len(),
+    ensures
+        ws1[k] == ws2[k],
+    decreases k,
+{
+    if k == 0 {
+        assert(nv[n].wait_head == Some(ws1[0]));
+        assert(nv[n].wait_head == Some(ws2[0]));
+    } else {
+        lemma_chain_eq_at(nv, tv, n, ws1, ws2, k - 1);
+        assert(tv[ws1[k - 1]].qnext == Some(ws1[k]));
+        assert(tv[ws2[k - 1]].qnext == Some(ws2[k]));
+    }
+}
+
+// No chain is a strict prefix of another: the shorter chain's last node ends the walk
+// (`qnext == None`) but the longer chain threads it onward — contradiction.
+proof fn lemma_chain_not_strict_prefix(
+    nv: Map<ObjId, NotifView>,
+    tv: Map<ObjId, TcbView>,
+    n: ObjId,
+    ws1: Seq<ObjId>,
+    ws2: Seq<ObjId>,
+)
+    requires
+        waiter_chain(nv, tv, n, ws1),
+        waiter_chain(nv, tv, n, ws2),
+        ws1.len() < ws2.len(),
+    ensures
+        false,
+{
+    if ws1.len() == 0 {
+        assert(nv[n].wait_head is None);
+        assert(nv[n].wait_head == Some(ws2[0]));
+    } else {
+        let k: int = ws1.len() as int - 1;
+        lemma_chain_eq_at(nv, tv, n, ws1, ws2, k);
+        assert(tv[ws1[k]].qnext is None);
+        assert(tv[ws2[k]].qnext == Some(ws2[k + 1]));
+    }
+}
+
+// The uniqueness theorem (the central new lemma of phase 4b).
+pub proof fn lemma_waiter_chain_unique(
+    nv: Map<ObjId, NotifView>,
+    tv: Map<ObjId, TcbView>,
+    n: ObjId,
+    ws1: Seq<ObjId>,
+    ws2: Seq<ObjId>,
+)
+    requires
+        waiter_chain(nv, tv, n, ws1),
+        waiter_chain(nv, tv, n, ws2),
+    ensures
+        ws1 == ws2,
+{
+    if ws1.len() < ws2.len() {
+        lemma_chain_not_strict_prefix(nv, tv, n, ws1, ws2);
+    }
+    if ws2.len() < ws1.len() {
+        lemma_chain_not_strict_prefix(nv, tv, n, ws2, ws1);
+    }
+    assert forall|i: int| 0 <= i < ws1.len() implies ws1[i] == ws2[i] by {
+        lemma_chain_eq_at(nv, tv, n, ws1, ws2, i);
+    }
+    assert(ws1 =~= ws2);
+}
+
+// Binding-liveness companion to `chan_wf` (plan §4b, the named-invariant resolution):
+// every bound endpoint event names a *live, well-formed* notification. STRUCTURAL only
+// (`nv` domain + `notif_wf`) — no `refs` clause — which is exactly what makes it
+// preservable across a fire: `signal` preserves `notif_wf` of the notification it
+// signals and frames every other notif/TCB, and the enqueue/dequeue `slot_move` frames
+// `notif_view`/`tcb_view`. So `fire`/`send`/`recv`/`endpoint_cap_dropped` can carry it
+// in both `requires` and `ensures` (the `chan_wf` discipline), and `fire` discharges
+// `signal`'s `notif_view`-domain + `notif_wf` preconditions from it. The waiter-release
+// `refs[n] > 0` that `signal`'s wake path also needs is NOT here — it is not preservable
+// across the `-1` without the refcount census (deferred to the post-phase-5 teardown
+// phase, plan §1.4), so it rides as a precondition-only clause on the fire-callers.
+pub open spec fn binding_notif_wf(
+    cv: Map<ObjId, ChanView>,
+    nv: Map<ObjId, NotifView>,
+    tv: Map<ObjId, TcbView>,
+    ch: ObjId,
+) -> bool {
+    forall|e: int, v: int| #![trigger cv[ch].bindings[(e, v)]]
+        (0 <= e < 2 && 0 <= v < 3 && cv[ch].bindings[(e, v)].notif is Some) ==> {
+            &&& nv.dom().contains(cv[ch].bindings[(e, v)].notif->Some_0)
+            &&& notif_wf(nv, tv, cv[ch].bindings[(e, v)].notif->Some_0)
+        }
+}
+
+// The per-binding refs side-condition `signal` needs to discharge its wake-release
+// `-1`: a queued waiter on binding `(e, v)`'s notification implies that notification has
+// `refs > 0`. PRECONDITION-only on the fire-callers (it is the waiter term of the
+// refcount census, not preservable across the `-1` without the full census deferred to
+// the post-phase-5 teardown phase, plan §1.4) — unlike the structural `binding_notif_wf`.
+pub open spec fn binding_refs_ok(
+    cv: Map<ObjId, ChanView>,
+    nv: Map<ObjId, NotifView>,
+    rv: Map<ObjId, nat>,
+    ch: ObjId,
+    e: int,
+    v: int,
+) -> bool {
+    cv[ch].bindings[(e, v)].notif is Some ==> (
+        nv[cv[ch].bindings[(e, v)].notif->Some_0].wait_head is Some ==> (
+            rv.dom().contains(cv[ch].bindings[(e, v)].notif->Some_0)
+                && rv[cv[ch].bindings[(e, v)].notif->Some_0] > 0))
+}
+
+// `notif_wf(m)` survives any edit that leaves `m`'s notification view and all of `m`'s
+// waiter TCBs (those with `wait_notif == Some(m)`) untouched — the rest of the store may
+// move freely. This is how a fire that signals notification `n != m` preserves `m`'s
+// well-formedness: `signal` only perturbs a TCB that was waiting on `n` (its
+// `forall k` frame), so `m`'s chain nodes — all naming `m`, never `n` — are unchanged.
+pub proof fn lemma_notif_wf_frame(
+    nv: Map<ObjId, NotifView>,
+    tv: Map<ObjId, TcbView>,
+    nv2: Map<ObjId, NotifView>,
+    tv2: Map<ObjId, TcbView>,
+    m: ObjId,
+)
+    requires
+        notif_wf(nv, tv, m),
+        nv2.dom().contains(m),
+        nv2[m] == nv[m],
+        tv2.dom() == tv.dom(),
+        forall|k: ObjId| #[trigger] tv[k].wait_notif == Some(m) ==> tv2[k] == tv[k],
+    ensures
+        notif_wf(nv2, tv2, m),
+{
+    let ws = choose|ws: Seq<ObjId>| waiter_chain(nv, tv, m, ws);
+    assert(waiter_chain(nv, tv, m, ws));
+    assert(waiter_chain(nv2, tv2, m, ws)) by {
+        assert forall|i: int| #![trigger ws[i]] 0 <= i < ws.len() implies
+            tv2.dom().contains(ws[i]) && tv2[ws[i]] == tv[ws[i]] by {
+            assert(tv[ws[i]].wait_notif == Some(m));
+        }
+    }
+}
+
+// `signal`'s wake step (plan §4b): popping the head `t == ws0[0]` from a non-empty
+// waiter chain yields `ws0.drop_first()` in the post-state, given the head/tail were
+// re-pointed past `t` (new head = `t`'s old `qnext`; tail dropped to `None` exactly when
+// that is `None`) and only `t`'s TCB moved. Extracted so `signal`'s own body query stays
+// under the solver rlimit (the doc 25 §2 decomposition discipline).
+pub proof fn lemma_drop_first_chain(
+    nv0: Map<ObjId, NotifView>,
+    tv0: Map<ObjId, TcbView>,
+    nvf: Map<ObjId, NotifView>,
+    tvf: Map<ObjId, TcbView>,
+    n: ObjId,
+    t: ObjId,
+    ws0: Seq<ObjId>,
+)
+    requires
+        waiter_chain(nv0, tv0, n, ws0),
+        ws0.len() > 0,
+        ws0[0] == t,
+        nvf[n].wait_head == tv0[t].qnext,
+        tv0[t].qnext is None ==> nvf[n].wait_tail is None,
+        tv0[t].qnext is Some ==> nvf[n].wait_tail == nv0[n].wait_tail,
+        tvf.dom() == tv0.dom(),
+        forall|k: ObjId| #![trigger tvf[k]] k != t ==> tvf[k] == tv0[k],
+    ensures
+        waiter_chain(nvf, tvf, n, ws0.drop_first()),
+{
+    let dws = ws0.drop_first();
+    // `tv0[t].qnext == (if 1 < len { Some(ws0[1]) } else { None })` — ws0 clause 5 at 0.
+    assert(tv0[ws0[0]].qnext == (if 1 < ws0.len() { Some(ws0[1]) } else { None }));
+    assert(dws.no_duplicates()) by {
+        assert forall|i: int, j: int|
+            0 <= i < dws.len() && 0 <= j < dws.len() && i != j implies dws[i] != dws[j] by {
+            assert(dws[i] == ws0[i + 1]);
+            assert(dws[j] == ws0[j + 1]);
+        }
+    }
+    assert forall|i: int| #![trigger dws[i]] 0 <= i < dws.len() implies dws[i] != t by {
+        assert(dws[i] == ws0[i + 1]);
+    }
+    assert forall|i: int| #![trigger dws[i]] 0 <= i < dws.len() implies
+        tvf.dom().contains(dws[i])
+        && tvf[dws[i]].qnext == (if i + 1 < dws.len() { Some(dws[i + 1]) } else { None })
+        && tvf[dws[i]].wait_notif == Some(n)
+        && tvf[dws[i]].state == ThreadState::BlockedNotif by {
+        assert(dws[i] == ws0[i + 1]);
+        assert(tv0[ws0[i + 1]].qnext == (if i + 2 < ws0.len() { Some(ws0[i + 2]) } else { None }));
+    }
+}
+
 // `s` is one of channel-view `cv`'s ring cap slots. `send`/`recv` require the
 // caller's source/destination slots are NOT ring caps of the channel (the
 // kernel naturally supplies cspace residents), so moving them disturbs no other
@@ -3670,6 +3883,12 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
         // which frames `chan_view` unchanged. 3d's `send`/`recv` rely on this —
         // without it a `slot_move` call havocs every channel cursor (detail §1.1).
         final(store).chan_view() == old(store).chan_view(),
+        // Likewise the notification/TCB/timer views (plan §4b): `set_slot` frames all of
+        // them, so a queued-cap move preserves `binding_notif_wf` for `send`/`recv`.
+        final(store).notif_view() == old(store).notif_view(),
+        final(store).tcb_view() == old(store).tcb_view(),
+        final(store).timer_view() == old(store).timer_view(),
+        final(store).timer_head_view() == old(store).timer_head_view(),
         final(store).slot_view()[dst].cap == old(store).slot_view()[src].cap,
         is_empty_cap(final(store).slot_view()[src].cap),
         // The cap-content frame: only `src`/`dst` change cap; the neighbour fixups
@@ -3682,6 +3901,10 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
     let ghost m0 = old(store).slot_view();
     let ghost r0 = old(store).refs_view();
     let ghost cv0 = old(store).chan_view();
+    let ghost nv0 = old(store).notif_view();
+    let ghost tv0 = old(store).tcb_view();
+    let ghost tmv0 = old(store).timer_view();
+    let ghost th0 = old(store).timer_head_view();
     let ghost srk = choose|s: Map<SlotId, nat>| valid_srank(m0, s);
     // The transposition renaming. Every slot but `src` lands on `rl[k]`; `src`
     // ends emptied (cleared below). `rl[dst] == m0[src]` (lemma_dst_relabeled).
@@ -3875,6 +4098,10 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
             store.slot_view().dom().finite(),
             store.refs_view() == r0,
             store.chan_view() == cv0,
+            store.notif_view() == nv0,
+            store.tcb_view() == tv0,
+            store.timer_view() == tmv0,
+            store.timer_head_view() == th0,
             cspace_wf(m0),
             valid_srank(m0, srk),
             rl == relabeled(m0, src, dst),
