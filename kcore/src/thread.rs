@@ -10,12 +10,16 @@
 //! Single-core; the kernel is non-preemptible (IRQs masked at EL1), so the
 //! scheduler is only ever invoked at exception boundaries.
 
-use crate::cspace::{CapKind, CapSlot, ObjHeader};
+use crate::cspace::{self, CapKind, CapSlot, ObjHeader};
 use crate::id::{ObjId, SlotId};
 use crate::store::Store;
-
-pub const BIND_EXIT: usize = 0;
-pub const BIND_FAULT: usize = 1;
+use vstd::prelude::*;
+// `StoreSpec` (the `external_trait_extension`) must be in scope to resolve
+// `store.tcb_view()`/`notif_view()`/… in the §4d contracts, and `TcbView` appears in
+// `bind`'s `ensures`; both erase in a normal build, so they are otherwise unused here
+// (the doc/results/26 §2.3 idiom).
+#[allow(unused_imports)]
+use crate::cspace::{StoreSpec, TcbView};
 
 /// The terminal report record (§5.1), preallocated in the TCB so death
 /// delivery never allocates (§3.6). One transition ever: Running →
@@ -112,6 +116,11 @@ impl Tcb {
     }
 }
 
+verus! {
+
+pub const BIND_EXIT: usize = 0;
+pub const BIND_FAULT: usize = 1;
+
 /// Record the terminal report and fire the matching binding (§5.1).
 /// pre:  r is Exited or Faulted; the caller has already moved t out of
 ///       Running (Halted / Faulted).
@@ -120,19 +129,78 @@ impl Tcb {
 ///       one the holder never configured or one revoke already cleared:
 ///       signaling nothing is a no-op (§5.1). A non-empty slot's cap
 ///       holds a ref, so the notification it names is necessarily live.
-pub fn report_terminal<S: Store>(store: &mut S, t: ObjId, r: Report) {
-    if store.tcb_report(t) != Report::Running {
-        return;
+///
+/// Verified (plan §4d, doc/results/34): the two §5.1 properties.
+/// **ReportMonotone** — the `report != Running` guard makes the transition
+/// Running → Exited|Faulted happen **at most once** and terminal states absorbing
+/// (a later call is a no-op, the store untouched). **FireSafe** — discharged *by the
+/// body verifying*: the empty-slot path fires nothing, and on the notification-cap
+/// path the `requires` (a cap-in-slot designates a live, `notif_wf` notification —
+/// the first cspace-slot installment of `refcount_sound`, scoped per the per-op-delta
+/// precedent, **not** the full census) exactly meets `signal`'s preconditions, so the
+/// fired object is provably live, never freed memory. The `wait_notif != Some(nn)`
+/// clause is what makes the dying thread provably *not* the woken waiter, so its own
+/// report survives the fire.
+pub fn report_terminal<S: Store>(store: &mut S, t: ObjId, r: Report)
+    requires
+        old(store).tcb_view().dom().contains(t),
+        !(r matches Report::Running),
+        old(store).tcb_view()[t].bind_slots.len() == 2,
+        ({
+            let which: int = if r matches Report::Exited(_) { BIND_EXIT as int } else { BIND_FAULT as int };
+            let slot = old(store).tcb_view()[t].bind_slots[which];
+            &&& old(store).slot_view().dom().contains(slot)
+            &&& (cspace::cap_notif(old(store).slot_view()[slot].cap) matches Some(nn) ==> {
+                    &&& old(store).notif_view().dom().contains(nn)
+                    &&& cspace::notif_wf(old(store).notif_view(), old(store).tcb_view(), nn)
+                    &&& (old(store).notif_view()[nn].wait_head is Some
+                            ==> old(store).refs_view().dom().contains(nn) && old(store).refs_view()[nn] > 0)
+                    &&& old(store).tcb_view()[t].wait_notif != Some(nn)
+                })
+        }),
+    ensures
+        final(store).slot_view() == old(store).slot_view(),
+        final(store).chan_view() == old(store).chan_view(),
+        final(store).timer_view() == old(store).timer_view(),
+        final(store).timer_head_view() == old(store).timer_head_view(),
+        // ReportMonotone — absorbing: an already-terminal report ⇒ a no-op.
+        !(old(store).tcb_view()[t].report matches Report::Running) ==> {
+            &&& final(store).refs_view() == old(store).refs_view()
+            &&& final(store).notif_view() == old(store).notif_view()
+            &&& final(store).tcb_view() == old(store).tcb_view()
+        },
+        // ReportMonotone — the one transition: a Running report becomes `r` (and any
+        // later call hits the absorbing path above — "at most one transition").
+        old(store).tcb_view()[t].report matches Report::Running ==>
+            final(store).tcb_view()[t].report == r,
+{
+    match store.tcb_report(t) {
+        Report::Running => {}
+        _ => { return; }
     }
     store.set_tcb_report(t, r);
     let which = match r {
         Report::Exited(_) => BIND_EXIT,
         Report::Faulted { .. } => BIND_FAULT,
-        Report::Running => return,
+        Report::Running => { return; }
     };
     let slot = store.tcb_bind_slot(t, which);
-    if let CapKind::Notification(n) = store.slot(slot).cap.kind {
+    let cap = store.slot(slot).cap;
+    if let CapKind::Notification(n) = cap.kind {
         let bits = store.tcb_bind_bits(t, which);
+        proof {
+            // The cap is a notification, so the §4d `requires` conditional fires at `nn = n`.
+            assert(cspace::cap_notif(cap) == Some(n));
+            // `set_tcb_report` inserts at the resident key `t`, so the TCB domain is
+            // unchanged (extensional).
+            assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
+            // `set_tcb_report` differs from entry only at `t`'s report; `t` is not a
+            // waiter on `n` (`requires`), so `n`'s queue well-formedness survives —
+            // discharging `signal`'s `notif_wf` precondition.
+            cspace::lemma_notif_wf_frame(
+                old(store).notif_view(), old(store).tcb_view(),
+                store.notif_view(), store.tcb_view(), n);
+        }
         crate::notification::signal(store, n, bits);
     }
 }
@@ -144,9 +212,66 @@ pub fn report_terminal<S: Store>(store: &mut S, t: ObjId, r: Report) {
 ///
 /// pre:  which < 2; notif_src is `None` or a slot holding a notification
 ///       cap owned by the caller.
-pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<SlotId>, bits: u64) {
+///
+/// Verified (plan §4d, doc/results/34): the analog of `channel::bind` (3e) in shape
+/// (release old / install new / set bits), but — unlike the refcount-only channel
+/// binding — the TCB bind slots are CDT-visible cap slots, so it composes the real
+/// `cspace::delete` (the §4d-strengthened notification-cap frame) + the verified
+/// `cspace::slot_move`. The bind slot ends holding the moved cap (or empty on a `None`
+/// src); `bind_bits[which]` is updated; the object views are framed; `cspace_wf` is
+/// preserved. The displaced-notif refs `-1` rides the host test (`check_thread_bind`),
+/// not the verified contract (`delete` omits `refs_view`).
+pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<SlotId>, bits: u64)
+    requires
+        cspace::cspace_wf(old(store).slot_view()),
+        old(store).slot_view().dom().finite(),
+        old(store).tcb_view().dom().contains(t),
+        which < 2,
+        old(store).tcb_view()[t].bind_bits.len() == 2,
+        old(store).tcb_view()[t].bind_slots.len() == 2,
+        old(store).slot_view().dom().contains(old(store).tcb_view()[t].bind_slots[which as int]),
+        // The displaced cap is empty or a notification, so the `delete` takes the §4d
+        // clean notification-cap frame (a bind slot only ever holds a notification cap).
+        cspace::is_empty_cap(old(store).slot_view()[old(store).tcb_view()[t].bind_slots[which as int]].cap)
+            || cspace::cap_notif(old(store).slot_view()[old(store).tcb_view()[t].bind_slots[which as int]].cap) is Some,
+        notif_src matches Some(src) ==> {
+            &&& old(store).slot_view().dom().contains(src)
+            &&& src != old(store).tcb_view()[t].bind_slots[which as int]
+            &&& !cspace::is_empty_cap(old(store).slot_view()[src].cap)
+        },
+    ensures
+        cspace::cspace_wf(final(store).slot_view()),
+        final(store).slot_view().dom() == old(store).slot_view().dom(),
+        final(store).slot_view().dom().finite(),
+        // `bind_bits[which]` updated; the rest of `t`'s TCB and every other TCB fixed.
+        final(store).tcb_view() == old(store).tcb_view().insert(
+            t,
+            TcbView {
+                bind_bits: old(store).tcb_view()[t].bind_bits.update(which as int, bits),
+                ..old(store).tcb_view()[t]
+            }),
+        final(store).chan_view() == old(store).chan_view(),
+        final(store).notif_view() == old(store).notif_view(),
+        final(store).timer_view() == old(store).timer_view(),
+        final(store).timer_head_view() == old(store).timer_head_view(),
+        // The slot effect, split on `notif_src` (read off `delete` + `slot_move`).
+        notif_src matches Some(src) ==> {
+            &&& final(store).slot_view()[old(store).tcb_view()[t].bind_slots[which as int]].cap
+                    == old(store).slot_view()[src].cap
+            &&& cspace::is_empty_cap(final(store).slot_view()[src].cap)
+            &&& forall|x: SlotId| old(store).slot_view().dom().contains(x)
+                    && x != old(store).tcb_view()[t].bind_slots[which as int] && x != src
+                    ==> #[trigger] final(store).slot_view()[x].cap == old(store).slot_view()[x].cap
+        },
+        notif_src is None ==> {
+            &&& cspace::is_empty_cap(final(store).slot_view()[old(store).tcb_view()[t].bind_slots[which as int]].cap)
+            &&& forall|x: SlotId| old(store).slot_view().dom().contains(x)
+                    && x != old(store).tcb_view()[t].bind_slots[which as int]
+                    ==> #[trigger] final(store).slot_view()[x].cap == old(store).slot_view()[x].cap
+        },
+{
     let slot = store.tcb_bind_slot(t, which);
-    if !store.slot(slot).cap.is_empty() {
+    if !cspace::cap_is_empty(store.slot(slot).cap) {
         crate::cspace::delete(store, slot);
     }
     store.set_tcb_bind_bits(t, which, bits);
@@ -154,6 +279,8 @@ pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<S
         crate::cspace::slot_move(store, src, slot);
     }
 }
+
+} // verus!
 
 /// pre:  refs == 0 (last cap gone).
 /// post: t off every queue and never scheduled again. If t is CURRENT the

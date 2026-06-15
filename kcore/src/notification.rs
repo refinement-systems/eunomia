@@ -70,6 +70,11 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
     ensures
         final(store).slot_view() == old(store).slot_view(),
         final(store).chan_view() == old(store).chan_view(),
+        // The timer views are untouched (plan §4d): every setter in the body frames
+        // them and `make_runnable` frames them, so `report_terminal` (which fires
+        // `signal` and otherwise touches no timer) can frame timers across the wake.
+        final(store).timer_view() == old(store).timer_view(),
+        final(store).timer_head_view() == old(store).timer_head_view(),
         // The whole effect is confined to notification `n` (in `notif_view`) and the
         // one woken thread (in `tcb_view`); the domains never move.
         final(store).notif_view() == old(store).notif_view().insert(n, final(store).notif_view()[n]),

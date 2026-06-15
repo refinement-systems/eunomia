@@ -990,6 +990,18 @@ pub open spec fn is_empty_cap(c: Cap) -> bool {
     c.kind matches CapKind::Empty
 }
 
+// The notification a cap names, if it is a notification cap (else `None`). The
+// spec projection `thread::report_terminal`/`thread::bind` (plan §4d) use to talk
+// about the notification a TCB bind slot holds — narrower than `cap_obj` (which
+// returns the object for *any* object cap), because a bind slot only ever holds a
+// notification cap and the §4d contracts reason specifically about that case.
+pub open spec fn cap_notif(c: Cap) -> Option<ObjId> {
+    match c.kind {
+        CapKind::Notification(o) => Some(o),
+        _ => None,
+    }
+}
+
 // Exec emptiness check tied to the `is_empty_cap` spec — `Cap::is_empty` is plain
 // Rust (outside `verus!`), so verified exec code (channel `recv`, §3d) uses this.
 pub fn cap_is_empty(c: Cap) -> (r: bool)
@@ -4378,6 +4390,24 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         final(store).slot_view().dom().finite(),
         is_empty_cap(final(store).slot_view()[slot].cap),
         count_nonempty(final(store).slot_view()) < count_nonempty(old(store).slot_view()),
+        // Conditional-on-notification frame (plan §4d): deleting a **notification**
+        // cap is robustly clean — `cdt_unlink`/`set_slot` frame every object view,
+        // the `Channel`/mapped-`Frame` teardown branches don't fire, and `obj_unref`
+        // only drops `refs[n]` (and at zero calls the no-op `destroy_notif`). So the
+        // object views and every *other* slot's cap are untouched. This is the
+        // additive enabling clause `thread::bind` reads off (the displaced bind cap
+        // is always a notification); host-test-checked (`check_delete_notif`), as an
+        // assumed `external_body` clause must be. `refs_view` is deliberately left
+        // out — the `refs[n] -= 1` rides the host test, not `bind`'s verified contract.
+        cap_notif(old(store).slot_view()[slot].cap) is Some ==> {
+            &&& final(store).tcb_view() == old(store).tcb_view()
+            &&& final(store).chan_view() == old(store).chan_view()
+            &&& final(store).notif_view() == old(store).notif_view()
+            &&& final(store).timer_view() == old(store).timer_view()
+            &&& final(store).timer_head_view() == old(store).timer_head_view()
+            &&& forall|x: SlotId| old(store).slot_view().dom().contains(x) && x != slot
+                    ==> #[trigger] final(store).slot_view()[x].cap == old(store).slot_view()[x].cap
+        },
 {
     let cap = store.slot(slot).cap;
     debug_assert!(!cap.is_empty());
