@@ -122,19 +122,23 @@ unaffected — confirmed by the kernel cross-build and `cargo test`.
 Verus is the **mechanized implementation tier for `kcore`** (plan
 `doc/plans/3_verus-rewrite.md`): **unbounded**, functional proofs on the real
 handle/`Store` code — the Store seam carries an abstract ghost view so the
-generic `fn op<S: Store>` operations are verified once for all stores. Proven so
-far: `untyped::carve`/`carve_place` (totality + placement geometry, phase 0); and
-the **non-recursive** cspace/CDT ops `derive` (the monotone-derivation security
-theorem — derived rights ⊆ source ∀ masks; faithful copy of kind/object; +
-overflow-free refcount bump), `cdt_insert_child` (structural `cdt_wf`
-preservation + sibling-list splice), and `obj_ref` (phase 2; findings in
-`doc/results/21_verus-findings.md`). **Still on plain Rust + deferred:** the
-looping/recursive ops (`slot_move`, `cdt_unlink`, `delete`, `revoke`,
-`destroy_cspace`, `obj_unref`) and their **termination** — these need the
-acyclicity/ghost-rank machinery (`cdt_wf` is currently the *structural* fragment,
-not yet the full TLA TypeOK). The `verus` CI job runs `cargo verus verify -p
-kcore` with no per-proof filter, so a new `verus!{}` obligation auto-gates.
-`scratchpad` keeps the toolchain-smoke `spec fn min` example.
+generic `fn op<S: Store>` operations are verified once for all stores. Proven
+(unbounded, no assumptions): `untyped::carve`/`carve_place` (totality + placement
+geometry, phase 0); the **non-recursive** cspace/CDT ops `derive` (monotone
+derivation — rights ⊆ source ∀ masks; faithful copy; overflow-free refcount
+bump), `cdt_insert_child` (structural splice), and `obj_ref` — these now preserve
+the **full `cspace_wf`** (strengthened `cdt_wf` + **parent- and sibling-
+acyclicity composition**, the construction-side witnesses; phase 2c,
+`doc/results/22_verus-findings.md`); and `revoke`/`descend_to_leaf` **termination**
+(phase 2b). The strengthened `cdt_wf` adds the reachability anchors
+(`siblings_share_parent`/`parent_has_first_child`) that make acyclicity
+constructible. **Trusted (assumed `external_body` contracts, host-test-checked
+against the real bodies — `kcore/src/test_store.rs`):** `delete`, `slot_move`,
+`cdt_unlink` — all carry full strengthened-`cspace_wf` contracts; their bodies
+(the linked-list-splice walk; for `delete`, the cross-object teardown) are the
+scoped residue. The `verus` CI job runs `cargo verus verify -p kcore` with no
+per-proof filter, so a new `verus!{}` obligation auto-gates. `scratchpad` keeps
+the toolchain-smoke `spec fn min` example.
 
 ```sh
 cargo verus verify -p kcore        # the kcore proofs (CI-gated)
@@ -446,7 +450,7 @@ non-`#[inline(always)]` helpers in user.rs.
 |------|-------|------|
 | TLA+ / TLC | commit protocol, cap revocation | Before respective milestone |
 | Kani | host chokepoints (`urt`, `ipc`, `cas`, `dma-pool`); the `kcore` kernel-core harnesses were migrated to Verus (plan `doc/plans/3_verus-rewrite.md` phase 2) | During kernel development |
-| Verus | **mechanized implementation tier for `kcore`** (plan `doc/plans/3_verus-rewrite.md`): unbounded/functional proofs on the real handle/`Store` code — `untyped::carve` (phase 0); the non-recursive cspace/CDT ops `derive`/`cdt_insert_child`/`obj_ref` (phase 2); the looping/teardown ops + termination deferred (need the ghost-rank machinery). + `scratchpad` smoke | CI `verus` job (`cargo verus verify -p kcore`); during the Verus rewrite |
+| Verus | **mechanized implementation tier for `kcore`** (plan `doc/plans/3_verus-rewrite.md`): unbounded/functional proofs on the real handle/`Store` code — `untyped::carve` (phase 0); the non-recursive cspace/CDT ops `derive`/`cdt_insert_child`/`obj_ref`, now preserving full `cspace_wf` (parent+sibling acyclicity composition, phase 2c); `revoke`/`descend_to_leaf` termination (phase 2b). `delete`/`slot_move`/`cdt_unlink` carry assumed `external_body` contracts, host-test-checked (`kcore/src/test_store.rs`); their body proofs are the residue. + `scratchpad` smoke | CI `verus` job (`cargo verus verify -p kcore`); during the Verus rewrite |
 | Loom / Shuttle | IPC crate, userspace servers | During M1+ development |
 | Miri + proptest | everything; chunker + prolly tree esp. | Continuous |
 | cargo-fuzz | IPC decoder, postcard payloads | From M1 |
@@ -493,9 +497,12 @@ deleted. The historical findings/bounds remain recorded:
   chokepoints. The `kcore` kernel-core leg was migrated to Verus (the `verus`
   job; plan phase 2). No `--harness` filter, so a new harness gates automatically.
 - **verus** — `cargo verus verify -p kcore` (pinned Verus `0.2026.06.07.cd03505`,
-  release zip cached): the deductive kernel-core proofs (`untyped::carve` + the
-  non-recursive cspace/CDT ops `derive`/`cdt_insert_child`/`obj_ref`). No
-  per-proof filter, so a new `verus!{}` obligation gates automatically.
+  release zip cached): the deductive kernel-core proofs (`untyped::carve`; the
+  non-recursive cspace/CDT ops `derive`/`cdt_insert_child`/`obj_ref` preserving
+  full `cspace_wf`; `revoke`/`descend_to_leaf` termination). No per-proof filter,
+  so a new `verus!{}` obligation gates automatically. The `host-tests` job's
+  `kcore` leg now also runs `test_store` — the executable check of the
+  `delete`/`slot_move`/`cdt_unlink` assumed contracts against their real bodies.
 - **concurrency** — the Loom/Shuttle models under `RUSTFLAGS="--cfg loom"` /
   `"--cfg shuttle"` (plan `doc/plans/1_loom-shuttle-rewrite.md` §6):
   `cargo test -p urt -p ipc --lib`. Loom is the certifying exhaustive proof
