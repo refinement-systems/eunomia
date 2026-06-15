@@ -373,58 +373,9 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId) {
 
 // `derive` is verified — see the `verus!{}` block at the end of this file.
 
-/// Delete one cap (children survive, re-parented one level up).
-///
-/// pre:  slot non-empty.
-/// post: slot empty and detached; object unref'd (destroyed if last ref).
-///
-/// Ordering is load-bearing (TSpec `ChannelFireSafe`, plan DN-2): a channel
-/// cap fires `endpoint_cap_dropped` (peer-closed) *before* `obj_unref`, so a
-/// whole-object teardown signals each surviving peer's binding into a still-
-/// live notification.
-///
-/// Last-ref teardown of container objects (cspaces, channels) recurses
-/// through here; depth is bounded by the nesting of containers holding the
-/// final cap to other containers. seL4 flattens this with zombie caps —
-/// owed when the revoke walk becomes preemptible, tracked as M2 debt.
-// kani_contracts spike retired in the arena rewrite.
-pub fn delete<S: Store>(store: &mut S, slot: SlotId) {
-    let cap = store.slot(slot).cap;
-    debug_assert!(!cap.is_empty());
-    cdt_unlink(store, slot);
-    let mut s = store.slot(slot);
-    s.cap = Cap::EMPTY;
-    store.set_slot(slot, s);
-    // Channel endpoint liveness is tracked per end for peer-closed (§3.3).
-    if let CapKind::Channel(ch, end) = cap.kind {
-        crate::channel::endpoint_cap_dropped(store, ch, end);
-    }
-    // Deleting a mapped frame cap unmaps it — the one revocation story
-    // for shared memory (§2.5).
-    if let CapKind::Frame { pages, mapping: Some((asp, va)), .. } = cap.kind {
-        store.aspace_unmap(asp, va, pages);
-        unref_aspace(store, asp);
-    }
-    obj_unref(store, cap);
-}
-
-/// Revoke: delete every CDT descendant of `slot` — cspace residents and
-/// in-flight queue slots alike, unconditionally (§2.2). The cap itself
-/// survives. Deletion is leaf-first so the tree stays consistent at every
-/// step (the LiveParent invariant of the TLA+ model holds throughout,
-/// which is what makes the walk restartable when it becomes preemptible).
-///
-/// pre:  slot non-empty.
-/// post: slot has no descendants; slot's cap unchanged.
-pub fn revoke<S: Store>(store: &mut S, slot: SlotId) {
-    while let Some(mut leaf) = store.slot(slot).first_child {
-        // Descend to a leaf of our subtree.
-        while let Some(c) = store.slot(leaf).first_child {
-            leaf = c;
-        }
-        delete(store, leaf);
-    }
-}
+// `delete` and `revoke` are in the `verus!{}` block at the end of this file
+// (`delete` carries an assumed contract pending its teardown-recursion proof;
+// `revoke`'s termination is proven against it).
 
 // ── Deductive verification (plan doc/plans/3_verus-rewrite.md §4.1) ───────────
 //
@@ -608,18 +559,45 @@ pub open spec fn empty_slots_detached(m: Map<SlotId, CapSlot>) -> bool {
     })
 }
 
-// The **structural** CDT invariant. NOTE: this is deliberately the structural
-// fragment — it does NOT include acyclicity. Acyclicity is what the revoke/delete
-// termination proofs need, and it lands with the ghost-rank machinery in the
-// termination increment (plan §4.1); the non-recursive ops proven here
-// (cdt_insert_child, derive) preserve the structural invariant. Until then this
-// is NOT the full TLA TypeOK — it admits cyclic trees.
+// The **structural** CDT invariant (the structural half of the TLA TypeOK).
+// Acyclicity is layered on top as `cspace_wf` below — kept separate so the
+// non-recursive ops that don't need termination reason about the cheaper
+// predicate.
 pub open spec fn cdt_wf(m: Map<SlotId, CapSlot>) -> bool {
     &&& links_in_domain(m)
     &&& siblings_doubly_consistent(m)
     &&& first_child_parent_agree(m)
     &&& head_is_first_child(m)
     &&& empty_slots_detached(m)
+}
+
+// ── Acyclicity (the basis for revoke's termination) ──────────────────────────
+//
+// A strict decrease along a link makes that relation well-founded — no cycle can
+// return from a smaller rank to a larger one. The ranks are GHOST-only
+// (existential witnesses), so they need no home in the abstract `Store`: a proof
+// that needs termination chooses a witness. `prank` decreases parent→child, so
+// descending to a leaf via `first_child` strictly lowers it.
+pub open spec fn valid_prank(m: Map<SlotId, CapSlot>, r: Map<SlotId, nat>) -> bool {
+    &&& r.dom() == m.dom()
+    &&& forall|k: SlotId| #[trigger] m.dom().contains(k) ==>
+            (m[k].parent matches Some(p) ==> m.dom().contains(p) && r[k] < r[p])
+}
+
+pub open spec fn acyclic(m: Map<SlotId, CapSlot>) -> bool {
+    exists|r: Map<SlotId, nat>| valid_prank(m, r)
+}
+
+// The full cspace well-formedness: structure + acyclicity. The invariant the
+// recursive/looping ops require and preserve.
+pub open spec fn cspace_wf(m: Map<SlotId, CapSlot>) -> bool {
+    cdt_wf(m) && acyclic(m)
+}
+
+// The count of live (non-empty) slots — the well-founded measure for revoke's
+// outer loop: each leaf delete strictly lowers it.
+pub open spec fn count_nonempty(m: Map<SlotId, CapSlot>) -> nat {
+    m.dom().filter(|k: SlotId| !is_empty_cap(m[k].cap)).len()
 }
 
 // ── Refcount census: the stored refcount equals the count of designating slots
@@ -930,6 +908,133 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (r
         }
     }
     Ok(())
+}
+
+/// Delete one cap (children survive, re-parented one level up).
+///
+/// **Trusted boundary (assumed contract).** The body is the real teardown:
+/// `cdt_unlink` + per-end channel `peer_closed` + frame unmap + `obj_unref`,
+/// whose last-ref path recurses across objects (`destroy_cspace` → `delete`).
+/// That cross-object recursion — the seL4-zombie measure — is the remaining
+/// kernel-core proof (it needs the channel/notification/thread destructors
+/// ported, plan phases 3–5), so `delete` is `external_body`: Verus trusts this
+/// contract and `revoke` (below) is verified against it. The contract states
+/// exactly what `revoke`'s termination needs — the live-slot count strictly
+/// drops, the domain and well-formedness are preserved — and is the obligation
+/// the future body proof must discharge.
+#[verifier::external_body]
+pub fn delete<S: Store>(store: &mut S, slot: SlotId)
+    requires
+        cspace_wf(old(store).slot_view()),
+        old(store).slot_view().dom().finite(),
+        old(store).slot_view().dom().contains(slot),
+        !is_empty_cap(old(store).slot_view()[slot].cap),
+    ensures
+        cspace_wf(final(store).slot_view()),
+        final(store).slot_view().dom() == old(store).slot_view().dom(),
+        final(store).slot_view().dom().finite(),
+        is_empty_cap(final(store).slot_view()[slot].cap),
+        count_nonempty(final(store).slot_view()) < count_nonempty(old(store).slot_view()),
+{
+    let cap = store.slot(slot).cap;
+    debug_assert!(!cap.is_empty());
+    cdt_unlink(store, slot);
+    let mut s = store.slot(slot);
+    s.cap = Cap::EMPTY;
+    store.set_slot(slot, s);
+    // Channel endpoint liveness is tracked per end for peer-closed (§3.3).
+    if let CapKind::Channel(ch, end) = cap.kind {
+        crate::channel::endpoint_cap_dropped(store, ch, end);
+    }
+    // Deleting a mapped frame cap unmaps it — the one revocation story
+    // for shared memory (§2.5).
+    if let CapKind::Frame { pages, mapping: Some((asp, va)), .. } = cap.kind {
+        store.aspace_unmap(asp, va, pages);
+        unref_aspace(store, asp);
+    }
+    obj_unref(store, cap);
+}
+
+/// Descend from `start` to a leaf of its subtree (the inner walk of `revoke`).
+///
+/// **Terminates** (`decreases prank[leaf]`): each step follows `first_child`,
+/// and the child's parent rank is strictly below the leaf's (acyclicity) — the
+/// headline gain over the old `debug_assert`, here proven unbounded for all tree
+/// shapes by *using* the acyclicity witness.
+pub fn descend_to_leaf<S: Store>(store: &S, start: SlotId) -> (leaf: SlotId)
+    requires
+        cdt_wf(store.slot_view()),
+        acyclic(store.slot_view()),
+        store.slot_view().dom().contains(start),
+        !is_empty_cap(store.slot_view()[start].cap),
+    ensures
+        store.slot_view().dom().contains(leaf),
+        store.slot_view()[leaf].first_child is None,
+        !is_empty_cap(store.slot_view()[leaf].cap),
+{
+    let ghost r = choose|r: Map<SlotId, nat>| valid_prank(store.slot_view(), r);
+    let mut leaf = start;
+    while store.slot(leaf).first_child.is_some()
+        invariant
+            cdt_wf(store.slot_view()),
+            valid_prank(store.slot_view(), r),
+            store.slot_view().dom().contains(leaf),
+            !is_empty_cap(store.slot_view()[leaf].cap),
+        decreases r[leaf],
+    {
+        let c = store.slot(leaf).first_child.unwrap();
+        // c is leaf's first child: c is live, claims leaf as parent (so its rank
+        // is strictly lower — the loop measure drops), and is non-empty.
+        proof {
+            assert(store.slot_view()[c].parent == Some(leaf));
+            assert(r[c] < r[leaf]);
+        }
+        leaf = c;
+    }
+    leaf
+}
+
+/// Revoke: delete every CDT descendant of `slot` — cspace residents and
+/// in-flight queue slots alike, unconditionally (§2.2). The cap itself survives.
+///
+/// **Terminates** (`decreases count_nonempty`): each iteration descends to a
+/// leaf and deletes it, and `delete` strictly lowers the live-slot count. This
+/// is the revocation-walk termination the plan calls the headline gain over
+/// Kani's `debug_assert` — proven here for all shapes, modulo `delete`'s assumed
+/// teardown contract (above).
+///
+/// pre:  the cspace is well-formed (and finite); `slot` is live and non-empty.
+/// post: `slot` has no children (its subtree is gone); the cspace stays
+///       well-formed.
+pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
+    requires
+        cspace_wf(old(store).slot_view()),
+        old(store).slot_view().dom().finite(),
+        old(store).slot_view().dom().contains(slot),
+        !is_empty_cap(old(store).slot_view()[slot].cap),
+    ensures
+        cspace_wf(final(store).slot_view()),
+        final(store).slot_view().dom().contains(slot),
+        final(store).slot_view()[slot].first_child is None,
+{
+    while store.slot(slot).first_child.is_some()
+        invariant
+            cspace_wf(store.slot_view()),
+            store.slot_view().dom().finite(),
+            store.slot_view().dom().contains(slot),
+        decreases count_nonempty(store.slot_view()),
+    {
+        // The first child is live (it names `slot` as parent, so it is not an
+        // empty/detached slot) — so we descend from a non-empty node even if
+        // `slot` itself were emptied by an earlier delete.
+        let first = store.slot(slot).first_child.unwrap();
+        proof {
+            assert(store.slot_view()[first].parent == Some(slot));
+            assert(!is_empty_cap(store.slot_view()[first].cap));
+        }
+        let leaf = descend_to_leaf(store, first);
+        delete(store, leaf);
+    }
 }
 
 } // verus!
