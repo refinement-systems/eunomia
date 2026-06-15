@@ -136,9 +136,18 @@ constructible. **Trusted (assumed `external_body` contracts, host-test-checked
 against the real bodies — `kcore/src/test_store.rs`):** `delete`, `slot_move`,
 `cdt_unlink` — all carry full strengthened-`cspace_wf` contracts; their bodies
 (the linked-list-splice walk; for `delete`, the cross-object teardown) are the
-scoped residue. The `verus` CI job runs `cargo verus verify -p kcore` with no
-per-proof filter, so a new `verus!{}` obligation auto-gates. `scratchpad` keeps
-the toolchain-smoke `spec fn min` example.
+scoped residue. The **structural core** of `slot_move`'s body proof is now proven
+(phase 2 closeout, `doc/results/23_verus-findings.md`): `slot_move` is the
+identity transposition π=(src dst), and `lemma_transpose_preserves_cspace_wf` +
+`lemma_child_on_chain` (every child lies on the `next_sib` chain) are verified —
+the remaining body-match (the conditional fixups equal the renaming) is the
+residue, so `slot_move`/`cdt_unlink` stay `external_body`. (That increment also
+**retracted doc 21 §9's** proposed revoke-cap-survival fix as unsound — cross-
+object teardown empties slots outside the deleted subtree and can empty revoke's
+own root in the seL4-zombie case; two `test_store` cases witness it.) The `verus`
+CI job runs `cargo verus verify -p kcore` with no per-proof filter, so a new
+`verus!{}` obligation auto-gates. `scratchpad` keeps the toolchain-smoke `spec fn
+min` example.
 
 ```sh
 cargo verus verify -p kcore        # the kcore proofs (CI-gated)
