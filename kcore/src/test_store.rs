@@ -26,9 +26,12 @@ use crate::cspace::{
 };
 use crate::id::{ObjId, SlotId};
 use crate::notification::{destroy_notif, remove_waiter, signal, wait};
+use crate::timer::{arm, check_expired, destroy_timer, disarm};
 use crate::untyped::{reset, retype_check, retype_install, ObjType, RetypeError};
 use crate::store::{Binding, Store};
-use crate::thread::{bind as thread_bind, report_terminal, Report, ThreadState, BIND_EXIT, BIND_FAULT};
+use crate::thread::{
+    bind as thread_bind, destroy_tcb, report_terminal, Report, ThreadState, BIND_EXIT, BIND_FAULT,
+};
 use std::collections::{BTreeMap, VecDeque};
 
 // ── The concrete store ────────────────────────────────────────────────────
@@ -504,6 +507,41 @@ fn notif_wf_exec(st: &ArrayStore, n: ObjId) -> bool {
     }
     // the walk ended at the chain's last node (its qnext == None); it must be wait_tail.
     last == nv.wait_tail
+}
+
+// The exec mirror of `timer_wf` (plan §4e): the armed list from `timer_armed_head`,
+// threaded through `next`, is a finite duplicate-free chain whose every node is a live,
+// armed timer with a bound notification (`timer_chain`), and it captures EVERY armed
+// timer (`timer_complete`). The completeness sweep is what makes `disarm`'s walk sound.
+fn timer_wf_exec(st: &ArrayStore) -> bool {
+    let mut cur = st.timer_armed_head;
+    let mut seen: Vec<u64> = Vec::new();
+    let mut steps = 0usize;
+    while let Some(c) = cur {
+        steps += 1;
+        if steps > st.timers.len() + 1 {
+            return false; // a cycle (walk longer than the timer count)
+        }
+        let tm = match st.timers.get(&c.0) {
+            Some(v) => v,
+            None => return false, // a charted node is not a live timer
+        };
+        if !tm.armed || tm.notif.is_none() {
+            return false; // a charted node must be armed with a bound notification
+        }
+        if seen.contains(&c.0) {
+            return false; // a duplicate (defensive; the steps cap also bounds cycles)
+        }
+        seen.push(c.0);
+        cur = tm.next;
+    }
+    // completeness: every armed timer is on the chain.
+    for (id, tm) in st.timers.iter() {
+        if tm.armed && !seen.contains(id) {
+            return false;
+        }
+    }
+    true
 }
 
 // ── Shape builders ─────────────────────────────────────────────────────────
@@ -1076,6 +1114,123 @@ fn check_thread_bind(st: &mut ArrayStore, t: ObjId, which: usize, notif_src: Opt
         *expect_refs.get_mut(&no.0).unwrap() -= 1;
     }
     assert_eq!(st.refs, expect_refs, "thread_bind: displaced notif -1, move net-zero");
+}
+
+// `arm`'s ensures against the real body (plan §4e): `timer_wf` preserved; slot/chan/notif/
+// tcb views framed; `t` ends armed at the list head bound to `notif`; and the net ref
+// delta is `disarm`'s -1 (on re-arm) plus arm's +1 — net-zero on a same-notif re-arm.
+fn check_arm(st: &mut ArrayStore, t: ObjId, notif: ObjId, bits: u64, deadline: u64) {
+    assert!(timer_wf_exec(st), "arm pre: timer_wf");
+    let fp = fingerprint(st);
+    let chans = st.chans.clone();
+    let notifs = st.notifs.clone();
+    let tcbs = st.tcbs.clone();
+    let was_armed = st.timers[&t.0].armed;
+    let old_notif = st.timers[&t.0].notif;
+    let mut expect_refs = st.refs.clone();
+    if was_armed {
+        if let Some(m) = old_notif {
+            *expect_refs.get_mut(&m.0).unwrap() -= 1;
+        }
+    }
+    *expect_refs.get_mut(&notif.0).unwrap() += 1;
+
+    arm(st, t, notif, bits, deadline);
+
+    assert!(timer_wf_exec(st), "arm post: timer_wf preserved");
+    assert!(fingerprint(st) == fp, "arm post: slot_view unchanged");
+    assert!(st.chans == chans, "arm post: chan_view unchanged");
+    assert!(st.notifs == notifs, "arm post: notif_view unchanged");
+    assert!(st.tcbs == tcbs, "arm post: tcb_view unchanged");
+    assert_eq!(st.refs, expect_refs, "arm: net ref delta (re-arm -1, arm +1)");
+    assert!(st.timers[&t.0].armed, "arm: t armed");
+    assert!(st.timers[&t.0].notif == Some(notif), "arm: bound to notif");
+    assert_eq!(st.timers[&t.0].deadline, deadline, "arm: deadline set");
+    assert_eq!(st.timers[&t.0].bits, bits, "arm: bits set");
+    assert!(st.timer_armed_head == Some(t), "arm: pushed onto the list head");
+}
+
+// `disarm`'s ensures against the real body (plan §4e): `timer_wf` preserved; the views
+// framed; `t` cleared (armed/notif/next) and off the armed list; its notif ref released
+// iff it was armed.
+fn check_disarm(st: &mut ArrayStore, t: ObjId) {
+    assert!(timer_wf_exec(st), "disarm pre: timer_wf");
+    let fp = fingerprint(st);
+    let chans = st.chans.clone();
+    let notifs = st.notifs.clone();
+    let tcbs = st.tcbs.clone();
+    let was_armed = st.timers[&t.0].armed;
+    let old_notif = st.timers[&t.0].notif;
+    let mut expect_refs = st.refs.clone();
+    if was_armed {
+        if let Some(m) = old_notif {
+            *expect_refs.get_mut(&m.0).unwrap() -= 1;
+        }
+    }
+
+    disarm(st, t);
+
+    assert!(timer_wf_exec(st), "disarm post: timer_wf preserved");
+    assert!(fingerprint(st) == fp, "disarm post: slot_view unchanged");
+    assert!(st.chans == chans, "disarm post: chan_view unchanged");
+    assert!(st.notifs == notifs, "disarm post: notif_view unchanged");
+    assert!(st.tcbs == tcbs, "disarm post: tcb_view unchanged");
+    assert_eq!(st.refs, expect_refs, "disarm: released the timer's ref iff it was armed");
+    assert!(!st.timers[&t.0].armed, "disarm: t unarmed");
+    assert!(st.timers[&t.0].notif.is_none(), "disarm: notif cleared");
+    assert!(st.timers[&t.0].next.is_none(), "disarm: next cleared");
+    let mut cur = st.timer_armed_head;
+    while let Some(c) = cur {
+        assert!(c.0 != t.0, "disarm: t no longer on the armed list");
+        cur = st.timers[&c.0].next;
+    }
+}
+
+// `destroy_timer` (refs == 0): `disarm` of the timer object, `timer_wf` preserved.
+fn check_destroy_timer(st: &mut ArrayStore, t: ObjId) {
+    assert!(timer_wf_exec(st), "destroy_timer pre: timer_wf");
+    destroy_timer(st, t);
+    assert!(timer_wf_exec(st), "destroy_timer post: timer_wf preserved");
+    assert!(!st.timers[&t.0].armed, "destroy_timer: disarmed");
+}
+
+// `check_expired`'s ensures against the real body (plan §4e): `timer_wf` preserved, slot/
+// chan views framed, and — stronger than the verified contract — every timer still on the
+// armed list is unexpired (every `deadline <= now` was fired and disarmed by the sweep).
+fn check_check_expired(st: &mut ArrayStore, now: u64) {
+    assert!(timer_wf_exec(st), "check_expired pre: timer_wf");
+    let fp = fingerprint(st);
+    let chans = st.chans.clone();
+    check_expired(st, now);
+    assert!(timer_wf_exec(st), "check_expired post: timer_wf preserved");
+    assert!(fingerprint(st) == fp, "check_expired post: slot_view unchanged");
+    assert!(st.chans == chans, "check_expired post: chan_view unchanged");
+    let mut cur = st.timer_armed_head;
+    while let Some(c) = cur {
+        assert!(st.timers[&c.0].deadline > now, "check_expired: every survivor is unexpired");
+        cur = st.timers[&c.0].next;
+    }
+}
+
+// `destroy_tcb`'s assumed structural contract (plan §4e) against the real body: `t` ends
+// Halted with its queue link and both binding slots cleared, its report UNCHANGED
+// (destruction fires no report, §5.1), and `cspace_wf` preserved.
+fn check_destroy_tcb(st: &mut ArrayStore, t: ObjId) {
+    assert!(cspace_wf_exec(st), "destroy_tcb pre: cspace_wf");
+    let n = st.n();
+    let report0 = st.tcbs[&t.0].report;
+    let s0 = st.tcbs[&t.0].bind_slots[0];
+    let s1 = st.tcbs[&t.0].bind_slots[1];
+
+    destroy_tcb(st, t);
+
+    assert!(cspace_wf_exec(st), "destroy_tcb post: cspace_wf preserved");
+    assert_eq!(st.n(), n, "destroy_tcb: arena extent unchanged");
+    assert_eq!(st.tcbs[&t.0].state, ThreadState::Halted, "destroy_tcb: t halted");
+    assert!(st.tcbs[&t.0].qnext.is_none(), "destroy_tcb: queue link cleared");
+    assert_eq!(st.tcbs[&t.0].report, report0, "destroy_tcb: report unchanged");
+    assert!(st.at(s0).cap.is_empty(), "destroy_tcb: EXIT bind slot emptied");
+    assert!(st.at(s1).cap.is_empty(), "destroy_tcb: FAULT bind slot emptied");
 }
 
 // A halted thread (ObjId 200) with two bind slots (1 = EXIT, 2 = FAULT). With
@@ -2186,4 +2341,159 @@ fn destroy_channel_deletes_caps_and_releases_bindings() {
 
     assert_eq!(st.refs[&100], 2, "peer-closed binding's notif released");
     assert_eq!(st.refs[&101], 2, "readable binding's notif released");
+}
+
+// ── Timer (plan §4e) ────────────────────────────────────────────────────────
+
+// `timer_wf_exec` rejects each malformed armed list (so the timer-op `timer_wf`
+// precondition is non-vacuous): a head pointing at a non-timer, an unarmed node on the
+// chain, a node armed without a bound notification, a `next` cycle, and an armed timer
+// absent from the chain (the completeness violation).
+#[test]
+fn timer_wf_exec_has_teeth() {
+    let armed = |notif: Option<ObjId>, next: Option<ObjId>| TimerState {
+        armed: true, deadline: 0, notif, bits: 0, next,
+    };
+    // A well-formed singleton list passes.
+    let mut ok = ArrayStore::new(0);
+    ok.timers.insert(300, armed(Some(ObjId(100)), None));
+    ok.timer_armed_head = Some(ObjId(300));
+    assert!(timer_wf_exec(&ok), "a well-formed armed list is accepted");
+
+    // Head points at an unregistered timer.
+    let mut dangling = ArrayStore::new(0);
+    dangling.timer_armed_head = Some(ObjId(999));
+    assert!(!timer_wf_exec(&dangling), "head names a non-timer");
+
+    // A node on the chain is not armed.
+    let mut unarmed = ArrayStore::new(0);
+    unarmed.timers.insert(300, TimerState { armed: false, deadline: 0, notif: Some(ObjId(100)), bits: 0, next: None });
+    unarmed.timer_armed_head = Some(ObjId(300));
+    assert!(!timer_wf_exec(&unarmed), "a charted node must be armed");
+
+    // A charted node has no bound notification.
+    let mut no_notif = ArrayStore::new(0);
+    no_notif.timers.insert(300, armed(None, None));
+    no_notif.timer_armed_head = Some(ObjId(300));
+    assert!(!timer_wf_exec(&no_notif), "a charted node must name a notification");
+
+    // A `next` cycle (300 → 301 → 300).
+    let mut cyclic = ArrayStore::new(0);
+    cyclic.timers.insert(300, armed(Some(ObjId(100)), Some(ObjId(301))));
+    cyclic.timers.insert(301, armed(Some(ObjId(100)), Some(ObjId(300))));
+    cyclic.timer_armed_head = Some(ObjId(300));
+    assert!(!timer_wf_exec(&cyclic), "a cycle is rejected");
+
+    // An armed timer is not on the chain (completeness violation).
+    let mut incomplete = ArrayStore::new(0);
+    incomplete.timers.insert(300, armed(Some(ObjId(100)), None));
+    incomplete.timers.insert(301, armed(Some(ObjId(101)), None)); // armed but unlinked
+    incomplete.timer_armed_head = Some(ObjId(300));
+    assert!(!timer_wf_exec(&incomplete), "an off-chain armed timer is rejected");
+}
+
+// `arm`/`disarm` lifecycle: install, same-notif re-arm (net-zero refs), different-notif
+// re-arm (old -1, new +1), disarm (release + off the list), and an idempotent disarm of an
+// already-disarmed timer — the per-op armed-timer refcount deltas end to end.
+#[test]
+fn arm_disarm_lifecycle() {
+    let mut st = ArrayStore::new(0);
+    let t = ObjId(300);
+    let n1 = ObjId(100);
+    let n2 = ObjId(101);
+    st.timers.insert(300, TimerState { armed: false, deadline: 0, notif: None, bits: 0, next: None });
+    st.refs.insert(100, 1);
+    st.refs.insert(101, 1);
+
+    check_arm(&mut st, t, n1, 0b1, 50);
+    assert_eq!(st.refs[&100], 2, "arm +1 on n1");
+
+    check_arm(&mut st, t, n1, 0b10, 60); // same-notif re-arm
+    assert_eq!(st.refs[&100], 2, "same-notif re-arm is net-zero");
+
+    check_arm(&mut st, t, n2, 0b100, 70); // different-notif re-arm
+    assert_eq!(st.refs[&100], 1, "re-arm released n1");
+    assert_eq!(st.refs[&101], 2, "re-arm acquired n2");
+
+    check_disarm(&mut st, t);
+    assert_eq!(st.refs[&101], 1, "disarm released n2");
+    assert!(st.timer_armed_head.is_none(), "the armed list is empty");
+
+    check_disarm(&mut st, t); // idempotent no-op
+    assert_eq!(st.refs[&101], 1, "a second disarm touches no ref");
+}
+
+// `check_expired`: a sweep over `300 → 301` where 300 (deadline 50) is expired and binds a
+// notification with a blocked waiter, and 301 (deadline 200) is not. The expired timer is
+// disarmed and its waiter woken (timer ref released by `disarm`, waiter ref by the wake);
+// the unexpired timer survives, now the list head.
+#[test]
+fn check_expired_wake_and_skip() {
+    let now = 100u64;
+    let mut st = ArrayStore::new(0);
+    st.timers.insert(301, TimerState { armed: true, deadline: 200, notif: Some(ObjId(101)), bits: 0b10, next: None });
+    st.timers.insert(300, TimerState { armed: true, deadline: 50, notif: Some(ObjId(100)), bits: 0b1, next: Some(ObjId(301)) });
+    st.timer_armed_head = Some(ObjId(300));
+    // notif 100 with a blocked waiter 400 (so the fire takes the wake path).
+    st.tcbs.insert(400, TcbState { state: ThreadState::BlockedNotif, wait_notif: Some(ObjId(100)), ..tcb_state_default() });
+    st.notifs.insert(100, NotifState { word: 0, wait_head: Some(ObjId(400)), wait_tail: Some(ObjId(400)) });
+    st.refs.insert(100, 2); // the timer's ref + the waiter's ref
+    // notif 101, no waiter.
+    st.notifs.insert(101, NotifState { word: 0, wait_head: None, wait_tail: None });
+    st.refs.insert(101, 1); // the timer's ref
+
+    check_check_expired(&mut st, now);
+
+    assert!(!st.timers[&300].armed, "the expired timer is disarmed");
+    assert_eq!(st.tcbs[&400].state, ThreadState::Runnable, "its blocked waiter woke");
+    assert_eq!(st.tcbs[&400].retval, 0b1, "the timer's bits were delivered");
+    assert_eq!(st.refs[&100], 0, "disarm released the timer ref, the wake the waiter ref");
+    assert!(st.timers[&301].armed, "the unexpired timer survives");
+    assert!(st.timer_armed_head == Some(ObjId(301)), "the survivor is now the list head");
+    assert_eq!(st.refs[&101], 1, "the untouched notif keeps its ref");
+}
+
+// `destroy_timer` of an armed timer (its last cap gone): `disarm`, releasing the notif ref
+// and emptying the armed list.
+#[test]
+fn destroy_timer_disarms() {
+    let mut st = ArrayStore::new(0);
+    let t = ObjId(300);
+    st.timers.insert(300, TimerState { armed: true, deadline: 10, notif: Some(ObjId(100)), bits: 0b1, next: None });
+    st.timer_armed_head = Some(t);
+    st.refs.insert(100, 1);
+    st.refs.insert(300, 0); // last cap gone (the destroy_timer precondition)
+
+    check_destroy_timer(&mut st, t);
+
+    assert!(st.timer_armed_head.is_none(), "the armed list is now empty");
+    assert_eq!(st.refs[&100], 0, "destroy_timer released the notif ref via disarm");
+}
+
+// `destroy_tcb`'s structural contract: a Runnable thread (200) holding two notification
+// bind caps is halted, its queue link cleared, both bind slots emptied, and its report
+// left untouched (destruction fires none). Bind-cap refs start at 2 so the deletes just
+// decrement (no object teardown — the cross-object recursion is the deferred residue).
+#[test]
+fn destroy_tcb_structural() {
+    let mut st = ArrayStore::new(2);
+    st.slots[0] = detached(notif_cap(50));
+    st.slots[1] = detached(notif_cap(51));
+    st.refs.insert(50, 2);
+    st.refs.insert(51, 2);
+    let t = ObjId(200);
+    st.tcbs.insert(
+        200,
+        TcbState {
+            state: ThreadState::Runnable,
+            report: Report::Running,
+            bind_slots: [SlotId(0), SlotId(1)],
+            ..tcb_state_default()
+        },
+    );
+
+    check_destroy_tcb(&mut st, t);
+
+    assert_eq!(st.refs[&50], 1, "EXIT bind cap deleted (ref decremented)");
+    assert_eq!(st.refs[&51], 1, "FAULT bind cap deleted (ref decremented)");
 }

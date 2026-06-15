@@ -6,10 +6,16 @@
 //! `kernel` crate (`kernel/src/timer.rs`). Expiry is checked on the periodic
 //! tick, so deadline resolution is one tick at MVP.
 
-use crate::cspace::ObjHeader;
+use crate::cspace::{self, ObjHeader};
 use crate::id::ObjId;
 use crate::notification;
 use crate::store::Store;
+use vstd::prelude::*;
+// `StoreSpec` (the `external_trait_extension`) must be in scope to resolve
+// `store.timer_view()`/`timer_head_view()`/… in the §4e contracts; it erases in a
+// normal build, so it is otherwise unused here (the doc/results/26 §2.3 idiom).
+#[allow(unused_imports)]
+use crate::cspace::StoreSpec;
 
 #[repr(C)]
 pub struct TimerObj {
@@ -36,65 +42,537 @@ impl TimerObj {
     }
 }
 
-/// Arm (or re-arm) a timer: signal `bits` on `notif` once the counter
-/// passes `deadline`. The armed timer holds a ref on the notification.
-pub fn arm<S: Store>(store: &mut S, t: ObjId, notif: ObjId, bits: u64, deadline: u64) {
+verus! {
+
+/// Disarm a timer: unlink it from the armed list and release the ref it held on
+/// its bound notification (§3.6).
+///
+/// Verified (plan §4e, doc/results/35): the `remove_waiter` analog (doc 33) over the
+/// GLOBAL armed list — singly-linked, head-only (no tail). `!armed` ⇒ a no-op; `armed`
+/// ⇒ `t` is spliced out (`timer_seq` loses `t` — by `timer_wf`'s completeness an armed
+/// timer is always on the list, so the walk is guaranteed to find it), the queued ref is
+/// released (`refs[notif] -= 1`, the **armed-timer term** of `refcount_sound`, the
+/// `binding_refs_ok` per-op-delta precedent), and `t.armed`/`t.notif`/`t.next` cleared.
+/// `timer_wf` is preserved. The `armed ⇒ refs > 0` precondition (the timer holds its
+/// own ref) discharges the release `-1`. The walk is read-only; the writes are on the
+/// found path, which returns (the `remove_waiter` shape).
+pub fn disarm<S: Store>(store: &mut S, t: ObjId)
+    requires
+        old(store).timer_view().dom().contains(t),
+        cspace::timer_wf(old(store).timer_view(), old(store).timer_head_view()),
+        old(store).timer_view()[t].armed ==>
+            (old(store).timer_view()[t].notif matches Some(n) ==>
+                old(store).refs_view().dom().contains(n) && old(store).refs_view()[n] > 0),
+    ensures
+        final(store).slot_view() == old(store).slot_view(),
+        final(store).chan_view() == old(store).chan_view(),
+        final(store).notif_view() == old(store).notif_view(),
+        final(store).tcb_view() == old(store).tcb_view(),
+        final(store).timer_view().dom() == old(store).timer_view().dom(),
+        cspace::timer_wf(final(store).timer_view(), final(store).timer_head_view()),
+        // Not armed ⇒ nothing moves.
+        !old(store).timer_view()[t].armed ==> {
+            &&& final(store).timer_view() == old(store).timer_view()
+            &&& final(store).timer_head_view() == old(store).timer_head_view()
+            &&& final(store).refs_view() == old(store).refs_view()
+        },
+        // Armed ⇒ `t` cleared, the ref released, the rest of the list intact. Two frames
+        // `check_expired` relies on: (a) every timer other than `t` and `t`'s predecessor
+        // (whose old `next` was `Some(t)`) is *fully* unchanged — gives the suffix's
+        // `next`-threading; (b) every timer other than `t` keeps its `armed`/`notif`/
+        // `deadline`/`bits` (only the predecessor's `next` moves) — gives the suffix's and
+        // the still-armed prefix's `timer_signal_ok` across the splice.
+        old(store).timer_view()[t].armed ==> {
+            &&& final(store).timer_view()[t].armed == false
+            &&& final(store).timer_view()[t].notif is None
+            &&& final(store).timer_view()[t].next is None
+            &&& final(store).refs_view() == old(store).refs_view().insert(
+                    old(store).timer_view()[t].notif->Some_0,
+                    (old(store).refs_view()[old(store).timer_view()[t].notif->Some_0] - 1) as nat)
+            &&& !cspace::timer_seq(final(store).timer_view(), final(store).timer_head_view()).contains(t)
+            &&& forall|j: ObjId| #![trigger final(store).timer_view()[j]]
+                    j != t && old(store).timer_view()[j].next != Some(t)
+                    ==> final(store).timer_view()[j] == old(store).timer_view()[j]
+            &&& forall|j: ObjId| #![trigger final(store).timer_view()[j]] j != t ==> {
+                    &&& final(store).timer_view()[j].armed == old(store).timer_view()[j].armed
+                    &&& final(store).timer_view()[j].notif == old(store).timer_view()[j].notif
+                    &&& final(store).timer_view()[j].deadline == old(store).timer_view()[j].deadline
+                    &&& final(store).timer_view()[j].bits == old(store).timer_view()[j].bits
+                }
+        },
+{
+    if !store.timer_armed(t) {
+        return;
+    }
+    let ghost tmv0 = old(store).timer_view();
+    let ghost head0 = old(store).timer_head_view();
+    let ghost ts0 = cspace::timer_seq(tmv0, head0);
+    proof {
+        assert(cspace::timer_chain(tmv0, head0, ts0) && cspace::timer_complete(tmv0, ts0));
+        assert(tmv0[t].armed);
+        assert(ts0.contains(t));
+    }
+
+    let mut cur = store.timer_armed_head();
+    let mut prev: Option<ObjId> = None;
+    let ghost mut k: int = 0;
+
+    while cur.is_some()
+        invariant
+            store.slot_view() == old(store).slot_view(),
+            store.chan_view() == old(store).chan_view(),
+            store.notif_view() == old(store).notif_view(),
+            store.tcb_view() == old(store).tcb_view(),
+            store.refs_view() == old(store).refs_view(),
+            store.timer_view() == tmv0,
+            store.timer_head_view() == head0,
+            tmv0 == old(store).timer_view(),
+            head0 == old(store).timer_head_view(),
+            ts0 == cspace::timer_seq(tmv0, head0),
+            cspace::timer_chain(tmv0, head0, ts0),
+            cspace::timer_complete(tmv0, ts0),
+            tmv0[t].armed,
+            ts0.contains(t),
+            tmv0[t].notif matches Some(n) ==>
+                store.refs_view().dom().contains(n) && store.refs_view()[n] > 0,
+            0 <= k <= ts0.len(),
+            cur == (if k < ts0.len() { Some(ts0[k]) } else { None::<ObjId> }),
+            prev == (if k == 0 { None::<ObjId> } else { Some(ts0[k - 1]) }),
+            forall|i: int| 0 <= i < k ==> ts0[i] != t,
+        decreases ts0.len() - k,
+    {
+        let c = cur.unwrap();
+        assert(k < ts0.len());
+        assert(c == ts0[k]);
+        // `ObjId`'s exec `==` is external (doc 33 §2); compare the tag.
+        if c.0 == t.0 {
+            assert(t == ts0[k]);
+            let ghost len = ts0.len() as int;
+            // `cnext == tmv0[t].next` (c == t, store still pinned to old).
+            let cnext = store.timer_next(c);
+            assert(cnext == tmv0[t].next);
+
+            // Re-point the head (k==0) or the predecessor (k>0) past `t`.
+            match prev {
+                None => {
+                    store.set_timer_armed_head(cnext);
+                }
+                Some(p) => {
+                    proof { assert(k > 0); assert(p == ts0[k - 1]); assert(tmv0.dom().contains(p)); }
+                    store.set_timer_next(p, cnext);
+                }
+            }
+
+            // Release the queued ref, clear `t`. `t` armed ⇒ `notif is Some` (timer_chain).
+            let nopt = store.timer_notif(t);
+            assert(nopt == tmv0[t].notif);
+            assert(tmv0[t].notif is Some);
+            if let Some(n) = nopt {
+                store.set_obj_refs(n, store.obj_refs(n) - 1);
+            }
+            store.set_timer_notif(t, None);
+            store.set_timer_armed(t, false);
+            store.set_timer_next(t, None);
+
+            proof {
+                let tmvf = store.timer_view();
+                let headf = store.timer_head_view();
+                assert(ts0.index_of(t) == k) by {
+                    let idx = ts0.index_of(t);
+                    assert(0 <= idx < ts0.len() && ts0[idx] == t);
+                }
+                // The sets all hit resident keys (`t`, and the predecessor `p`), so the
+                // domain is unchanged — needs `=~=` through the insert chain.
+                assert(tmvf.dom() =~= tmv0.dom());
+                cspace::lemma_timer_remove_chain(tmv0, head0, tmvf, headf, t, ts0, k);
+                // Completeness: every still-armed timer was charted on `ts0` and is not
+                // `t`, so it survives the splice.
+                assert(cspace::timer_complete(tmvf, ts0.remove(k))) by {
+                    assert forall|j: ObjId| #[trigger] tmvf.dom().contains(j) && tmvf[j].armed
+                        implies ts0.remove(k).contains(j) by {
+                        assert(j != t);
+                        assert(tmv0[j].armed);
+                        assert(ts0.contains(j));
+                        cspace::lemma_seq_remove_keeps(ts0, k, j);
+                    }
+                }
+                assert(cspace::timer_wf(tmvf, headf));
+                // `t ∉ timer_seq(final)`: the unique chain is `ts0.remove(k)`, which omits `t`.
+                cspace::lemma_timer_chain_unique(tmvf, headf,
+                    cspace::timer_seq(tmvf, headf), ts0.remove(k));
+                assert(!ts0.remove(k).contains(t)) by {
+                    ts0.remove_ensures(k);
+                    assert forall|i: int| 0 <= i < ts0.remove(k).len() implies
+                        ts0.remove(k)[i] != t by {
+                        let ii = if i < k { i } else { i + 1 };
+                        assert(ts0.remove(k)[i] == ts0[ii]);
+                        assert(ii != k);
+                    }
+                }
+            }
+            return;
+        }
+        prev = cur;
+        cur = store.timer_next(c);
+        proof {
+            k = k + 1;
+        }
+    }
+    proof {
+        assert(k == ts0.len());
+        assert(!ts0.contains(t));
+        assert(false);
+    }
+}
+
+/// Arm (or re-arm) a timer: signal `bits` on `notif` once the counter passes
+/// `deadline`. The armed timer holds a ref on the notification.
+///
+/// Verified (plan §4e, doc/results/35): the head-push analog of `wait`'s tail-push.
+/// `disarm` first (idempotent re-arm), `+1` on the notification ref, set the fields, push
+/// onto the armed list head (`timer_seq` prepend). Modeling the ref delta in body order
+/// (`disarm`'s `-1` then `arm`'s `+1`) makes the **same-notif re-arm provably net-zero**
+/// (the `bind_refs_post` precedent, doc 30 §2.2). `timer_wf` is preserved. The precise
+/// ref delta rides the host test (`check_arm`), not the verified contract (the `bind`
+/// precedent, doc 34 §2.5).
+pub fn arm<S: Store>(store: &mut S, t: ObjId, notif: ObjId, bits: u64, deadline: u64)
+    requires
+        old(store).timer_view().dom().contains(t),
+        old(store).refs_view().dom().contains(notif),
+        old(store).refs_view()[notif] < u32::MAX,
+        cspace::timer_wf(old(store).timer_view(), old(store).timer_head_view()),
+        // re-arm release fragment (discharges the `disarm` `-1` if `t` is already armed).
+        old(store).timer_view()[t].armed ==>
+            (old(store).timer_view()[t].notif matches Some(n) ==>
+                old(store).refs_view().dom().contains(n) && old(store).refs_view()[n] > 0),
+    ensures
+        final(store).slot_view() == old(store).slot_view(),
+        final(store).chan_view() == old(store).chan_view(),
+        final(store).notif_view() == old(store).notif_view(),
+        final(store).tcb_view() == old(store).tcb_view(),
+        final(store).timer_view().dom() == old(store).timer_view().dom(),
+        cspace::timer_wf(final(store).timer_view(), final(store).timer_head_view()),
+        // `t` ends armed, bound to `notif`, with the programmed deadline/bits.
+        final(store).timer_view()[t].armed,
+        final(store).timer_view()[t].notif == Some(notif),
+        final(store).timer_view()[t].deadline == deadline,
+        final(store).timer_view()[t].bits == bits,
+{
     disarm(store, t);
+
+    let ghost tmv1 = store.timer_view();
+    let ghost head1 = store.timer_head_view();
+    let ghost ts1 = cspace::timer_seq(tmv1, head1);
+    proof {
+        assert(cspace::timer_chain(tmv1, head1, ts1) && cspace::timer_complete(tmv1, ts1));
+        // `t` is not armed post-disarm, so it is not charted on `ts1`.
+        assert(!tmv1[t].armed);
+        assert(!ts1.contains(t)) by {
+            if ts1.contains(t) {
+                let m = ts1.index_of(t);
+                assert(tmv1[ts1[m]].armed);
+            }
+        }
+        // `disarm` only decreases `refs[notif]`, so the `+1` stays in range.
+        assert(store.refs_view()[notif] <= old(store).refs_view()[notif]);
+    }
+
     store.set_obj_refs(notif, store.obj_refs(notif) + 1);
     store.set_timer_notif(t, Some(notif));
     store.set_timer_bits(t, bits);
     store.set_timer_deadline(t, deadline);
     store.set_timer_armed(t, true);
-    store.set_timer_next(t, store.timer_armed_head());
+    let h = store.timer_armed_head();
+    proof { assert(h == head1); }
+    store.set_timer_next(t, h);
     store.set_timer_armed_head(Some(t));
+
+    proof {
+        let tmvf = store.timer_view();
+        let headf = store.timer_head_view();
+        // `pts == [t] ++ ts1`.
+        let pts = Seq::new((ts1.len() + 1) as nat, |i: int| if i == 0 { t } else { ts1[i - 1] });
+        assert(pts.len() == ts1.len() + 1);
+        assert(pts[0] == t);
+        assert(forall|i: int| 1 <= i < pts.len() ==> pts[i] == ts1[i - 1]);
+        // `arm`'s sets after `disarm` all hit key `t` (the head set frames `timer_view`),
+        // so the post-state differs from the post-`disarm` map at `t` alone.
+        assert(tmvf =~= tmv1.insert(t, tmvf[t]));
+        cspace::lemma_timer_push_head_chain(tmv1, head1, tmvf, headf, t, ts1, pts);
+        // Completeness: every armed timer is `t` or was charted on `ts1`, all on `pts`.
+        assert(cspace::timer_complete(tmvf, pts)) by {
+            assert forall|j: ObjId| #[trigger] tmvf.dom().contains(j) && tmvf[j].armed
+                implies pts.contains(j) by {
+                if j == t {
+                    assert(pts[0] == t);
+                } else {
+                    assert(tmv1[j].armed);
+                    assert(ts1.contains(j));
+                    let m = ts1.index_of(j);
+                    assert(pts[m + 1] == ts1[m]);
+                }
+            }
+        }
+        assert(cspace::timer_wf(tmvf, headf));
+    }
 }
 
-pub fn disarm<S: Store>(store: &mut S, t: ObjId) {
-    if !store.timer_armed(t) {
-        return;
+/// pre:  refs == 0 (last cap gone).
+///
+/// Verified (plan §4e, doc/results/35): teardown of a timer object — just `disarm`
+/// (release the notification ref, unlink from the armed list) if it is still armed.
+pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
+    requires
+        old(store).timer_view().dom().contains(t),
+        cspace::timer_wf(old(store).timer_view(), old(store).timer_head_view()),
+        old(store).timer_view()[t].armed ==>
+            (old(store).timer_view()[t].notif matches Some(n) ==>
+                old(store).refs_view().dom().contains(n) && old(store).refs_view()[n] > 0),
+    ensures
+        final(store).slot_view() == old(store).slot_view(),
+        final(store).chan_view() == old(store).chan_view(),
+        final(store).notif_view() == old(store).notif_view(),
+        final(store).tcb_view() == old(store).tcb_view(),
+        cspace::timer_wf(final(store).timer_view(), final(store).timer_head_view()),
+{
+    disarm(store, t);
+}
+
+// `timer_notif_injective` survives `disarm(c)`: `c` is unarmed and every other timer keeps
+// its `armed`/`notif` (disarm's four-field frame), so the armed set shrinks while its
+// notifications are unchanged — still pairwise-distinct.
+proof fn lemma_inj_after_disarm(
+    pre: Map<ObjId, cspace::TimerView>,
+    post: Map<ObjId, cspace::TimerView>,
+    c: ObjId,
+)
+    requires
+        cspace::timer_notif_injective(pre),
+        post.dom() == pre.dom(),
+        !post[c].armed,
+        forall|j: ObjId| #![trigger post[j]]
+            j != c ==> post[j].armed == pre[j].armed && post[j].notif == pre[j].notif,
+    ensures
+        cspace::timer_notif_injective(post),
+{
+    assert forall|c1: ObjId, c2: ObjId|
+        post.dom().contains(c1) && post.dom().contains(c2)
+            && post[c1].armed && post[c2].armed && post[c1].notif == post[c2].notif
+        implies c1 == c2 by {
+        assert(c1 != c && c2 != c);
+        assert(pre[c1].armed && pre[c2].armed && pre[c1].notif == pre[c2].notif);
     }
-    let mut cur = store.timer_armed_head();
-    let mut prev: Option<ObjId> = None;
-    while let Some(c) = cur {
-        if c == t {
-            let cnext = store.timer_next(c);
-            match prev {
-                None => store.set_timer_armed_head(cnext),
-                Some(p) => store.set_timer_next(p, cnext),
+}
+
+// `timer_signal_ok` survives a `disarm(c)` + `signal(n)` (n = `c`'s notification) when the
+// armed notifications are pairwise-distinct (`timer_notif_injective` on the pre-state):
+// every *other* armed timer's notification `np != n` (injectivity), so the fire — which
+// touches only `n`'s notification view, the woken thread, and `n`'s refs — leaves `np`'s
+// liveness/`notif_wf`/refs intact (the `np`-`notif_wf` via `lemma_notif_wf_frame`).
+proof fn lemma_signal_ok_after_fire(
+    tmv_pre: Map<ObjId, cspace::TimerView>,
+    nv_pre: Map<ObjId, cspace::NotifView>,
+    tv_pre: Map<ObjId, cspace::TcbView>,
+    rv_pre: Map<ObjId, nat>,
+    tmv2: Map<ObjId, cspace::TimerView>,
+    nv2: Map<ObjId, cspace::NotifView>,
+    tv2: Map<ObjId, cspace::TcbView>,
+    rv2: Map<ObjId, nat>,
+    c: ObjId,
+    n: ObjId,
+)
+    requires
+        cspace::timer_signal_ok(tmv_pre, nv_pre, tv_pre, rv_pre),
+        cspace::timer_notif_injective(tmv_pre),
+        tmv_pre.dom().contains(c),
+        tmv_pre[c].armed,
+        tmv_pre[c].notif == Some(n),
+        // post-fire timer view: `c` unarmed, every other timer keeps armed/notif.
+        tmv2.dom() == tmv_pre.dom(),
+        !tmv2[c].armed,
+        forall|j: ObjId| #![trigger tmv2[j]]
+            j != c ==> tmv2[j].armed == tmv_pre[j].armed && tmv2[j].notif == tmv_pre[j].notif,
+        // notif/tcb/refs differ from the pre-state only at `n` (disarm frames notif/tcb and
+        // touches refs[n]; signal touches `n`'s view, the threads waiting on `n`, refs[n]).
+        nv2.dom() == nv_pre.dom(),
+        forall|m: ObjId| #![trigger nv2[m]] m != n ==> nv2[m] == nv_pre[m],
+        tv2.dom() == tv_pre.dom(),
+        forall|th: ObjId| #![trigger tv2[th]]
+            tv_pre[th].wait_notif != Some(n) ==> tv2[th] == tv_pre[th],
+        rv_pre.dom().contains(n),
+        rv2.dom() == rv_pre.dom(),
+        forall|m: ObjId| #![trigger rv2[m]] m != n ==> rv2[m] == rv_pre[m],
+    ensures
+        cspace::timer_signal_ok(tmv2, nv2, tv2, rv2),
+{
+    assert forall|cp: ObjId| #[trigger] tmv2.dom().contains(cp)
+        implies cspace::timer_signal_ok_at(tmv2, nv2, tv2, rv2, cp) by {
+        if tmv2[cp].armed && tmv2[cp].notif is Some {
+            assert(cp != c);
+            let np = tmv2[cp].notif->Some_0;
+            assert(tmv_pre[cp].armed && tmv_pre[cp].notif == Some(np));
+            assert(cspace::timer_signal_ok_at(tmv_pre, nv_pre, tv_pre, rv_pre, cp));
+            // `np != n`: both `cp` and `c` armed with these notifs ⇒ injectivity.
+            assert(np != n) by {
+                if np == n {
+                    assert(tmv_pre[cp].notif == tmv_pre[c].notif);
+                }
             }
-            break;
+            assert(nv2[np] == nv_pre[np]);
+            assert(rv2[np] == rv_pre[np]);
+            cspace::lemma_notif_wf_frame(nv_pre, tv_pre, nv2, tv2, np);
         }
-        prev = cur;
-        cur = store.timer_next(c);
     }
-    // When armed, `notif` was set by `arm` and is always present.
-    if let Some(n) = store.timer_notif(t) {
-        store.set_obj_refs(n, store.obj_refs(n) - 1);
-    }
-    store.set_timer_notif(t, None);
-    store.set_timer_armed(t, false);
-    store.set_timer_next(t, None);
 }
 
 /// Tick-time expiry sweep. O(armed timers) per tick — fine at MVP scale.
-pub fn check_expired<S: Store>(store: &mut S, now: u64) {
+///
+/// Verified (plan §4e, doc/results/35): the armed-list walk that `disarm`s + `signal`s
+/// every expired timer. `disarm`/`signal` both frame `slot_view`/`chan_view`, so the
+/// sweep does too; `disarm` preserves `timer_wf` and `signal` frames the timer views, so
+/// `timer_wf` survives the whole walk. The walk reads each timer's `next` *before* its
+/// `disarm`, so it continues from a node still on the (mutated) list — the cursor tracks
+/// the entry snapshot `ts0`, whose unprocessed suffix `disarm`/`signal` provably leave
+/// intact. The census tension (`signal`'s `wait_head ⇒ refs > 0` across multiple fires)
+/// is resolved by the **distinct-notification** precondition (`timer_notif_injective`):
+/// each fire touches one notification's refs/queue, so the carried `timer_signal_ok`
+/// (the armed-timer census fragment, supplied by the trusted shell) survives every fire
+/// via `lemma_notif_wf_frame`. The general shared-notification case rides forward to the
+/// census phase (plan §1.4).
+pub fn check_expired<S: Store>(store: &mut S, now: u64)
+    requires
+        cspace::timer_wf(old(store).timer_view(), old(store).timer_head_view()),
+        cspace::timer_notif_injective(old(store).timer_view()),
+        cspace::timer_signal_ok(old(store).timer_view(), old(store).notif_view(),
+            old(store).tcb_view(), old(store).refs_view()),
+    ensures
+        final(store).slot_view() == old(store).slot_view(),
+        final(store).chan_view() == old(store).chan_view(),
+        cspace::timer_wf(final(store).timer_view(), final(store).timer_head_view()),
+{
+    let ghost tmv0 = old(store).timer_view();
+    let ghost head0 = old(store).timer_head_view();
+    let ghost ts0 = cspace::timer_seq(tmv0, head0);
+    proof {
+        assert(cspace::timer_chain(tmv0, head0, ts0) && cspace::timer_complete(tmv0, ts0));
+    }
+
     let mut cur = store.timer_armed_head();
-    while let Some(c) = cur {
+    let ghost mut k: int = 0;
+
+    while cur.is_some()
+        invariant
+            store.slot_view() == old(store).slot_view(),
+            store.chan_view() == old(store).chan_view(),
+            cspace::timer_wf(store.timer_view(), store.timer_head_view()),
+            cspace::timer_notif_injective(store.timer_view()),
+            cspace::timer_signal_ok(store.timer_view(), store.notif_view(),
+                store.tcb_view(), store.refs_view()),
+            tmv0 == old(store).timer_view(),
+            head0 == old(store).timer_head_view(),
+            ts0 == cspace::timer_seq(tmv0, head0),
+            cspace::timer_chain(tmv0, head0, ts0),
+            0 <= k <= ts0.len(),
+            cur == (if k < ts0.len() { Some(ts0[k]) } else { None::<ObjId> }),
+            // the unprocessed suffix retains its original armed/notif/next links.
+            forall|i: int| #![trigger ts0[i]] k <= i < ts0.len() ==> {
+                &&& store.timer_view().dom().contains(ts0[i])
+                &&& store.timer_view()[ts0[i]].armed
+                &&& store.timer_view()[ts0[i]].notif is Some
+                &&& store.timer_view()[ts0[i]].next
+                        == (if i + 1 < ts0.len() { Some(ts0[i + 1]) } else { None::<ObjId> })
+            },
+        decreases ts0.len() - k,
+    {
+        let c = cur.unwrap();
+        assert(k < ts0.len());
+        assert(c == ts0[k]);
+
+        let ghost tmv_pre = store.timer_view();
+        let ghost nv_pre = store.notif_view();
+        let ghost tv_pre = store.tcb_view();
+        let ghost rv_pre = store.refs_view();
+
         let next = store.timer_next(c);
+        assert(next == (if k + 1 < ts0.len() { Some(ts0[k + 1]) } else { None::<ObjId> }));
+
         if store.timer_deadline(c) <= now {
-            // Read the firing target before `disarm` clears it.
             let notif = store.timer_notif(c);
             let bits = store.timer_bits(c);
+            assert(notif == tmv_pre[c].notif);
+            assert(notif is Some);
+            // disarm precondition: `c` armed ⇒ its notif has refs > 0 (≥ 1 by signal_ok).
+            assert(cspace::timer_signal_ok_at(tmv_pre, nv_pre, tv_pre, rv_pre, c));
+
+            let ghost n = notif->Some_0;
+            proof {
+                // The §4e census fragment for `c`: `n` is live + `notif_wf`, with refs ≥ 1
+                // (the timer's ref) and ≥ 2 when a waiter is queued.
+                assert(nv_pre.dom().contains(n) && rv_pre.dom().contains(n) && rv_pre[n] >= 1);
+                assert(cspace::notif_wf(nv_pre, tv_pre, n));
+            }
+
             disarm(store, c);
-            if let Some(n) = notif {
-                notification::signal(store, n, bits);
+
+            let ghost rv1 = store.refs_view();
+            proof {
+                // post-disarm: notif/tcb framed; refs[n] == rv_pre[n] - 1; `n` still live + wf.
+                assert(store.notif_view() == nv_pre);
+                assert(store.tcb_view() == tv_pre);
+                assert(rv1 == rv_pre.insert(n, (rv_pre[n] - 1) as nat));
+                assert(nv_pre[n].wait_head is Some ==> rv1[n] >= 1);
+            }
+
+            if let Some(nn) = notif {
+                assert(nn == n);
+                notification::signal(store, nn, bits);
+
+                proof {
+                    let tmv2 = store.timer_view();
+                    let nv2 = store.notif_view();
+                    let tv2 = store.tcb_view();
+                    let rv2 = store.refs_view();
+                    // signal touches notif/tcb/refs only at `n` (over the post-disarm state).
+                    assert(nv2.dom() == nv_pre.dom());
+                    assert(forall|m: ObjId| #![trigger nv2[m]] m != n ==> nv2[m] == nv_pre[m]);
+                    assert(rv2.dom() == rv_pre.dom());
+                    assert(forall|m: ObjId| #![trigger rv2[m]] m != n ==> rv2[m] == rv_pre[m]);
+                    // injectivity + signal_ok survive the fire (distinct notifications).
+                    lemma_inj_after_disarm(tmv_pre, tmv2, c);
+                    lemma_signal_ok_after_fire(tmv_pre, nv_pre, tv_pre, rv_pre,
+                        tmv2, nv2, tv2, rv2, c, n);
+                    // The unprocessed suffix `ts0[k+1..]` is untouched: each such node is not
+                    // `c` and its `next` was not `Some(c)`, so `disarm` left it whole and
+                    // `signal` frames `timer_view`.
+                    assert forall|i: int| #![trigger ts0[i]] k + 1 <= i < ts0.len() implies {
+                        &&& tmv2.dom().contains(ts0[i])
+                        &&& tmv2[ts0[i]].armed
+                        &&& tmv2[ts0[i]].notif is Some
+                        &&& tmv2[ts0[i]].next
+                                == (if i + 1 < ts0.len() { Some(ts0[i + 1]) } else { None::<ObjId> })
+                    } by {
+                        assert(ts0[i] != c);
+                        assert(tmv_pre[ts0[i]].next != Some(c));
+                    }
+                }
+            }
+        } else {
+            // Not expired: the store is unchanged this iteration; the suffix shrinks by one.
+            proof {
+                assert forall|i: int| #![trigger ts0[i]] k + 1 <= i < ts0.len() implies {
+                    &&& store.timer_view().dom().contains(ts0[i])
+                    &&& store.timer_view()[ts0[i]].armed
+                    &&& store.timer_view()[ts0[i]].notif is Some
+                    &&& store.timer_view()[ts0[i]].next
+                            == (if i + 1 < ts0.len() { Some(ts0[i + 1]) } else { None::<ObjId> })
+                } by {}
             }
         }
         cur = next;
+        proof {
+            k = k + 1;
+        }
     }
 }
 
-/// pre:  refs == 0.
-pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId) {
-    disarm(store, t);
-}
+} // verus!

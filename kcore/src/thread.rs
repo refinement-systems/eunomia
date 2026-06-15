@@ -282,6 +282,8 @@ pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<S
 
 } // verus!
 
+verus! {
+
 /// pre:  refs == 0 (last cap gone).
 /// post: t off every queue and never scheduled again. If t is CURRENT the
 ///       exception exit path will switch away; the TCB memory stays valid
@@ -297,7 +299,41 @@ pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<S
 /// ready structure through `Store::unqueue_ready` (the scheduler is
 /// kernel-side); a thread blocked on a notification is unlinked here,
 /// since the waiter queue is a kcore object.
-pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId) {
+///
+/// **Assumed, host-test-checked (plan §4e — the declared scope-out, §1.4).** Its
+/// body recurses through the still-`external_body` `cspace::delete` and the
+/// plain-Rust `unref_cspace`/`unref_aspace` (the cross-object teardown, deferred to
+/// the post-phase-5 census phase), so — like `delete`/`channel::destroy_channel` —
+/// it carries an `external_body` contract checked against its real body in
+/// `test_store.rs` (`check_destroy_tcb`), not a Verus body proof. The contract is the
+/// robustly-true structural core: `t` ends `Halted` with its queue link and both
+/// binding slots cleared, **its report UNCHANGED** (destruction fires no report,
+/// §5.1), and `cspace_wf` preserved. `unqueue_ready` therefore needs no Verus
+/// contract (the body is unverified) — a small simplification of the §1.3 note.
+#[verifier::external_body]
+pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
+    requires
+        cspace::cspace_wf(old(store).slot_view()),
+        old(store).slot_view().dom().finite(),
+        old(store).tcb_view().dom().contains(t),
+        old(store).tcb_view()[t].bind_slots.len() == 2,
+        old(store).slot_view().dom().contains(old(store).tcb_view()[t].bind_slots[0]),
+        old(store).slot_view().dom().contains(old(store).tcb_view()[t].bind_slots[1]),
+    ensures
+        cspace::cspace_wf(final(store).slot_view()),
+        final(store).slot_view().dom() == old(store).slot_view().dom(),
+        final(store).tcb_view().dom().contains(t),
+        final(store).tcb_view()[t].state == ThreadState::Halted,
+        final(store).tcb_view()[t].qnext is None,
+        // The report is untouched — destruction is the parent acting, not the thread
+        // dying, so the record never transitions here (§5.1).
+        final(store).tcb_view()[t].report == old(store).tcb_view()[t].report,
+        // Both binding slots emptied (their caps die with the TCB by CDT cleanup).
+        cspace::is_empty_cap(
+            final(store).slot_view()[old(store).tcb_view()[t].bind_slots[0]].cap),
+        cspace::is_empty_cap(
+            final(store).slot_view()[old(store).tcb_view()[t].bind_slots[1]].cap),
+{
     if store.tcb_state(t) == ThreadState::Runnable {
         store.unqueue_ready(t);
     } else if store.tcb_state(t) == ThreadState::BlockedNotif {
@@ -324,3 +360,5 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId) {
         store.set_tcb_aspace(t, None);
     }
 }
+
+} // verus!

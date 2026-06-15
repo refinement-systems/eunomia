@@ -1648,6 +1648,396 @@ pub proof fn lemma_remove_chain(
     }
 }
 
+// ── armed-timer list model (plan §4e) ───────────────────────────────────────
+// The armed-timer list is a GLOBAL singly-linked intrusive list: the head is the
+// `timer_head_view` scalar (the kernel static, store.rs:130), threaded through each
+// `TimerView`'s `next`. Unlike the notification waiter queue it has NO tail pointer
+// and is not per-object — it is the one list of every armed timer. The model mirrors
+// `waiter_chain`/`notif_wf`/`waiter_seq` (head-only, so lighter — no tail-fixup, no
+// per-object key): `arm` prepends the head, `disarm` splices out one element,
+// `check_expired` walks it. Acyclicity is `valid_list_rank` over the `next` projection,
+// implied by `timer_chain`'s `no_duplicates` (rank = position) exactly as for `qnext`.
+
+// `ts` is the armed-timer list in head-to-tail order. Pins the imperative
+// `timer_head_view`/`timer_next` links to the `Seq`: distinct elements (acyclicity —
+// the index IS the rank), the head agrees with `ts[0]`, `next` threads each element to
+// the next (the last to `None`), and every charted node is `armed` with a bound
+// notification (`arm` sets `armed`+`notif` together, `disarm` clears both — so an armed
+// timer always names the notification its `+1` ref is held on).
+pub open spec fn timer_chain(
+    tmv: Map<ObjId, TimerView>,
+    head: Option<ObjId>,
+    ts: Seq<ObjId>,
+) -> bool {
+    &&& ts.no_duplicates()
+    &&& forall|i: int| #![trigger ts[i]] 0 <= i < ts.len() ==> tmv.dom().contains(ts[i])
+    &&& (ts.len() == 0 ==> head is None)
+    &&& (ts.len() > 0 ==> head == Some(ts[0]))
+    &&& forall|i: int| #![trigger ts[i]] 0 <= i < ts.len() ==>
+            tmv[ts[i]].next == (if i + 1 < ts.len() { Some(ts[i + 1]) } else { None })
+    &&& forall|i: int| #![trigger ts[i]] 0 <= i < ts.len() ==>
+            tmv[ts[i]].armed && tmv[ts[i]].notif is Some
+}
+
+// Every armed timer is charted on `ts` (the completeness clause — armed ⇒ on the list).
+// This is what makes `disarm`'s walk guaranteed to find an armed `t` (unlike
+// `remove_waiter`, which tolerates an absent waiter): `timer_wf` carries it, `arm`/
+// `disarm` preserve it, the trusted kernel shell establishes it at boot.
+pub open spec fn timer_complete(tmv: Map<ObjId, TimerView>, ts: Seq<ObjId>) -> bool {
+    forall|k: ObjId| #[trigger] tmv.dom().contains(k) && tmv[k].armed ==> ts.contains(k)
+}
+
+// The armed-timer list is well-formed: a chain witness exists that captures every armed
+// timer. The `notif_wf` analog (global rather than per-object; no empty head/tail
+// agreement clause since there is no tail pointer).
+pub open spec fn timer_wf(tmv: Map<ObjId, TimerView>, head: Option<ObjId>) -> bool {
+    exists|ts: Seq<ObjId>| #[trigger] timer_chain(tmv, head, ts) && timer_complete(tmv, ts)
+}
+
+// The insertion-order armed `Seq` — well-defined when `timer_wf` holds (the chain is
+// unique given the `next` threading, `lemma_timer_chain_unique`). `arm` ⇒ prepend,
+// `disarm` ⇒ a splice (`Seq::remove`).
+pub open spec fn timer_seq(tmv: Map<ObjId, TimerView>, head: Option<ObjId>) -> Seq<ObjId> {
+    choose|ts: Seq<ObjId>| timer_chain(tmv, head, ts) && timer_complete(tmv, ts)
+}
+
+// `ts1[k] == ts2[k]` for any in-bounds `k`: heads agree, then `next` threads each step
+// (the `lemma_chain_eq_at` analog over the armed list).
+proof fn lemma_tchain_eq_at(
+    tmv: Map<ObjId, TimerView>,
+    head: Option<ObjId>,
+    ts1: Seq<ObjId>,
+    ts2: Seq<ObjId>,
+    k: int,
+)
+    requires
+        timer_chain(tmv, head, ts1),
+        timer_chain(tmv, head, ts2),
+        0 <= k < ts1.len(),
+        k < ts2.len(),
+    ensures
+        ts1[k] == ts2[k],
+    decreases k,
+{
+    if k == 0 {
+        assert(head == Some(ts1[0]));
+        assert(head == Some(ts2[0]));
+    } else {
+        lemma_tchain_eq_at(tmv, head, ts1, ts2, k - 1);
+        assert(tmv[ts1[k - 1]].next == Some(ts1[k]));
+        assert(tmv[ts2[k - 1]].next == Some(ts2[k]));
+    }
+}
+
+// No armed chain is a strict prefix of another (the `lemma_chain_not_strict_prefix`
+// analog): the shorter chain's last node ends the walk (`next == None`) but the longer
+// threads it onward.
+proof fn lemma_tchain_not_strict_prefix(
+    tmv: Map<ObjId, TimerView>,
+    head: Option<ObjId>,
+    ts1: Seq<ObjId>,
+    ts2: Seq<ObjId>,
+)
+    requires
+        timer_chain(tmv, head, ts1),
+        timer_chain(tmv, head, ts2),
+        ts1.len() < ts2.len(),
+    ensures
+        false,
+{
+    if ts1.len() == 0 {
+        assert(head is None);
+        assert(head == Some(ts2[0]));
+    } else {
+        let k: int = ts1.len() as int - 1;
+        lemma_tchain_eq_at(tmv, head, ts1, ts2, k);
+        assert(tmv[ts1[k]].next is None);
+        assert(tmv[ts2[k]].next == Some(ts2[k + 1]));
+    }
+}
+
+// The armed-chain uniqueness theorem (the `lemma_waiter_chain_unique` analog) — so the
+// `choose` in `timer_seq` is the insertion order, letting `disarm` state its effect as a
+// `timer_seq` equality rather than mere existence.
+pub proof fn lemma_timer_chain_unique(
+    tmv: Map<ObjId, TimerView>,
+    head: Option<ObjId>,
+    ts1: Seq<ObjId>,
+    ts2: Seq<ObjId>,
+)
+    requires
+        timer_chain(tmv, head, ts1),
+        timer_chain(tmv, head, ts2),
+    ensures
+        ts1 == ts2,
+{
+    if ts1.len() < ts2.len() {
+        lemma_tchain_not_strict_prefix(tmv, head, ts1, ts2);
+    }
+    if ts2.len() < ts1.len() {
+        lemma_tchain_not_strict_prefix(tmv, head, ts2, ts1);
+    }
+    assert forall|i: int| 0 <= i < ts1.len() implies ts1[i] == ts2[i] by {
+        lemma_tchain_eq_at(tmv, head, ts1, ts2, i);
+    }
+    assert(ts1 =~= ts2);
+}
+
+// `disarm`'s splice step (plan §4e): unlinking `t == ts0[k]` from the armed list yields
+// `ts0.remove(k)`. The `lemma_remove_chain` analog minus the tail fixup (no tail pointer)
+// — the head re-pointed past `t` when `t` was the head (`k == 0`), the predecessor's
+// `next` re-threaded past `t` otherwise (`k > 0`), and `t` itself dropped from the chain
+// (its own post-state fields are irrelevant — it is no longer charted).
+pub proof fn lemma_timer_remove_chain(
+    tmv0: Map<ObjId, TimerView>,
+    head0: Option<ObjId>,
+    tmvf: Map<ObjId, TimerView>,
+    headf: Option<ObjId>,
+    t: ObjId,
+    ts0: Seq<ObjId>,
+    k: int,
+)
+    requires
+        timer_chain(tmv0, head0, ts0),
+        tmvf.dom() == tmv0.dom(),
+        0 <= k < ts0.len(),
+        ts0[k] == t,
+        // predecessor re-threaded past `t` (k>0), its armed/notif framed.
+        k > 0 ==> tmvf[ts0[k - 1]].next == tmv0[t].next,
+        k > 0 ==> tmvf[ts0[k - 1]].armed == tmv0[ts0[k - 1]].armed,
+        k > 0 ==> tmvf[ts0[k - 1]].notif == tmv0[ts0[k - 1]].notif,
+        // every node other than `t` and the predecessor unchanged.
+        forall|j: ObjId| #![trigger tmvf[j]]
+            j != t && (k == 0 || j != ts0[k - 1]) ==> tmvf[j] == tmv0[j],
+        // head fix: k==0 ⇒ new head is `t`'s old next; else unchanged.
+        k == 0 ==> headf == tmv0[t].next,
+        k > 0 ==> headf == head0,
+    ensures
+        timer_chain(tmvf, headf, ts0.remove(k)),
+{
+    let dts = ts0.remove(k);
+    let len = ts0.len() as int;
+    ts0.remove_ensures(k);
+    // dts.len() == len - 1; dts[i] == ts0[i] for i<k, ts0[i+1] for k<=i<len-1.
+
+    assert(dts.no_duplicates()) by {
+        assert forall|i: int, j: int|
+            0 <= i < dts.len() && 0 <= j < dts.len() && i != j implies dts[i] != dts[j] by {
+            let ii = if i < k { i } else { i + 1 };
+            let jj = if j < k { j } else { j + 1 };
+            assert(dts[i] == ts0[ii] && dts[j] == ts0[jj]);
+            assert(ii != jj);
+        }
+    }
+
+    // Per-node: domain, next-threading, armed+notif.
+    assert forall|i: int| #![trigger dts[i]] 0 <= i < dts.len() implies
+        tmvf.dom().contains(dts[i])
+        && tmvf[dts[i]].next == (if i + 1 < dts.len() { Some(dts[i + 1]) } else { None::<ObjId> })
+        && tmvf[dts[i]].armed && tmvf[dts[i]].notif is Some by {
+        let ii = if i < k { i } else { i + 1 };
+        assert(dts[i] == ts0[ii]);
+        assert(tmv0.dom().contains(ts0[ii]));
+        assert(tmv0[ts0[ii]].next == (if ii + 1 < len { Some(ts0[ii + 1]) } else { None::<ObjId> }));
+        assert(tmv0[ts0[ii]].armed && tmv0[ts0[ii]].notif is Some);
+        if k > 0 && i == k - 1 {
+            // dts[i] is the predecessor ts0[k-1]; next re-threaded to tmv0[t].next.
+            assert(ii == k - 1);
+            assert(tmv0[t].next == (if k + 1 < len { Some(ts0[k + 1]) } else { None::<ObjId> }));
+            if i + 1 < dts.len() {
+                assert(dts[i + 1] == ts0[k + 1]);
+            } else {
+                assert(k + 1 == len);
+            }
+        } else {
+            assert(tmvf[ts0[ii]] == tmv0[ts0[ii]]);
+            if i + 1 < dts.len() {
+                let i1 = if i + 1 < k { i + 1 } else { i + 2 };
+                assert(dts[i + 1] == ts0[i1]);
+            }
+        }
+    }
+
+    // Head of `dts`.
+    if dts.len() == 0 {
+        assert(k == 0 && len == 1);
+        assert(tmv0[ts0[0]].next is None);
+        assert(headf is None);
+    } else {
+        if k == 0 {
+            assert(dts[0] == ts0[1]);
+            assert(tmv0[ts0[0]].next == Some(ts0[1]));
+            assert(headf == Some(dts[0]));
+        } else {
+            assert(dts[0] == ts0[0]);
+            assert(head0 == Some(ts0[0]));
+            assert(headf == Some(dts[0]));
+        }
+    }
+}
+
+// `[t] ++ ts0` is duplicate-free when `ts0` is and `t ∉ ts0`. Isolated into its own
+// query: `Seq::no_duplicates`'s `self[i] != self[j]` is an n² trigger, so leaving it in
+// `lemma_timer_push_head_chain`'s body (alongside the threading index terms) exploded the
+// rlimit — here the only `Seq`-index terms in scope are `pts`/`ts0`'s.
+proof fn lemma_push_head_nodup(ts0: Seq<ObjId>, t: ObjId, pts: Seq<ObjId>)
+    requires
+        ts0.no_duplicates(),
+        !ts0.contains(t),
+        pts.len() == ts0.len() + 1,
+        pts[0] == t,
+        forall|i: int| #![trigger pts[i]] 1 <= i < pts.len() ==> pts[i] == ts0[i - 1],
+    ensures
+        pts.no_duplicates(),
+{
+    assert forall|i: int, j: int|
+        0 <= i < pts.len() && 0 <= j < pts.len() && i != j implies pts[i] != pts[j] by {
+        if i >= 1 && j >= 1 {
+            assert(pts[i] == ts0[i - 1] && pts[j] == ts0[j - 1]);
+        } else if i == 0 {
+            assert(pts[j] == ts0[j - 1] && ts0.contains(ts0[j - 1]));
+        } else {
+            assert(pts[i] == ts0[i - 1] && ts0.contains(ts0[i - 1]));
+        }
+    }
+}
+
+// `arm`'s prepend step (plan §4e): pushing the freshly-armed `t` onto the head yields
+// `pts` (the head-push of `ts0`, i.e. `[t] ++ ts0`). `ts0` is the post-`disarm` chain —
+// `t` is not on it (it was just unarmed), and `arm` touches only `t`'s fields and the
+// head scalar, so every prior node is intact. The lighter analog of `wait`'s tail-push.
+pub proof fn lemma_timer_push_head_chain(
+    tmv0: Map<ObjId, TimerView>,
+    head0: Option<ObjId>,
+    tmvf: Map<ObjId, TimerView>,
+    headf: Option<ObjId>,
+    t: ObjId,
+    ts0: Seq<ObjId>,
+    pts: Seq<ObjId>,
+)
+    requires
+        timer_chain(tmv0, head0, ts0),
+        !ts0.contains(t),
+        tmv0.dom().contains(t),
+        // `arm` touches only `t`'s timer fields (each `set_timer_*` inserts at key `t`),
+        // so the post-state differs from the post-`disarm` map at `t` alone — a single
+        // `insert` rather than a broad `forall` frame (the broad trigger blew the rlimit).
+        tmvf == tmv0.insert(t, tmvf[t]),
+        tmvf[t].next == head0,
+        tmvf[t].armed && tmvf[t].notif is Some,
+        headf == Some(t),
+        // `pts == [t] ++ ts0`.
+        pts.len() == ts0.len() + 1,
+        pts[0] == t,
+        forall|i: int| #![trigger pts[i]] 1 <= i < pts.len() ==> pts[i] == ts0[i - 1],
+    ensures
+        timer_chain(tmvf, headf, pts),
+{
+    lemma_push_head_nodup(ts0, t, pts);
+    // Domain.
+    assert forall|i: int| #![trigger pts[i]] 0 <= i < pts.len() implies
+        tmvf.dom().contains(pts[i]) by {
+        if i == 0 { assert(pts[0] == t); } else { assert(pts[i] == ts0[i - 1]); }
+    }
+    // Armed + bound notification.
+    assert forall|i: int| #![trigger pts[i]] 0 <= i < pts.len() implies
+        tmvf[pts[i]].armed && tmvf[pts[i]].notif is Some by {
+        if i == 0 {
+            assert(pts[0] == t);
+        } else {
+            assert(pts[i] == ts0[i - 1] && ts0[i - 1] != t);
+            assert(tmvf[ts0[i - 1]] == tmv0[ts0[i - 1]]);
+        }
+    }
+    // `next`-threading.
+    assert forall|i: int| #![trigger pts[i]] 0 <= i < pts.len() implies
+        tmvf[pts[i]].next == (if i + 1 < pts.len() { Some(pts[i + 1]) } else { None::<ObjId> }) by {
+        if i == 0 {
+            assert(tmvf[t].next == head0);
+            if 1 < pts.len() {
+                assert(pts[1] == ts0[0]);
+                assert(head0 == Some(ts0[0]));
+            } else {
+                assert(ts0.len() == 0 && head0 is None);
+            }
+        } else {
+            assert(pts[i] == ts0[i - 1] && ts0[i - 1] != t);
+            assert(tmvf[ts0[i - 1]] == tmv0[ts0[i - 1]]);
+            assert(tmv0[ts0[i - 1]].next
+                == (if i < ts0.len() { Some(ts0[i]) } else { None::<ObjId> }));
+            if i + 1 < pts.len() { assert(pts[i + 1] == ts0[i]); } else { assert(i == ts0.len()); }
+        }
+    }
+}
+
+// An element of a duplicate-free `Seq` other than the one at index `k` survives a
+// `remove(k)`. Used to re-establish `timer_complete` after `disarm`'s splice: every
+// still-armed timer was charted on `ts0` and is not the removed `t == ts0[k]`, so it
+// is still charted on `ts0.remove(k)`.
+pub proof fn lemma_seq_remove_keeps(ts0: Seq<ObjId>, k: int, j: ObjId)
+    requires
+        0 <= k < ts0.len(),
+        ts0.no_duplicates(),
+        ts0.contains(j),
+        j != ts0[k],
+    ensures
+        ts0.remove(k).contains(j),
+{
+    let m = ts0.index_of(j);
+    ts0.remove_ensures(k);
+    if m < k {
+        assert(ts0.remove(k)[m] == ts0[m]);
+    } else {
+        assert(ts0.remove(k)[m - 1] == ts0[m]);
+    }
+}
+
+// Per-armed-timer signal-precondition supply (plan §4e, the census fragment): an armed
+// timer's bound notification is live and well-formed, holds the timer's own ref
+// (`refs >= 1`), and — when it has a blocked waiter — the waiter's ref too (`refs >= 2`),
+// so after `disarm` releases the timer's `-1` the waiter's survives and `signal`'s
+// wake-release precondition (`wait_head is Some ⇒ refs > 0`) still holds. The armed-timer
+// analog of `binding_notif_wf` + `binding_refs_ok`; precondition-only — the `refs`
+// fractions are not preservable without the full refcount census (the post-phase-5
+// teardown phase, plan §1.4) — but `check_expired` preserves it across a fire because the
+// armed notifications are pairwise distinct (`timer_notif_injective`).
+pub open spec fn timer_signal_ok_at(
+    tmv: Map<ObjId, TimerView>,
+    nv: Map<ObjId, NotifView>,
+    tv: Map<ObjId, TcbView>,
+    rv: Map<ObjId, nat>,
+    c: ObjId,
+) -> bool {
+    (tmv.dom().contains(c) && tmv[c].armed && tmv[c].notif is Some) ==> {
+        let n = tmv[c].notif->Some_0;
+        &&& nv.dom().contains(n)
+        &&& notif_wf(nv, tv, n)
+        &&& rv.dom().contains(n)
+        &&& rv[n] >= 1
+        &&& (nv[n].wait_head is Some ==> rv[n] >= 2)
+    }
+}
+
+pub open spec fn timer_signal_ok(
+    tmv: Map<ObjId, TimerView>,
+    nv: Map<ObjId, NotifView>,
+    tv: Map<ObjId, TcbView>,
+    rv: Map<ObjId, nat>,
+) -> bool {
+    forall|c: ObjId| #[trigger] tmv.dom().contains(c) ==> timer_signal_ok_at(tmv, nv, tv, rv, c)
+}
+
+// Armed timers bind pairwise-distinct notifications — what makes `check_expired`'s sweep
+// non-interfering: a `disarm`+`signal` on one armed timer's notification leaves every
+// other armed timer's notification (and its refs) untouched, so `timer_signal_ok` and
+// `timer_wf` survive across the fire. Realistic at MVP scale (one timer per notification);
+// the general (shared-notification) case rides forward to the census phase (plan §1.4).
+pub open spec fn timer_notif_injective(tmv: Map<ObjId, TimerView>) -> bool {
+    forall|c1: ObjId, c2: ObjId| #![trigger tmv[c1], tmv[c2]]
+        (tmv.dom().contains(c1) && tmv.dom().contains(c2)
+            && tmv[c1].armed && tmv[c2].armed && tmv[c1].notif == tmv[c2].notif) ==> c1 == c2
+}
+
 // `s` is one of channel-view `cv`'s ring cap slots. `send`/`recv` require the
 // caller's source/destination slots are NOT ring caps of the channel (the
 // kernel naturally supplies cspace residents), so moving them disturbs no other
