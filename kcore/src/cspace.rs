@@ -30,6 +30,12 @@ use vstd::prelude::*;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Rights(pub u8);
 
+// Inside `verus!{}` so the bit consts and `masked` are usable from verified code
+// (the §3c `retype_install` rights-inheritance theorem names `READ`/`WRITE`/`PHYS`/
+// `ALL`/`THREAD_ALL`; doc/results/28 §1). `masked` carries its bit-level `ensures`
+// here rather than via a standalone `assume_specification` — its trivial body is now
+// verified, not assumed.
+verus! {
 impl Rights {
     pub const READ: u8 = 1 << 0; // recv / wait
     pub const WRITE: u8 = 1 << 1; // send / signal
@@ -53,10 +59,15 @@ impl Rights {
         self.0 & bits == bits
     }
 
-    pub fn masked(self, mask: u8) -> Rights {
+    // The bit-level spec is what makes monotone derivation (and §3c's
+    // sub-untyped-never-PHYS theorem) provable.
+    pub fn masked(self, mask: u8) -> (out: Rights)
+        ensures out.0 == (self.0 & mask),
+    {
         Rights(self.0 & mask)
     }
 }
+} // verus!
 
 /// Common header at the start of every kernel object. `refs` counts every
 /// kernel reference that keeps the object alive: cap slots, channel-event
@@ -570,11 +581,9 @@ pub open spec fn derived_kind(k: CapKind) -> CapKind {
     }
 }
 
-// `Rights::masked` clears bits (rights ∩ mask); its bit-level spec is what makes
-// monotone derivation provable. (Trusted boundary: the method is plain Rust;
-// this states what it computes.)
-pub assume_specification [ Rights::masked ](r: Rights, mask: u8) -> (out: Rights)
-    ensures out.0 == (r.0 & mask);
+// `Rights::masked` now carries its bit-level `ensures` on the verified method
+// itself (see the `impl Rights` verus block above) — the standalone
+// `assume_specification` it used to need is gone (doc/results/28 §1).
 
 // `CapSlot::empty` is a plain-Rust const fn (shared with the kernel shell); state
 // what it builds so `slot_move`'s final clear can be verified — an empty cap with
@@ -951,6 +960,66 @@ proof fn lemma_insert_preserves_sib_acyclic(
         }
     }
     assert(valid_srank(m1, s1));
+    assert(sib_acyclic(m1));
+}
+
+// A local edit at one slot `k` that keeps `k`'s four CDT links and never turns a
+// non-empty slot empty preserves `cspace_wf`. Every structural clause and both
+// acyclicity ranks read only links (identical here) and per-slot emptiness (only
+// ever relaxed, empty→non-empty), so the witnesses transfer unchanged. The reuse
+// `retype_install` (plan §3c) leans on for its three `set_slot`s — the untyped's
+// watermark bump (links + emptiness both fixed) and the two detached dst/dst2
+// fills (an empty, hence detached, slot gains a cap with its links still null;
+// doc/results/28 §1).
+pub(crate) proof fn lemma_local_cap_edit_preserves_cspace_wf(
+    m0: Map<SlotId, CapSlot>,
+    k: SlotId,
+    v: CapSlot,
+)
+    requires
+        cspace_wf(m0),
+        m0.dom().contains(k),
+        v.parent == m0[k].parent,
+        v.first_child == m0[k].first_child,
+        v.next_sib == m0[k].next_sib,
+        v.prev_sib == m0[k].prev_sib,
+        is_empty_cap(v.cap) ==> is_empty_cap(m0[k].cap),
+    ensures
+        cspace_wf(m0.insert(k, v)),
+{
+    let m1 = m0.insert(k, v);
+    assert(m1.dom() =~= m0.dom());
+    // Every slot's four CDT links agree with m0 (k by hypothesis, all others
+    // untouched). The structural clauses read only these, so they carry.
+    assert forall|j: SlotId| #[trigger] m1.dom().contains(j) implies {
+        &&& m1[j].parent == m0[j].parent
+        &&& m1[j].first_child == m0[j].first_child
+        &&& m1[j].next_sib == m0[j].next_sib
+        &&& m1[j].prev_sib == m0[j].prev_sib
+    } by {
+        if j != k {
+            assert(m1[j] == m0[j]);
+        }
+    }
+    // empty_slots_detached: a slot empty in m1 is empty in m0 (k by hypothesis,
+    // others unchanged), hence detached there, hence detached here (links agree).
+    assert forall|j: SlotId| #[trigger] m1.dom().contains(j) implies (is_empty_cap(m1[j].cap) ==> {
+        &&& m1[j].parent == None
+        &&& m1[j].first_child == None
+        &&& m1[j].next_sib == None
+        &&& m1[j].prev_sib == None
+    }) by {
+        if j != k {
+            assert(m1[j] == m0[j]);
+        }
+    }
+    assert(cdt_wf(m1));
+    // Ranks reuse m0's witnesses: parent/next links and the domain are identical.
+    let r0 = choose|r: Map<SlotId, nat>| valid_prank(m0, r);
+    assert(valid_prank(m1, r0));
+    let s0 = choose|s: Map<SlotId, nat>| valid_srank(m0, s);
+    assert(valid_srank(m1, s0));
+    assert(acyclic(m1));
     assert(sib_acyclic(m1));
 }
 
@@ -2414,6 +2483,11 @@ pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
     ensures
         final(store).slot_view().dom() == old(store).slot_view().dom(),
         final(store).refs_view() == old(store).refs_view(),
+        // The CDT surgery is pure `set_slot` (which frames `chan_view`), so the
+        // channel ghost view is untouched — the frame `retype_install`'s channel arm
+        // (plan §3c) needs to carry `chan_view` across the two inserts it threads
+        // between `endpoint_cap_added(A)` and `endpoint_cap_added(B)` (doc 28).
+        final(store).chan_view() == old(store).chan_view(),
         forall|k: SlotId| #[trigger] old(store).slot_view().dom().contains(k)
             ==> final(store).slot_view()[k].cap == old(store).slot_view()[k].cap,
         final(store).slot_view()[child].cap == old(store).slot_view()[child].cap,
@@ -2426,6 +2500,16 @@ pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
         final(store).slot_view()[child].next_sib == old(store).slot_view()[parent].first_child,
         old(store).slot_view()[parent].first_child matches Some(f)
             ==> final(store).slot_view()[f].prev_sib == Some(child),
+        // The old first child keeps its parent and cap (only its prev_sib was
+        // rewritten) — so a second insert under the same parent (retype's channel
+        // arm: dst then dst2) leaves the first-inserted child still parented at
+        // `parent`, holding its cap (doc 28). These per-slot frames spare callers the
+        // `forall` caps-unchanged instantiation for the parent / old first child.
+        final(store).slot_view()[parent].cap == old(store).slot_view()[parent].cap,
+        old(store).slot_view()[parent].first_child matches Some(f)
+            ==> final(store).slot_view()[f].parent == old(store).slot_view()[f].parent,
+        old(store).slot_view()[parent].first_child matches Some(f)
+            ==> final(store).slot_view()[f].cap == old(store).slot_view()[f].cap,
         cspace_wf(final(store).slot_view()),
 {
     let ghost m0 = old(store).slot_view();

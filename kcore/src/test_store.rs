@@ -17,10 +17,12 @@
 //! plain-Rust re-expression. Shapes are built with the *verified* `derive`, so
 //! the generator cannot manufacture a non-`cspace_wf` start state.
 
-use crate::cspace::{cdt_unlink, delete, derive, revoke, slot_move, Cap, CapKind, CapSlot, Rights};
+use crate::cspace::{
+    cdt_unlink, delete, derive, revoke, slot_move, Cap, CapKind, CapSlot, ChanEnd, Rights,
+};
 use crate::id::{ObjId, SlotId};
 use crate::notification::signal;
-use crate::untyped::{reset, retype_check, ObjType, RetypeError};
+use crate::untyped::{reset, retype_check, retype_install, ObjType, RetypeError};
 use crate::store::{Binding, Store};
 use crate::thread::{Report, ThreadState};
 use std::collections::BTreeMap;
@@ -605,6 +607,96 @@ fn check_reset(st: &mut ArrayStore, ut: SlotId) {
     }
 }
 
+// Structural CapKind equality (CapKind is Clone+Copy but not PartialEq, so the
+// `dst.cap.kind == kind` postcondition is re-expressed here for the differential
+// runner). Covers the kinds `retype_install` installs.
+fn cap_kind_eq(a: CapKind, b: CapKind) -> bool {
+    match (a, b) {
+        (CapKind::Empty, CapKind::Empty) => true,
+        (
+            CapKind::Untyped { base: b1, size: s1, watermark: w1 },
+            CapKind::Untyped { base: b2, size: s2, watermark: w2 },
+        ) => b1 == b2 && s1 == s2 && w1 == w2,
+        (
+            CapKind::Frame { base: b1, pages: p1, mapping: m1 },
+            CapKind::Frame { base: b2, pages: p2, mapping: m2 },
+        ) => b1 == b2 && p1 == p2 && m1 == m2,
+        (CapKind::Aspace(o1), CapKind::Aspace(o2)) => o1 == o2,
+        (CapKind::CSpace(o1), CapKind::CSpace(o2)) => o1 == o2,
+        (CapKind::Thread(o1), CapKind::Thread(o2)) => o1 == o2,
+        (CapKind::Channel(o1, e1), CapKind::Channel(o2, e2)) => o1 == o2 && e1 == e2,
+        (CapKind::Notification(o1), CapKind::Notification(o2)) => o1 == o2,
+        (CapKind::Timer(o1), CapKind::Timer(o2)) => o1 == o2,
+        _ => false,
+    }
+}
+
+// Assert `retype_install`'s §3c contract against the real body: the watermark bump,
+// the §2.5 rights-inheritance table (incl. PHYS cleared for a sub-Untyped), the new
+// cap as a CDT child of `ut`, `cspace_wf` preserved, and the refcount/end_caps
+// deltas (non-channel: refs/chan untouched — the object's `init` pre-counts `dst`;
+// channel: refs 2, both ends accounted, `dst2` = endpoint B, other channels intact).
+fn check_retype_install(
+    st: &mut ArrayStore,
+    ut: SlotId,
+    ty: ObjType,
+    kind: CapKind,
+    end: u64,
+    dst: SlotId,
+    dst2: Option<SlotId>,
+) {
+    assert!(cspace_wf_exec(st), "retype_install pre: cspace_wf");
+    let (base, size, _) = untyped_geom(st.at(ut).cap).expect("retype_install pre: ut is Untyped");
+    assert!(base <= end, "retype_install pre: base <= end");
+    let ut_rights = st.at(ut).cap.rights.0;
+    let refs_before = st.refs.clone();
+    let chans_before = st.chans.clone();
+
+    retype_install(st, ut, ty, kind, end, dst, dst2);
+
+    assert!(cspace_wf_exec(st), "retype_install post: cspace_wf preserved");
+    // watermark advanced to `end - base`, base/size kept.
+    assert_eq!(untyped_geom(st.at(ut).cap), Some((base, size, end - base)), "watermark advanced");
+    // `dst` holds the new cap as a CDT child of `ut`.
+    assert!(cap_kind_eq(st.at(dst).cap.kind, kind), "dst holds the carved kind");
+    // SlotId is not Debug (see `fingerprint`), so compare with `assert!(==)`.
+    assert!(st.at(dst).parent == Some(ut), "dst is a CDT child of ut");
+    // §2.5 rights-inheritance table.
+    let expect_rights = match ty {
+        ObjType::Frame => ut_rights,
+        ObjType::Thread => Rights::THREAD_ALL.0,
+        ObjType::Untyped => ut_rights & (Rights::READ | Rights::WRITE),
+        _ => Rights::ALL.0,
+    };
+    assert_eq!(st.at(dst).cap.rights.0, expect_rights, "rights-inheritance table");
+    if matches!(ty, ObjType::Untyped) {
+        assert_eq!(st.at(dst).cap.rights.0 & Rights::PHYS, 0, "sub-Untyped never carries PHYS");
+    }
+    // refcount / chan_view deltas.
+    match kind {
+        CapKind::Channel(ch, _) => {
+            assert_eq!(st.refs[&ch.0], 2, "channel refs == 2");
+            assert_eq!(st.chan(ch).end_caps, [1, 1], "both ends' caps accounted");
+            let d2 = dst2.expect("channel: dst2 is Some");
+            assert!(
+                cap_kind_eq(st.at(d2).cap.kind, CapKind::Channel(ch, ChanEnd::B)),
+                "dst2 holds endpoint B"
+            );
+            assert_eq!(st.at(d2).cap.rights.0, Rights::ALL.0, "dst2 rights == ALL");
+            assert!(st.at(d2).parent == Some(ut), "dst2 is a CDT child of ut");
+            for (k, v) in chans_before.iter() {
+                if *k != ch.0 {
+                    assert!(st.chans.get(k) == Some(v), "other channels untouched");
+                }
+            }
+        }
+        _ => {
+            assert_eq!(st.refs, refs_before, "non-channel: refs untouched (init pre-counts dst)");
+            assert!(st.chans == chans_before, "non-channel: chan_view untouched");
+        }
+    }
+}
+
 // A well-formed one-deep channel (ObjId 7) + a notification (ObjId 100), the
 // fixture for the assumed-`signal` frame check. The arena holds the channel's 8
 // ring cap slots (1..=8) plus a non-empty witness at slot 0; ring 0 has one
@@ -768,6 +860,109 @@ fn reset_arms() {
     let mut st = ArrayStore::new(1);
     st.slots[0] = detached(frame_cap(0));
     check_reset(&mut st, SlotId(0));
+}
+
+#[test]
+fn retype_install_arms() {
+    // Frame inherits the untyped's rights (0xff here, PHYS included).
+    let mut st = ArrayStore::new(3);
+    st.slots[0] = detached(untyped_cap(0x1000, 0x10000, 0));
+    check_retype_install(
+        &mut st,
+        SlotId(0),
+        ObjType::Frame,
+        CapKind::Frame { base: 0x2000, pages: 1, mapping: None },
+        0x5000,
+        SlotId(1),
+        None,
+    );
+
+    // Thread → THREAD_ALL.
+    let mut st = ArrayStore::new(3);
+    st.slots[0] = detached(untyped_cap(0x1000, 0x10000, 0));
+    st.refs.insert(50, 1);
+    check_retype_install(
+        &mut st,
+        SlotId(0),
+        ObjType::Thread,
+        CapKind::Thread(ObjId(50)),
+        0x4000,
+        SlotId(1),
+        None,
+    );
+
+    // Sub-Untyped masked to READ|WRITE — PHYS provably stripped (the untyped has it).
+    // Rights = READ|PHYS so masked = READ (1) differs from ALL (3): teeth vs mutation.
+    let mut st = ArrayStore::new(3);
+    let mut uc = untyped_cap(0x1000, 0x10000, 0);
+    uc.rights = Rights(Rights::READ | Rights::PHYS);
+    st.slots[0] = detached(uc);
+    check_retype_install(
+        &mut st,
+        SlotId(0),
+        ObjType::Untyped,
+        CapKind::Untyped { base: 0x2000, size: 0x1000, watermark: 0 },
+        0x3000,
+        SlotId(1),
+        None,
+    );
+
+    // CSpace → ALL.
+    let mut st = ArrayStore::new(3);
+    st.slots[0] = detached(untyped_cap(0x1000, 0x10000, 0));
+    st.refs.insert(60, 1);
+    check_retype_install(
+        &mut st,
+        SlotId(0),
+        ObjType::CSpace,
+        CapKind::CSpace(ObjId(60)),
+        0x4000,
+        SlotId(1),
+        None,
+    );
+
+    // Channel: endpoint A in dst, B in dst2, refs → 2, end_caps → [1, 1].
+    let mut st = ArrayStore::new(4);
+    st.slots[0] = detached(untyped_cap(0x1000, 0x10000, 0));
+    let ch = ObjId(70);
+    st.refs.insert(70, 1);
+    st.chans.insert(
+        70,
+        ChanState {
+            depth: 1,
+            end_caps: [0, 0],
+            head: [0, 0],
+            count: [0, 0],
+            bindings: BTreeMap::new(),
+            msg_len: BTreeMap::new(),
+            ring_cap: BTreeMap::new(),
+        },
+    );
+    // A second, unrelated channel (ObjId 99) so the "other channels untouched"
+    // frame-check loop in check_retype_install actually runs (it skips ch == 70) —
+    // pinning the `forall|o| o != ch ==> chan_view[o] unchanged` postcondition.
+    st.chans.insert(
+        99,
+        ChanState {
+            depth: 2,
+            end_caps: [1, 1],
+            head: [0, 1],
+            count: [1, 0],
+            bindings: BTreeMap::new(),
+            msg_len: BTreeMap::new(),
+            ring_cap: BTreeMap::new(),
+        },
+    );
+    st.refs.insert(99, 1);
+    check_retype_install(
+        &mut st,
+        SlotId(0),
+        ObjType::Channel,
+        CapKind::Channel(ch, ChanEnd::A),
+        0x4000,
+        SlotId(1),
+        Some(SlotId(2)),
+    );
 }
 
 #[test]

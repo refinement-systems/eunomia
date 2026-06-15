@@ -17,13 +17,20 @@
 //! baked into the image.
 
 use crate::cspace::{self, Cap, CapKind, ChanEnd, CSpaceObj, Rights};
-// The `Store` ghost-view extension (`slot_view`/`refs_view`) the §3a contracts
-// quantify over. Only referenced from `requires`/`ensures`, which erase in a
-// normal build — hence unused there (the `spec fn`s `is_empty_cap`/`reset_slot`
-// and `CapKind` matches are reached by full path / module import respectively).
+// `StoreSpec` carries the `Store` ghost-view extension (`slot_view`/`refs_view`/
+// `chan_view`) the §3a/§3c contracts quantify over. Only referenced from
+// `requires`/`ensures`, which erase in a normal build — hence unused there. The spec
+// `fn`s (`cspace_wf`/`is_empty_cap`/`reset_slot`) and the proof lemma are reached by
+// **full path** inside contracts/proofs: they erase to nothing in a normal build, so
+// a `use` of them would be an unresolved import there. (The channel postcondition
+// reads `chan_view()` fields directly, so the `ChanView` type name is never written.)
 #[allow(unused_imports)]
 use crate::cspace::StoreSpec;
 use crate::id::SlotId;
+// `ObjId` appears only in the §3c channel postcondition (the `forall|o: ObjId|`
+// other-channels-untouched frame), which erases in a normal build — hence unused there.
+#[allow(unused_imports)]
+use crate::id::ObjId;
 use crate::store::Store;
 use vstd::prelude::*;
 
@@ -367,14 +374,31 @@ pub fn carve(
 
 } // verus!
 
+verus! {
+
 /// Install half: advance the untyped's watermark, set the new cap's rights
 /// per the inheritance table, link it as a CDT child, and run the channel
 /// two-endpoint dance. All checks already passed; this is infallible.
 ///
-/// pre:  `ut_slot` still holds the Untyped cap [`retype_check`] returned;
-///       `kind` was built at `carve.start`; `end == carve.end`.
-/// post: watermark = `end - base`; dst holds the cap; object refs == caps
-///       installed (1, or 2 for channels).
+/// Verified (plan doc/plans/3_verus-rewrite_phase3-detail.md §3c; doc/results/28).
+/// The §2.5 rights-inheritance table is proven as theorems: a Frame inherits the
+/// untyped's rights (so phys-read flows only along boot untypeds); a Thread carries
+/// `THREAD_ALL`; a carved sub-Untyped is masked to `READ|WRITE` and so **provably
+/// never carries `PHYS`** — phys stays off ordinary derivation chains by
+/// construction, now ∀ rather than asserted; every other object gets `ALL`. The new
+/// cap is a CDT child of the untyped (verified `cdt_insert_child`) and `cspace_wf`
+/// is preserved. The channel arm installs endpoint B in `dst2`, bumps the channel
+/// refcount to 2, and accounts both ends (verified `endpoint_cap_added`), leaving
+/// the freshly-carved channel with `end_caps == [1, 1]`.
+///
+/// pre:  `ut_slot` still holds the Untyped cap [`retype_check`] returned, with
+///       `base <= end`; `kind` (non-Empty) was built at `carve.start`;
+///       `end == carve.end`; `dst` (and, for a channel, `dst2`) is empty; a
+///       freshly-`init`'d channel has refs 1 and `end_caps == [0, 0]`.
+/// post: watermark = `end - base`; `dst` holds `Cap { kind, <table rights> }` as a
+///       CDT child of `ut_slot`; refs/end_caps account the installed cap(s)
+///       (non-channel: refs/chan untouched — the object's `init` pre-counts `dst`;
+///       channel: refs 2, both ends accounted, `dst2` = endpoint B).
 pub fn retype_install<S: Store>(
     store: &mut S,
     ut_slot: SlotId,
@@ -383,52 +407,186 @@ pub fn retype_install<S: Store>(
     end: u64,
     dst: SlotId,
     dst2: Option<SlotId>,
-) {
+)
+    requires
+        crate::cspace::cspace_wf(old(store).slot_view()),
+        old(store).slot_view().dom().contains(ut_slot),
+        old(store).slot_view().dom().contains(dst),
+        old(store).slot_view()[ut_slot].cap.kind matches CapKind::Untyped { .. },
+        (old(store).slot_view()[ut_slot].cap.kind matches CapKind::Untyped { base, size, watermark }
+            ==> base <= end),
+        crate::cspace::is_empty_cap(old(store).slot_view()[dst].cap),
+        !(kind matches CapKind::Empty),
+        (kind matches CapKind::Channel(ch, _) ==> (
+            dst2 matches Some(d2)
+                && d2 != dst
+                && old(store).slot_view().dom().contains(d2)
+                && crate::cspace::is_empty_cap(old(store).slot_view()[d2].cap)
+                && old(store).chan_view().dom().contains(ch)
+                && old(store).refs_view().dom().contains(ch)
+                && old(store).chan_view()[ch].end_caps.len() == 2
+                && old(store).chan_view()[ch].end_caps[0] == 0
+                && old(store).chan_view()[ch].end_caps[1] == 0
+                && old(store).refs_view()[ch] == 1
+        )),
+    ensures
+        final(store).slot_view().dom() == old(store).slot_view().dom(),
+        // watermark advanced to `end - base`.
+        (old(store).slot_view()[ut_slot].cap.kind matches CapKind::Untyped { base, size, watermark }
+            ==> final(store).slot_view()[ut_slot].cap.kind
+                == CapKind::Untyped { base, size, watermark: (end - base) as u64 }),
+        // `dst` holds the new cap as a CDT child of `ut_slot`.
+        final(store).slot_view()[dst].cap.kind == kind,
+        final(store).slot_view()[dst].parent == Some(ut_slot),
+        // §2.5 rights-inheritance table, as theorems keyed on `ty`.
+        (ty == ObjType::Frame ==> final(store).slot_view()[dst].cap.rights.0
+            == old(store).slot_view()[ut_slot].cap.rights.0),
+        (ty == ObjType::Thread ==> final(store).slot_view()[dst].cap.rights.0 == Rights::THREAD_ALL.0),
+        (ty == ObjType::Untyped ==> (
+            final(store).slot_view()[dst].cap.rights.0
+                == (old(store).slot_view()[ut_slot].cap.rights.0 & (Rights::READ | Rights::WRITE))
+            && (final(store).slot_view()[dst].cap.rights.0 & Rights::PHYS) == 0
+        )),
+        ((ty != ObjType::Frame && ty != ObjType::Thread && ty != ObjType::Untyped)
+            ==> final(store).slot_view()[dst].cap.rights.0 == Rights::ALL.0),
+        crate::cspace::cspace_wf(final(store).slot_view()),
+        // refcount / chan_view deltas. Non-channel: untouched (the object's `init`
+        // pre-counts `dst`, so there is no bump here).
+        (!(kind matches CapKind::Channel(_, _)) ==> (
+            final(store).refs_view() == old(store).refs_view()
+            && final(store).chan_view() == old(store).chan_view()
+        )),
+        // Channel: refs → 2, both ends accounted (end_caps [1, 1]), other channels
+        // untouched, `dst2` installed as endpoint B.
+        (kind matches CapKind::Channel(ch, _) ==> (
+            final(store).refs_view() == old(store).refs_view().insert(ch, 2 as nat)
+            && final(store).chan_view().dom() == old(store).chan_view().dom()
+            && final(store).chan_view()[ch].end_caps.len() == 2
+            && final(store).chan_view()[ch].end_caps[0] == 1
+            && final(store).chan_view()[ch].end_caps[1] == 1
+            && (forall|o: ObjId| #[trigger] old(store).chan_view().dom().contains(o) && o != ch
+                    ==> final(store).chan_view()[o] == old(store).chan_view()[o])
+            && (dst2 matches Some(d2) ==> (
+                final(store).slot_view()[d2].cap.kind == CapKind::Channel(ch, ChanEnd::B)
+                && final(store).slot_view()[d2].cap.rights.0 == Rights::ALL.0
+                && final(store).slot_view()[d2].parent == Some(ut_slot)
+            ))
+        )),
+{
+    let ghost m0 = store.slot_view();
+    let ghost rv0 = store.refs_view();
+    let ghost cv0 = store.chan_view();
+
     let mut ut = store.slot(ut_slot);
-    let CapKind::Untyped { base, size, .. } = ut.cap.kind else {
-        // Unreachable: retype_check established this and nothing mutates
-        // ut_slot's kind between check and install.
-        return;
+    let ghost ut_rights = ut.cap.rights;
+    let (base, size) = match ut.cap.kind {
+        CapKind::Untyped { base, size, .. } => (base, size),
+        _ => {
+            // Unreachable: the precondition pins `ut_slot` to an Untyped cap.
+            assert(false);
+            return;
+        }
     };
-    ut.cap.kind = CapKind::Untyped {
-        base,
-        size,
-        watermark: end - base,
-    };
-    // Frames inherit the untyped's rights so phys-read (§2.5) flows only
-    // from boot untypeds along explicit grants; threads carry the full
-    // §2.3 thread-rights set on the creator cap (attenuation strips from
-    // here); other kernel objects get the ordinary full mask. A carved
-    // sub-untyped inherits read/write but never phys-read: a spawn pool
-    // funds child memory, not DMA authority — stripping here keeps phys
-    // off ordinary derivation chains (§2.5) by construction.
+    assert(base <= end);
+    ut.cap.kind = CapKind::Untyped { base, size, watermark: end - base };
     let rights = match ty {
         ObjType::Frame => ut.cap.rights,
         ObjType::Thread => Rights::THREAD_ALL,
         ObjType::Untyped => ut.cap.rights.masked(Rights::READ | Rights::WRITE),
         _ => Rights::ALL,
     };
+    proof {
+        // §2.5 sub-untyped-never-PHYS: masking to READ|WRITE clears the PHYS bit for
+        // every possible rights value — the theorem, ∀, not a sampled assert. (The
+        // bit-vector tactic needs a plain `u8`, so bind `ut_rights.0` to `b` first.)
+        assert(Rights::READ | Rights::WRITE == 3u8) by (compute);
+        assert(Rights::PHYS == 4u8) by (compute);
+        let b = ut_rights.0;
+        assert((b & 3u8) & 4u8 == 0u8) by (bit_vector);
+    }
     store.set_slot(ut_slot, ut);
+    let ghost m_u = m0.insert(ut_slot, ut);
+    proof {
+        // Watermark bump: links + emptiness fixed, so `cspace_wf` carries.
+        crate::cspace::lemma_local_cap_edit_preserves_cspace_wf(m0, ut_slot, ut);
+        assert(store.slot_view() =~= m_u);
+    }
+
+    // `dst` is empty in m0, untouched by the ut_slot edit (dst != ut_slot: dst is
+    // empty, ut_slot is not), so it is still empty and detached here.
+    assert(dst != ut_slot);
     let mut d = store.slot(dst);
     d.cap = Cap { kind, rights };
     store.set_slot(dst, d);
+    proof {
+        // Detached fill: `dst` was empty (hence all-None links), now non-empty with
+        // links still None — `cspace_wf` carries.
+        crate::cspace::lemma_local_cap_edit_preserves_cspace_wf(m_u, dst, d);
+        assert(store.slot_view() =~= m_u.insert(dst, d));
+    }
     cspace::cdt_insert_child(store, ut_slot, dst);
+
+    // After the first insert: `dst` is parented at `ut_slot` and holds `Cap{kind,
+    // rights}`; `ut_slot` still holds the watermark-bumped Untyped; refs/chan are
+    // unchanged from entry. Capture this so the channel arm can show it survives.
+    let ghost m_a = store.slot_view();
+    proof {
+        assert(m_a[dst].cap == d.cap);
+        assert(m_a[dst].parent == Some(ut_slot));
+        assert(m_a[ut_slot].cap == ut.cap);
+        assert(m_a[ut_slot].first_child == Some(dst));
+        assert(store.refs_view() =~= rv0);
+        assert(store.chan_view() =~= cv0);
+    }
+
     if let CapKind::Channel(ch, _) = kind {
         crate::channel::endpoint_cap_added(store, ch, ChanEnd::A);
-        // dst2 is Some for channels (retype_check enforced it).
+        // dst2 is Some for channels (retype_check enforced it; the precondition
+        // carries it here).
         if let Some(d2) = dst2 {
+            // endpoint_cap_added framed `slot_view`, so the arena is still `m_a`; d2
+            // is in its domain (a cap-only edit of the read keeps d2's links, and the
+            // lemma needs no fact about d2's old cap — it is non-empty after the fill).
+            assert(store.slot_view() =~= m_a);
+            assert(m_a.dom().contains(d2));
             let mut s2 = store.slot(d2);
-            s2.cap = Cap {
-                kind: CapKind::Channel(ch, ChanEnd::B),
-                rights: Rights::ALL,
-            };
+            s2.cap = Cap { kind: CapKind::Channel(ch, ChanEnd::B), rights: Rights::ALL };
             store.set_slot(d2, s2);
+            proof {
+                crate::cspace::lemma_local_cap_edit_preserves_cspace_wf(m_a, d2, s2);
+                assert(store.slot_view() =~= m_a.insert(d2, s2));
+            }
+            // refs[ch] is still 1 here (set_slot/cdt_insert_child/endpoint frame it).
+            assert(store.refs_view()[ch] == 1);
             store.set_obj_refs(ch, store.obj_refs(ch) + 1);
             cspace::cdt_insert_child(store, ut_slot, d2);
             crate::channel::endpoint_cap_added(store, ch, ChanEnd::B);
+
+            // ── Close the channel-arm postconditions ──
+            proof {
+                // dst survived both later inserts: its cap is preserved (cdt_insert_
+                // child keeps all caps; endpoint/set_obj_refs frame slot_view) and its
+                // parent is preserved (the second insert's old-first-child = dst keeps
+                // its parent — the cdt_insert_child frame clause).
+                assert(store.slot_view()[dst].cap == d.cap);
+                assert(store.slot_view()[dst].parent == Some(ut_slot));
+                assert(store.slot_view()[ut_slot].cap == ut.cap);
+                // d2 is endpoint B, parented at ut_slot, rights ALL.
+                assert(store.slot_view()[d2].cap == s2.cap);
+                assert(store.slot_view()[d2].parent == Some(ut_slot));
+                // end_caps: [0,0] →(A) [1,0] →(B) [1,1]; refs: 1 →(set) 2.
+                assert(store.chan_view()[ch].end_caps[0] == 1);
+                assert(store.chan_view()[ch].end_caps[1] == 1);
+                assert(store.refs_view() =~= rv0.insert(ch, 2 as nat));
+                assert(store.chan_view().dom() == cv0.dom());
+                assert forall|o: ObjId| #[trigger] cv0.dom().contains(o) && o != ch
+                    implies store.chan_view()[o] == cv0[o] by {}
+            }
         }
     }
 }
+
+} // verus!
 
 verus! {
 
