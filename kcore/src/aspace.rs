@@ -18,6 +18,11 @@
 //! [`crate::store::Store::aspace_unmap`]).
 
 use crate::cspace::ObjHeader;
+// `StoreSpec` (the `external_trait_extension`) must be in scope so `unmap_in` can
+// name the `tlb_log_view` ghost view on the generic `S: Store`; it erases in a
+// normal build, so it is otherwise unused here (the doc/results/26 §2.3 idiom).
+#[allow(unused_imports)]
+use crate::cspace::StoreSpec;
 use crate::store::Store;
 use vstd::prelude::*;
 
@@ -1438,14 +1443,17 @@ verus! {
 /// Verified equal to the model [`pt_lookup`]: a `Some((l3, e))` result names the
 /// in-bounds leaf slot (`l3 < pool.len()`, `e < 512`) whose value is exactly
 /// `pt_lookup`'s leaf PTE; `None` matches `pt_lookup` being `None`. The bounds
-/// are what let [`range_mapped_in`] index `pool[l3][e]` safely. The two `?` are
-/// spelled as explicit `match`/early-return so the control flow stays in the
-/// verified fragment (the 5a convention).
+/// are what let [`range_mapped_in`] index `pool[l3][e]` safely. The slot is also
+/// returned *structurally* as [`pt_leaf_slot`] (`== Some((l3, e))`) — `unmap_in`
+/// (5e) needs the slot, not just the value, to hand the leaf-clear frame lemma.
+/// The two `?` are spelled as explicit `match`/early-return so the control flow
+/// stays in the verified fragment (the 5a convention).
 pub(crate) fn lookup(l1: &[u64; 512], pool: &[[u64; 512]], pool_base: u64, va: u64) -> (r: Option<(usize, usize)>)
     ensures
         match r {
             Some((l3, e)) => l3 < pool.len() && e < 512
-                && pt_lookup(l1@, pool@, pool_base, va) == Some(pool@[l3 as int][e as int]),
+                && pt_lookup(l1@, pool@, pool_base, va) == Some(pool@[l3 as int][e as int])
+                && pt_leaf_slot(l1@, pool@, pool_base, va) == Some((l3 as nat, e as nat)),
             None => pt_lookup(l1@, pool@, pool_base, va) is None,
         },
 {
@@ -1802,9 +1810,282 @@ proof fn lemma_pg_distinct(va: u64, pages: u64, j: int, k: int)
 
 } // verus!
 
+verus! {
+
+/// The TLBI log `unmap_in` issues over `[va, va+n*PAGE)`: one `(asid, pg(va,j))`
+/// entry per **present** page (`pt_lookup` of the *original* table is `Some`), in
+/// ascending `j` order — the §4.5 "one TLBI per cleared page, in order" as a
+/// closed-form spec (the `expected_tlb_log` of the detail plan). Built over the
+/// original tables: a clear sets a leaf to `0` (still `Some`), so a page's
+/// presence is invariant across the unmap, and the runtime branch (`lookup` of the
+/// *current* table) agrees with this original-table predicate (bridged by the
+/// frame invariant). `pub closed` so `unmap_in`'s public ensures may name it
+/// without leaking the walk (the `pg`/`spec_pte_encode` idiom).
+pub closed spec fn unmap_log(
+    l1: Seq<u64>,
+    pool: Seq<[u64; 512]>,
+    pool_base: u64,
+    asid: u16,
+    va: u64,
+    n: nat,
+) -> Seq<(u16, u64)>
+    decreases n,
+{
+    if n == 0 {
+        Seq::empty()
+    } else {
+        let prev = unmap_log(l1, pool, pool_base, asid, va, (n - 1) as nat);
+        if pt_lookup(l1, pool, pool_base, pg(va, (n - 1) as int)) is Some {
+            prev.push((asid, pg(va, (n - 1) as int)))
+        } else {
+            prev
+        }
+    }
+}
+
+/// One-step unfold of [`unmap_log`]: clearing `n = i+1` pages appends page `i`'s
+/// TLBI iff page `i` was present. The recursive `closed` fn needs the explicit
+/// successor reveal (fuel) to unfold a symbolic `(i+1) as nat`.
+proof fn lemma_unmap_log_step(l1: Seq<u64>, pool: Seq<[u64; 512]>, pool_base: u64, asid: u16, va: u64, i: int)
+    requires 0 <= i,
+    ensures
+        unmap_log(l1, pool, pool_base, asid, va, (i + 1) as nat)
+            == (if pt_lookup(l1, pool, pool_base, pg(va, i)) is Some {
+                    unmap_log(l1, pool, pool_base, asid, va, i as nat).push((asid, pg(va, i)))
+                } else {
+                    unmap_log(l1, pool, pool_base, asid, va, i as nat)
+                }),
+{
+    reveal_with_fuel(unmap_log, 2);
+    assert((i + 1) as nat > 0);
+    assert(((i + 1) as nat - 1) as nat == i as nat);
+    assert(pg(va, ((i + 1) as nat - 1) as int) == pg(va, i));
+}
+
+/// A present leaf slot lives in a **leaf** table: if `va` resolves to slot
+/// `(l3, e)` then `l3 ∈ leaves` (and `l3 < pool_used`). The same closure walk as
+/// [`lemma_walk_alloc_resolves`]' tail, but starting from `pt_leaf_slot` (what
+/// `lookup` hands `unmap_in`), so the leaf-clear can invoke [`lemma_leaf_write`].
+proof fn lemma_present_leaf_in_leaves(
+    l1: Seq<u64>,
+    pool: Seq<[u64; 512]>,
+    pool_base: u64,
+    pu: nat,
+    pl: nat,
+    leaves: Set<nat>,
+    va: u64,
+    l3: nat,
+    e: nat,
+)
+    requires
+        pt_wf_leveled(l1, pool, pool_base, pu, pl, leaves),
+        pool.len() == pl,
+        pt_leaf_slot(l1, pool, pool_base, va) == Some((l3, e)),
+    ensures
+        leaves.contains(l3),
+        l3 < pu,
+{
+    lemma_va_indices(va);
+    let l1e = l1[spec_l1_index(va) as int];
+    assert(l1e & DESC_TABLE == DESC_TABLE);            // else pt_leaf_slot is None
+    assert(pool_index_spec(pool_base, pl, l1e) is Some
+        && pool_index_spec(pool_base, pl, l1e).unwrap() < pu
+        && !leaves.contains(pool_index_spec(pool_base, pl, l1e).unwrap()));  // (b1)
+    let l2_idx = pool_index_spec(pool_base, pl, l1e).unwrap();
+    let l2e = pool[l2_idx as int][spec_l2_index(va) as int];
+    assert(l2e & DESC_TABLE == DESC_TABLE);            // else pt_leaf_slot is None
+    assert(pool_index_spec(pool_base, pl, l2e) == Some(l3));  // from pt_leaf_slot == Some((l3,e))
+    assert(pool_index_spec(pool_base, pl, l2e) is Some
+        && pool_index_spec(pool_base, pl, l2e).unwrap() < pu
+        && leaves.contains(pool_index_spec(pool_base, pl, l2e).unwrap()));  // (b2)
+}
+
+/// An **absent** page's lookup is unchanged by a leaf-table clear: a `None` walk
+/// dead-ends at `l1` or an **inner** table (all `!= l3`, since `l3 ∈ leaves`), so
+/// zeroing a leaf entry leaves it `None`. The `None`-companion of
+/// [`lemma_leaf_write`]'s frame (which only covers present pages), needed because
+/// `unmap_in`'s frame ranges over pages that may be unmapped.
+proof fn lemma_leaf_clear_none(
+    l1: Seq<u64>,
+    pool: Seq<[u64; 512]>,
+    pooln: Seq<[u64; 512]>,
+    pool_base: u64,
+    pu: nat,
+    pl: nat,
+    leaves: Set<nat>,
+    l3: nat,
+    w: u64,
+)
+    requires
+        pt_wf_leveled(l1, pool, pool_base, pu, pl, leaves),
+        leaves.contains(l3),
+        pool.len() == pl,
+        pooln.len() == pl,
+        forall|t: int| 0 <= t < pl && t != l3 ==> pooln[t] == pool[t],
+        pt_leaf_slot(l1, pool, pool_base, w) is None,
+    ensures
+        pt_lookup(l1, pooln, pool_base, w) == pt_lookup(l1, pool, pool_base, w),
+{
+    lemma_va_indices(w);
+    let l1e = l1[spec_l1_index(w) as int];
+    if l1e & DESC_TABLE == DESC_TABLE {
+        assert(pool_index_spec(pool_base, pl, l1e) is Some
+            && pool_index_spec(pool_base, pl, l1e).unwrap() < pu
+            && !leaves.contains(pool_index_spec(pool_base, pl, l1e).unwrap()));  // (b1)
+        let l2_idx = pool_index_spec(pool_base, pl, l1e).unwrap();
+        assert(l2_idx != l3);                          // inner != leaf
+        assert(pooln[l2_idx as int] == pool[l2_idx as int]);
+        let l2e = pool[l2_idx as int][spec_l2_index(w) as int];
+        // `pt_leaf_slot(w)` is None, so `l2e` cannot be a present table descriptor
+        // (else (b2) would resolve it to a leaf, making `pt_leaf_slot` Some).
+        assert(l2e & DESC_TABLE != DESC_TABLE) by {
+            if l2e & DESC_TABLE == DESC_TABLE {
+                assert(pool_index_spec(pool_base, pl, l2e) is Some
+                    && leaves.contains(pool_index_spec(pool_base, pl, l2e).unwrap()));  // (b2)
+                assert(pt_leaf_slot(l1, pool, pool_base, w) is Some);
+                assert(false);
+            }
+        }
+    }
+    // Both walks dead-end identically (only the leaf table `l3` changed; the dead-
+    // end reads `l1` + inner tables, none of which is `l3`).
+    assert(pt_lookup(l1, pooln, pool_base, w) == pt_lookup(l1, pool, pool_base, w));
+}
+
+/// Clearing the leaf slot `(l3, e)` that `va` resolves to (writing `0`): preserves
+/// `pt_wf`, makes `va` read `Some(0)` (unmapped), and **frames every page whose
+/// leaf slot differs from `(l3, e)`** — present or absent. [`lemma_leaf_write`]
+/// (with `pte == 0`) gives the present-page frame; [`lemma_leaf_clear_none`] adds
+/// the absent-page case, so the unified frame covers all of `unmap_in`'s range.
+proof fn lemma_leaf_clear(
+    l1: Seq<u64>,
+    pool: Seq<[u64; 512]>,
+    pooln: Seq<[u64; 512]>,
+    pool_base: u64,
+    pu: nat,
+    pl: nat,
+    leaves: Set<nat>,
+    l3: nat,
+    e: nat,
+    va: u64,
+)
+    requires
+        pt_wf_leveled(l1, pool, pool_base, pu, pl, leaves),
+        leaves.contains(l3),
+        e < 512,
+        pool.len() == pl,
+        pt_leaf_slot(l1, pool, pool_base, va) == Some((l3, e)),
+        pooln.len() == pl,
+        pooln[l3 as int][e as int] == 0,
+        forall|j: int| 0 <= j < 512 && j != e ==> pooln[l3 as int][j] == pool[l3 as int][j],
+        forall|t: int| 0 <= t < pl && t != l3 ==> pooln[t] == pool[t],
+    ensures
+        pt_wf(l1, pooln, pool_base, pu, pl),
+        pt_lookup(l1, pooln, pool_base, va) == Some(0u64),
+        forall|w: u64| #![trigger pt_lookup(l1, pooln, pool_base, w)]
+            pt_leaf_slot(l1, pool, pool_base, w) != Some((l3, e))
+                ==> pt_lookup(l1, pooln, pool_base, w) == pt_lookup(l1, pool, pool_base, w),
+{
+    lemma_leaf_write(l1, pool, pooln, pool_base, pu, pl, leaves, l3, e, va, 0u64);
+    assert forall|w: u64| #![trigger pt_lookup(l1, pooln, pool_base, w)]
+        pt_leaf_slot(l1, pool, pool_base, w) != Some((l3, e))
+            implies pt_lookup(l1, pooln, pool_base, w) == pt_lookup(l1, pool, pool_base, w) by {
+        if pt_leaf_slot(l1, pool, pool_base, w) is Some {
+            // present-but-other-slot — lemma_leaf_write's frame applies.
+        } else {
+            lemma_leaf_clear_none(l1, pool, pooln, pool_base, pu, pl, leaves, l3, w);
+        }
+    }
+}
+
+/// Per-step advance of `unmap_in`'s "range-unmapped" (A) + "outside-range framed"
+/// (C) invariants for a **cleared** page `i` — the `unmap` analog of
+/// [`lemma_map_in_step`]. Distinct in-range/outside-range pages have distinct leaf
+/// slots (the tree theorem [`lemma_distinct_pages_slots`]), so clearing page `i`'s
+/// slot leaves every other tracked page untouched.
+proof fn lemma_unmap_in_step(
+    l1: Seq<u64>,
+    before: Seq<[u64; 512]>,
+    after: Seq<[u64; 512]>,
+    pool_base: u64,
+    pu: nat,
+    pl: nat,
+    pool_0: Seq<[u64; 512]>,
+    va: u64,
+    pages: u64,
+    i: int,
+    l3: nat,
+    e: nat,
+)
+    requires
+        va % PAGE == 0,
+        va >= USER_VA_BASE,
+        (va as int) + (pages as int) * (PAGE as int) <= USER_VA_END as int,
+        0 <= i < pages,
+        pt_wf(l1, before, pool_base, pu, pl),
+        before.len() == pl,
+        pt_leaf_slot(l1, before, pool_base, pg(va, i)) == Some((l3, e)),
+        pt_lookup(l1, after, pool_base, pg(va, i)) == Some(0u64),
+        forall|w: u64| #![trigger pt_lookup(l1, after, pool_base, w)]
+            pt_leaf_slot(l1, before, pool_base, w) != Some((l3, e))
+                ==> pt_lookup(l1, after, pool_base, w) == pt_lookup(l1, before, pool_base, w),
+        forall|j: int| #![trigger pg(va, j)] 0 <= j < i ==>
+            pt_lookup(l1, before, pool_base, pg(va, j)) is None
+                || pt_lookup(l1, before, pool_base, pg(va, j)) == Some(0u64),
+        forall|w: u64| #![trigger pt_lookup(l1, before, pool_base, w)]
+            (USER_VA_BASE <= w < USER_VA_END && w % PAGE == 0
+                && ((w as int) < (va as int) || (w as int) >= (va as int) + i * (PAGE as int)))
+                ==> pt_lookup(l1, before, pool_base, w) == pt_lookup(l1, pool_0, pool_base, w),
+    ensures
+        forall|j: int| #![trigger pg(va, j)] 0 <= j < i + 1 ==>
+            pt_lookup(l1, after, pool_base, pg(va, j)) is None
+                || pt_lookup(l1, after, pool_base, pg(va, j)) == Some(0u64),
+        forall|w: u64| #![trigger pt_lookup(l1, after, pool_base, w)]
+            (USER_VA_BASE <= w < USER_VA_END && w % PAGE == 0
+                && ((w as int) < (va as int) || (w as int) >= (va as int) + (i + 1) * (PAGE as int)))
+                ==> pt_lookup(l1, after, pool_base, w) == pt_lookup(l1, pool_0, pool_base, w),
+{
+    lemma_pg_in_range(va, pages, i);
+    assert((i + 1) * (PAGE as int) == i * (PAGE as int) + (PAGE as int)) by (nonlinear_arith);
+    assert(i * (PAGE as int) >= 0) by (nonlinear_arith) requires i >= 0, PAGE > 0;
+    // (A) advance: every page `j ≤ i` is unmapped after the clear.
+    assert forall|j: int| #![trigger pg(va, j)] 0 <= j < i + 1 implies
+        (pt_lookup(l1, after, pool_base, pg(va, j)) is None
+            || pt_lookup(l1, after, pool_base, pg(va, j)) == Some(0u64)) by {
+        if j < i {
+            lemma_pg_in_range(va, pages, j);
+            lemma_pg_distinct(va, pages, j, i);
+            if pt_leaf_slot(l1, before, pool_base, pg(va, j)) is Some {
+                lemma_distinct_pages_slots(l1, before, pool_base, pu, pl, pg(va, j), pg(va, i));
+            }
+            // pg(va,j)'s slot != (l3,e) ⟹ framed; A_i carries.
+        }
+        // j == i: pt_lookup(after, pg(va,i)) == Some(0).
+    }
+    // (C) advance: every aligned user page outside [va, va+(i+1)*PAGE) is framed.
+    assert forall|w: u64| #![trigger pt_lookup(l1, after, pool_base, w)]
+        (USER_VA_BASE <= w < USER_VA_END && w % PAGE == 0
+            && ((w as int) < (va as int) || (w as int) >= (va as int) + (i + 1) * (PAGE as int)))
+        implies pt_lookup(l1, after, pool_base, w) == pt_lookup(l1, pool_0, pool_base, w) by {
+        assert(w != pg(va, i));   // pg(va,i) == va + i*PAGE, strictly inside the gap
+        if pt_leaf_slot(l1, before, pool_base, w) is Some {
+            lemma_distinct_pages_slots(l1, before, pool_base, pu, pl, w, pg(va, i));
+        }
+        // w's slot != (l3,e) ⟹ framed to `before`; w also outside [va,va+i*PAGE) ⟹ C_i.
+    }
+}
+
 /// Unmap `pages` frames at `va`, invalidating each cleared page's TLB entry
 /// through `store`. Mirrors the old `unmap` (clear + per-page TLBI wherever the
 /// L3 table exists, then a single trailing barrier).
+///
+/// Verified against the `pt_wf` tree model + the TLBI effect-log (doc 40): on
+/// return every page in `[va, va+pages·PAGE)` is unmapped (`pt_lookup` is `None`
+/// or `Some(0)`), every aligned user page **outside** the range keeps its mapping
+/// (the frame), `pt_wf` is preserved (clearing a leaf keeps the tree — no table is
+/// freed), and `store`'s TLBI log grows by **exactly one `(asid, va+i·PAGE)` per
+/// cleared page, in ascending order** ([`unmap_log`]) followed by the trailing
+/// barrier — the §4.5 "one TLBI per cleared page, in order" as a postcondition.
 pub fn unmap_in<S: Store>(
     l1: &[u64; 512],
     pool: &mut [[u64; 512]],
@@ -1813,16 +2094,120 @@ pub fn unmap_in<S: Store>(
     va: u64,
     pages: u64,
     store: &mut S,
-) {
-    for i in 0..pages {
-        let page_va = va + i * PAGE;
-        if let Some((l3, e)) = lookup(l1, pool, pool_base, page_va) {
-            pool[l3][e] = 0;
-            store.tlb_invalidate_page(asid, page_va);
+)
+    requires
+        pool_geom_ok(pool_base, old(pool).len() as nat),
+        exists|pu: nat| pt_wf(l1@, old(pool)@, pool_base, pu, old(pool).len() as nat),
+        va % PAGE == 0,
+        va >= USER_VA_BASE,
+        (va as int) + (pages as int) * (PAGE as int) <= USER_VA_END as int,
+    ensures
+        final(pool).len() == old(pool).len(),
+        exists|pu: nat| pt_wf(l1@, final(pool)@, pool_base, pu, final(pool).len() as nat),
+        forall|i: int| #![trigger pg(va, i)] 0 <= i < pages ==>
+            pt_lookup(l1@, final(pool)@, pool_base, pg(va, i)) is None
+                || pt_lookup(l1@, final(pool)@, pool_base, pg(va, i)) == Some(0u64),
+        forall|w: u64| #![trigger pt_lookup(l1@, final(pool)@, pool_base, w)]
+            (USER_VA_BASE <= w < USER_VA_END && w % PAGE == 0
+                && ((w as int) < (va as int) || (w as int) >= (va as int) + (pages as int) * (PAGE as int)))
+                ==> pt_lookup(l1@, final(pool)@, pool_base, w) == pt_lookup(l1@, old(pool)@, pool_base, w),
+        final(store).tlb_log_view()
+            == old(store).tlb_log_view() + unmap_log(l1@, old(pool)@, pool_base, asid, va, pages as nat),
+{
+    broadcast use {vstd::slice::group_slice_axioms, vstd::array::group_array_axioms};
+    let ghost pl = pool.len() as nat;
+    let ghost pool_0 = pool@;
+    let ghost pu = choose|pu: nat| pt_wf(l1@, pool_0, pool_base, pu, pl);
+    proof { assert(USER_VA_END == 0x80_0000_0000) by (compute); }
+    let mut i: u64 = 0;
+    while i < pages
+        invariant
+            i <= pages,
+            pool.len() == pl,
+            pool.len() == old(pool).len(),
+            pool_0 == old(pool)@,
+            pool_geom_ok(pool_base, pl),
+            pt_wf(l1@, pool@, pool_base, pu, pl),
+            va % PAGE == 0,
+            va >= USER_VA_BASE,
+            (va as int) + (pages as int) * (PAGE as int) <= USER_VA_END as int,
+            USER_VA_END == 0x80_0000_0000,
+            // (A) every already-processed page is unmapped.
+            forall|j: int| #![trigger pg(va, j)] 0 <= j < i ==>
+                pt_lookup(l1@, pool@, pool_base, pg(va, j)) is None
+                    || pt_lookup(l1@, pool@, pool_base, pg(va, j)) == Some(0u64),
+            // (C) every aligned user page outside [va, va+i*PAGE) keeps its mapping.
+            forall|w: u64| #![trigger pt_lookup(l1@, pool@, pool_base, w)]
+                (USER_VA_BASE <= w < USER_VA_END && w % PAGE == 0
+                    && ((w as int) < (va as int) || (w as int) >= (va as int) + (i as int) * (PAGE as int)))
+                    ==> pt_lookup(l1@, pool@, pool_base, w) == pt_lookup(l1@, pool_0, pool_base, w),
+            // (E) the TLBI log so far = one entry per cleared page, in order.
+            store.tlb_log_view()
+                == old(store).tlb_log_view() + unmap_log(l1@, pool_0, pool_base, asid, va, i as nat),
+        decreases pages - i,
+    {
+        proof { lemma_pg_in_range(va, pages, i as int); }
+        let page = va + i * PAGE;
+        assert(page == pg(va, i as int));
+        let ghost before = pool@;
+        proof { lemma_unmap_log_step(l1@, pool_0, pool_base, asid, va, i as int); }
+        // C_i at `page` (page == va+i*PAGE is outside [va, va+i*PAGE)) bridges the
+        // current-table presence test to the original-table `unmap_log` predicate.
+        assert((page as int) >= (va as int) + (i as int) * (PAGE as int));
+        assert(pt_lookup(l1@, before, pool_base, page) == pt_lookup(l1@, pool_0, pool_base, page));
+        match lookup(l1, pool, pool_base, page) {
+            Some((l3, e)) => {
+                let ghost leaves = choose|lv: Set<nat>| pt_wf_leveled(l1@, before, pool_base, pu, pl, lv);
+                proof { lemma_present_leaf_in_leaves(l1@, before, pool_base, pu, pl, leaves, page, l3 as nat, e as nat); }
+                pool[l3][e] = 0;
+                proof {
+                    lemma_leaf_clear(l1@, before, pool@, pool_base, pu, pl, leaves, l3 as nat, e as nat, page);
+                    lemma_unmap_in_step(l1@, before, pool@, pool_base, pu, pl, pool_0, va, pages, i as int,
+                        l3 as nat, e as nat);
+                }
+                store.tlb_invalidate_page(asid, page);
+                proof {
+                    // (E) advance: present ⟹ unmap_log gained (asid, page); push distributes over +.
+                    assert(pt_lookup(l1@, pool_0, pool_base, pg(va, i as int)) is Some);
+                    assert(store.tlb_log_view()
+                        =~= old(store).tlb_log_view() + unmap_log(l1@, pool_0, pool_base, asid, va, (i + 1) as nat));
+                }
+            }
+            None => {
+                // Page absent: no L3 entry to clear, no TLBI. Pool + log unchanged.
+                proof {
+                    assert(pool@ == before);
+                    // (A) j == i: the page is unmapped (None); (C) shrinks; (E) no push.
+                    assert(pt_lookup(l1@, pool@, pool_base, pg(va, i as int)) is None);
+                    assert(pt_lookup(l1@, pool_0, pool_base, pg(va, i as int)) is None);
+                    assert(store.tlb_log_view()
+                        =~= old(store).tlb_log_view() + unmap_log(l1@, pool_0, pool_base, asid, va, (i + 1) as nat));
+                    assert forall|w: u64| #![trigger pt_lookup(l1@, pool@, pool_base, w)]
+                        (USER_VA_BASE <= w < USER_VA_END && w % PAGE == 0
+                            && ((w as int) < (va as int) || (w as int) >= (va as int) + ((i + 1) as int) * (PAGE as int)))
+                        implies pt_lookup(l1@, pool@, pool_base, w) == pt_lookup(l1@, pool_0, pool_base, w) by {
+                        assert((i + 1) as int * (PAGE as int) >= (i as int) * (PAGE as int)) by (nonlinear_arith)
+                            requires PAGE > 0, i >= 0;
+                    }
+                    assert forall|j: int| #![trigger pg(va, j)] 0 <= j < (i + 1) as int implies
+                        (pt_lookup(l1@, pool@, pool_base, pg(va, j)) is None
+                            || pt_lookup(l1@, pool@, pool_base, pg(va, j)) == Some(0u64)) by {
+                        if j == i as int { assert(pg(va, j) == page); }
+                    }
+                }
+            }
         }
+        i = i + 1;
     }
     store.barrier_after_unmap();
+    proof {
+        // The barrier frames both the page tables (it takes neither slice) and the
+        // accumulated TLBI log, so the loop-exit invariants are the postconditions.
+        assert(pt_wf(l1@, pool@, pool_base, pu, pl));
+    }
 }
+
+} // verus!
 
 verus! {
 

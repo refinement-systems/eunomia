@@ -98,6 +98,11 @@ struct ArrayStore {
     tcbs: BTreeMap<u64, TcbState>,
     timers: BTreeMap<u64, TimerState>,
     timer_armed_head: Option<ObjId>,
+    // The TLBI effect log (plan §5e): the executable counterpart of the
+    // `tlb_log_view` ghost view. `tlb_invalidate_page` appends `(asid, va)`, so
+    // `check_unmap` can assert `unmap_in` issues one TLBI per cleared page, in
+    // order (the ordering theorem checked against the real body).
+    tlb_log: Vec<(u16, u64)>,
 }
 
 impl ArrayStore {
@@ -111,6 +116,7 @@ impl ArrayStore {
             tcbs: BTreeMap::new(),
             timers: BTreeMap::new(),
             timer_armed_head: None,
+            tlb_log: Vec::new(),
         }
     }
     fn n(&self) -> usize {
@@ -297,16 +303,14 @@ impl Store for ArrayStore {
         self.tcbs.get_mut(&t.0).unwrap().state = ThreadState::Runnable;
     }
     fn unqueue_ready(&mut self, _: ObjId) {}
-    fn tlb_invalidate_page(&mut self, _: u16, _: u64) {
-        unimplemented!()
+    // The real `dsb`/`isb` + TLBI is the kernel shell's job; here the barriers are
+    // no-ops and `tlb_invalidate_page` records the `(asid, va)` log so `check_unmap`
+    // can assert the §5e ordering theorem against the real `unmap_in` body.
+    fn tlb_invalidate_page(&mut self, asid: u16, va: u64) {
+        self.tlb_log.push((asid, va));
     }
-    // No-op so `map_in` host tests (`aspace::map_in`) can use `ArrayStore` purely
-    // as the barrier supplier; the real `dsb`/`isb` is the kernel shell's job.
-    // `tlb_invalidate_page`/`barrier_after_unmap` stay `unimplemented!()` (5e).
     fn barrier_after_map(&mut self) {}
-    fn barrier_after_unmap(&mut self) {
-        unimplemented!()
-    }
+    fn barrier_after_unmap(&mut self) {}
     fn timer_armed_head(&self) -> Option<ObjId> {
         self.timer_armed_head
     }
@@ -2507,7 +2511,7 @@ fn destroy_tcb_structural() {
 // the verified read-only walker (`range_mapped_in`/`lookup`) — the executable
 // counterpart of the `pt_lookup` round-trip.
 
-use crate::aspace::{lookup, map_in, pte_encode, range_mapped_in, MapError, PAGE, PERM_W, USER_VA_BASE, USER_VA_END};
+use crate::aspace::{lookup, map_in, pte_encode, range_mapped_in, unmap_in, MapError, PAGE, PERM_W, USER_VA_BASE, USER_VA_END};
 
 // A fresh aspace: a zeroed L1, an `npools`-table zeroed pool at a page-aligned
 // base, `pool_used == 0`. `pool_base` sits well inside the 48-bit address field.
@@ -2633,4 +2637,116 @@ fn randomized_map_sweep() {
         }
     }
     assert!(trials > 300, "sweep should map hundreds of ranges, ran {trials}");
+}
+
+// ── aspace `unmap_in` (plan §5e): the verified leaf-clear + TLBI effect-log ──
+//
+// `unmap_in` runs the **real** body against the same hand-built arrays, driving
+// the per-page TLBI through `ArrayStore`'s real `tlb_log`. The host checks assert
+// both halves of the §5e contract: the pages are cleared (and others framed,
+// `range_mapped_in`/`lookup`) and the TLBI log equals the expected `(asid, va)`
+// sequence, in ascending order — the executable counterpart of the ordering
+// theorem (`unmap_log`).
+
+const TEST_ASID: u16 = 7;
+
+#[test]
+fn unmap_clears_and_logs() {
+    let (mut l1, mut pool, mut used, base) = map_fixture(8);
+    let mut store = ArrayStore::new(0);
+    let (va, pa) = (USER_VA_BASE, 0x4800_0000u64);
+    map_in(&mut l1, &mut pool, &mut used, base, pa, va, 4, PERM_W, &mut store).unwrap();
+    assert!(range_mapped_in(&l1, &pool, base, va, 4 * PAGE, false), "mapped before unmap");
+
+    unmap_in(&l1, &mut pool, base, TEST_ASID, va, 4, &mut store);
+    // Every page in the range is now unmapped…
+    assert!(!range_mapped_in(&l1, &pool, base, va, 4 * PAGE, false), "range cleared");
+    for i in 0..4u64 {
+        let (l3, e) = lookup(&l1, &pool, base, va + i * PAGE).expect("L3 table still present");
+        assert_eq!(pool[l3][e], 0, "leaf {i} zeroed");
+    }
+    // …and one TLBI per cleared page, in ascending order, then a (no-op) barrier.
+    let expect: Vec<(u16, u64)> = (0..4).map(|i| (TEST_ASID, va + i * PAGE)).collect();
+    assert_eq!(store.tlb_log, expect, "one TLBI per cleared page, in order");
+}
+
+#[test]
+fn unmap_absent_l3_region_no_tlbi() {
+    // `unmap_in` skips a page only when its whole L3 table is absent — the skip is
+    // per-L3-table (2 MiB), not per-leaf (`lookup` is `Some` for any present chain,
+    // even a zero leaf). Map one page in region 0, then unmap a *different* 2 MiB
+    // region (l2 slot 1, no L3 table) — no panic, no TLBI.
+    let (mut l1, mut pool, mut used, base) = map_fixture(8);
+    let mut store = ArrayStore::new(0);
+    map_in(&mut l1, &mut pool, &mut used, base, 0x4800_0000, USER_VA_BASE, 1, PERM_W, &mut store).unwrap();
+    store.tlb_log.clear();
+    // USER_VA_BASE + 512*PAGE is the next 2 MiB region — no L2/L3 there.
+    unmap_in(&l1, &mut pool, base, TEST_ASID, USER_VA_BASE + 512 * PAGE, 4, &mut store);
+    assert!(store.tlb_log.is_empty(), "absent L3 region ⇒ no TLBI");
+    // The unrelated mapping is untouched (the frame).
+    assert!(range_mapped_in(&l1, &pool, base, USER_VA_BASE, PAGE, false), "other mapping intact");
+}
+
+#[test]
+fn unmap_skips_absent_l3_at_region_boundary() {
+    // A range straddling the 2 MiB L3 boundary: the present half is cleared + TLBI'd,
+    // the absent half is skipped (the genuine per-L3 skip). Page 0's mapping creates
+    // the L3 table for region 0 (pages 0..511); pages 512.. live in the absent region 1.
+    let (mut l1, mut pool, mut used, base) = map_fixture(8);
+    let mut store = ArrayStore::new(0);
+    map_in(&mut l1, &mut pool, &mut used, base, 0x4800_0000, USER_VA_BASE, 1, PERM_W, &mut store).unwrap();
+    store.tlb_log.clear();
+    // [base+510*PAGE, base+514*PAGE): pages 510,511 (region 0, present) + 512,513 (region 1, absent).
+    unmap_in(&l1, &mut pool, base, TEST_ASID, USER_VA_BASE + 510 * PAGE, 4, &mut store);
+    assert_eq!(store.tlb_log,
+        vec![(TEST_ASID, USER_VA_BASE + 510 * PAGE), (TEST_ASID, USER_VA_BASE + 511 * PAGE)],
+        "only the present-L3 pages are TLBI'd; the absent region is skipped");
+}
+
+#[test]
+fn unmap_partial_overlap_frames_the_rest() {
+    let (mut l1, mut pool, mut used, base) = map_fixture(8);
+    let mut store = ArrayStore::new(0);
+    let (va, pa) = (USER_VA_BASE, 0x4800_0000u64);
+    map_in(&mut l1, &mut pool, &mut used, base, pa, va, 4, PERM_W, &mut store).unwrap();
+    store.tlb_log.clear();
+    // Unmap only the middle two pages (1..3).
+    unmap_in(&l1, &mut pool, base, TEST_ASID, va + PAGE, 2, &mut store);
+    // Pages 1,2 gone; pages 0,3 keep their exact PTEs (the frame).
+    assert!(!range_mapped_in(&l1, &pool, base, va + PAGE, 2 * PAGE, false), "middle cleared");
+    let (l3, e) = lookup(&l1, &pool, base, va).expect("present");
+    assert_eq!(pool[l3][e], pte_encode(pa, PERM_W), "page 0 framed");
+    let (l3, e) = lookup(&l1, &pool, base, va + 3 * PAGE).expect("present");
+    assert_eq!(pool[l3][e], pte_encode(pa + 3 * PAGE, PERM_W), "page 3 framed");
+    assert_eq!(store.tlb_log, vec![(TEST_ASID, va + PAGE), (TEST_ASID, va + 2 * PAGE)]);
+}
+
+#[test]
+fn unmap_tlbis_present_l3_including_zero_leaves() {
+    // Two disjoint single pages (a hole between them) share one L3 table, so the
+    // whole 4-page span has a present chain. `unmap_in` TLBIs every page in a
+    // present L3 region — the holes (zero leaves) included — one per page, in order.
+    let (mut l1, mut pool, mut used, base) = map_fixture(8);
+    let mut store = ArrayStore::new(0);
+    let va = USER_VA_BASE;
+    map_in(&mut l1, &mut pool, &mut used, base, 0x4800_0000, va, 1, PERM_W, &mut store).unwrap();
+    map_in(&mut l1, &mut pool, &mut used, base, 0x4900_0000, va + 2 * PAGE, 1, PERM_W, &mut store).unwrap();
+    store.tlb_log.clear();
+    unmap_in(&l1, &mut pool, base, TEST_ASID, va, 4, &mut store);
+    assert!(!range_mapped_in(&l1, &pool, base, va, 4 * PAGE, false));
+    let expect: Vec<(u16, u64)> = (0..4).map(|i| (TEST_ASID, va + i * PAGE)).collect();
+    assert_eq!(store.tlb_log, expect, "one TLBI per page of the present L3, in order");
+}
+
+#[test]
+fn map_unmap_remap_roundtrip() {
+    let (mut l1, mut pool, mut used, base) = map_fixture(8);
+    let mut store = ArrayStore::new(0);
+    let (va, pa) = (USER_VA_BASE, 0x4800_0000u64);
+    map_in(&mut l1, &mut pool, &mut used, base, pa, va, 3, PERM_W, &mut store).unwrap();
+    unmap_in(&l1, &mut pool, base, TEST_ASID, va, 3, &mut store);
+    assert!(!range_mapped_in(&l1, &pool, base, va, 3 * PAGE, false), "unmapped");
+    // The cleared leaves are reusable: a fresh map of the same range succeeds.
+    map_in(&mut l1, &mut pool, &mut used, base, pa, va, 3, PERM_W, &mut store).unwrap();
+    assert!(range_mapped_in(&l1, &pool, base, va, 3 * PAGE, true), "remapped writable");
 }

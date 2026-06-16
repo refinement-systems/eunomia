@@ -465,6 +465,14 @@ pub trait ExStore {
     // The armed-timer list head — a `Store`-seam scalar (the kernel static,
     // store.rs:130); the list *logic* is in `crate::timer` (phase 4e).
     spec fn timer_head_view(&self) -> Option<ObjId>;
+    // The TLBI effect log (plan §5e): the ordered sequence of `(asid, va)` TLB
+    // invalidations issued through this store. The seventh view — pure hardware
+    // effect, not object state — so `aspace::unmap_in` can prove "one TLBI per
+    // cleared page, in order" as a real postcondition. Only the three hardware-
+    // seam methods below touch it; it is left unconstrained across the object
+    // setters (no object op interleaves a setter with a TLBI), so adding it is a
+    // localized seam change, not a per-setter sweep (plan §5e/§1.4).
+    spec fn tlb_log_view(&self) -> Seq<(u16, u64)>;
 
     fn slot(&self, s: SlotId) -> (r: CapSlot)
         requires self.slot_view().dom().contains(s),
@@ -980,7 +988,8 @@ pub trait ExStore {
     // `map_in` needs to call it in the verified fragment. Because it takes
     // neither page-table slice, Verus already knows it cannot perturb `l1`/`pool`,
     // so `map_in`'s page-table postcondition is independent of this contract.
-    // `tlb_invalidate_page`/`barrier_after_unmap` stay uncontracted until 5e.
+    // It also frames the TLBI log unchanged (plan §5e) — the log only ever grows
+    // via `tlb_invalidate_page`, so the barrier is a pure ordering fence.
     fn barrier_after_map(&mut self)
         ensures
             final(self).slot_view() == old(self).slot_view(),
@@ -989,7 +998,40 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).tlb_log_view() == old(self).tlb_log_view();
+
+    // ── unmap hardware seam (plan §5e; the `aspace::unmap_in` TLBI ordering) ──
+    //
+    // The two effect-log methods `unmap_in` calls. `tlb_invalidate_page` appends
+    // exactly one `(asid, va)` entry — that *append* is what makes "one TLBI per
+    // cleared page, in ascending order" a postcondition (the loop invariant tracks
+    // `tlb_log_view() == old ++ cleared-prefix`). Both frame every object view, so
+    // the page-table postcondition and the log postcondition compose cleanly.
+    fn tlb_invalidate_page(&mut self, asid: u16, va: u64)
+        ensures
+            final(self).tlb_log_view() == old(self).tlb_log_view().push((asid, va)),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view();
+
+    // The trailing `dsb`/`isb` after the per-page TLBIs — a pure fence, framing
+    // every object view *and* the accumulated TLBI log (so the loop's final log
+    // state survives the barrier).
+    fn barrier_after_unmap(&mut self)
+        ensures
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).tlb_log_view() == old(self).tlb_log_view();
 }
 
 // The refcounted object a cap designates (the spec mirror of `Cap::obj`).
