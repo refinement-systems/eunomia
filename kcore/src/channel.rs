@@ -197,13 +197,17 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
             ==> final(store).refs_view() == old(store).refs_view(),
         cspace::binding_notif_wf(final(store).chan_view(), final(store).notif_view(),
             final(store).tcb_view(), ch),
-        // The refcount census rides through (plan §6d body PR, doc 45 §3): the only state
+        // The refcount census moves in lockstep (plan §6d body PR, doc 45 §3): the only state
         // change before a possible fire is `set_chan_end_caps`, and `end_caps` is **not** a
         // census term — `binding_refs` reads only the (unchanged) bindings, the other five
-        // terms read framed views — so the census is unchanged across the decrement, and
-        // `fire` carries its own conditional preservation across the peer-closed fire.
-        // **Conditional** (no new `requires`) — `delete`'s Channel branch supplies the hypothesis.
-        cspace::refcount_sound(old(store)) ==> cspace::refcount_sound(final(store)),
+        // terms read framed views — so refs *and* census are unchanged across the decrement,
+        // and `fire` freezes the delta across the peer-closed fire. Unconditional and
+        // `requires`-free — `delete`'s Channel branch consumes it in the off-by-one window.
+        cspace::census_delta_frozen(old(store), final(store)),
+        // …and a census off by one at any `z` survives — exactly the shape `delete` carries
+        // across the peer-closed fire (its deleted channel cap's slot was just cleared).
+        forall|z: ObjId| cspace::census_off_by_one(old(store), z)
+            ==> #[trigger] cspace::census_off_by_one(final(store), z),
 {
     let e = end_idx(end);
     store.set_chan_end_caps(ch, e, store.chan_end_caps(ch, e) - 1);
@@ -211,7 +215,8 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
     // binding invariant + the fired binding's refs side-condition carry to the fire.
     assert(store.chan_view()[ch].bindings == old(store).chan_view()[ch].bindings);
     // The census is unchanged across the `end_caps` decrement (`end_caps` is no census
-    // term): `binding_refs` is framed (bindings unchanged), the other five read framed views.
+    // term): `binding_refs` is framed (bindings unchanged), the other five read framed views;
+    // `set_chan_end_caps` also frames `refs`. So both refs and census equal `old` here.
     proof {
         assert(store.chan_view().dom() == old(store).chan_view().dom());
         assert forall|c: ObjId| old(store).chan_view().dom().contains(c) implies
@@ -227,6 +232,17 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
     }
     if store.chan_end_caps(ch, e) == 0 {
         fire(store, ch, 1 - e, EV_PEER_CLOSED);
+    }
+    // census_delta_frozen(old, final): the `set_chan_end_caps` step left refs *and* census
+    // equal to `old` (above), and `fire` froze the delta across the peer-closed fire — so
+    // the net delta from `old` is exactly `fire`'s frozen delta. A census off-by-one then
+    // survives by `lemma_off_by_one_frozen` applied to that frozen delta.
+    proof {
+        assert(cspace::census_delta_frozen(old(store), store));
+        assert forall|z: ObjId| cspace::census_off_by_one(old(store), z) implies
+            #[trigger] cspace::census_off_by_one(store, z) by {
+            cspace::lemma_off_by_one_frozen(old(store), store, z);
+        }
     }
 }
 
@@ -254,12 +270,16 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
         final(store).chan_view() == old(store).chan_view(),
         cspace::binding_notif_wf(final(store).chan_view(), final(store).notif_view(),
             final(store).tcb_view(), ch),
-        // The refcount census rides through the fire (plan §6d body PR): `fire` reads a
-        // binding then either does nothing or calls `signal` (whose own conditional
-        // preservation applies, its `old` being this `old` — no mutation precedes it).
-        // **Conditional** so `send`/`recv` (the construction-op callers of `fire`) keep
-        // no `refcount_sound` obligation; the teardown caller `endpoint_cap_dropped` supplies it.
-        cspace::refcount_sound(old(store)) ==> cspace::refcount_sound(final(store)),
+        // The refcount census moves in lockstep across the fire (plan §6d body PR): `fire`
+        // reads a binding then either does nothing or calls `signal` (whose own
+        // `census_delta_frozen` applies, its `old` being this `old` — no mutation precedes
+        // it). Unconditional and `requires`-free, so `send`/`recv` (the construction-op
+        // callers) keep no census obligation; `endpoint_cap_dropped` consumes it.
+        cspace::census_delta_frozen(old(store), final(store)),
+        // …and a census off by one at any `z` survives (the frozen delta applied to that
+        // shape) — `endpoint_cap_dropped`/`delete` read this off the chain.
+        forall|z: ObjId| cspace::census_off_by_one(old(store), z)
+            ==> #[trigger] cspace::census_off_by_one(final(store), z),
 {
     let b = store.chan_binding(ch, end, event);
     if let Some(n) = b.notif {
@@ -290,12 +310,15 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
             }
         }
     }
-    // The fire preserves `refcount_sound` (conditionally): in the bound branch `signal`'s
-    // own conditional ensures applies (nothing mutated before it, so its `old` is this
-    // `old`); in the unbound branch the store is untouched.
+    // The fire freezes the census delta: in the bound branch `signal`'s own
+    // `census_delta_frozen` applies (nothing mutated before it, so its `old` is this `old`);
+    // in the unbound branch the store is untouched (a trivially frozen delta). A census
+    // off-by-one then survives by `lemma_off_by_one_frozen` applied to that frozen delta.
     proof {
-        if cspace::refcount_sound(old(store)) {
-            assert(cspace::refcount_sound(store));
+        assert(cspace::census_delta_frozen(old(store), store));
+        assert forall|z: ObjId| cspace::census_off_by_one(old(store), z) implies
+            #[trigger] cspace::census_off_by_one(store, z) by {
+            cspace::lemma_off_by_one_frozen(old(store), store, z);
         }
     }
 }
