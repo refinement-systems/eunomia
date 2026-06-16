@@ -22,8 +22,8 @@ use crate::channel::{
     EV_READABLE, MSG_PAYLOAD,
 };
 use crate::cspace::{
-    cdt_unlink, delete, derive, revoke, slot_move, unref_aspace, Cap, CapKind, CapSlot, ChanEnd,
-    Rights,
+    cdt_unlink, delete, derive, destroy_cspace, obj_unref, revoke, slot_move, unref_aspace,
+    unref_cspace, Cap, CapKind, CapSlot, ChanEnd, Rights,
 };
 use crate::id::{ObjId, SlotId};
 use crate::notification::{destroy_notif, remove_waiter, signal, wait};
@@ -761,6 +761,7 @@ fn check_delete(st: &mut ArrayStore, slot: SlotId) {
     assert!(cspace_wf_exec(st), "delete pre: cspace_wf");
     assert!(!st.at(slot).cap.is_empty(), "delete pre: slot non-empty");
     let (n0, c0) = (st.n(), count_nonempty_exec(st));
+    let resid0 = st.cspaces.clone();
     // The §6a census clause is conditional on the precondition `refcount_sound`,
     // so only assert it preserved when the fixture satisfied it (most generated
     // forests carry no object caps, so they are vacuously sound).
@@ -770,6 +771,8 @@ fn check_delete(st: &mut ArrayStore, slot: SlotId) {
     assert_eq!(st.n(), n0, "delete post: dom preserved");
     assert!(st.at(slot).cap.is_empty(), "delete post: target slot emptied");
     assert!(count_nonempty_exec(st) < c0, "delete post: count_nonempty strictly drops");
+    // §6c: residency is immutable across delete (the frame destroy_cspace's loop reads).
+    assert!(st.cspaces == resid0, "delete post: cspace residency unchanged");
     if sound0 {
         assert!(refcount_sound_exec(st), "delete post: refcount_sound preserved");
     }
@@ -2151,6 +2154,174 @@ fn unref_aspace_last_ref_destroys() {
     let mut st = ArrayStore::new(0);
     st.refs.insert(2, 1);
     check_unref_aspace(&mut st, ObjId(2));
+}
+
+// ── Cross-object teardown refcount plumbing (plan §6c): obj_unref / unref_cspace /
+//    destroy_cspace, driven on the real ArrayStore bodies. obj_unref/unref_cspace are
+//    now proven (not external_body), so these are differential regression guards (the
+//    erasure + the ArrayStore seam); destroy_cspace's loop and the nested cross-object
+//    recursion through the still-external_body `delete` are exercised at runtime. ──
+
+// cap_obj as plain Rust (the spec `cap_obj` is not exec-callable from the harness).
+fn cap_obj_of(cap: Cap) -> Option<ObjId> {
+    match cap.kind {
+        CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => None,
+        CapKind::Aspace(o) | CapKind::CSpace(o) | CapKind::Thread(o)
+        | CapKind::Channel(o, _) | CapKind::Notification(o) | CapKind::Timer(o) => Some(o),
+    }
+}
+
+// Drive `obj_unref`. For a designating cap it must be handed the off-by-one state
+// (`refs[o] == census(o) + 1`, sound elsewhere — the caller already cleared o's slot);
+// the `-1` restores full soundness, firing the type-specific destructor at zero. For a
+// non-designating cap it is a no-op (the store is untouched).
+fn check_obj_unref(st: &mut ArrayStore, cap: Cap) {
+    assert!(cspace_wf_exec(st), "obj_unref pre: cspace_wf");
+    let c0 = count_nonempty_exec(st);
+    match cap_obj_of(cap) {
+        None => {
+            let fp0 = fingerprint(st);
+            let refs0 = st.refs.clone();
+            obj_unref(st, cap);
+            assert_eq!(fingerprint(st), fp0, "obj_unref(non-designating): slots untouched");
+            assert_eq!(st.refs, refs0, "obj_unref(non-designating): refs untouched");
+        }
+        Some(o) => {
+            let r0 = st.refs[&o.0];
+            assert!(r0 > 0, "obj_unref pre: refs[o] > 0");
+            assert_eq!(obj_census_exec(st, o) + 1, r0, "obj_unref pre: off-by-one census at o");
+            for (&x, &r) in &st.refs {
+                if x != o.0 {
+                    assert_eq!(obj_census_exec(st, ObjId(x)), r, "obj_unref pre: sound at every other object");
+                }
+            }
+            obj_unref(st, cap);
+            assert!(refcount_sound_exec(st), "obj_unref post: refcount_sound restored");
+            assert!(count_nonempty_exec(st) <= c0, "obj_unref post: count_nonempty non-increase");
+        }
+    }
+}
+
+// Drive `unref_cspace` on the off-by-one state: the `-1`, then the at-zero
+// `destroy_cspace` (residents emptied) or the plain decrement (cspace survives).
+fn check_unref_cspace(st: &mut ArrayStore, cs: ObjId) {
+    assert!(cspace_wf_exec(st), "unref_cspace pre: cspace_wf");
+    let r0 = st.refs[&cs.0];
+    assert!(r0 > 0, "unref_cspace pre: refs[cs] > 0");
+    assert_eq!(obj_census_exec(st, cs) + 1, r0, "unref_cspace pre: off-by-one census at cs");
+    let residents: Vec<SlotId> = st.cspaces[&cs.0].clone();
+    let c0 = count_nonempty_exec(st);
+    unref_cspace(st, cs);
+    assert!(cspace_wf_exec(st), "unref_cspace post: cspace_wf preserved");
+    assert!(refcount_sound_exec(st), "unref_cspace post: refcount_sound restored");
+    assert!(count_nonempty_exec(st) <= c0, "unref_cspace post: count_nonempty non-increase");
+    if r0 == 1 {
+        for sid in residents {
+            assert!(st.at(sid).cap.is_empty(), "unref_cspace last ref: every resident emptied");
+        }
+    }
+}
+
+// Drive `destroy_cspace`'s resident loop (the precondition is `refs[cs] == 0`). Every
+// resident is emptied (delete + its cross-object recursion), `cspace_wf` and
+// `refcount_sound` preserved, the live-slot count non-increasing.
+fn check_destroy_cspace(st: &mut ArrayStore, cs: ObjId) {
+    assert!(cspace_wf_exec(st), "destroy_cspace pre: cspace_wf");
+    assert_eq!(st.refs.get(&cs.0).copied().unwrap_or(0), 0, "destroy_cspace pre: refs[cs] == 0");
+    let residents: Vec<SlotId> = st.cspaces[&cs.0].clone();
+    let (c0, sound0) = (count_nonempty_exec(st), refcount_sound_exec(st));
+    destroy_cspace(st, cs);
+    assert!(cspace_wf_exec(st), "destroy_cspace post: cspace_wf preserved");
+    for sid in residents {
+        assert!(st.at(sid).cap.is_empty(), "destroy_cspace: every resident emptied");
+    }
+    assert!(count_nonempty_exec(st) <= c0, "destroy_cspace: count_nonempty non-increase");
+    if sound0 {
+        assert!(refcount_sound_exec(st), "destroy_cspace post: refcount_sound preserved");
+    }
+}
+
+// destroy_cspace on a cspace whose residents are bare frame caps (no nested objects):
+// both residents are deleted, the count drops to zero, the census stays sound.
+#[test]
+fn destroy_cspace_empties_frame_residents() {
+    let mut st = ArrayStore::new(2);
+    st.slots[0] = detached(frame_cap(0x1000));
+    st.slots[1] = detached(frame_cap(0x2000));
+    st.refs.insert(10, 0);
+    st.cspaces.insert(10, vec![SlotId(0), SlotId(1)]);
+    assert!(refcount_sound_exec(&st), "fixture is refcount_sound");
+    check_destroy_cspace(&mut st, ObjId(10));
+}
+
+// The nested case: cspace 10's sole resident is the *one* cap to cspace 11, which owns
+// its own frame residents. destroy_cspace(10) → delete(the CSpace(11) cap) → obj_unref →
+// destroy_cspace(11) → delete 11's residents — the opaque-`delete`-recurses path,
+// exercised at runtime (delete keeps a real body under its external_body contract).
+#[test]
+fn destroy_cspace_nested_recurses_through_delete() {
+    let mut st = ArrayStore::new(3);
+    st.slots[0] = detached(cspace_cap(11)); // the one cap to cspace 11 (resident of 10)
+    st.slots[1] = detached(frame_cap(0x1000));
+    st.slots[2] = detached(frame_cap(0x2000));
+    st.refs.insert(10, 0);
+    st.refs.insert(11, 1);
+    st.cspaces.insert(10, vec![SlotId(0)]);
+    st.cspaces.insert(11, vec![SlotId(1), SlotId(2)]);
+    assert!(refcount_sound_exec(&st), "nested fixture is refcount_sound");
+    check_destroy_cspace(&mut st, ObjId(10));
+    // The nested cspace's residents were emptied by the cross-object recursion too.
+    assert!(st.at(SlotId(1)).cap.is_empty(), "nested resident emptied");
+    assert!(st.at(SlotId(2)).cap.is_empty(), "nested resident emptied");
+    assert_eq!(st.refs[&11], 0, "nested cspace's last ref dropped to zero");
+}
+
+// unref_cspace on a non-last ref: a cap designates cspace 10 (census == 1) and the
+// off-by-one bump makes refs == 2, so the `-1` lands at 1 — the cspace survives, its
+// resident untouched.
+#[test]
+fn unref_cspace_non_last_decrements() {
+    let mut st = ArrayStore::new(2);
+    st.slots[0] = detached(cspace_cap(10)); // a cap designating 10 → census(10) == 1
+    st.slots[1] = detached(frame_cap(0x1000)); // a resident of 10
+    st.refs.insert(10, 2); // off-by-one: census(10) + 1
+    st.cspaces.insert(10, vec![SlotId(1)]);
+    assert!(!refcount_sound_exec(&st), "the off-by-one state is not yet sound at 10");
+    check_unref_cspace(&mut st, ObjId(10));
+    assert_eq!(st.refs[&10], 1, "unref_cspace non-last: cspace survives");
+    assert!(!st.at(SlotId(1)).cap.is_empty(), "unref_cspace non-last: resident untouched");
+}
+
+// unref_cspace on the last ref: census(10) == 0, refs == 1 (the sole holder), so the
+// `-1` reaches zero and destroy_cspace empties the resident.
+#[test]
+fn unref_cspace_last_ref_destroys() {
+    let mut st = ArrayStore::new(1);
+    st.slots[0] = detached(frame_cap(0x1000)); // a resident of 10
+    st.refs.insert(10, 1); // census(10) == 0, off-by-one
+    st.cspaces.insert(10, vec![SlotId(0)]);
+    check_unref_cspace(&mut st, ObjId(10));
+    assert!(!st.refs.contains_key(&10) || st.refs[&10] == 0, "unref_cspace last ref: cspace torn down");
+}
+
+// obj_unref on a CSpace cap, last ref (off-by-one ⇒ census(10) == 0): the dispatch fires
+// destroy_cspace, emptying the resident.
+#[test]
+fn obj_unref_cspace_last_ref_destroys() {
+    let mut st = ArrayStore::new(1);
+    st.slots[0] = detached(frame_cap(0x1000)); // a resident of 10
+    st.refs.insert(10, 1); // census(10) == 0, off-by-one
+    st.cspaces.insert(10, vec![SlotId(0)]);
+    check_obj_unref(&mut st, cspace_cap(10));
+    assert!(st.at(SlotId(0)).cap.is_empty(), "obj_unref(CSpace) last ref: resident emptied");
+}
+
+// obj_unref on a non-designating Frame cap: a pure no-op (the off-by-one bookkeeping
+// for the aspace ride is delete's frame-unmap branch, not obj_unref).
+#[test]
+fn obj_unref_frame_is_noop() {
+    let mut st = refcount_sound_fixture();
+    check_obj_unref(&mut st, frame_cap(0x9999));
 }
 
 // `wait` on a nonzero word consumes it without blocking; the queue and refs are
