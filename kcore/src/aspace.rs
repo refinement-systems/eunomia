@@ -19,6 +19,15 @@
 
 use crate::cspace::ObjHeader;
 use crate::store::Store;
+use vstd::prelude::*;
+
+verus! {
+
+// The geometry/permission/descriptor consts live inside `verus!{}` so the §4.5
+// `pte_encode`/`va_range_ok` contracts can name them (the `channel::MSG_PAYLOAD`
+// idiom — a const must be in a `verus!{}` block to be spec-visible; it erases to
+// a byte-identical `pub`/`pub(crate) const`, so the kernel's glob re-export and
+// the aarch64 build are unchanged).
 
 pub const PAGE: u64 = 4096;
 /// Lowest VA a process may map — everything below belongs to the shared
@@ -35,8 +44,8 @@ pub const PERM_DEVICE: u64 = 1 << 2;
 
 // ── descriptor bits (the on-hardware format; byte-identical to the old
 //    kernel walker, plan §2.4) ──────────────────────────────────────────────
-// `pub(crate)` so the §4.5 harnesses (`proofs::aspace`) assert against the
-// named bits rather than magic numbers; not part of the crate's public API.
+// `pub(crate)` so the in-module `tests` assert against the named bits rather
+// than magic numbers; not part of the crate's public API.
 pub(crate) const DESC_TABLE: u64 = 0b11;
 pub(crate) const DESC_PAGE: u64 = 0b11;
 pub(crate) const AF: u64 = 1 << 10; // access flag
@@ -50,6 +59,14 @@ pub(crate) const ATTR_NORMAL: u64 = 0 << 2;
 pub(crate) const ATTR_DEVICE: u64 = 1 << 2;
 /// Output-address field of a descriptor: bits [47:12].
 pub(crate) const ADDR_MASK: u64 = 0x0000_FFFF_FFFF_F000;
+
+// vstd specs `saturating_add`/`saturating_sub` but not `saturating_mul`
+// (`std_specs/num.rs`); `va_range_ok` needs it. Trust the standard saturating
+// semantics (the `untyped.rs` `checked_next_multiple_of` precedent).
+pub assume_specification[ u64::saturating_mul ](x: u64, y: u64) -> u64
+    returns (if x * y > u64::MAX { u64::MAX } else { (x * y) as u64 });
+
+} // verus!
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MapError {
@@ -83,25 +100,192 @@ impl AspaceObj {
     }
 }
 
-// ── pure functions (plan §2.4 / §4.5) ──────────────────────────────────────
+// ── pure functions (plan §2.4 / §4.5), verified (plan
+//    doc/plans/3_verus-rewrite_phase5-detail.md §5b) ──────────────────────────
 
-/// L1/L2/L3 indices of a VA (39-bit, 4 KiB granule, 512-entry tables).
-pub fn l1_index(va: u64) -> usize {
+verus! {
+
+/// L1/L2/L3 indices of a VA (39-bit, 4 KiB granule, 512-entry tables). The
+/// `spec_*` mirrors make the indices spec-visible (`when_used_as_spec`) so the
+/// [`lemma_user_va_l1_index`] corollary — and 5c's page-table spec walk — can
+/// name them.
+pub open spec fn spec_l1_index(va: u64) -> usize {
     ((va >> 30) & 0x1FF) as usize
 }
-pub fn l2_index(va: u64) -> usize {
+#[verifier::when_used_as_spec(spec_l1_index)]
+pub fn l1_index(va: u64) -> (r: usize)
+    ensures r == spec_l1_index(va),
+{
+    ((va >> 30) & 0x1FF) as usize
+}
+pub open spec fn spec_l2_index(va: u64) -> usize {
     ((va >> 21) & 0x1FF) as usize
 }
-pub fn l3_index(va: u64) -> usize {
+#[verifier::when_used_as_spec(spec_l2_index)]
+pub fn l2_index(va: u64) -> (r: usize)
+    ensures r == spec_l2_index(va),
+{
+    ((va >> 21) & 0x1FF) as usize
+}
+pub open spec fn spec_l3_index(va: u64) -> usize {
+    ((va >> 12) & 0x1FF) as usize
+}
+#[verifier::when_used_as_spec(spec_l3_index)]
+pub fn l3_index(va: u64) -> (r: usize)
+    ensures r == spec_l3_index(va),
+{
     ((va >> 12) & 0x1FF) as usize
 }
 
 /// Is `[va, va + pages*PAGE)` a legal user mapping range? (page-aligned, inside
-/// `[USER_VA_BASE, USER_VA_END)`). Used by [`map_in`] and proven by
-/// `check_va_bounds`.
-pub fn va_range_ok(va: u64, pages: u64) -> bool {
+/// `[USER_VA_BASE, USER_VA_END)`). Used by [`map_in`].
+///
+/// Verified **total** and fully functional: the result is exactly the integer
+/// predicate `va % PAGE == 0 ∧ va ≥ USER_VA_BASE ∧ va + pages·PAGE ≤
+/// USER_VA_END`. The saturating arithmetic equals the int condition because
+/// `USER_VA_END = 2³⁹ ≪ 2⁶⁴`, so any saturation forces the range out of bounds.
+pub fn va_range_ok(va: u64, pages: u64) -> (ok: bool)
+    ensures
+        ok == (va % PAGE == 0 && va >= USER_VA_BASE
+            && (va as int) + (pages as int) * (PAGE as int) <= USER_VA_END as int),
+{
+    assert(USER_VA_END == 0x80_0000_0000) by (compute);
     va % PAGE == 0 && va >= USER_VA_BASE && va.saturating_add(pages.saturating_mul(PAGE)) <= USER_VA_END
 }
+
+/// Build a leaf (L3 page) descriptor. AF and PXN are unconditional (user pages
+/// are never EL1-executable); a writable perm grants `AP_EL0_RW`, else RO;
+/// **device memory is never executable** — `PERM_X` is ignored when
+/// `PERM_DEVICE` is set (spec §2.5; the kernel walker honoured `PERM_X` here,
+/// finding AS-1). The output address is masked to bits [47:12].
+///
+/// Verified — the §2.5/§4.5 **isolation theorem**, ∀ `(pa, perms)`: AF + PXN
+/// always set; `AP` grants EL0 write iff `PERM_W`; device is non-executable
+/// (`UXN`) + `SH_NONE` + `ATTR_DEVICE` even when `PERM_X` is set (the AS-1 fix);
+/// a non-device non-`X` page is `UXN`; the address field round-trips. The
+/// security corollary — no `perms` yields an EL1-writable or EL0-kernel-
+/// executable page — is the conjunction of PXN-always + the `AP`/`UXN` clauses.
+///
+/// `pub(crate)`: the contract names the crate-internal descriptor bits, and the
+/// public aspace surface is `map_in`/`unmap_in`/`range_mapped_in` (which call
+/// this), not the leaf encoder directly.
+pub(crate) fn pte_encode(pa: u64, perms: u64) -> (pte: u64)
+    ensures
+        pte & AF == AF,
+        pte & PXN == PXN,
+        pte & ADDR_MASK == pa & ADDR_MASK,
+        perms & PERM_W != 0 ==> (pte >> 6) & 0b11 == 0b01,
+        perms & PERM_W == 0 ==> (pte >> 6) & 0b11 == 0b11,
+        perms & PERM_DEVICE != 0 ==> pte & UXN == UXN,
+        perms & PERM_DEVICE != 0 ==> pte & SH_INNER == 0,
+        perms & PERM_DEVICE != 0 ==> pte & ATTR_DEVICE == ATTR_DEVICE,
+        (perms & PERM_DEVICE == 0 && perms & PERM_X == 0) ==> pte & UXN == UXN,
+{
+    let ap = if perms & PERM_W != 0 { AP_EL0_RW } else { AP_EL0_RO };
+    let device = perms & PERM_DEVICE != 0;
+    let xn = if perms & PERM_X != 0 && !device { 0 } else { UXN };
+    let (attr, sh) = if device { (ATTR_DEVICE, SH_NONE) } else { (ATTR_NORMAL, SH_INNER) };
+    let pte = (pa & ADDR_MASK) | DESC_PAGE | AF | sh | attr | ap | xn | PXN;
+    proof {
+        lemma_pte_bits(pa, ap, sh, attr, xn, pte);
+    }
+    pte
+}
+
+/// The output PA of a leaf descriptor (the inverse of [`pte_encode`]'s address
+/// field). Composed with `pte_encode`'s address-field `ensures` it round-trips:
+/// `pte_output_pa(pte_encode(pa, perms)) == pa & ADDR_MASK` (host-tested).
+/// `pub(crate)` for the same reason as [`pte_encode`] (names `ADDR_MASK`).
+// The decoder half of the encode/decode pair: exercised by the round-trip host
+// test (`cfg(test)`) and available to the walker; no non-test caller yet.
+#[allow(dead_code)]
+pub(crate) fn pte_output_pa(pte: u64) -> (r: u64)
+    ensures r == pte & ADDR_MASK,
+{
+    pte & ADDR_MASK
+}
+
+/// The PTE field-extraction facts, isolated into one `bit_vector` step (the
+/// `untyped.rs` §2.5 discipline). The descriptor-bit masks are pairwise
+/// disjoint, so each field of `pte` is independent of the others; the value
+/// constraints on `ap`/`sh`/`attr`/`xn` (the `pte_encode` if-arms) plus the
+/// const literals (fixed via `compute`) make the bit-blast a tautology.
+proof fn lemma_pte_bits(pa: u64, ap: u64, sh: u64, attr: u64, xn: u64, pte: u64)
+    requires
+        pte == (pa & ADDR_MASK) | DESC_PAGE | AF | sh | attr | ap | xn | PXN,
+        ap == AP_EL0_RW || ap == AP_EL0_RO,
+        sh == SH_NONE || sh == SH_INNER,
+        attr == ATTR_NORMAL || attr == ATTR_DEVICE,
+        xn == 0 || xn == UXN,
+    ensures
+        pte & AF == AF,
+        pte & PXN == PXN,
+        pte & ADDR_MASK == pa & ADDR_MASK,
+        ap == AP_EL0_RW ==> (pte >> 6) & 0b11 == 0b01,
+        ap == AP_EL0_RO ==> (pte >> 6) & 0b11 == 0b11,
+        xn == UXN ==> pte & UXN == UXN,
+        sh == SH_NONE ==> pte & SH_INNER == 0,
+        attr == ATTR_DEVICE ==> pte & ATTR_DEVICE == ATTR_DEVICE,
+{
+    // Pin every named const to its literal so the bit-vector solver reasons over
+    // concrete masks (the bound vars `ap`/`sh`/`attr`/`xn` stay symbolic but are
+    // constrained to two values each).
+    assert(AF == 0x400) by (compute);
+    assert(PXN == 0x20_0000_0000_0000) by (compute);
+    assert(ADDR_MASK == 0xFFFF_FFFF_F000) by (compute);
+    assert(AP_EL0_RW == 0x40) by (compute);
+    assert(AP_EL0_RO == 0xC0) by (compute);
+    assert(SH_NONE == 0) by (compute);
+    assert(SH_INNER == 0x300) by (compute);
+    assert(ATTR_NORMAL == 0) by (compute);
+    assert(ATTR_DEVICE == 0x4) by (compute);
+    assert(UXN == 0x40_0000_0000_0000) by (compute);
+    assert(DESC_PAGE == 0x3) by (compute);
+    assert(
+        pte & AF == AF
+        && pte & PXN == PXN
+        && pte & ADDR_MASK == pa & ADDR_MASK
+        && (ap == AP_EL0_RW ==> (pte >> 6) & 0b11 == 0b01)
+        && (ap == AP_EL0_RO ==> (pte >> 6) & 0b11 == 0b11)
+        && (xn == UXN ==> pte & UXN == UXN)
+        && (sh == SH_NONE ==> pte & SH_INNER == 0)
+        && (attr == ATTR_DEVICE ==> pte & ATTR_DEVICE == ATTR_DEVICE)
+    ) by (bit_vector)
+        requires
+            pte == (pa & ADDR_MASK) | DESC_PAGE | AF | sh | attr | ap | xn | PXN,
+            ap == AP_EL0_RW || ap == AP_EL0_RO,
+            sh == SH_NONE || sh == SH_INNER,
+            attr == ATTR_NORMAL || attr == ATTR_DEVICE,
+            xn == 0 || xn == UXN,
+            AF == 0x400,
+            PXN == 0x20_0000_0000_0000,
+            ADDR_MASK == 0xFFFF_FFFF_F000,
+            AP_EL0_RW == 0x40,
+            AP_EL0_RO == 0xC0,
+            SH_NONE == 0,
+            SH_INNER == 0x300,
+            ATTR_NORMAL == 0,
+            ATTR_DEVICE == 0x4,
+            UXN == 0x40_0000_0000_0000,
+            DESC_PAGE == 0x3;
+}
+
+/// A user mapping never touches the two shared kernel L1 entries (indices 0/1):
+/// every page VA in `[USER_VA_BASE, USER_VA_END)` has `l1_index ≥ 2` (the §4.5
+/// theorem, consumed by 5d's `walk_alloc`). Stated over the half-open
+/// mapped-page range, so the `pages == 0` edge (`va` can equal `USER_VA_END`) is
+/// excluded by construction.
+pub proof fn lemma_user_va_l1_index(va: u64)
+    requires USER_VA_BASE <= va < USER_VA_END,
+    ensures l1_index(va) >= 2,
+{
+    assert(USER_VA_END == 0x80_0000_0000) by (compute);
+    assert(((va >> 30) & 0x1FF) >= 2 && ((va >> 30) & 0x1FF) < 0x200) by (bit_vector)
+        requires 0x8000_0000u64 <= va, va < 0x80_0000_0000u64;
+    assert(((va >> 30) & 0x1FF) as usize >= 2);
+}
+
+} // verus!
 
 /// PA of pool table `idx` and the inverse, as stored in a table descriptor's
 /// output-address field — the byte-identical PA↔pool-index conversion.
@@ -112,7 +296,7 @@ fn pa_of_table(pool_base: u64, idx: usize) -> u64 {
 /// The pool index a table descriptor points at, or `None` if it addresses
 /// outside the pool. Well-formed tables (everything [`map_in`] writes) always
 /// yield `Some(idx)` with `idx < pool_len`; the bound keeps the walker total
-/// for CBMC (the old pointer walk had no bound — and no provenance either).
+/// (the old pointer walk had no bound — and no provenance either).
 fn pool_index(pool_base: u64, pool_len: usize, desc: u64) -> Option<usize> {
     let pa = desc & ADDR_MASK;
     if pa < pool_base {
@@ -123,25 +307,6 @@ fn pool_index(pool_base: u64, pool_len: usize, desc: u64) -> Option<usize> {
         return None;
     }
     Some(idx)
-}
-
-/// Build a leaf (L3 page) descriptor. AF and PXN are unconditional (user pages
-/// are never EL1-executable); a writable perm grants `AP_EL0_RW`, else RO;
-/// **device memory is never executable** — `PERM_X` is ignored when
-/// `PERM_DEVICE` is set (spec §2.5; the kernel walker honoured `PERM_X` here,
-/// finding AS-1). The output address is masked to bits [47:12].
-pub fn pte_encode(pa: u64, perms: u64) -> u64 {
-    let ap = if perms & PERM_W != 0 { AP_EL0_RW } else { AP_EL0_RO };
-    let device = perms & PERM_DEVICE != 0;
-    let xn = if perms & PERM_X != 0 && !device { 0 } else { UXN };
-    let (attr, sh) = if device { (ATTR_DEVICE, SH_NONE) } else { (ATTR_NORMAL, SH_INNER) };
-    (pa & ADDR_MASK) | DESC_PAGE | AF | sh | attr | ap | xn | PXN
-}
-
-/// The output PA of a leaf descriptor (the inverse of [`pte_encode`]'s address
-/// field).
-pub fn pte_output_pa(pte: u64) -> u64 {
-    pte & ADDR_MASK
 }
 
 // ── the walker, over the table pool as a slice ──────────────────────────────
@@ -293,4 +458,63 @@ pub fn range_mapped_in(
         page += PAGE;
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pte_encode_writable_vs_ro() {
+        let pa = 0x4800_0000;
+        let rw = pte_encode(pa, PERM_W);
+        assert_eq!((rw >> 6) & 0b11, 0b01, "PERM_W => AP_EL0_RW");
+        assert_eq!(rw & AF, AF);
+        assert_eq!(rw & PXN, PXN);
+        assert_eq!(rw & ADDR_MASK, pa & ADDR_MASK);
+        let ro = pte_encode(pa, 0);
+        assert_eq!((ro >> 6) & 0b11, 0b11, "no PERM_W => AP_EL0_RO");
+    }
+
+    #[test]
+    fn pte_encode_device_never_executable() {
+        // AS-1 regression: PERM_X is ignored when PERM_DEVICE is set.
+        let pte = pte_encode(0x0900_0000, PERM_DEVICE | PERM_X | PERM_W);
+        assert_eq!(pte & UXN, UXN, "device memory must be execute-never");
+        assert_eq!(pte & SH_INNER, 0, "device memory is SH_NONE");
+        assert_eq!(pte & ATTR_DEVICE, ATTR_DEVICE);
+    }
+
+    #[test]
+    fn pte_encode_normal_exec_vs_nx() {
+        // Non-device, executable: UXN clear (EL0 may execute).
+        assert_eq!(pte_encode(0x4800_0000, PERM_X) & UXN, 0);
+        // Non-device, non-executable: UXN set.
+        assert_eq!(pte_encode(0x4800_0000, 0) & UXN, UXN);
+    }
+
+    #[test]
+    fn pte_output_pa_roundtrip() {
+        let pa = 0x4800_1000;
+        for &perms in &[0u64, PERM_W, PERM_X, PERM_DEVICE, PERM_DEVICE | PERM_X] {
+            assert_eq!(pte_output_pa(pte_encode(pa, perms)), pa & ADDR_MASK);
+        }
+    }
+
+    #[test]
+    fn va_range_ok_boundaries() {
+        assert!(va_range_ok(USER_VA_BASE, 1));
+        assert!(va_range_ok(USER_VA_BASE, 0)); // empty range at base
+        assert!(va_range_ok(USER_VA_END - PAGE, 1)); // last page fits exactly
+        assert!(!va_range_ok(USER_VA_BASE - PAGE, 1)); // below base
+        assert!(!va_range_ok(USER_VA_BASE + 1, 1)); // unaligned
+        assert!(!va_range_ok(USER_VA_END - PAGE, 2)); // runs past the top
+        assert!(!va_range_ok(USER_VA_BASE, u64::MAX)); // saturating overflow edge
+    }
+
+    #[test]
+    fn user_va_never_touches_kernel_l1() {
+        assert_eq!(l1_index(USER_VA_BASE), 2);
+        assert!(l1_index(USER_VA_END - PAGE) >= 2);
+    }
 }
