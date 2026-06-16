@@ -73,6 +73,8 @@ pub assume_specification[ u64::saturating_mul ](x: u64, y: u64) -> u64
 
 } // verus!
 
+verus! {
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MapError {
     BadVa,
@@ -80,6 +82,8 @@ pub enum MapError {
     /// Table pool exhausted — donate a bigger pool (§2.5: one error path).
     NeedMemory,
 }
+
+} // verus!
 
 /// The fields are `pub` so the kernel shell can build slice views over the L1
 /// table and the table pool from these PAs. Outside that shell — and never in
@@ -177,8 +181,22 @@ pub fn va_range_ok(va: u64, pages: u64) -> (ok: bool)
 /// `pub(crate)`: the contract names the crate-internal descriptor bits, and the
 /// public aspace surface is `map_in`/`unmap_in`/`range_mapped_in` (which call
 /// this), not the leaf encoder directly.
+/// Spec mirror of [`pte_encode`] — the leaf-PTE bit pattern as a `spec fn`, so the
+/// `map_in` postcondition can say "the installed leaf is exactly `pte_encode(pa,
+/// perms)`". `pub closed` so the cross-crate `pub map_in` may name it without
+/// leaking the `pub(crate)` descriptor-bit consts (the doc-38 §2 idiom).
+pub closed spec fn spec_pte_encode(pa: u64, perms: u64) -> u64 {
+    let ap = if perms & PERM_W != 0 { AP_EL0_RW } else { AP_EL0_RO };
+    let device = perms & PERM_DEVICE != 0;
+    let xn = if perms & PERM_X != 0 && !device { 0u64 } else { UXN };
+    let sh = if device { SH_NONE } else { SH_INNER };
+    let attr = if device { ATTR_DEVICE } else { ATTR_NORMAL };
+    (pa & ADDR_MASK) | DESC_PAGE | AF | sh | attr | ap | xn | PXN
+}
+
 pub(crate) fn pte_encode(pa: u64, perms: u64) -> (pte: u64)
     ensures
+        pte == spec_pte_encode(pa, perms),
         pte & AF == AF,
         pte & PXN == PXN,
         pte & ADDR_MASK == pa & ADDR_MASK,
@@ -295,12 +313,6 @@ pub proof fn lemma_user_va_l1_index(va: u64)
 
 } // verus!
 
-/// PA of pool table `idx` and the inverse, as stored in a table descriptor's
-/// output-address field — the byte-identical PA↔pool-index conversion.
-fn pa_of_table(pool_base: u64, idx: usize) -> u64 {
-    pool_base + (idx as u64) * PAGE
-}
-
 // ── the page-table partial-map model (plan
 //    doc/plans/3_verus-rewrite_phase5-detail.md §1.2/§5c) ──────────────────────
 //
@@ -367,18 +379,70 @@ pub closed spec fn page_ok(l1: Seq<u64>, pool: Seq<[u64; 512]>, pool_base: u64, 
     }
 }
 
-/// Table-pool well-formedness — the `chan_wf`/`notif_wf`/`timer_wf` analog for
-/// the page table. **Designed here (5c), consumed by 5d/5e** — no 5c op
-/// establishes or preserves it (the read-only [`range_mapped_in`] does not need
-/// it), so it is a definition only in this sub-phase; 5d validates/refines it
-/// against `map_in` (the "add the clause when the op needs it" discipline, doc
-/// 27 §3). Three aspects (detail §1.2):
-///   (a) accounting — pool length and the used-tables high-water mark;
-///   (b) closure — every present table descriptor (in `l1` and in used tables)
-///       resolves to a pool index `< pool_used`;
-///   (c) tree-shape / no-aliasing — distinct present table descriptors point to
-///       distinct pool indices (the page table is a tree, not a DAG; the
-///       load-bearing locality invariant for 5d's leaf-write frame lemma).
+/// The leaf **slot** `(l3 table, entry)` a walk of `va` lands on, or `None` — the
+/// structural mirror of [`pt_lookup`] (which returns the *value* `pool[l3][e]`).
+/// `map_in`'s leaf write needs the slot, not just the value: it writes `pool[l3][e]`
+/// and reasons that `va` (and only pages sharing that slot) now read it.
+pub closed spec fn pt_leaf_slot(l1: Seq<u64>, pool: Seq<[u64; 512]>, pool_base: u64, va: u64) -> Option<(nat, nat)> {
+    let l1e = l1[spec_l1_index(va) as int];
+    if l1e & DESC_TABLE != DESC_TABLE {
+        None
+    } else {
+        match pool_index_spec(pool_base, pool.len(), l1e) {
+            None => None,
+            Some(l2_idx) => {
+                let l2e = pool[l2_idx as int][spec_l2_index(va) as int];
+                if l2e & DESC_TABLE != DESC_TABLE {
+                    None
+                } else {
+                    match pool_index_spec(pool_base, pool.len(), l2e) {
+                        None => None,
+                        Some(l3_idx) => Some((l3_idx, spec_l3_index(va) as nat)),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `va`'s L3 table is a leaf table for *some* `pt_wf` witness — the predicate
+/// `walk_alloc` hands `map_in` so its leaf write preserves `pt_wf` (a frame PTE
+/// must land in a leaf table, never an inner one — the `DESC_PAGE == DESC_TABLE`
+/// hazard). Existential so it composes with the existential [`pt_wf`].
+pub closed spec fn pt_wf_leaf(
+    l1: Seq<u64>,
+    pool: Seq<[u64; 512]>,
+    pool_base: u64,
+    pool_used: nat,
+    pool_len: nat,
+    l3: nat,
+) -> bool {
+    exists|leaves: Set<nat>|
+        pt_wf_leveled(l1, pool, pool_base, pool_used, pool_len, leaves) && leaves.contains(l3)
+}
+
+/// `pt_leaf_slot` and `pt_lookup` agree: if the walk lands on slot `(l3, e)` then
+/// the looked-up value is exactly `pool[l3][e]` (both unfold the same walk).
+pub proof fn lemma_leaf_slot_lookup(l1: Seq<u64>, pool: Seq<[u64; 512]>, pool_base: u64, va: u64)
+    ensures
+        match pt_leaf_slot(l1, pool, pool_base, va) {
+            Some((l3, e)) => pt_lookup(l1, pool, pool_base, va) == Some(pool[l3 as int][e as int]),
+            None => pt_lookup(l1, pool, pool_base, va) is None,
+        },
+{
+}
+
+/// Table-pool well-formedness — the `chan_wf`/`notif_wf`/`timer_wf` analog for the
+/// page table, **refined in 5d** (doc 39) to carry the L2/L3 level structure
+/// `map_in` needs. The 5c definition quantified closure over *all* used tables,
+/// which is unsatisfiable once a real mapping is installed: a leaf (L3) PTE has
+/// `DESC_PAGE == DESC_TABLE == 0b11` (`aspace.rs`), so its frame-PA address field
+/// would be (wrongly) required to resolve into the pool. The level *partition*
+/// fixes this — closure/no-aliasing apply to the intermediate (L2) tables only;
+/// leaf (L3) tables hold frame PTEs and are unconstrained. The partition is
+/// existentially quantified so the public signature stays
+/// `(l1, pool, pool_base, pool_used, pool_len)` (no ghost arg leaks to the kernel
+/// shell, which calls `map_in` with no `leaves`); [`pt_wf_leveled`] is the witness.
 pub closed spec fn pt_wf(
     l1: Seq<u64>,
     pool: Seq<[u64; 512]>,
@@ -386,33 +450,134 @@ pub closed spec fn pt_wf(
     pool_used: nat,
     pool_len: nat,
 ) -> bool {
+    exists|leaves: Set<nat>| pt_wf_leveled(l1, pool, pool_base, pool_used, pool_len, leaves)
+}
+
+/// The leveled core of [`pt_wf`]. `leaves` are the L3 (leaf) pool tables; the rest
+/// of `[0, pool_used)` are the L2 (inner) tables. Clauses:
+///   (a) accounting — pool length, the high-water mark, `leaves ⊆ [0, pool_used)`;
+///   (b1) L1 descriptors resolve to an **inner** table `< pool_used`;
+///   (b2) descriptors **inside an inner table** resolve to a **leaf** table
+///        `< pool_used` (leaf tables' entries are unconstrained — frame PTEs);
+///   (c1)/(c2) the parent→child index map is injective (the page table is a tree,
+///        not a DAG — the load-bearing locality invariant for the leaf-write frame).
+/// Cross-level no-aliasing (an L1 target vs an L2 target) is free: L1 targets are
+/// inner, L2 targets are leaf, so they are disjoint by the partition.
+pub closed spec fn pt_wf_leveled(
+    l1: Seq<u64>,
+    pool: Seq<[u64; 512]>,
+    pool_base: u64,
+    pool_used: nat,
+    pool_len: nat,
+    leaves: Set<nat>,
+) -> bool {
     // (a) accounting.
     &&& l1.len() == 512
     &&& pool.len() == pool_len
     &&& pool_used <= pool_len
-    // (b) closure: every present L1 table descriptor lands inside the used pool.
+    &&& (forall|x: nat| leaves.contains(x) ==> x < pool_used)
+    // (b1) L1 → inner (present, in-range, not a leaf).
     &&& (forall|i: int| #![trigger l1[i]]
-            0 <= i < 512 && l1[i] & DESC_TABLE == DESC_TABLE
-                ==> pool_index_resolves(pool_base, pool_len, pool_used, l1[i]))
-    // (b) closure: ditto for descriptors held in any used table (the L2 level).
+            0 <= i < 512 && l1[i] & DESC_TABLE == DESC_TABLE ==> {
+                &&& pool_index_spec(pool_base, pool_len, l1[i]) is Some
+                &&& pool_index_spec(pool_base, pool_len, l1[i]).unwrap() < pool_used
+                &&& !leaves.contains(pool_index_spec(pool_base, pool_len, l1[i]).unwrap())
+            })
+    // (b2) inner → leaf.
     &&& (forall|t: int, e: int| #![trigger pool[t][e]]
-            0 <= t < pool_used && 0 <= e < 512 && pool[t][e] & DESC_TABLE == DESC_TABLE
-                ==> pool_index_resolves(pool_base, pool_len, pool_used, pool[t][e]))
-    // (c) tree-shape / no-aliasing: distinct present L1 descriptors → distinct
-    //     pool indices (extended to the inner levels in 5d as `map_in` pays for it).
-    &&& (forall|i: int, j: int|
+            0 <= t < pool_used && !leaves.contains(t as nat) && 0 <= e < 512
+                && pool[t][e] & DESC_TABLE == DESC_TABLE ==> {
+                &&& pool_index_spec(pool_base, pool_len, pool[t][e]) is Some
+                &&& pool_index_spec(pool_base, pool_len, pool[t][e]).unwrap() < pool_used
+                &&& leaves.contains(pool_index_spec(pool_base, pool_len, pool[t][e]).unwrap())
+            })
+    // (c1) L1 injective.
+    &&& (forall|i: int, j: int| #![trigger l1[i], l1[j]]
             0 <= i < 512 && 0 <= j < 512 && i != j
                 && l1[i] & DESC_TABLE == DESC_TABLE && l1[j] & DESC_TABLE == DESC_TABLE
-                ==> pool_index_spec(pool_base, pool_len, l1[i]) != pool_index_spec(pool_base, pool_len, l1[j]))
+                ==> pool_index_spec(pool_base, pool_len, l1[i])
+                        != pool_index_spec(pool_base, pool_len, l1[j]))
+    // (c2) inner-table descriptors injective across all inner tables.
+    &&& (forall|t1: int, e1: int, t2: int, e2: int| #![trigger pool[t1][e1], pool[t2][e2]]
+            0 <= t1 < pool_used && !leaves.contains(t1 as nat) && 0 <= e1 < 512
+                && 0 <= t2 < pool_used && !leaves.contains(t2 as nat) && 0 <= e2 < 512
+                && !(t1 == t2 && e1 == e2)
+                && pool[t1][e1] & DESC_TABLE == DESC_TABLE
+                && pool[t2][e2] & DESC_TABLE == DESC_TABLE
+                ==> pool_index_spec(pool_base, pool_len, pool[t1][e1])
+                        != pool_index_spec(pool_base, pool_len, pool[t2][e2]))
 }
 
-/// `desc` resolves (as a table descriptor) to a pool index strictly inside the
-/// used region — the closure obligation `pt_wf` repeats per level.
-pub closed spec fn pool_index_resolves(pool_base: u64, pool_len: nat, pool_used: nat, desc: u64) -> bool {
-    match pool_index_spec(pool_base, pool_len, desc) {
-        Some(idx) => idx < pool_used,
-        None => false,
-    }
+/// The pool's address geometry the descriptor round-trip needs: `pool_base`
+/// page-aligned, and the whole pool inside the 48-bit output-address field (so
+/// `pool_base + idx*PAGE` never overflows and never collides with the descriptor
+/// control bits). Both hold for the kernel shell — the table pool is page-aligned
+/// untyped memory (`AspaceObj::bytes_for`, retype aligns to 4 KiB). A `requires`
+/// on the map ops; `0x1_0000_…` is `2^48`.
+pub open spec fn pool_geom_ok(pool_base: u64, pool_len: nat) -> bool {
+    &&& pool_base & PAGE_MASK == 0
+    &&& (pool_base as int) + (pool_len as int) * (PAGE as int) <= 0x1_0000_0000_0000
+}
+
+/// PA of pool table `idx`, as stored in a table descriptor's output-address field
+/// — the byte-identical PA↔pool-index conversion (the inverse is [`pool_index`]).
+/// The geometry `requires` keeps `pool_base + idx*PAGE` overflow-free.
+fn pa_of_table(pool_base: u64, pool_len: usize, idx: usize) -> (r: u64)
+    requires
+        pool_geom_ok(pool_base, pool_len as nat),
+        idx < pool_len,
+    ensures
+        r as int == pool_base as int + (idx as int) * (PAGE as int),
+{
+    assert((idx as int) * (PAGE as int) <= (pool_len as int) * (PAGE as int)) by (nonlinear_arith)
+        requires idx < pool_len;
+    pool_base + (idx as u64) * PAGE
+}
+
+/// The descriptor round-trip: a table descriptor built from `pa_of_table(idx)`
+/// resolves back to exactly `idx` (and reads as a present table descriptor). The
+/// arithmetic linchpin of `walk_alloc`'s closure reasoning — the low 0b11 tag is
+/// disjoint from `ADDR_MASK[47:12]`, and a page-aligned in-range PA round-trips
+/// through `(.. & ADDR_MASK) - pool_base) / PAGE`. The hard mask/division steps
+/// are isolated into `bit_vector`/`nonlinear_arith` one-liners (the doc-25/37 §2
+/// discipline).
+proof fn lemma_desc_roundtrip(pool_base: u64, pool_len: nat, idx: nat, pa: u64)
+    requires
+        pool_geom_ok(pool_base, pool_len),
+        idx < pool_len,
+        pa as int == pool_base as int + (idx as int) * (PAGE as int),
+    ensures
+        (pa | DESC_TABLE) & DESC_TABLE == DESC_TABLE,
+        pool_index_spec(pool_base, pool_len, pa | DESC_TABLE) == Some(idx),
+{
+    assert(PAGE == 4096 && PAGE_MASK == 4095 && DESC_TABLE == 3) by (compute);
+    assert(ADDR_MASK == 0xFFFF_FFFF_F000) by (compute);
+    // `pa = pool_base + idx*PAGE` is page-aligned (base aligned + a multiple of
+    // PAGE), in range (< pool_base + pool_len*PAGE ≤ 2^48), hence < 2^48.
+    let ghost bound: int = 0x1_0000_0000_0000;
+    assert(pool_base as int % 4096 == 0) by (bit_vector)
+        requires pool_base & PAGE_MASK == 0, PAGE_MASK == 4095;
+    assert(pa as int % 4096 == 0) by (nonlinear_arith)
+        requires pa as int == pool_base as int + (idx as int) * 4096, pool_base as int % 4096 == 0;
+    assert(pa & PAGE_MASK == 0) by (bit_vector)
+        requires pa as int % 4096 == 0, PAGE_MASK == 4095;
+    assert((idx as int) * 4096 <= (pool_len as int) * 4096) by (nonlinear_arith)
+        requires pool_len > idx;
+    assert(bound > pa as int);
+    assert(pa < 0x1_0000_0000_0000u64);
+    // The control tag does not touch the output-address field, so it round-trips.
+    assert((pa | DESC_TABLE) & DESC_TABLE == DESC_TABLE) by (bit_vector)
+        requires DESC_TABLE == 3;
+    assert((pa | DESC_TABLE) & ADDR_MASK == pa) by (bit_vector)
+        requires
+            pa & PAGE_MASK == 0,
+            pa < 0x1_0000_0000_0000u64,
+            PAGE_MASK == 4095,
+            DESC_TABLE == 3,
+            ADDR_MASK == 0xFFFF_FFFF_F000;
+    // Now `pool_index_spec` divides the (recovered) offset by PAGE → idx.
+    assert(((pa as int) - (pool_base as int)) == (idx as int) * (PAGE as int));
+    assert(((idx as int) * (PAGE as int)) / (PAGE as int) == idx as int) by (nonlinear_arith);
 }
 
 /// The pool index a table descriptor points at, or `None` if it addresses
@@ -446,42 +611,823 @@ fn pool_index(pool_base: u64, pool_len: usize, desc: u64) -> (r: Option<usize>)
 
 // ── the walker, over the table pool as a slice ──────────────────────────────
 
+verus! {
+
 /// Grab the next free pool table, zero it, and return its index. The zeroing
 /// matches the old `alloc_table`'s `write_bytes(.., 0, PAGE)` so a freshly
 /// allocated table starts empty (`check_pool_accounting`).
-fn alloc_table(pool: &mut [[u64; 512]], pool_used: &mut u64) -> Result<usize, MapError> {
-    if *pool_used as usize >= pool.len() {
+///
+/// Purely structural — no `pt_wf`/`pt_lookup` here; [`walk_alloc`] combines this
+/// with `pt_wf` to conclude the fresh table perturbs no lookup. `Ok` carries: the
+/// fresh index is the old high-water mark, it is in bounds, `pool_used` advanced
+/// by one (still `<= len`), the new table is all-zero, and every other table is
+/// untouched. `Err` is `NeedMemory` exactly at exhaustion, leaving state intact.
+fn alloc_table(pool: &mut [[u64; 512]], pool_used: &mut u64) -> (r: Result<usize, MapError>)
+    ensures
+        final(pool).len() == old(pool).len(),
+        match r {
+            Ok(idx) => {
+                &&& idx as int == *old(pool_used) as int
+                &&& idx < final(pool).len()
+                &&& *final(pool_used) == *old(pool_used) + 1
+                &&& *final(pool_used) <= final(pool).len()
+                &&& (forall|e: int| 0 <= e < 512 ==> final(pool)@[idx as int][e] == 0)
+                &&& (forall|t: int| 0 <= t < final(pool).len() && t != idx as int
+                        ==> final(pool)@[t] == old(pool)@[t])
+            }
+            Err(e) => {
+                &&& e == MapError::NeedMemory
+                &&& *final(pool_used) == *old(pool_used)
+                &&& final(pool)@ == old(pool)@
+                &&& *old(pool_used) >= old(pool).len()
+            }
+        },
+{
+    broadcast use {vstd::slice::group_slice_axioms, vstd::array::group_array_axioms};
+    // Compare in `u64` before the `as usize` cast so the cast is lossless without
+    // pinning `usize`'s width (the doc-38 §2 discipline; `pool.len() as u64` is
+    // exact since `usize <= u64`).
+    if *pool_used >= pool.len() as u64 {
         return Err(MapError::NeedMemory);
     }
     let idx = *pool_used as usize;
-    *pool_used += 1;
+    *pool_used = *pool_used + 1;
     pool[idx] = [0u64; 512];
+    assert(forall|e: int| 0 <= e < 512 ==> pool@[idx as int][e] == 0);
     Ok(idx)
 }
 
+} // verus!
+
+verus! {
+
+/// The three table indices of any VA are `< 512` (the spec mirror of the exec
+/// `l1_index`/`l2_index`/`l3_index` `ensures`, usable from `proof`/`spec` context).
+proof fn lemma_va_indices(w: u64)
+    ensures
+        spec_l1_index(w) < 512,
+        spec_l2_index(w) < 512,
+        spec_l3_index(w) < 512,
+{
+    assert(((w >> 30) & 0x1FF) < 512) by (bit_vector);
+    assert(((w >> 21) & 0x1FF) < 512) by (bit_vector);
+    assert(((w >> 12) & 0x1FF) < 512) by (bit_vector);
+}
+
+/// `0` is not a table descriptor (a zeroed pool entry) and `desc | DESC_TABLE` is
+/// — the two descriptor-tag facts the link proofs lean on, isolated to bit_vector.
+proof fn lemma_desc_tag(desc: u64)
+    ensures
+        0u64 & DESC_TABLE != DESC_TABLE,
+        (desc | DESC_TABLE) & DESC_TABLE == DESC_TABLE,
+{
+    assert(DESC_TABLE == 3) by (compute);
+    assert(0u64 & 3 != 3) by (bit_vector);
+    assert((desc | 3) & 3 == 3) by (bit_vector);
+}
+
+/// Linking a **fresh, zeroed** table (index `pu`, the old high-water mark) into a
+/// previously-empty **L1** slot preserves `pt_wf` and **changes no `pt_lookup`** —
+/// the new L2 table is empty, so a walk that now enters it immediately dead-ends.
+/// The fresh index `pu` becomes a new inner (L2) table; `leaves` is unchanged.
+/// Freshness (`pu` is distinct from every present descriptor's target, all `< pu`
+/// by the pre-link closure) is what re-establishes the injectivity clauses.
+proof fn lemma_link_l1(
+    l1: Seq<u64>,
+    pool: Seq<[u64; 512]>,
+    pooln: Seq<[u64; 512]>,
+    pool_base: u64,
+    pu: nat,
+    pl: nat,
+    i0: int,
+    desc: u64,
+)
+    requires
+        pt_wf(l1, pool, pool_base, pu, pl),
+        pu < pl,
+        0 <= i0 < 512,
+        l1[i0] & DESC_TABLE != DESC_TABLE,
+        desc & DESC_TABLE == DESC_TABLE,
+        pool_index_spec(pool_base, pl, desc) == Some(pu),
+        pooln.len() == pl,
+        forall|e: int| 0 <= e < 512 ==> pooln[pu as int][e] == 0,
+        forall|t: int| 0 <= t < pl && t != pu ==> pooln[t] == pool[t],
+    ensures
+        pt_wf(l1.update(i0, desc), pooln, pool_base, (pu + 1) as nat, pl),
+        forall|w: u64| #![trigger pt_lookup(l1.update(i0, desc), pooln, pool_base, w)]
+            pt_lookup(l1.update(i0, desc), pooln, pool_base, w)
+                == pt_lookup(l1, pool, pool_base, w),
+{
+    let leaves = choose|lv: Set<nat>| pt_wf_leveled(l1, pool, pool_base, pu, pl, lv);
+    let l1n = l1.update(i0, desc);
+    let pun = (pu + 1) as nat;
+    // Every present descriptor's target is `< pu` (closure), so `pu` is fresh.
+    lemma_desc_tag(0);
+    assert(!leaves.contains(pu));  // leaves ⊆ [0, pu)
+    assert(pt_wf_leveled(l1n, pooln, pool_base, pun, pl, leaves)) by {
+        assert forall|i: int| #![trigger l1n[i]]
+            0 <= i < 512 && l1n[i] & DESC_TABLE == DESC_TABLE implies {
+                &&& pool_index_spec(pool_base, pl, l1n[i]) is Some
+                &&& pool_index_spec(pool_base, pl, l1n[i]).unwrap() < pun
+                &&& !leaves.contains(pool_index_spec(pool_base, pl, l1n[i]).unwrap())
+            } by {
+            if i == i0 {
+                assert(l1n[i] == desc);
+            } else {
+                assert(l1n[i] == l1[i]);  // old (b1) fires on l1[i]
+            }
+        }
+        assert forall|t: int, e: int| #![trigger pooln[t][e]]
+            0 <= t < pun && !leaves.contains(t as nat) && 0 <= e < 512
+                && pooln[t][e] & DESC_TABLE == DESC_TABLE implies {
+                &&& pool_index_spec(pool_base, pl, pooln[t][e]) is Some
+                &&& pool_index_spec(pool_base, pl, pooln[t][e]).unwrap() < pun
+                &&& leaves.contains(pool_index_spec(pool_base, pl, pooln[t][e]).unwrap())
+            } by {
+            if t == pu {
+                assert(pooln[t][e] == 0);  // fresh table — entry is 0, antecedent false
+            } else {
+                assert(t < pu);
+                assert(pooln[t] == pool[t]);
+                assert(pooln[t][e] == pool[t][e]);  // old (b2) fires on pool[t][e]
+            }
+        }
+        assert forall|i: int, j: int| #![trigger l1n[i], l1n[j]]
+            0 <= i < 512 && 0 <= j < 512 && i != j
+                && l1n[i] & DESC_TABLE == DESC_TABLE && l1n[j] & DESC_TABLE == DESC_TABLE
+            implies pool_index_spec(pool_base, pl, l1n[i]) != pool_index_spec(pool_base, pl, l1n[j]) by {
+            if i == i0 {
+                assert(l1n[i] == desc && l1n[j] == l1[j]);  // l1[j] target < pu = Some(pu)'s idx
+            } else if j == i0 {
+                assert(l1n[j] == desc && l1n[i] == l1[i]);
+            } else {
+                assert(l1n[i] == l1[i] && l1n[j] == l1[j]);  // old (c1)
+            }
+        }
+        assert forall|t1: int, e1: int, t2: int, e2: int| #![trigger pooln[t1][e1], pooln[t2][e2]]
+            0 <= t1 < pun && !leaves.contains(t1 as nat) && 0 <= e1 < 512
+                && 0 <= t2 < pun && !leaves.contains(t2 as nat) && 0 <= e2 < 512
+                && !(t1 == t2 && e1 == e2)
+                && pooln[t1][e1] & DESC_TABLE == DESC_TABLE
+                && pooln[t2][e2] & DESC_TABLE == DESC_TABLE
+            implies pool_index_spec(pool_base, pl, pooln[t1][e1])
+                        != pool_index_spec(pool_base, pl, pooln[t2][e2]) by {
+            if t1 == pu {
+                assert(pooln[t1][e1] == 0);  // antecedent false
+            } else if t2 == pu {
+                assert(pooln[t2][e2] == 0);  // antecedent false
+            } else {
+                assert(t1 < pu && t2 < pu);
+                assert(pooln[t1] == pool[t1] && pooln[t2] == pool[t2]);
+                assert(pooln[t1][e1] == pool[t1][e1] && pooln[t2][e2] == pool[t2][e2]);  // old (c2)
+            }
+        }
+    }
+    // pt_lookup is unchanged for every `w` (the new L2 table is empty).
+    assert forall|w: u64| #![trigger pt_lookup(l1n, pooln, pool_base, w)]
+        pt_lookup(l1n, pooln, pool_base, w) == pt_lookup(l1, pool, pool_base, w) by {
+        lemma_link_l1_lookup(l1, pool, pooln, pool_base, pu, pl, i0, desc, leaves, w);
+    }
+}
+
+/// Per-`w` core of [`lemma_link_l1`]'s `pt_lookup` frame: case-splits on whether
+/// `w`'s L1 index is the linked slot. If it is, both walks dead-end (`None`); if
+/// not, the walk reads only old tables (`< pu`, by closure), all unchanged.
+proof fn lemma_link_l1_lookup(
+    l1: Seq<u64>,
+    pool: Seq<[u64; 512]>,
+    pooln: Seq<[u64; 512]>,
+    pool_base: u64,
+    pu: nat,
+    pl: nat,
+    i0: int,
+    desc: u64,
+    leaves: Set<nat>,
+    w: u64,
+)
+    requires
+        pt_wf_leveled(l1, pool, pool_base, pu, pl, leaves),
+        pu < pl,
+        0 <= i0 < 512,
+        l1[i0] & DESC_TABLE != DESC_TABLE,
+        pool_index_spec(pool_base, pl, desc) == Some(pu),
+        pooln.len() == pl,
+        forall|e: int| 0 <= e < 512 ==> pooln[pu as int][e] == 0,
+        forall|t: int| 0 <= t < pl && t != pu ==> pooln[t] == pool[t],
+    ensures
+        pt_lookup(l1.update(i0, desc), pooln, pool_base, w) == pt_lookup(l1, pool, pool_base, w),
+{
+    lemma_va_indices(w);
+    lemma_desc_tag(0);
+    assert(pool.len() == pl && pooln.len() == pl);  // align both walks' pool_index_spec
+    let l1n = l1.update(i0, desc);
+    let i1 = spec_l1_index(w) as int;
+    if i1 == i0 {
+        // After: enter the fresh empty L2 table at `pu`; its entries are 0, so the
+        // L2 read is not a table descriptor → None. Before: l1[i0] absent → None.
+        assert(l1n[i1] == desc);
+        assert(pooln[pu as int][spec_l2_index(w) as int] == 0);
+        assert(pt_lookup(l1, pool, pool_base, w) is None);
+        assert(pt_lookup(l1n, pooln, pool_base, w) is None);
+    } else {
+        assert(l1n[i1] == l1[i1]);
+        if l1[i1] & DESC_TABLE == DESC_TABLE {
+            let l2i = pool_index_spec(pool_base, pl, l1[i1]).unwrap();
+            assert(l2i < pu);                 // (b1) closure
+            assert(pooln[l2i as int] == pool[l2i as int]);
+            let l2e = pool[l2i as int][spec_l2_index(w) as int];
+            if l2e & DESC_TABLE == DESC_TABLE {
+                let l3i = pool_index_spec(pool_base, pl, l2e).unwrap();
+                assert(l2i < pu && !leaves.contains(l2i));   // l1 target is inner
+                assert(l3i < pu);             // (b2) closure
+                assert(pooln[l3i as int] == pool[l3i as int]);
+            }
+        }
+        // every read on `w`'s walk matched, so the two walks coincide.
+        assert(pt_lookup(l1n, pooln, pool_base, w) == pt_lookup(l1, pool, pool_base, w));
+    }
+}
+
+/// Linking a **fresh, zeroed** leaf table (index `pu`) into a previously-empty
+/// slot `(t1, e1)` of an **inner** table `t1` preserves `pt_wf` (with `pu` joining
+/// `leaves`) and **frames every nonzero leaf**: a page that was mapped stays
+/// mapped to the same value. The walk into the new leaf table only ever surfaces a
+/// fresh `0` (an unmapped page), so no nonzero PTE is perturbed. Takes the witness
+/// `leaves` explicitly because the caller (`walk_alloc`) must already know `t1` is
+/// inner (an L1 target, by `(b1)`).
+proof fn lemma_link_l2(
+    l1: Seq<u64>,
+    pool: Seq<[u64; 512]>,
+    pooln: Seq<[u64; 512]>,
+    pool_base: u64,
+    pu: nat,
+    pl: nat,
+    leaves: Set<nat>,
+    t1: int,
+    e1: int,
+    desc: u64,
+)
+    requires
+        pt_wf_leveled(l1, pool, pool_base, pu, pl, leaves),
+        pu < pl,
+        0 <= t1 < pu,
+        !leaves.contains(t1 as nat),
+        0 <= e1 < 512,
+        pool[t1][e1] & DESC_TABLE != DESC_TABLE,
+        desc & DESC_TABLE == DESC_TABLE,
+        pool_index_spec(pool_base, pl, desc) == Some(pu),
+        pooln.len() == pl,
+        forall|e: int| 0 <= e < 512 ==> pooln[pu as int][e] == 0,
+        pooln[t1][e1] == desc,
+        forall|e: int| 0 <= e < 512 && e != e1 ==> pooln[t1][e] == pool[t1][e],
+        forall|t: int| 0 <= t < pl && t != pu && t != t1 ==> pooln[t] == pool[t],
+    ensures
+        pt_wf(l1, pooln, pool_base, (pu + 1) as nat, pl),
+        forall|w: u64| #![trigger pt_lookup(l1, pooln, pool_base, w)]
+            pt_lookup(l1, pool, pool_base, w) is Some
+                ==> pt_lookup(l1, pooln, pool_base, w) == pt_lookup(l1, pool, pool_base, w),
+{
+    lemma_desc_tag(0);
+    let leavesn = leaves.insert(pu);
+    let pun = (pu + 1) as nat;
+    assert(!leaves.contains(pu));  // leaves ⊆ [0, pu)
+    assert(pt_wf_leveled(l1, pooln, pool_base, pun, pl, leavesn)) by {
+        assert forall|i: int| #![trigger l1[i]]
+            0 <= i < 512 && l1[i] & DESC_TABLE == DESC_TABLE implies {
+                &&& pool_index_spec(pool_base, pl, l1[i]) is Some
+                &&& pool_index_spec(pool_base, pl, l1[i]).unwrap() < pun
+                &&& !leavesn.contains(pool_index_spec(pool_base, pl, l1[i]).unwrap())
+            } by {
+            // L1 target is an old inner index `< pu`, so it is `!= pu` and stays inner.
+            assert(pool_index_spec(pool_base, pl, l1[i]).unwrap() < pu);
+        }
+        assert forall|t: int, e: int| #![trigger pooln[t][e]]
+            0 <= t < pun && !leavesn.contains(t as nat) && 0 <= e < 512
+                && pooln[t][e] & DESC_TABLE == DESC_TABLE implies {
+                &&& pool_index_spec(pool_base, pl, pooln[t][e]) is Some
+                &&& pool_index_spec(pool_base, pl, pooln[t][e]).unwrap() < pun
+                &&& leavesn.contains(pool_index_spec(pool_base, pl, pooln[t][e]).unwrap())
+            } by {
+            // `t` is an old inner table (`pu` is in `leavesn`, excluded).
+            assert(t < pu && !leaves.contains(t as nat));
+            if t == t1 && e == e1 {
+                assert(pooln[t][e] == desc);  // → pu ∈ leavesn
+            } else if t == t1 {
+                assert(pooln[t][e] == pool[t][e]);  // unchanged entry; old (b2)
+            } else {
+                assert(pooln[t] == pool[t]);  // old (b2)
+                assert(pooln[t][e] == pool[t][e]);
+            }
+        }
+        assert forall|i: int, j: int| #![trigger l1[i], l1[j]]
+            0 <= i < 512 && 0 <= j < 512 && i != j
+                && l1[i] & DESC_TABLE == DESC_TABLE && l1[j] & DESC_TABLE == DESC_TABLE
+            implies pool_index_spec(pool_base, pl, l1[i]) != pool_index_spec(pool_base, pl, l1[j]) by {
+            // l1 unchanged → old (c1).
+        }
+        assert forall|ta: int, ea: int, tb: int, eb: int| #![trigger pooln[ta][ea], pooln[tb][eb]]
+            0 <= ta < pun && !leavesn.contains(ta as nat) && 0 <= ea < 512
+                && 0 <= tb < pun && !leavesn.contains(tb as nat) && 0 <= eb < 512
+                && !(ta == tb && ea == eb)
+                && pooln[ta][ea] & DESC_TABLE == DESC_TABLE
+                && pooln[tb][eb] & DESC_TABLE == DESC_TABLE
+            implies pool_index_spec(pool_base, pl, pooln[ta][ea])
+                        != pool_index_spec(pool_base, pl, pooln[tb][eb]) by {
+            assert(ta < pu && tb < pu && !leaves.contains(ta as nat) && !leaves.contains(tb as nat));
+            let is_new = |t: int, e: int| t == t1 && e == e1;
+            if is_new(ta, ea) && is_new(tb, eb) {
+                // same slot — excluded by ta==tb && ea==eb
+            } else if is_new(ta, ea) {
+                // pooln[ta][ea] == desc → pu; the other resolves to an old leaf < pu.
+                assert(pooln[ta][ea] == desc);
+                assert(pooln[tb][eb] == pool[tb][eb]);
+                assert(pool_index_spec(pool_base, pl, pool[tb][eb]).unwrap() < pu);  // old (b2)
+            } else if is_new(tb, eb) {
+                assert(pooln[tb][eb] == desc);
+                assert(pooln[ta][ea] == pool[ta][ea]);
+                assert(pool_index_spec(pool_base, pl, pool[ta][ea]).unwrap() < pu);
+            } else {
+                assert(pooln[ta][ea] == pool[ta][ea] && pooln[tb][eb] == pool[tb][eb]);  // old (c2)
+            }
+        }
+    }
+    assert forall|w: u64| #![trigger pt_lookup(l1, pooln, pool_base, w)]
+        pt_lookup(l1, pool, pool_base, w) is Some
+            implies pt_lookup(l1, pooln, pool_base, w) == pt_lookup(l1, pool, pool_base, w) by {
+        lemma_link_l2_lookup(l1, pool, pooln, pool_base, pu, pl, leaves, t1, e1, desc, w);
+    }
+}
+
+/// Per-`w` core of [`lemma_link_l2`]'s frame: a **present** `w` cannot have its L2
+/// step land on the just-written slot `(t1, e1)` — that slot was empty, but a
+/// present `w` needs a descriptor there — so its whole walk reads only old tables,
+/// unchanged. (Holds for any present page, mapped or `Some(0)`.)
+proof fn lemma_link_l2_lookup(
+    l1: Seq<u64>,
+    pool: Seq<[u64; 512]>,
+    pooln: Seq<[u64; 512]>,
+    pool_base: u64,
+    pu: nat,
+    pl: nat,
+    leaves: Set<nat>,
+    t1: int,
+    e1: int,
+    desc: u64,
+    w: u64,
+)
+    requires
+        pt_wf_leveled(l1, pool, pool_base, pu, pl, leaves),
+        pu < pl,
+        0 <= t1 < pu,
+        !leaves.contains(t1 as nat),
+        0 <= e1 < 512,
+        pool[t1][e1] & DESC_TABLE != DESC_TABLE,
+        pool_index_spec(pool_base, pl, desc) == Some(pu),
+        pooln.len() == pl,
+        pooln[t1][e1] == desc,
+        forall|e: int| 0 <= e < 512 && e != e1 ==> pooln[t1][e] == pool[t1][e],
+        forall|t: int| 0 <= t < pl && t != pu && t != t1 ==> pooln[t] == pool[t],
+        pt_lookup(l1, pool, pool_base, w) is Some,
+    ensures
+        pt_lookup(l1, pooln, pool_base, w) == pt_lookup(l1, pool, pool_base, w),
+{
+    lemma_va_indices(w);
+    assert(pool.len() == pl && pooln.len() == pl);
+    let i1 = spec_l1_index(w) as int;
+    // `w` is mapped, so the full walk is present: L1 desc → inner l2i → L2 desc → leaf l3i.
+    assert(l1[i1] & DESC_TABLE == DESC_TABLE);
+    let l2i = pool_index_spec(pool_base, pl, l1[i1]).unwrap();
+    assert(l2i < pu && !leaves.contains(l2i));    // (b1): l1 target is inner
+    let l2e = pool[l2i as int][spec_l2_index(w) as int];
+    assert(l2e & DESC_TABLE == DESC_TABLE);       // present (else lookup were None)
+    // If the walk used `t1`, its L2 entry index cannot be `e1` (that slot was empty),
+    // so the written slot is untouched on `w`'s path.
+    if l2i == t1 {
+        assert(spec_l2_index(w) as int != e1);    // else `l2e` would be the empty slot
+        assert(pooln[l2i as int][spec_l2_index(w) as int] == pool[l2i as int][spec_l2_index(w) as int]);
+    } else {
+        assert(pooln[l2i as int] == pool[l2i as int]);
+    }
+    let l3i = pool_index_spec(pool_base, pl, l2e).unwrap();
+    assert(l3i < pu && leaves.contains(l3i));     // (b2): inner target is a leaf
+    assert(l3i != pu && l3i != t1);               // leaf ≠ the fresh/inner indices
+    assert(pooln[l3i as int] == pool[l3i as int]);
+}
+
+/// Writing a leaf PTE `pte` into the leaf slot `(l3, e)` that `va` resolves to
+/// preserves `pt_wf` (the slot is in a **leaf** table `l3 ∈ leaves`, excluded from
+/// the closure/no-aliasing clauses, so the frame PTE cannot violate them), makes
+/// `va` map to `pte`, and **frames every page whose looked-up value differs from
+/// the slot's old value** — a *value*-based locality argument that needs no
+/// no-aliasing: a page reading a value `!= pool[l3][e]` must read a different slot,
+/// hence is untouched. `map_in` writes into slots that pass 1 left `0`, so this
+/// preserves every nonzero (mapped) page.
+proof fn lemma_leaf_write(
+    l1: Seq<u64>,
+    pool: Seq<[u64; 512]>,
+    pooln: Seq<[u64; 512]>,
+    pool_base: u64,
+    pu: nat,
+    pl: nat,
+    leaves: Set<nat>,
+    l3: nat,
+    e: nat,
+    va: u64,
+    pte: u64,
+)
+    requires
+        pt_wf_leveled(l1, pool, pool_base, pu, pl, leaves),
+        leaves.contains(l3),
+        e < 512,
+        pt_leaf_slot(l1, pool, pool_base, va) == Some((l3, e)),
+        pooln.len() == pl,
+        pooln[l3 as int][e as int] == pte,
+        forall|j: int| 0 <= j < 512 && j != e ==> pooln[l3 as int][j] == pool[l3 as int][j],
+        forall|t: int| 0 <= t < pl && t != l3 ==> pooln[t] == pool[t],
+    ensures
+        pt_wf(l1, pooln, pool_base, pu, pl),
+        pt_lookup(l1, pooln, pool_base, va) == Some(pte),
+        // slot-based frame: a page resolving to a *different* leaf slot is unchanged
+        // (what `map_in` uses, via `lemma_distinct_pages_slots`, for the other pages).
+        forall|w: u64| #![trigger pt_lookup(l1, pooln, pool_base, w)]
+            (pt_leaf_slot(l1, pool, pool_base, w) is Some
+                && pt_leaf_slot(l1, pool, pool_base, w) != Some((l3, e)))
+                ==> pt_lookup(l1, pooln, pool_base, w) == pt_lookup(l1, pool, pool_base, w),
+{
+    // (1) pt_wf preserved with the same `leaves` — `l3 ∈ leaves` excludes it from
+    // (b2)/(c2), so writing a frame PTE there breaks nothing.
+    assert(pt_wf_leveled(l1, pooln, pool_base, pu, pl, leaves)) by {
+        assert forall|t: int, e2: int| #![trigger pooln[t][e2]]
+            0 <= t < pu && !leaves.contains(t as nat) && 0 <= e2 < 512
+                && pooln[t][e2] & DESC_TABLE == DESC_TABLE implies {
+                &&& pool_index_spec(pool_base, pl, pooln[t][e2]) is Some
+                &&& pool_index_spec(pool_base, pl, pooln[t][e2]).unwrap() < pu
+                &&& leaves.contains(pool_index_spec(pool_base, pl, pooln[t][e2]).unwrap())
+            } by {
+            assert(t != l3);  // t inner, l3 ∈ leaves
+            assert(pooln[t] == pool[t]);
+            assert(pooln[t][e2] == pool[t][e2]);  // old (b2)
+        }
+        assert forall|t1: int, e1: int, t2: int, e2: int| #![trigger pooln[t1][e1], pooln[t2][e2]]
+            0 <= t1 < pu && !leaves.contains(t1 as nat) && 0 <= e1 < 512
+                && 0 <= t2 < pu && !leaves.contains(t2 as nat) && 0 <= e2 < 512
+                && !(t1 == t2 && e1 == e2)
+                && pooln[t1][e1] & DESC_TABLE == DESC_TABLE
+                && pooln[t2][e2] & DESC_TABLE == DESC_TABLE
+            implies pool_index_spec(pool_base, pl, pooln[t1][e1])
+                        != pool_index_spec(pool_base, pl, pooln[t2][e2]) by {
+            assert(t1 != l3 && t2 != l3);
+            assert(pooln[t1] == pool[t1] && pooln[t2] == pool[t2]);  // old (c2)
+        }
+    }
+    // (2) va maps to pte, and (3) the slot-based frame, per `w`.
+    lemma_leaf_slot_lookup(l1, pooln, pool_base, va);
+    assert forall|w: u64| #![trigger pt_lookup(l1, pooln, pool_base, w)]
+        (pt_leaf_slot(l1, pool, pool_base, w) is Some
+            && pt_leaf_slot(l1, pool, pool_base, w) != Some((l3, e)))
+            implies pt_lookup(l1, pooln, pool_base, w) == pt_lookup(l1, pool, pool_base, w) by {
+        lemma_leaf_write_frame(l1, pool, pooln, pool_base, pu, pl, leaves, l3, e, w);
+    }
+    // va's walk lands on (l3, e); after the write the leaf reads `pte`.
+    assert(pt_leaf_slot(l1, pooln, pool_base, va) == Some((l3, e))) by {
+        lemma_leaf_write_slot(l1, pool, pooln, pool_base, pu, pl, leaves, l3, e, va);
+    }
+    lemma_leaf_slot_lookup(l1, pooln, pool_base, va);
+}
+
+/// Per-`w` slot frame of [`lemma_leaf_write`]: a page resolving to a leaf slot
+/// other than the written `(l3, e)` reads only old tables (its walk goes through
+/// `l1` + inner tables, all `!= l3`) and a leaf entry `!= (l3, e)`, all unchanged.
+proof fn lemma_leaf_write_frame(
+    l1: Seq<u64>,
+    pool: Seq<[u64; 512]>,
+    pooln: Seq<[u64; 512]>,
+    pool_base: u64,
+    pu: nat,
+    pl: nat,
+    leaves: Set<nat>,
+    l3: nat,
+    e: nat,
+    w: u64,
+)
+    requires
+        pt_wf_leveled(l1, pool, pool_base, pu, pl, leaves),
+        leaves.contains(l3),
+        e < 512,
+        pooln.len() == pl,
+        forall|j: int| 0 <= j < 512 && j != e ==> pooln[l3 as int][j] == pool[l3 as int][j],
+        forall|t: int| 0 <= t < pl && t != l3 ==> pooln[t] == pool[t],
+    ensures
+        (pt_leaf_slot(l1, pool, pool_base, w) is Some
+            && pt_leaf_slot(l1, pool, pool_base, w) != Some((l3, e)))
+            ==> pt_lookup(l1, pooln, pool_base, w) == pt_lookup(l1, pool, pool_base, w),
+{
+    lemma_va_indices(w);
+    assert(pool.len() == pl && pooln.len() == pl);
+    if pt_leaf_slot(l1, pool, pool_base, w) is Some
+        && pt_leaf_slot(l1, pool, pool_base, w) != Some((l3, e)) {
+        let l1e = l1[spec_l1_index(w) as int];
+        let l2_idx = pool_index_spec(pool_base, pl, l1e).unwrap();
+        assert(l2_idx < pu && !leaves.contains(l2_idx));   // l1 target inner
+        assert(l2_idx != l3 && pooln[l2_idx as int] == pool[l2_idx as int]);
+        let l2e = pool[l2_idx as int][spec_l2_index(w) as int];
+        let l3w = pool_index_spec(pool_base, pl, l2e).unwrap();
+        assert(l3w < pu && leaves.contains(l3w));          // L3 table is a leaf
+        // w's slot is (l3w, l3_index(w)) != (l3, e); the read at it is unchanged.
+        if l3w == l3 {
+            assert(spec_l3_index(w) as nat != e);
+        }
+        assert(pooln[l3w as int][spec_l3_index(w) as int] == pool[l3w as int][spec_l3_index(w) as int]);
+    }
+}
+
+/// The leaf write does not move `va`'s walk: its L1/L2 path reads only `l1` and
+/// **inner** tables (all `!= l3`, since `l3 ∈ leaves`), unchanged by the write.
+proof fn lemma_leaf_write_slot(
+    l1: Seq<u64>,
+    pool: Seq<[u64; 512]>,
+    pooln: Seq<[u64; 512]>,
+    pool_base: u64,
+    pu: nat,
+    pl: nat,
+    leaves: Set<nat>,
+    l3: nat,
+    e: nat,
+    va: u64,
+)
+    requires
+        pt_wf_leveled(l1, pool, pool_base, pu, pl, leaves),
+        leaves.contains(l3),
+        pt_leaf_slot(l1, pool, pool_base, va) == Some((l3, e)),
+        pooln.len() == pl,
+        forall|t: int| 0 <= t < pl && t != l3 ==> pooln[t] == pool[t],
+    ensures
+        pt_leaf_slot(l1, pooln, pool_base, va) == Some((l3, e)),
+{
+    lemma_va_indices(va);
+    assert(pool.len() == pl && pooln.len() == pl);
+    let l1e = l1[spec_l1_index(va) as int];
+    let l2_idx = pool_index_spec(pool_base, pl, l1e).unwrap();
+    assert(l2_idx < pu && !leaves.contains(l2_idx));   // l1 target inner
+    assert(l2_idx != l3);
+    assert(pooln[l2_idx as int] == pool[l2_idx as int]);
+}
+
+/// **The page table is a tree, not a DAG (the chief 5d theorem).** Two distinct
+/// page-aligned user VAs resolve to **distinct** leaf slots. The proof runs the
+/// no-aliasing clauses backwards: equal leaf slots force (via (c2)) the same L2
+/// table + entry, then (via (c1)) the same L1 entry — i.e. equal L1/L2/L3 indices,
+/// which for aligned in-range VAs means equal VAs (`bit_vector`), contradiction.
+/// This is what makes `map_in`'s per-page leaf writes non-interfering.
+proof fn lemma_distinct_pages_slots(
+    l1: Seq<u64>,
+    pool: Seq<[u64; 512]>,
+    pool_base: u64,
+    pu: nat,
+    pl: nat,
+    va1: u64,
+    va2: u64,
+)
+    requires
+        pt_wf(l1, pool, pool_base, pu, pl),
+        va1 % PAGE == 0,
+        va2 % PAGE == 0,
+        USER_VA_BASE <= va1 < USER_VA_END,
+        USER_VA_BASE <= va2 < USER_VA_END,
+        va1 != va2,
+        pt_leaf_slot(l1, pool, pool_base, va1) is Some,
+        pt_leaf_slot(l1, pool, pool_base, va2) is Some,
+    ensures
+        pt_leaf_slot(l1, pool, pool_base, va1) != pt_leaf_slot(l1, pool, pool_base, va2),
+{
+    lemma_va_indices(va1);
+    lemma_va_indices(va2);
+    assert(USER_VA_END == 0x80_0000_0000) by (compute);
+    assert(PAGE == 4096 && PAGE_MASK == 4095) by (compute);
+    let leaves = choose|lv: Set<nat>| pt_wf_leveled(l1, pool, pool_base, pu, pl, lv);
+    if pt_leaf_slot(l1, pool, pool_base, va1) == pt_leaf_slot(l1, pool, pool_base, va2) {
+        // Equal slots ⇒ same l3 table and same l3_index.
+        let l3 = pt_leaf_slot(l1, pool, pool_base, va1).unwrap().0;
+        assert(spec_l3_index(va1) == spec_l3_index(va2));
+        // va1/va2's L2 tables and entries.
+        let l2a = pool_index_spec(pool_base, pl, l1[spec_l1_index(va1) as int]).unwrap();
+        let l2b = pool_index_spec(pool_base, pl, l1[spec_l1_index(va2) as int]).unwrap();
+        assert(l2a < pu && !leaves.contains(l2a));   // (b1) inner
+        assert(l2b < pu && !leaves.contains(l2b));
+        // Both L2 descriptors resolve to `l3`; (c2) ⇒ same (table, entry).
+        assert(pool_index_spec(pool_base, pl, pool[l2a as int][spec_l2_index(va1) as int]) == Some(l3));
+        assert(pool_index_spec(pool_base, pl, pool[l2b as int][spec_l2_index(va2) as int]) == Some(l3));
+        assert(l2a == l2b && spec_l2_index(va1) == spec_l2_index(va2));
+        // Both L1 entries resolve to `l2a`; (c1) ⇒ same L1 index.
+        assert(spec_l1_index(va1) == spec_l1_index(va2));
+        // Bridge the `usize` index equalities to the underlying `u64` bit-fields,
+        // and `% PAGE == 0` to the `& PAGE_MASK == 0` alignment form.
+        assert(((va1 >> 30) & 0x1FF) < 512 && ((va2 >> 30) & 0x1FF) < 512
+            && ((va1 >> 21) & 0x1FF) < 512 && ((va2 >> 21) & 0x1FF) < 512
+            && ((va1 >> 12) & 0x1FF) < 512 && ((va2 >> 12) & 0x1FF) < 512) by (bit_vector);
+        assert(spec_l1_index(va1) == spec_l1_index(va2));
+        assert(spec_l2_index(va1) == spec_l2_index(va2));
+        assert(spec_l3_index(va1) == spec_l3_index(va2));
+        assert((va1 >> 30) & 0x1FF == (va2 >> 30) & 0x1FF);
+        assert((va1 >> 21) & 0x1FF == (va2 >> 21) & 0x1FF);
+        assert((va1 >> 12) & 0x1FF == (va2 >> 12) & 0x1FF);
+        assert(va1 & 4095 == 0) by (bit_vector) requires va1 % 4096 == 0;
+        assert(va2 & 4095 == 0) by (bit_vector) requires va2 % 4096 == 0;
+        // Equal index triple + aligned + in range ⇒ va1 == va2.
+        assert(va1 == va2) by (bit_vector)
+            requires
+                (va1 >> 30) & 0x1FF == (va2 >> 30) & 0x1FF,
+                (va1 >> 21) & 0x1FF == (va2 >> 21) & 0x1FF,
+                (va1 >> 12) & 0x1FF == (va2 >> 12) & 0x1FF,
+                va1 & 4095 == 0,
+                va2 & 4095 == 0,
+                va1 < 0x80_0000_0000u64,
+                va2 < 0x80_0000_0000u64;
+        assert(false);
+    }
+}
+
+} // verus!
+
+verus! {
+
 /// Walk to `va`'s L3 entry, allocating the L2/L3 tables if absent. Returns the
-/// `(pool index, entry index)` of the L3 slot. Mirrors the old `l3_slot`.
+/// `(pool index, entry index)` of the L3 slot. The presence tests are on the
+/// **descriptor tag** (`& DESC_TABLE`), matching [`lookup`]/[`pt_lookup`] — for a
+/// well-formed table (entries are `0` or table descriptors) this is identical to
+/// the old `== 0`, and it makes the walker total: a non-table-descriptor is
+/// treated as absent and re-allocated rather than chased (doc 39).
+///
+/// Verified against the `pt_wf` tree model: preserves `pt_wf`, grows `pool_used`
+/// monotonically, **clobbers no nonzero leaf** (the no-overwrite frame), and on
+/// `Ok` returns the in-bounds leaf slot `(l3, l3_index(va))` that `pt_lookup(va)`
+/// now resolves to; if `va`'s tables were already present it allocates nothing and
+/// leaves `l1`/`pool`/`pool_used` byte-identical (the two-pass enabler).
 fn walk_alloc(
     l1: &mut [u64; 512],
     pool: &mut [[u64; 512]],
     pool_used: &mut u64,
     pool_base: u64,
     va: u64,
-) -> Result<(usize, usize), MapError> {
+) -> (r: Result<(usize, usize), MapError>)
+    requires
+        pool_geom_ok(pool_base, old(pool).len() as nat),
+        pt_wf(old(l1)@, old(pool)@, pool_base, *old(pool_used) as nat, old(pool).len() as nat),
+        USER_VA_BASE <= va < USER_VA_END,
+    ensures
+        final(pool).len() == old(pool).len(),
+        pt_wf(final(l1)@, final(pool)@, pool_base, *final(pool_used) as nat, final(pool).len() as nat),
+        *final(pool_used) >= *old(pool_used),
+        forall|w: u64| #![trigger pt_lookup(final(l1)@, final(pool)@, pool_base, w)]
+            pt_lookup(old(l1)@, old(pool)@, pool_base, w) is Some
+                ==> pt_lookup(final(l1)@, final(pool)@, pool_base, w)
+                        == pt_lookup(old(l1)@, old(pool)@, pool_base, w),
+        // tables already present ⇒ no allocation ⇒ success (the pass-2 enabler).
+        pt_lookup(old(l1)@, old(pool)@, pool_base, va) is Some ==> r is Ok,
+        match r {
+            Ok((l3, e)) => {
+                &&& l3 < final(pool).len()
+                &&& e < 512
+                &&& e == spec_l3_index(va)
+                &&& pt_lookup(final(l1)@, final(pool)@, pool_base, va)
+                        == Some(final(pool)@[l3 as int][e as int])
+                &&& pt_leaf_slot(final(l1)@, final(pool)@, pool_base, va) == Some((l3 as nat, e as nat))
+                &&& pt_wf_leaf(final(l1)@, final(pool)@, pool_base, *final(pool_used) as nat,
+                        final(pool).len() as nat, l3 as nat)
+                &&& (pt_lookup(old(l1)@, old(pool)@, pool_base, va) is Some
+                        ==> *final(pool_used) == *old(pool_used)
+                            && final(l1)@ == old(l1)@ && final(pool)@ == old(pool)@)
+            }
+            Err(e) => e == MapError::NeedMemory,
+        },
+{
+    let ghost pl = pool.len() as nat;
+    let ghost l1_0 = l1@;
+    let ghost pool_0 = pool@;
+    let ghost pu_0 = *pool_used;
+    proof {
+        lemma_va_indices(va);
+        lemma_desc_tag(0);
+    }
+    let plen = pool.len();
     let l1i = l1_index(va);
-    if l1[l1i] == 0 {
+
+    // ── L1 level: ensure `l1[l1i]` is a present table descriptor ──
+    if l1[l1i] & DESC_TABLE != DESC_TABLE {
+        assert(pt_lookup(l1_0, pool_0, pool_base, va) is None);  // l1 entry absent
         let idx = alloc_table(pool, pool_used)?;
-        l1[l1i] = pa_of_table(pool_base, idx) | DESC_TABLE;
+        let ghost pool_1 = pool@;
+        let pa = pa_of_table(pool_base, plen, idx);
+        let desc = pa | DESC_TABLE;
+        proof {
+            lemma_desc_roundtrip(pool_base, pl, idx as nat, pa);
+            lemma_link_l1(l1_0, pool_0, pool_1, pool_base, pu_0 as nat, pl, l1i as int, desc);
+        }
+        l1[l1i] = desc;
     }
-    let l2_idx = pool_index(pool_base, pool.len(), l1[l1i]).ok_or(MapError::NeedMemory)?;
+    // Post-L1: `l1[l1i]` present, `pt_wf` holds, every lookup preserved from entry.
+    assert(l1@[l1i as int] & DESC_TABLE == DESC_TABLE);
+    assert(pt_wf(l1@, pool@, pool_base, *pool_used as nat, pl));
+    assert(*pool_used >= pu_0);
+    assert(pool@.len() == pl);
+    assert forall|w: u64| #![trigger pt_lookup(l1@, pool@, pool_base, w)]
+        pt_lookup(l1@, pool@, pool_base, w) == pt_lookup(l1_0, pool_0, pool_base, w) by {};
+    let ghost l1_a = l1@;
+    let ghost pool_a = pool@;
+    let ghost pu_a = *pool_used;
+
+    // The L1 target is an inner table (by closure (b1)); name the witness so the
+    // L2 link knows it.
+    let ghost leaves_a = choose|lv: Set<nat>| pt_wf_leveled(l1_a, pool_a, pool_base, pu_a as nat, pl, lv);
+    assert(pool_index_spec(pool_base, pl, l1_a[l1i as int]) is Some
+        && pool_index_spec(pool_base, pl, l1_a[l1i as int]).unwrap() < pu_a as nat
+        && !leaves_a.contains(pool_index_spec(pool_base, pl, l1_a[l1i as int]).unwrap()));
+    let l2_idx = match pool_index(pool_base, plen, l1[l1i]) {
+        Some(i) => i,
+        None => { assert(false); return Err(MapError::NeedMemory); }
+    };
     let l2i = l2_index(va);
-    if pool[l2_idx][l2i] == 0 {
+    assert(l2_idx < pu_a && !leaves_a.contains(l2_idx as nat));
+
+    // ── L2 level: ensure `pool[l2_idx][l2i]` is a present table descriptor ──
+    if pool[l2_idx][l2i] & DESC_TABLE != DESC_TABLE {
+        assert(pt_lookup(l1_a, pool_a, pool_base, va) is None);  // L2 entry absent
         let idx = alloc_table(pool, pool_used)?;
-        pool[l2_idx][l2i] = pa_of_table(pool_base, idx) | DESC_TABLE;
+        let ghost pool_b = pool@;
+        let pa = pa_of_table(pool_base, plen, idx);
+        let desc = pa | DESC_TABLE;
+        pool[l2_idx][l2i] = desc;
+        proof {
+            lemma_desc_roundtrip(pool_base, pl, idx as nat, pa);
+            lemma_link_l2(l1_a, pool_a, pool@, pool_base, pu_a as nat, pl, leaves_a,
+                l2_idx as int, l2i as int, desc);
+        }
     }
-    let l3_idx = pool_index(pool_base, pool.len(), pool[l2_idx][l2i]).ok_or(MapError::NeedMemory)?;
-    Ok((l3_idx, l3_index(va)))
+    // Post-L2: `pool[l2_idx][l2i]` present, `pt_wf` holds, nonzero leaves preserved.
+    assert(l1@[l1i as int] & DESC_TABLE == DESC_TABLE);
+    assert(pool@[l2_idx as int][l2i as int] & DESC_TABLE == DESC_TABLE);
+    assert(pt_wf(l1@, pool@, pool_base, *pool_used as nat, pl));
+    assert forall|w: u64| #![trigger pt_lookup(l1@, pool@, pool_base, w)]
+        pt_lookup(l1_0, pool_0, pool_base, w) is Some
+            implies pt_lookup(l1@, pool@, pool_base, w) == pt_lookup(l1_0, pool_0, pool_base, w) by {};
+
+    let l3_idx = match pool_index(pool_base, plen, pool[l2_idx][l2i]) {
+        Some(i) => i,
+        None => { assert(false); return Err(MapError::NeedMemory); }
+    };
+    let e = l3_index(va);
+    proof {
+        lemma_walk_alloc_resolves(l1@, pool@, pool_base, *pool_used as nat, pl,
+            l1i as nat, l2_idx as nat, l2i as nat, l3_idx as nat, va);
+    }
+    Ok((l3_idx, e))
 }
+
+/// `pt_lookup(va)` resolves to the leaf slot `walk_alloc` returns: given the L1 and
+/// L2 entries are present and resolve (through the closure) to `l2_idx`/`l3_idx`,
+/// the lookup yields `Some(pool[l3_idx][l3_index(va)])`.
+proof fn lemma_walk_alloc_resolves(
+    l1: Seq<u64>,
+    pool: Seq<[u64; 512]>,
+    pool_base: u64,
+    pu: nat,
+    pl: nat,
+    l1i: nat,
+    l2_idx: nat,
+    l2i: nat,
+    l3_idx: nat,
+    va: u64,
+)
+    requires
+        pt_wf(l1, pool, pool_base, pu, pl),
+        l1i == spec_l1_index(va),
+        l2i == spec_l2_index(va),
+        l1[l1i as int] & DESC_TABLE == DESC_TABLE,
+        pool_index_spec(pool_base, pl, l1[l1i as int]) == Some(l2_idx),
+        pool[l2_idx as int][l2i as int] & DESC_TABLE == DESC_TABLE,
+        pool_index_spec(pool_base, pl, pool[l2_idx as int][l2i as int]) == Some(l3_idx),
+        pool.len() == pl,
+    ensures
+        pt_lookup(l1, pool, pool_base, va) == Some(pool[l3_idx as int][spec_l3_index(va) as int]),
+        pt_leaf_slot(l1, pool, pool_base, va) == Some((l3_idx, spec_l3_index(va) as nat)),
+        pt_wf_leaf(l1, pool, pool_base, pu, pl, l3_idx),
+{
+    lemma_va_indices(va);
+    assert(pool.len() == pl);
+    assert(pool_index_spec(pool_base, pool.len(), l1[l1i as int]) == Some(l2_idx));
+    assert(pool_index_spec(pool_base, pool.len(), pool[l2_idx as int][l2i as int]) == Some(l3_idx));
+    // l3_idx is a leaf: the inner L1 target l2_idx's present descriptor resolves
+    // (by closure (b2)) into `leaves`.
+    let leaves = choose|lv: Set<nat>| pt_wf_leveled(l1, pool, pool_base, pu, pl, lv);
+    assert(l1[l1i as int] & DESC_TABLE == DESC_TABLE);              // (b1) trigger
+    assert(pool_index_spec(pool_base, pl, l1[l1i as int]).unwrap() < pu);  // (b1) closure
+    assert(l2_idx < pu && !leaves.contains(l2_idx));               // l1 target inner
+    assert(pool[l2_idx as int][l2i as int] & DESC_TABLE == DESC_TABLE);  // (b2) trigger
+    assert(leaves.contains(l3_idx));    // (b2): inner table's target is a leaf
+    assert(pt_wf_leveled(l1, pool, pool_base, pu, pl, leaves) && leaves.contains(l3_idx));
+}
+
+} // verus!
 
 verus! {
 
@@ -525,15 +1471,26 @@ pub(crate) fn lookup(l1: &[u64; 512], pool: &[[u64; 512]], pool_base: u64, va: u
 
 } // verus!
 
+verus! {
+
+/// The `i`-th page VA/PA of a `map_in` range — `base + i*PAGE` as a `u64` (exact
+/// under the no-overflow guarantees: `va_range_ok` for `va`, the `pa` `requires`
+/// for `pa`).
+pub closed spec fn pg(base: u64, i: int) -> u64 {
+    (base + i * (PAGE as int)) as u64
+}
+
 /// Map `pages` frames at `pa` into `[va, …)`. Two-pass (like the old `map`):
 /// pass 1 allocates the tables along the range and rejects any already-mapped
 /// page; pass 2 writes the leaves. Because pass 1 walked the whole range, pass
-/// 2 allocates nothing and cannot return `NeedMemory` (proven by
-/// `check_map_model`). Issues the post-map barrier through `store`.
+/// 2 allocates nothing and cannot return `NeedMemory` (the two-pass theorem,
+/// `walk_alloc`'s present⇒Ok). Issues the post-map barrier through `store`.
 ///
-/// pre:  `pool` is the aspace's table pool, `pool_used` its high-water mark,
-///       `pool_base` its PA; `l1` the aspace's L1 table.
-/// post: PTEs installed or an atomic failure; `*pool_used` only ever grows.
+/// Verified against the `pt_wf` tree model (doc 39): adds **exactly** the
+/// requested pages (`pt_lookup` == `spec_pte_encode`) or fails atomically
+/// (`BadVa`/`AlreadyMapped`/`NeedMemory` with no leaf written); preserves `pt_wf`;
+/// grows `pool_used` monotonically; and **clobbers no nonzero (mapped) page** (the
+/// no-overwrite frame, via the distinct-leaf-slot theorem).
 pub fn map_in<S: Store>(
     l1: &mut [u64; 512],
     pool: &mut [[u64; 512]],
@@ -544,23 +1501,306 @@ pub fn map_in<S: Store>(
     pages: u64,
     perms: u64,
     store: &mut S,
-) -> Result<(), MapError> {
+) -> (r: Result<(), MapError>)
+    requires
+        pool_geom_ok(pool_base, old(pool).len() as nat),
+        pt_wf(old(l1)@, old(pool)@, pool_base, *old(pool_used) as nat, old(pool).len() as nat),
+        (pa as int) + (pages as int) * (PAGE as int) <= u64::MAX as int,
+    ensures
+        final(pool).len() == old(pool).len(),
+        pt_wf(final(l1)@, final(pool)@, pool_base, *final(pool_used) as nat, final(pool).len() as nat),
+        *final(pool_used) >= *old(pool_used),
+        // no-overwrite frame: every page mapped (nonzero) before is preserved.
+        forall|w: u64| #![trigger pt_lookup(final(l1)@, final(pool)@, pool_base, w)]
+            (pt_lookup(old(l1)@, old(pool)@, pool_base, w) is Some
+                && pt_lookup(old(l1)@, old(pool)@, pool_base, w).unwrap() != 0)
+                ==> pt_lookup(final(l1)@, final(pool)@, pool_base, w)
+                        == pt_lookup(old(l1)@, old(pool)@, pool_base, w),
+        match r {
+            Ok(()) => forall|i: int| #![trigger pg(va, i)] 0 <= i < pages ==>
+                pt_lookup(final(l1)@, final(pool)@, pool_base, pg(va, i))
+                    == Some(spec_pte_encode(pg(pa, i), perms)),
+            Err(e) => e == MapError::BadVa || e == MapError::AlreadyMapped || e == MapError::NeedMemory,
+        },
+{
+    let ghost l1_0 = l1@;
+    let ghost pool_0 = pool@;
+    let ghost pu_0 = *pool_used;
+    let ghost pl = pool.len() as nat;
+    proof { assert(USER_VA_END == 0x80_0000_0000) by (compute); }
     if !va_range_ok(va, pages) {
         return Err(MapError::BadVa);
     }
-    for i in 0..pages {
-        let (l3, e) = walk_alloc(l1, pool, pool_used, pool_base, va + i * PAGE)?;
+    // ── Pass 1: walk-allocate the tables, reject any already-mapped page ──
+    let mut i: u64 = 0;
+    while i < pages
+        invariant
+            i <= pages,
+            pool.len() == pl,
+            pool.len() == old(pool).len(),
+            l1_0 == old(l1)@,
+            pool_0 == old(pool)@,
+            *pool_used >= *old(pool_used),
+            pool_geom_ok(pool_base, pl),
+            pt_wf(l1@, pool@, pool_base, *pool_used as nat, pl),
+            *pool_used >= pu_0,
+            va % PAGE == 0,
+            va >= USER_VA_BASE,
+            (va as int) + (pages as int) * (PAGE as int) <= USER_VA_END as int,
+            forall|w: u64| #![trigger pt_lookup(l1@, pool@, pool_base, w)]
+                pt_lookup(l1_0, pool_0, pool_base, w) is Some
+                    ==> pt_lookup(l1@, pool@, pool_base, w) == pt_lookup(l1_0, pool_0, pool_base, w),
+            forall|j: int| #![trigger pg(va, j)] 0 <= j < i ==>
+                pt_lookup(l1@, pool@, pool_base, pg(va, j)) == Some(0u64),
+        decreases pages - i,
+    {
+        proof { lemma_pg_in_range(va, pages, i as int); }
+        let page = va + i * PAGE;
+        let ghost before_l1 = l1@;
+        let ghost before_pool = pool@;
+        let res = walk_alloc(l1, pool, pool_used, pool_base, page);
+        // The frame composes S0→(loop head)→(post-walk_alloc): walk_alloc preserves
+        // every present page, so the early-exit error returns still frame S0's
+        // nonzero pages.
+        proof {
+            assert forall|w: u64| #![trigger pt_lookup(l1@, pool@, pool_base, w)]
+                (pt_lookup(l1_0, pool_0, pool_base, w) is Some
+                    && pt_lookup(l1_0, pool_0, pool_base, w).unwrap() != 0) implies
+                pt_lookup(l1@, pool@, pool_base, w) == pt_lookup(l1_0, pool_0, pool_base, w) by {
+                assert(pt_lookup(before_l1, before_pool, pool_base, w) == pt_lookup(l1_0, pool_0, pool_base, w));
+            }
+        }
+        let (l3, e) = match res {
+            Ok(x) => x,
+            Err(er) => return Err(er),
+        };
         if pool[l3][e] != 0 {
             return Err(MapError::AlreadyMapped);
         }
+        assert(pt_lookup(l1@, pool@, pool_base, page) == Some(0u64));
+        assert(page == pg(va, i as int));
+        assert forall|j: int| #![trigger pg(va, j)] 0 <= j < i + 1 implies
+            pt_lookup(l1@, pool@, pool_base, pg(va, j)) == Some(0u64) by {
+            if j < i as int {
+                assert(pt_lookup(before_l1, before_pool, pool_base, pg(va, j)) == Some(0u64));
+            } else {
+                assert(pg(va, j) == page);
+            }
+        }
+        i = i + 1;
     }
-    for i in 0..pages {
-        let (l3, e) = walk_alloc(l1, pool, pool_used, pool_base, va + i * PAGE)?;
-        pool[l3][e] = pte_encode(pa + i * PAGE, perms);
+    // ── Pass 2: write the leaves; pass 1 guarantees no allocation is needed ──
+    let mut k: u64 = 0;
+    while k < pages
+        invariant
+            k <= pages,
+            pool.len() == pl,
+            pool.len() == old(pool).len(),
+            l1_0 == old(l1)@,
+            pool_0 == old(pool)@,
+            *pool_used >= *old(pool_used),
+            pool_geom_ok(pool_base, pl),
+            pt_wf(l1@, pool@, pool_base, *pool_used as nat, pl),
+            *pool_used >= pu_0,
+            va % PAGE == 0,
+            va >= USER_VA_BASE,
+            (va as int) + (pages as int) * (PAGE as int) <= USER_VA_END as int,
+            (pa as int) + (pages as int) * (PAGE as int) <= u64::MAX as int,
+            forall|w: u64| #![trigger pt_lookup(l1@, pool@, pool_base, w)]
+                (pt_lookup(l1_0, pool_0, pool_base, w) is Some
+                    && pt_lookup(l1_0, pool_0, pool_base, w).unwrap() != 0)
+                    ==> pt_lookup(l1@, pool@, pool_base, w) == pt_lookup(l1_0, pool_0, pool_base, w),
+            forall|j: int| #![trigger pg(va, j)] 0 <= j < k ==>
+                pt_lookup(l1@, pool@, pool_base, pg(va, j)) == Some(spec_pte_encode(pg(pa, j), perms)),
+            forall|j: int| #![trigger pg(va, j)] k <= j < pages ==>
+                pt_lookup(l1@, pool@, pool_base, pg(va, j)) == Some(0u64),
+        decreases pages - k,
+    {
+        proof { lemma_pg_in_range(va, pages, k as int); }
+        let page = va + k * PAGE;
+        assert(page == pg(va, k as int));
+        assert(pt_lookup(l1@, pool@, pool_base, page) == Some(0u64));   // present (pass 1) → alloc-free
+        let res = walk_alloc(l1, pool, pool_used, pool_base, page);
+        let (l3, e) = match res {
+            Ok(x) => x,
+            Err(er) => { assert(false); return Err(er); }
+        };
+        // alloc-free: tables present ⇒ l1/pool/pool_used unchanged.
+        assert(pool@[l3 as int][e as int] == 0u64);
+        let ghost before = pool@;
+        let ghost puv = *pool_used as nat;
+        let pte = pte_encode(pa + k * PAGE, perms);
+        proof { lemma_pg_pa(pa, pages, k as int); }
+        assert(pte == spec_pte_encode(pg(pa, k as int), perms));
+        let ghost leaves = choose|lv: Set<nat>|
+            pt_wf_leveled(l1@, before, pool_base, puv, pl, lv) && lv.contains(l3 as nat);
+        pool[l3][e] = pte;
+        proof {
+            lemma_leaf_write(l1@, before, pool@, pool_base, puv, pl, leaves,
+                l3 as nat, e as nat, page, pte);
+            lemma_map_in_step(l1@, before, pool@, pool_base, puv, pl, l1_0, pool_0,
+                va, pa, pages, perms, k as int, l3 as nat, e as nat);
+        }
+        k = k + 1;
+    }
+    proof {
+        assert(pool.len() == pl);
+        assert(*pool_used >= pu_0);
+        assert(pt_wf(l1@, pool@, pool_base, *pool_used as nat, pl));
     }
     store.barrier_after_map();
+    proof {
+        assert(pool.len() == pl);
+        assert(*pool_used >= pu_0);
+        assert forall|i: int| #![trigger pg(va, i)] 0 <= i < pages implies
+            pt_lookup(l1@, pool@, pool_base, pg(va, i)) == Some(spec_pte_encode(pg(pa, i), perms)) by {};
+    }
     Ok(())
 }
+
+/// `va + i*PAGE` (for `0 <= i < pages` under `va_range_ok`) is a page-aligned user
+/// VA, overflow-free, equal to `pg(va, i)` — the per-page bound `map_in`'s loops
+/// hand `walk_alloc`.
+proof fn lemma_pg_in_range(va: u64, pages: u64, i: int)
+    requires
+        va % PAGE == 0,
+        va >= USER_VA_BASE,
+        (va as int) + (pages as int) * (PAGE as int) <= USER_VA_END as int,
+        0 <= i < pages,
+    ensures
+        pg(va, i) as int == (va as int) + i * (PAGE as int),
+        USER_VA_BASE <= pg(va, i) < USER_VA_END,
+        pg(va, i) % PAGE == 0,
+{
+    assert(USER_VA_END == 0x80_0000_0000) by (compute);
+    assert(i * (PAGE as int) < (pages as int) * (PAGE as int)) by (nonlinear_arith)
+        requires 0 <= i, i < pages, PAGE > 0;
+    assert(i * (PAGE as int) >= 0) by (nonlinear_arith) requires i >= 0, PAGE > 0;
+    // `va + i*PAGE < USER_VA_END < 2^64`, so the `as u64` in `pg` is exact.
+    assert((va as int) + i * (PAGE as int) < USER_VA_END as int);
+    assert(pg(va, i) as int == (va as int) + i * (PAGE as int));
+    assert((i * (PAGE as int)) % (PAGE as int) == 0) by (nonlinear_arith) requires PAGE > 0;
+    assert(pg(va, i) % PAGE == 0) by (nonlinear_arith)
+        requires
+            pg(va, i) as int == (va as int) + i * (PAGE as int),
+            (va as int) % (PAGE as int) == 0,
+            (i * (PAGE as int)) % (PAGE as int) == 0,
+            PAGE > 0;
+}
+
+/// `pa + i*PAGE` is overflow-free and equals `pg(pa, i)` (under the `pa` bound).
+proof fn lemma_pg_pa(pa: u64, pages: u64, i: int)
+    requires
+        (pa as int) + (pages as int) * (PAGE as int) <= u64::MAX as int,
+        0 <= i < pages,
+    ensures
+        pa + (i as u64) * PAGE == pg(pa, i),
+        (pa as int) + i * (PAGE as int) <= u64::MAX as int,
+{
+    assert(i * (PAGE as int) <= (pages as int) * (PAGE as int)) by (nonlinear_arith)
+        requires 0 <= i, i < pages, PAGE > 0;
+    assert(i * (PAGE as int) >= 0) by (nonlinear_arith) requires i >= 0, PAGE > 0;
+}
+
+/// Pass-2 step `k`: after the leaf write at page `k`, the already-written pages
+/// (`j < k`), the page just written (`j == k`), and the unwritten pages (`j > k`)
+/// all hold their intended values, and every nonzero pre-existing page is framed —
+/// each via the distinct-slot/leaf-write frame.
+proof fn lemma_map_in_step(
+    l1: Seq<u64>,
+    before: Seq<[u64; 512]>,
+    after: Seq<[u64; 512]>,
+    pool_base: u64,
+    pu: nat,
+    pl: nat,
+    l1_0: Seq<u64>,
+    pool_0: Seq<[u64; 512]>,
+    va: u64,
+    pa: u64,
+    pages: u64,
+    perms: u64,
+    k: int,
+    l3: nat,
+    e: nat,
+)
+    requires
+        va % PAGE == 0,
+        va >= USER_VA_BASE,
+        (va as int) + (pages as int) * (PAGE as int) <= USER_VA_END as int,
+        0 <= k < pages,
+        pt_wf(l1, before, pool_base, pu, pl),
+        before.len() == pl,
+        pt_leaf_slot(l1, before, pool_base, pg(va, k)) == Some((l3, e)),
+        // the leaf-write frame facts (from lemma_leaf_write on this step):
+        pt_wf(l1, after, pool_base, pu, pl),
+        pt_lookup(l1, after, pool_base, pg(va, k)) == Some(spec_pte_encode(pg(pa, k), perms)),
+        forall|w: u64| #![trigger pt_lookup(l1, after, pool_base, w)]
+            (pt_leaf_slot(l1, before, pool_base, w) is Some
+                && pt_leaf_slot(l1, before, pool_base, w) != Some((l3, e)))
+                ==> pt_lookup(l1, after, pool_base, w) == pt_lookup(l1, before, pool_base, w),
+        // pre-step invariants:
+        forall|j: int| #![trigger pg(va, j)] 0 <= j < k ==>
+            pt_lookup(l1, before, pool_base, pg(va, j)) == Some(spec_pte_encode(pg(pa, j), perms)),
+        forall|j: int| #![trigger pg(va, j)] k <= j < pages ==>
+            pt_lookup(l1, before, pool_base, pg(va, j)) == Some(0u64),
+        forall|w: u64| #![trigger pt_lookup(l1, before, pool_base, w)]
+            (pt_lookup(l1_0, pool_0, pool_base, w) is Some
+                && pt_lookup(l1_0, pool_0, pool_base, w).unwrap() != 0)
+                ==> pt_lookup(l1, before, pool_base, w) == pt_lookup(l1_0, pool_0, pool_base, w),
+    ensures
+        forall|j: int| #![trigger pg(va, j)] 0 <= j < k + 1 ==>
+            pt_lookup(l1, after, pool_base, pg(va, j)) == Some(spec_pte_encode(pg(pa, j), perms)),
+        forall|j: int| #![trigger pg(va, j)] k + 1 <= j < pages ==>
+            pt_lookup(l1, after, pool_base, pg(va, j)) == Some(0u64),
+        forall|w: u64| #![trigger pt_lookup(l1, after, pool_base, w)]
+            (pt_lookup(l1_0, pool_0, pool_base, w) is Some
+                && pt_lookup(l1_0, pool_0, pool_base, w).unwrap() != 0)
+                ==> pt_lookup(l1, after, pool_base, w) == pt_lookup(l1_0, pool_0, pool_base, w),
+{
+    // The written page's slot value before the write was 0, so anything with a
+    // nonzero looked-up value reads a *different* slot (used for the `w` frame).
+    lemma_leaf_slot_lookup(l1, before, pool_base, pg(va, k));
+    // (1) written + unwritten in-range pages: a different in-range page has a
+    // distinct slot (the tree theorem), so the write does not touch it.
+    assert forall|j: int| #![trigger pg(va, j)] 0 <= j < pages && j != k implies
+        pt_lookup(l1, after, pool_base, pg(va, j)) == pt_lookup(l1, before, pool_base, pg(va, j)) by {
+        lemma_pg_in_range(va, pages, j);
+        lemma_pg_in_range(va, pages, k);
+        lemma_pg_distinct(va, pages, j, k);
+        assert(pt_leaf_slot(l1, before, pool_base, pg(va, j)) is Some);
+        lemma_distinct_pages_slots(l1, before, pool_base, pu, pl, pg(va, j), pg(va, k));
+    }
+    // (2) nonzero pre-existing pages: their value != 0 == the written slot's old
+    // value, so their slot != (l3, e), so they are framed.
+    assert forall|w: u64| #![trigger pt_lookup(l1, after, pool_base, w)]
+        (pt_lookup(l1_0, pool_0, pool_base, w) is Some
+            && pt_lookup(l1_0, pool_0, pool_base, w).unwrap() != 0) implies
+        pt_lookup(l1, after, pool_base, w) == pt_lookup(l1_0, pool_0, pool_base, w) by {
+        lemma_leaf_slot_lookup(l1, before, pool_base, w);
+        assert(pt_lookup(l1, before, pool_base, w).unwrap() != 0);  // == S0's nonzero value
+    }
+}
+
+/// Distinct in-range page offsets give distinct page VAs (a `bit_vector` corollary
+/// used to invoke [`lemma_distinct_pages_slots`] in pass 2).
+proof fn lemma_pg_distinct(va: u64, pages: u64, j: int, k: int)
+    requires
+        va % PAGE == 0,
+        va >= USER_VA_BASE,
+        (va as int) + (pages as int) * (PAGE as int) <= USER_VA_END as int,
+        0 <= j < pages,
+        0 <= k < pages,
+        j != k,
+    ensures
+        pg(va, j) != pg(va, k),
+{
+    lemma_pg_in_range(va, pages, j);
+    lemma_pg_in_range(va, pages, k);
+    assert((va as int) + j * (PAGE as int) != (va as int) + k * (PAGE as int)) by (nonlinear_arith)
+        requires j != k, PAGE > 0;
+}
+
+} // verus!
 
 /// Unmap `pages` frames at `va`, invalidating each cleared page's TLB entry
 /// through `store`. Mirrors the old `unmap` (clear + per-page TLBI wherever the
@@ -773,8 +2013,8 @@ mod tests {
         let pool_base = 0x4900_0000u64;
         let mut l1 = [0u64; 512];
         let mut pool = vec![[0u64; 512]; 2]; // pool[0] = L2, pool[1] = L3
-        l1[l1_index(va)] = pa_of_table(pool_base, 0) | DESC_TABLE;
-        pool[0][l2_index(va)] = pa_of_table(pool_base, 1) | DESC_TABLE;
+        l1[l1_index(va)] = pa_of_table(pool_base, 2, 0) | DESC_TABLE;
+        pool[0][l2_index(va)] = pa_of_table(pool_base, 2, 1) | DESC_TABLE;
         for i in 0..npages {
             let page = va + (i as u64) * PAGE;
             pool[1][l3_index(page)] = pte_for(i);

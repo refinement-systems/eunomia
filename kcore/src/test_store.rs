@@ -300,9 +300,10 @@ impl Store for ArrayStore {
     fn tlb_invalidate_page(&mut self, _: u16, _: u64) {
         unimplemented!()
     }
-    fn barrier_after_map(&mut self) {
-        unimplemented!()
-    }
+    // No-op so `map_in` host tests (`aspace::map_in`) can use `ArrayStore` purely
+    // as the barrier supplier; the real `dsb`/`isb` is the kernel shell's job.
+    // `tlb_invalidate_page`/`barrier_after_unmap` stay `unimplemented!()` (5e).
+    fn barrier_after_map(&mut self) {}
     fn barrier_after_unmap(&mut self) {
         unimplemented!()
     }
@@ -2496,4 +2497,140 @@ fn destroy_tcb_structural() {
 
     assert_eq!(st.refs[&50], 1, "EXIT bind cap deleted (ref decremented)");
     assert_eq!(st.refs[&51], 1, "FAULT bind cap deleted (ref decremented)");
+}
+
+// ── aspace `map_in` (plan §5d): the verified two-pass walk-allocate over arrays ──
+//
+// `map_in` is generic over `Store`; these checks run the **real** body against
+// hand-built `[u64; 512]` / `Vec<[u64; 512]>` page tables, using `ArrayStore`
+// purely as the `barrier_after_map` supplier. The post-map state is checked via
+// the verified read-only walker (`range_mapped_in`/`lookup`) — the executable
+// counterpart of the `pt_lookup` round-trip.
+
+use crate::aspace::{lookup, map_in, pte_encode, range_mapped_in, MapError, PAGE, PERM_W, USER_VA_BASE, USER_VA_END};
+
+// A fresh aspace: a zeroed L1, an `npools`-table zeroed pool at a page-aligned
+// base, `pool_used == 0`. `pool_base` sits well inside the 48-bit address field.
+fn map_fixture(npools: usize) -> ([u64; 512], Vec<[u64; 512]>, u64, u64) {
+    ([0u64; 512], vec![[0u64; 512]; npools], 0u64, 0x4900_0000u64)
+}
+
+#[test]
+fn map_in_single_page() {
+    let (mut l1, mut pool, mut used, base) = map_fixture(8);
+    let mut store = ArrayStore::new(0);
+    let (va, pa) = (USER_VA_BASE, 0x4800_0000u64);
+    map_in(&mut l1, &mut pool, &mut used, base, pa, va, 1, PERM_W, &mut store).unwrap();
+    assert!(range_mapped_in(&l1, &pool, base, va, PAGE, true), "mapped writable");
+    let (l3, e) = lookup(&l1, &pool, base, va).expect("present");
+    assert_eq!(pool[l3][e], pte_encode(pa, PERM_W), "leaf is pte_encode(pa, W)");
+    assert_eq!(used, 2, "one L2 + one L3 table allocated");
+}
+
+#[test]
+fn map_in_multi_page() {
+    let (mut l1, mut pool, mut used, base) = map_fixture(8);
+    let mut store = ArrayStore::new(0);
+    let (va, pa) = (USER_VA_BASE, 0x4800_0000u64);
+    map_in(&mut l1, &mut pool, &mut used, base, pa, va, 4, PERM_W, &mut store).unwrap();
+    assert!(range_mapped_in(&l1, &pool, base, va, 4 * PAGE, true));
+    for i in 0..4u64 {
+        let (l3, e) = lookup(&l1, &pool, base, va + i * PAGE).expect("present");
+        assert_eq!(pool[l3][e], pte_encode(pa + i * PAGE, PERM_W), "page {i}");
+    }
+    assert_eq!(used, 2, "4 pages share one L3 table");
+}
+
+#[test]
+fn map_in_carries_l2_index() {
+    // A 2-page range straddling a 2 MiB L2 boundary forces a *second* L3 table.
+    let (mut l1, mut pool, mut used, base) = map_fixture(8);
+    let mut store = ArrayStore::new(0);
+    let (va, pa) = (USER_VA_BASE + 511 * PAGE, 0x4800_0000u64);
+    map_in(&mut l1, &mut pool, &mut used, base, pa, va, 2, PERM_W, &mut store).unwrap();
+    assert!(range_mapped_in(&l1, &pool, base, va, 2 * PAGE, true));
+    assert_eq!(used, 3, "one L2 + two L3 tables (the L2 carry)");
+}
+
+#[test]
+fn map_in_already_mapped_atomic() {
+    let (mut l1, mut pool, mut used, base) = map_fixture(8);
+    let mut store = ArrayStore::new(0);
+    let va = USER_VA_BASE;
+    let pa1 = 0x4800_0000u64;
+    map_in(&mut l1, &mut pool, &mut used, base, pa1, va, 4, PERM_W, &mut store).unwrap();
+    // Try to map pages 2..6 with a *different* PA: page 2 overlaps → AlreadyMapped.
+    let pa2 = 0x4A00_0000u64;
+    let r = map_in(&mut l1, &mut pool, &mut used, base, pa2, va + 2 * PAGE, 4, PERM_W, &mut store);
+    assert_eq!(r, Err(MapError::AlreadyMapped));
+    // Atomic: no leaf of the second request was written — pages 4/5 stay unmapped…
+    assert!(!range_mapped_in(&l1, &pool, base, va + 4 * PAGE, 2 * PAGE, false), "no partial write");
+    // …and the overlapped page keeps pa1's PTE (not overwritten with pa2's).
+    let (l3, e) = lookup(&l1, &pool, base, va + 2 * PAGE).expect("present");
+    assert_eq!(pool[l3][e], pte_encode(pa1 + 2 * PAGE, PERM_W), "original mapping intact");
+}
+
+#[test]
+fn map_in_need_memory() {
+    // A pool one table short of the L2+L3 a single page needs → NeedMemory.
+    let (mut l1, mut pool, mut used, base) = map_fixture(1);
+    let mut store = ArrayStore::new(0);
+    let r = map_in(&mut l1, &mut pool, &mut used, base, 0x4800_0000, USER_VA_BASE, 1, PERM_W, &mut store);
+    assert_eq!(r, Err(MapError::NeedMemory));
+    assert!(!range_mapped_in(&l1, &pool, base, USER_VA_BASE, PAGE, false), "nothing mapped");
+}
+
+#[test]
+fn map_in_readonly_rejects_write() {
+    let (mut l1, mut pool, mut used, base) = map_fixture(8);
+    let mut store = ArrayStore::new(0);
+    let va = USER_VA_BASE;
+    map_in(&mut l1, &mut pool, &mut used, base, 0x4800_0000, va, 1, 0 /* RO */, &mut store).unwrap();
+    assert!(range_mapped_in(&l1, &pool, base, va, PAGE, false), "present for reads");
+    assert!(!range_mapped_in(&l1, &pool, base, va, PAGE, true), "rejected for writes");
+}
+
+#[test]
+fn randomized_map_sweep() {
+    // For many seeds, map a handful of disjoint ascending ranges into a fresh
+    // pool, asserting after EACH map: the new range round-trips and **every prior
+    // range still holds its exact PTEs** (the no-clobber frame, at scale).
+    let mut trials = 0usize;
+    for seed in 0..200u64 {
+        let (mut l1, mut pool, mut used, base) = map_fixture(64);
+        let mut store = ArrayStore::new(0);
+        let mut rng = Lcg(seed.wrapping_mul(0x9E37_79B9).wrapping_add(1));
+        let mut mapped: Vec<(u64, u64, u64, u64)> = Vec::new(); // (va, pages, pa, perms)
+        let mut next_va = USER_VA_BASE;
+        for _ in 0..4 {
+            let gap = (rng.below(8) as u64) * PAGE;
+            let pages = 1 + (rng.below(4) as u64);
+            let va = next_va + gap;
+            let pa = 0x4800_0000u64 + (rng.below(64) as u64) * PAGE;
+            let perms = if rng.below(2) == 0 { PERM_W } else { 0 };
+            if va + pages * PAGE > USER_VA_END {
+                break;
+            }
+            match map_in(&mut l1, &mut pool, &mut used, base, pa, va, pages, perms, &mut store) {
+                Ok(()) => {
+                    assert!(range_mapped_in(&l1, &pool, base, va, pages * PAGE, perms & PERM_W != 0));
+                    for i in 0..pages {
+                        let (l3, e) = lookup(&l1, &pool, base, va + i * PAGE).expect("new range present");
+                        assert_eq!(pool[l3][e], pte_encode(pa + i * PAGE, perms));
+                    }
+                    for &(mva, mpages, mpa, mperms) in &mapped {
+                        for i in 0..mpages {
+                            let (l3, e) = lookup(&l1, &pool, base, mva + i * PAGE).expect("prior range intact");
+                            assert_eq!(pool[l3][e], pte_encode(mpa + i * PAGE, mperms), "no clobber");
+                        }
+                    }
+                    mapped.push((va, pages, pa, perms));
+                    next_va = va + pages * PAGE;
+                    trials += 1;
+                }
+                Err(_) => break,
+            }
+        }
+    }
+    assert!(trials > 300, "sweep should map hundreds of ranges, ran {trials}");
 }

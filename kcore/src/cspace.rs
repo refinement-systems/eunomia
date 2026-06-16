@@ -971,6 +971,25 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view();
+
+    // ── aspace hardware seam (plan §1.4; the `aspace::map_in` post-map barrier) ─
+    //
+    // The barrier carries no object state — it issues a `dsb`/`isb` so the leaf
+    // writes are visible before the mapping is used. Modeled as "frames every
+    // object view", which is faithful (it touches no kcore object) and is all
+    // `map_in` needs to call it in the verified fragment. Because it takes
+    // neither page-table slice, Verus already knows it cannot perturb `l1`/`pool`,
+    // so `map_in`'s page-table postcondition is independent of this contract.
+    // `tlb_invalidate_page`/`barrier_after_unmap` stay uncontracted until 5e.
+    fn barrier_after_map(&mut self)
+        ensures
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view();
 }
 
 // The refcounted object a cap designates (the spec mirror of `Cap::obj`).
