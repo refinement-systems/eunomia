@@ -17,9 +17,15 @@
 
 use crate::channel::MSG_PAYLOAD;
 use crate::untyped::ObjType;
+use vstd::prelude::*;
+
+verus! {
 
 /// Scheduler priority levels. Canonical home (the kernel's ready-queue array
 /// and this decoder's range check share it); `kernel::thread` re-exports it.
+/// Inside `verus!{}` so it is spec-visible to the `decode`/`decode_prio`
+/// contracts (the `channel::MSG_PAYLOAD` idiom); erases to a plain `pub const`,
+/// so the `kernel::thread` re-export and the aarch64 build are unchanged.
 pub const NUM_PRIOS: usize = 32;
 
 /// A decoded, shape-validated syscall. Slot indices stay `u64` — the
@@ -68,7 +74,13 @@ pub enum SysError {
     BadPrio,
 }
 
-fn decode_prio(raw: u64) -> Result<u8, SysError> {
+/// Mask the priority to its low byte and bound it. The `(raw & 0xFF) as u8`
+/// truncating cast is total; the range check is what `ThreadStart`/`ThreadStartAs`
+/// rely on, so the bound is a postcondition the kernel's ready-queue index trusts.
+fn decode_prio(raw: u64) -> (result: Result<u8, SysError>)
+    ensures
+        result matches Ok(p) ==> (p as usize) < NUM_PRIOS,
+{
     let prio = (raw & 0xFF) as u8;
     if prio as usize >= NUM_PRIOS {
         return Err(SysError::BadPrio);
@@ -78,14 +90,45 @@ fn decode_prio(raw: u64) -> Result<u8, SysError> {
 
 /// Decode the register file into a typed syscall (plan §2.5). `nr` is x7;
 /// `a` is x0..x5 (the kernel's trap-frame read — six argument registers).
-pub fn decode(nr: u64, a: [u64; 6]) -> Result<Sys, SysError> {
+///
+/// Verified (plan doc/plans/3_verus-rewrite_phase5-detail.md §5a): **total** —
+/// for any `(nr, a) : (u64, [u64;6])` it returns `Ok`/`Err`, never panics,
+/// overflows, or UBs (the spec §3.7 "unknown `nr` is an error, never a crash"
+/// as a theorem, not a review convention). The `ensures` pin the §4.6
+/// shape-validation: the `ChanSend` length cap that precedes `channel::send`'s
+/// `as u16` truncation (so send's `data.len() <= MSG_PAYLOAD` precondition is
+/// discharged at the source); the event/which/priority ranges; and that an
+/// unknown call or bad `ObjType` discriminant maps to the right error. The body
+/// uses explicit `match`/early-return (not `?`/`ok_or`) so the control flow is
+/// in the verified fragment.
+pub fn decode(nr: u64, a: [u64; 6]) -> (result: Result<Sys, SysError>)
+    ensures
+        // §3.7: every `nr` outside the defined 0..=23 range is `UnknownCall`.
+        nr >= 24 ==> result matches Err(SysError::UnknownCall),
+        // Retype with an out-of-range `ObjType` discriminant is `BadObjType`
+        // (via `ObjType::from_u64`'s `None`-iff-`v >= 8` characterization).
+        (nr == 3 && a@[1] >= 8) ==> result matches Err(SysError::BadObjType),
+        // The load-bearing §4.6 cap: a decoded send length never exceeds the
+        // payload bound, so the downstream `as u16` truncation is lossless and
+        // `channel::send`'s `data.len() <= MSG_PAYLOAD` precondition holds.
+        result matches Ok(Sys::ChanSend { len, .. }) ==> len <= MSG_PAYLOAD as u64,
+        // Bounded-before-use: event/which/priority are validated at decode time.
+        result matches Ok(Sys::ChanBind { event, .. }) ==> event < 3,
+        result matches Ok(Sys::ThreadBind { which, .. }) ==> which < 2,
+        result matches Ok(Sys::ThreadStart { prio, .. }) ==> (prio as usize) < NUM_PRIOS,
+        result matches Ok(Sys::ThreadStartAs { prio, .. }) ==> (prio as usize) < NUM_PRIOS,
+{
     Ok(match nr {
         0 => Sys::DebugPutc { ch: a[0] },
         1 => Sys::DebugWrite { ptr: a[0], len: a[1] },
         2 => Sys::Yield,
         3 => {
-            let ty = ObjType::from_u64(a[1]).ok_or(SysError::BadObjType)?;
-            Sys::Retype { ut: a[0], ty, param: a[2], dst: a[3], dst2: a[4] }
+            // `from_u64` is `None` exactly when `a[1] >= 8`, so the BadObjType
+            // postcondition follows from its contract.
+            match ObjType::from_u64(a[1]) {
+                Some(ty) => Sys::Retype { ut: a[0], ty, param: a[2], dst: a[3], dst2: a[4] },
+                None => return Err(SysError::BadObjType),
+            }
         }
         4 => Sys::CapCopy { src: a[0], dst: a[1], mask: a[2] },
         5 => Sys::CapDelete { slot: a[0] },
@@ -108,16 +151,20 @@ pub fn decode(nr: u64, a: [u64; 6]) -> Result<Sys, SysError> {
         11 => Sys::NotifSignal { slot: a[0], bits: a[1] },
         12 => Sys::NotifWait { slot: a[0] },
         13 => {
-            let prio = decode_prio(a[4])?;
-            Sys::ThreadStart { tcb: a[0], cspace: a[1], entry: a[2], sp: a[3], prio, arg: a[5] }
+            match decode_prio(a[4]) {
+                Ok(prio) => Sys::ThreadStart { tcb: a[0], cspace: a[1], entry: a[2], sp: a[3], prio, arg: a[5] },
+                Err(e) => return Err(e),
+            }
         }
         14 => Sys::TimerArm { timer: a[0], notif: a[1], bits: a[2], delta: a[3] },
         15 => Sys::ThreadExit { status: a[0] },
         16 => Sys::Map { aspace: a[0], frame: a[1], va: a[2], perms: a[3] },
         17 => Sys::FrameWrite { frame: a[0], off: a[1], buf: a[2], len: a[3] },
         18 => {
-            let prio = decode_prio(a[5])?;
-            Sys::ThreadStartAs { tcb: a[0], cspace: a[1], aspace: a[2], entry: a[3], sp: a[4], prio }
+            match decode_prio(a[5]) {
+                Ok(prio) => Sys::ThreadStartAs { tcb: a[0], cspace: a[1], aspace: a[2], entry: a[3], sp: a[4], prio },
+                Err(e) => return Err(e),
+            }
         }
         19 => Sys::FramePaddr { slot: a[0] },
         20 => Sys::DebugGetc,
@@ -132,6 +179,8 @@ pub fn decode(nr: u64, a: [u64; 6]) -> Result<Sys, SysError> {
         _ => return Err(SysError::UnknownCall),
     })
 }
+
+} // verus!
 
 #[cfg(test)]
 mod tests {
