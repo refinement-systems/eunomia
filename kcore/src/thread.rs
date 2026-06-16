@@ -225,6 +225,9 @@ pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<S
     requires
         cspace::cspace_wf(old(store).slot_view()),
         old(store).slot_view().dom().finite(),
+        // `delete` (the displaced-bind-cap teardown, the first mutation) requires
+        // `refcount_sound` (§6a/§1.3); it holds unmutated from entry to that call.
+        cspace::refcount_sound(old(store)),
         old(store).tcb_view().dom().contains(t),
         which < 2,
         old(store).tcb_view()[t].bind_bits.len() == 2,
@@ -310,11 +313,18 @@ verus! {
 /// binding slots cleared, **its report UNCHANGED** (destruction fires no report,
 /// §5.1), and `cspace_wf` preserved. `unqueue_ready` therefore needs no Verus
 /// contract (the body is unverified) — a small simplification of the §1.3 note.
+// **Refcount census (plan §6a).** The contract now also requires and preserves
+// `refcount_sound` and states the `count_nonempty` non-increase 6d's measure needs:
+// the bind-cap deletes drop `slot_refs`, and the `unref_cspace`/`unref_aspace`
+// releases drop `thread_hold_refs`, each matched by its `-1` (6d closes the body).
+// Stated now (still `external_body`, host-checked) so `obj_unref` (6c) verifies
+// against the final contract.
 #[verifier::external_body]
 pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
     requires
         cspace::cspace_wf(old(store).slot_view()),
         old(store).slot_view().dom().finite(),
+        cspace::refcount_sound(old(store)),
         old(store).tcb_view().dom().contains(t),
         old(store).tcb_view()[t].bind_slots.len() == 2,
         old(store).slot_view().dom().contains(old(store).tcb_view()[t].bind_slots[0]),
@@ -322,6 +332,9 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
     ensures
         cspace::cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom() == old(store).slot_view().dom(),
+        cspace::count_nonempty(final(store).slot_view())
+            <= cspace::count_nonempty(old(store).slot_view()),
+        cspace::refcount_sound(final(store)),
         final(store).tcb_view().dom().contains(t),
         final(store).tcb_view()[t].state == ThreadState::Halted,
         final(store).tcb_view()[t].qnext is None,
