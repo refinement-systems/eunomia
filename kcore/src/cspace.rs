@@ -233,14 +233,12 @@ fn obj_unref<S: Store>(store: &mut S, cap: Cap) {
     }
 }
 
-/// Drop a non-cap reference to an aspace (mapped frames and bound
-/// threads hold these so the aspace can't die under them).
-pub fn unref_aspace<S: Store>(store: &mut S, a: ObjId) {
-    store.set_obj_refs(a, store.obj_refs(a) - 1);
-    if store.obj_refs(a) == 0 {
-        store.aspace_destroy(a);
-    }
-}
+// `unref_aspace` (drop a non-cap reference to an aspace — mapped frames and bound
+// threads hold these so the aspace can't die under them) is verified — see the
+// `verus!{}` block at the end of this file (plan §6b, doc/results/42). It moved out
+// of this plain-Rust cluster ahead of `obj_unref`/`unref_cspace`/`destroy_cspace`
+// (6c/6d) because the aspace teardown is non-recursive — `aspace_destroy` is a seam
+// black box, so it closes without the cross-module recursion cluster.
 
 // kani_contracts spike retired in the arena rewrite.
 pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId) {
@@ -2714,6 +2712,105 @@ proof fn lemma_thread_hold_aspace_drop(m: Map<ObjId, TcbView>, k: ObjId, v: TcbV
         }
     }
     assert(c2 =~= c1);
+}
+
+// ── `delete`'s frame-unmap-branch census lemma (plan §6b, doc/results/42). ──
+//
+// `delete` clears a deleted cap's slot (`cspace.rs`'s `s.cap = EMPTY; set_slot`)
+// then, for a mapped Frame, calls `aspace_unmap` + `unref_aspace`. The census side
+// of that branch — landed here, consumed by 6d's `delete` body (the op stays
+// `external_body` this sub-phase): clearing a mapped Frame slot lowers exactly the
+// target aspace's `frame_map_refs` by one and leaves *every* object's `slot_refs`
+// (a Frame designates no object) and every *other* aspace's `frame_map_refs` fixed.
+// The matching `-1` is `unref_aspace`'s; the four non-slot census terms ride
+// `set_slot`'s view-frame at the call site. Two "unchanged" helpers (the
+// `lemma_same_caps_same_census` analog for a single *changed* key whose designation
+// of `o` is absent on both sides) plus the proven `lemma_frame_map_drop` compose it.
+
+// A single-slot edit whose old and new caps both designate nothing-of-`obj` leaves
+// `obj`'s slot census fixed (no finiteness needed — a pure set-extensionality step).
+proof fn lemma_nondesignating_edit_slot_refs(
+    m: Map<SlotId, CapSlot>,
+    k: SlotId,
+    v: CapSlot,
+    obj: ObjId,
+)
+    requires
+        m.dom().contains(k),
+        cap_obj(m[k].cap) != Some(obj),
+        cap_obj(v.cap) != Some(obj),
+    ensures
+        slot_refs(m.insert(k, v), obj) == slot_refs(m, obj),
+{
+    let m2 = m.insert(k, v);
+    let f1 = m.dom().filter(|j: SlotId| cap_obj(m[j].cap) == Some(obj));
+    let f2 = m2.dom().filter(|j: SlotId| cap_obj(m2[j].cap) == Some(obj));
+    assert(m2.dom() =~= m.dom());
+    assert forall|j: SlotId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.contains(j) by {
+        if j != k {
+            assert(m2[j] == m[j]);
+        } else {
+            assert(m2[k] == v);
+        }
+    }
+    assert(f2 =~= f1);
+}
+
+// The frame-mapping mirror: an edit whose old and new caps both target nothing-of-`o`
+// leaves `o`'s frame-mapping census fixed.
+proof fn lemma_nontargeting_edit_frame_map(
+    m: Map<SlotId, CapSlot>,
+    k: SlotId,
+    v: CapSlot,
+    o: ObjId,
+)
+    requires
+        m.dom().contains(k),
+        cap_frame_aspace(m[k].cap) != Some(o),
+        cap_frame_aspace(v.cap) != Some(o),
+    ensures
+        frame_map_refs(m.insert(k, v), o) == frame_map_refs(m, o),
+{
+    let m2 = m.insert(k, v);
+    let f1 = m.dom().filter(|j: SlotId| cap_frame_aspace(m[j].cap) == Some(o));
+    let f2 = m2.dom().filter(|j: SlotId| cap_frame_aspace(m2[j].cap) == Some(o));
+    assert(m2.dom() =~= m.dom());
+    assert forall|j: SlotId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.contains(j) by {
+        if j != k {
+            assert(m2[j] == m[j]);
+        } else {
+            assert(m2[k] == v);
+        }
+    }
+    assert(f2 =~= f1);
+}
+
+// The composite branch lemma 6d's `delete` body consumes: replacing a mapped Frame
+// slot `k` (target aspace `asp`) with a non-designating, non-targeting cap `v` (an
+// empty cap qualifies — `cap_obj`/`cap_frame_aspace` are both `None` for it) drops
+// `frame_map_refs(asp)` by one and fixes every other slot-view census term.
+proof fn lemma_frame_clear_census(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot, asp: ObjId)
+    requires
+        m.dom().finite(),
+        m.dom().contains(k),
+        cap_frame_aspace(m[k].cap) == Some(asp),
+        cap_obj(v.cap) is None,
+        cap_frame_aspace(v.cap) is None,
+    ensures
+        frame_map_refs(m.insert(k, v), asp) == (frame_map_refs(m, asp) - 1) as nat,
+        forall|o: ObjId| o != asp ==> #[trigger] frame_map_refs(m.insert(k, v), o) == frame_map_refs(m, o),
+        forall|o: ObjId| #[trigger] slot_refs(m.insert(k, v), o) == slot_refs(m, o),
+{
+    // A Frame designates no object, so the old cap at `k` designates nothing.
+    assert(cap_obj(m[k].cap) is None);
+    lemma_frame_map_drop(m, k, v, asp);
+    assert forall|o: ObjId| o != asp implies #[trigger] frame_map_refs(m.insert(k, v), o)
+        == frame_map_refs(m, o) by {
+        lemma_nontargeting_edit_frame_map(m, k, v, o);
+    }
+    assert forall|o: ObjId| #[trigger] slot_refs(m.insert(k, v), o) == slot_refs(m, o) by {
+        lemma_nondesignating_edit_slot_refs(m, k, v, o);
+    }
 }
 
 // ── Construction-side acyclicity preservation (doc/results/21 §9). ──
@@ -5272,6 +5369,68 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
         lemma_move_count(m0, mfin, src, dst);
         // dst inherits src's cap (rl[dst] == m0[src]).
         assert(mfin[dst] == m0[src]);
+    }
+}
+
+/// Drop a non-cap reference to an aspace — mapped frames and bound threads hold
+/// these so the aspace can't die under them (plan §6b, doc/results/42). The first
+/// teardown op into `verus!{}`: non-recursive (`aspace_destroy` is a seam black box;
+/// an aspace owns page tables, not caps), so it closes without the cross-module
+/// cluster (6c/6d).
+///
+/// **Off-by-one census precondition.** The caller (`delete`'s frame-unmap branch;
+/// `destroy_tcb`'s aspace release) clears the mapping/hold that named `a` *before*
+/// calling, so at entry `a`'s census has already dropped by one while `refs[a]` has
+/// not: `refs[a] == census(a) + 1`, sound everywhere else. The `-1` here lands the
+/// matching decrement, restoring the full `refcount_sound` invariant. At zero,
+/// `aspace_destroy` fires and `a` leaves the live set (the trusted page-table free,
+/// plan §2). `refs[a] > 0` is the underflow gate for `obj_refs(a) - 1` (§1.3).
+///
+/// The proof is light: `obj_census` reads only the seven object views (never
+/// `refs_view`), and both `set_obj_refs` and `aspace_destroy` frame those views, so
+/// the census is invariant across this op — no per-term recount is needed *inside*
+/// `unref_aspace` (that machinery is for the slot-clearing teardown ops, 6d).
+pub fn unref_aspace<S: Store>(store: &mut S, a: ObjId)
+    requires
+        old(store).refs_view().dom().contains(a),
+        old(store).refs_view()[a] > 0,
+        old(store).refs_view()[a] == obj_census(old(store), a) + 1,
+        forall|o: ObjId| o != a && old(store).refs_view().dom().contains(o)
+            ==> #[trigger] old(store).refs_view()[o] == obj_census(old(store), o),
+    ensures
+        refcount_sound(final(store)),
+        old(store).refs_view()[a] == 1 ==>
+            final(store).refs_view() == old(store).refs_view().remove(a),
+        old(store).refs_view()[a] > 1 ==>
+            final(store).refs_view() == old(store).refs_view().insert(
+                a,
+                (old(store).refs_view()[a] - 1) as nat,
+            ),
+        final(store).slot_view() == old(store).slot_view(),
+        final(store).chan_view() == old(store).chan_view(),
+        final(store).notif_view() == old(store).notif_view(),
+        final(store).tcb_view() == old(store).tcb_view(),
+        final(store).timer_view() == old(store).timer_view(),
+        final(store).timer_head_view() == old(store).timer_head_view(),
+        final(store).cspace_view() == old(store).cspace_view(),
+{
+    let r = store.obj_refs(a);
+    store.set_obj_refs(a, r - 1);
+    if store.obj_refs(a) == 0 {
+        store.aspace_destroy(a);
+        proof {
+            // (old.insert(a,0)).remove(a) == old.remove(a) (a was already live).
+            assert(final(store).refs_view() =~= old(store).refs_view().remove(a));
+        }
+    }
+    proof {
+        // Every census view is framed unchanged, so the recount is invariant.
+        assert forall|o: ObjId| #[trigger] obj_census(final(store), o)
+            == obj_census(old(store), o) by {}
+        // refcount_sound: a's term moved with the `-1`; every other object's refs
+        // and census are both untouched, so the precond's soundness carries over.
+        assert forall|o: ObjId| final(store).refs_view().dom().contains(o)
+            implies #[trigger] final(store).refs_view()[o] == obj_census(final(store), o) by {}
     }
 }
 

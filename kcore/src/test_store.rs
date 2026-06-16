@@ -22,7 +22,8 @@ use crate::channel::{
     EV_READABLE, MSG_PAYLOAD,
 };
 use crate::cspace::{
-    cdt_unlink, delete, derive, revoke, slot_move, Cap, CapKind, CapSlot, ChanEnd, Rights,
+    cdt_unlink, delete, derive, revoke, slot_move, unref_aspace, Cap, CapKind, CapSlot, ChanEnd,
+    Rights,
 };
 use crate::id::{ObjId, SlotId};
 use crate::notification::{destroy_notif, remove_waiter, signal, wait};
@@ -771,6 +772,29 @@ fn check_delete(st: &mut ArrayStore, slot: SlotId) {
     assert!(count_nonempty_exec(st) < c0, "delete post: count_nonempty strictly drops");
     if sound0 {
         assert!(refcount_sound_exec(st), "delete post: refcount_sound preserved");
+    }
+}
+
+// Assert `unref_aspace`'s §6b contract against the real body. The caller hands an
+// **off-by-one** state — `refs[a] == census(a)+1`, sound everywhere else — the state a
+// real teardown reaches by clearing the mapping/hold naming `a` *before* the call
+// (delete's frame-unmap branch; destroy_tcb's aspace release). Asserts the `-1` /
+// last-ref-destroy split and that `refcount_sound` is restored.
+fn check_unref_aspace(st: &mut ArrayStore, a: ObjId) {
+    let r0 = st.refs[&a.0];
+    assert!(r0 > 0, "unref_aspace pre: refs[a] > 0");
+    assert_eq!(obj_census_exec(st, a) + 1, r0, "unref_aspace pre: off-by-one census at a");
+    for (&o, &r) in &st.refs {
+        if o != a.0 {
+            assert_eq!(obj_census_exec(st, ObjId(o)), r, "unref_aspace pre: sound at every other object");
+        }
+    }
+    unref_aspace(st, a);
+    assert!(refcount_sound_exec(st), "unref_aspace post: refcount_sound restored");
+    if r0 == 1 {
+        assert!(!st.refs.contains_key(&a.0), "unref_aspace post: last ref → aspace_destroy dropped a");
+    } else {
+        assert_eq!(st.refs[&a.0], r0 - 1, "unref_aspace post: refs decremented, a still live");
     }
 }
 
@@ -2066,6 +2090,67 @@ fn refcount_sound_exec_has_teeth() {
     let mut st = base.clone();
     st.tcbs.get_mut(&6).unwrap().cspace = None;
     assert!(!refcount_sound_exec(&st), "teeth: thread_hold_refs term");
+}
+
+// ── Aspace teardown (plan §6b): `unref_aspace` + delete's frame-unmap branch ──
+
+// A `refcount_sound` store whose only references to aspace `a` are `nframes` detached
+// Frame caps mapped into it (`refs[a] == nframes`), so `census(a) == frame_map_refs ==
+// nframes`. Deleting one frame exercises delete's `aspace_unmap` + `unref_aspace` path.
+fn mapped_frame_fixture(a: u64, nframes: usize) -> ArrayStore {
+    let mut st = ArrayStore::new(nframes);
+    for i in 0..nframes {
+        let off = i as u64 * 0x1000;
+        st.slots[i] = detached(Cap {
+            kind: CapKind::Frame { base: 0x1000 + off, pages: 1, mapping: Some((ObjId(a), 0x4000 + off)) },
+            rights: Rights(0xff),
+        });
+    }
+    st.refs.insert(a, nframes as u32);
+    st
+}
+
+// Deleting a non-last mapped frame drops the aspace ref by one (the §6b
+// frame-mapping census term moves in lockstep with `unref_aspace`'s `-1`); the aspace
+// survives. The generic `check_delete` asserts `cspace_wf`/count-drop/`refcount_sound`;
+// this adds the aspace-specific outcome.
+#[test]
+fn delete_mapped_frame_drops_aspace_ref() {
+    let mut st = mapped_frame_fixture(2, 2);
+    assert!(refcount_sound_exec(&st), "fixture is refcount_sound");
+    check_delete(&mut st, SlotId(0));
+    assert_eq!(st.refs[&2], 1, "delete mapped frame: aspace ref dropped, not destroyed");
+    assert_eq!(obj_census_exec(&st, ObjId(2)), 1, "delete mapped frame: census == refs preserved");
+}
+
+// Deleting the *last* mapped frame drives `unref_aspace` to zero, firing
+// `aspace_destroy` (the trusted page-table free) — the aspace leaves the live set.
+#[test]
+fn delete_last_mapped_frame_destroys_aspace() {
+    let mut st = mapped_frame_fixture(2, 1);
+    assert!(refcount_sound_exec(&st), "fixture is refcount_sound");
+    check_delete(&mut st, SlotId(0));
+    assert!(!st.refs.contains_key(&2), "delete last mapped frame: aspace_destroy removed A");
+}
+
+// `unref_aspace` on a non-last ref: the off-by-one state (the all-terms census fixture
+// with `refs[A]` bumped by one, mirroring a caller that already cleared a hold naming A)
+// decrements back to soundness; A stays live.
+#[test]
+fn unref_aspace_non_last_decrements() {
+    let mut st = refcount_sound_fixture();
+    *st.refs.get_mut(&2).unwrap() += 1; // refs[A] = census(A) + 1
+    check_unref_aspace(&mut st, ObjId(2));
+    assert!(st.refs.contains_key(&2), "unref_aspace non-last: A still live");
+}
+
+// `unref_aspace` on the last ref: census(A) == 0, refs[A] == 1 (the sole dangling
+// reference), so the `-1` reaches zero and `aspace_destroy` fires.
+#[test]
+fn unref_aspace_last_ref_destroys() {
+    let mut st = ArrayStore::new(0);
+    st.refs.insert(2, 1);
+    check_unref_aspace(&mut st, ObjId(2));
 }
 
 // `wait` on a nonzero word consumes it without blocking; the queue and refs are
