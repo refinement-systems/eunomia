@@ -85,6 +85,10 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
         // census-agnostic callers (`check_expired`'s `signal`-in-a-loop).
         forall|z: ObjId| cspace::census_off_by_one(old(store), z)
             ==> #[trigger] cspace::census_off_by_one(final(store), z),
+        // Refs-domain completeness survives the wake (the census only drops, the refs domain
+        // is unchanged) — `delete`'s Channel branch carries it across the fire to `obj_unref`.
+        // Conditional + obj_census-triggered, so `check_expired` is undisturbed (doc 50).
+        cspace::census_dom_complete(old(store)) ==> cspace::census_dom_complete(final(store)),
         // The timer views are untouched (plan §4d): every setter in the body frames
         // them and `make_runnable` frames them, so `report_terminal` (which fires
         // `signal` and otherwise touches no timer) can frame timers across the wake.
@@ -163,6 +167,11 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
                 #[trigger] cspace::census_off_by_one(store, z) by {
                 cspace::lemma_off_by_one_frozen(old(store), store, z);
             }
+            // census_dom_complete: census + refs domain both unchanged ⇒ coverage carries.
+            if cspace::census_dom_complete(old(store)) {
+                assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o) >= 1 implies
+                    store.refs_view().dom().contains(o) by {}
+            }
         }
         return;
     }
@@ -225,26 +234,39 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
         assert(cspace::waiter_refs(nv0, tv0, n) == ws0.len());
         assert(cspace::waiter_refs(nvf, tvf, n) == dws.len());
         assert(store.refs_view().dom() == old(store).refs_view().dom());
-        assert forall|x: ObjId| old(store).refs_view().dom().contains(x) implies
-            store.refs_view()[x] + cspace::obj_census(old(store), x)
-                == old(store).refs_view()[x] + #[trigger] cspace::obj_census(store, x) by {
-            cspace::lemma_thread_hold_frame(tv0, tvf, x);
-            if x != n {
-                // Only `t` moved (the wake's single dequeue), naming `n != x` (old) / `None`
-                // (new) — so no node on `x`'s chain changed; refs at `x` is untouched too.
+        assert(store.refs_view().dom().contains(n));
+        // The census delta over **every** object (not just the refs domain): it drops by one
+        // at the woken `n` (the dequeued waiter) and is framed elsewhere (`thread_hold` via
+        // `lemma_thread_hold_frame`; `waiter_refs(o)` for `o != n` via `lemma_waiter_refs_frame`;
+        // slot/chan/timer by the view frames). `census_delta_frozen`, `census_off_by_one`
+        // preservation, and `census_dom_complete` preservation all derive from this.
+        assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o)
+            == (if o == n { (cspace::obj_census(old(store), n) - 1) as nat } else {
+                cspace::obj_census(old(store), o)
+            }) by {
+            cspace::lemma_thread_hold_frame(tv0, tvf, o);
+            if o != n {
                 assert forall|k: ObjId| #[trigger] tvf[k] != tv0[k]
-                    ==> tv0[k].wait_notif != Some(x) && tvf[k].wait_notif != Some(x) by {
+                    ==> tv0[k].wait_notif != Some(o) && tvf[k].wait_notif != Some(o) by {
                     if tvf[k] != tv0[k] {
                         assert(k == t);
                     }
                 }
-                cspace::lemma_waiter_refs_frame(nv0, tv0, nvf, tvf, n, x);
+                cspace::lemma_waiter_refs_frame(nv0, tv0, nvf, tvf, n, o);
             }
         }
         assert(cspace::census_delta_frozen(old(store), store));
         assert forall|z: ObjId| cspace::census_off_by_one(old(store), z) implies
             #[trigger] cspace::census_off_by_one(store, z) by {
             cspace::lemma_off_by_one_frozen(old(store), store, z);
+        }
+        if cspace::census_dom_complete(old(store)) {
+            assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o) >= 1 implies
+                store.refs_view().dom().contains(o) by {
+                // census(store, o) <= census(old, o), so a positive-census o had one before ⇒
+                // it was covered; the domain is unchanged.
+                assert(cspace::obj_census(old(store), o) >= 1);
+            }
         }
     }
 }
@@ -387,6 +409,7 @@ pub fn destroy_notif<S: Store>(store: &mut S, n: ObjId)
         old(store).notif_view()[n].wait_head is None,
         cspace::caps_consistent(old(store)),
         cspace::end_caps_sound(old(store)),
+        cspace::census_dom_complete(old(store)),
     ensures
         final(store).slot_view() == old(store).slot_view(),
         final(store).refs_view() == old(store).refs_view(),
@@ -400,6 +423,7 @@ pub fn destroy_notif<S: Store>(store: &mut S, n: ObjId)
         // untouched), so the cap→object invariant rides through trivially (plan §6d).
         cspace::caps_consistent(final(store)),
         cspace::end_caps_sound(final(store)),
+        cspace::census_dom_complete(final(store)),
 {
     let _ = n;
 }

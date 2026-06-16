@@ -192,6 +192,9 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
         cspace::end_caps_off_by_one(old(store), ch, end_idx_spec(end)),
     ensures
         final(store).slot_view() == old(store).slot_view(),
+        // Residency is framed: `set_chan_end_caps` and `fire` both frame `cspace_view`, so
+        // `delete`'s Channel branch carries it to `obj_unref` (plan §6d body PR).
+        final(store).cspace_view() == old(store).cspace_view(),
         cspace::caps_consistent(final(store)),
         cspace::end_caps_sound(final(store)),
         final(store).chan_view() == old(store).chan_view().insert(
@@ -217,6 +220,9 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
         // across the peer-closed fire (its deleted channel cap's slot was just cleared).
         forall|z: ObjId| cspace::census_off_by_one(old(store), z)
             ==> #[trigger] cspace::census_off_by_one(final(store), z),
+        // …and refs-domain completeness survives (`set_chan_end_caps` is census/dom-neutral,
+        // the fire only drops a census term and keeps the domain). `delete` carries it to `obj_unref`.
+        cspace::census_dom_complete(old(store)) ==> cspace::census_dom_complete(final(store)),
 {
     let e = end_idx(end);
     store.set_chan_end_caps(ch, e, store.chan_end_caps(ch, e) - 1);
@@ -285,6 +291,8 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
             #[trigger] cspace::census_off_by_one(store, z) by {
             cspace::lemma_off_by_one_frozen(old(store), store, z);
         }
+        // census_dom_complete: `set_chan_end_caps` is census/dom-neutral and `fire` carries it.
+        assert(cspace::census_dom_complete(old(store)) ==> cspace::census_dom_complete(store));
     }
 }
 
@@ -310,6 +318,9 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
     ensures
         final(store).slot_view() == old(store).slot_view(),
         final(store).chan_view() == old(store).chan_view(),
+        // Residency is framed across the fire — `signal` frames `cspace_view`, the unbound
+        // branch is a no-op; the teardown chain reads it off to `obj_unref` (plan §6d body PR).
+        final(store).cspace_view() == old(store).cspace_view(),
         cspace::binding_notif_wf(final(store).chan_view(), final(store).notif_view(),
             final(store).tcb_view(), ch),
         // The cap→object invariant survives the fire (plan §6d body PR): `signal` keeps every
@@ -328,6 +339,9 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
         // shape) — `endpoint_cap_dropped`/`delete` read this off the chain.
         forall|z: ObjId| cspace::census_off_by_one(old(store), z)
             ==> #[trigger] cspace::census_off_by_one(final(store), z),
+        // …and refs-domain completeness survives (`signal`'s own conditional, or the unbound
+        // no-op) — the teardown chain carries it to `obj_unref`.
+        cspace::census_dom_complete(old(store)) ==> cspace::census_dom_complete(final(store)),
 {
     let b = store.chan_binding(ch, end, event);
     if let Some(n) = b.notif {
@@ -375,6 +389,9 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
             #[trigger] cspace::census_off_by_one(store, z) by {
             cspace::lemma_off_by_one_frozen(old(store), store, z);
         }
+        // census_dom_complete: the bound branch rides `signal`'s own conditional (its `old` is
+        // this `old`); the unbound branch leaves the store untouched.
+        assert(cspace::census_dom_complete(old(store)) ==> cspace::census_dom_complete(store));
     }
 }
 
@@ -1199,6 +1216,8 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
         // channel caps, so the body's `delete`s thread it. Assumed here, discharged by the
         // body PR; host-checked (`check_destroy_channel`).
         cspace::end_caps_sound(old(store)),
+        // Refs-domain completeness (plan §6d body-removal): the body's `delete`s thread it.
+        cspace::census_dom_complete(old(store)),
     ensures
         cspace::cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom() == old(store).slot_view().dom(),
@@ -1207,7 +1226,11 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
         cspace::refcount_sound(final(store)),
         cspace::caps_consistent(final(store)),
         cspace::end_caps_sound(final(store)),
+        cspace::census_dom_complete(final(store)),
         cspace::only_empties(old(store).slot_view(), final(store).slot_view()),
+        // Residency is immutable: the ring-cap `delete`s and `set_obj_refs` all frame
+        // `cspace_view`, so `obj_unref`'s Channel arm carries it (plan §6d body PR).
+        final(store).cspace_view() == old(store).cspace_view(),
         forall|r: int, i: int, c: int|
             (0 <= r < 2 && 0 <= i < old(store).chan_view()[ch].depth && 0 <= c < 4)
                 ==> cspace::is_empty_cap(

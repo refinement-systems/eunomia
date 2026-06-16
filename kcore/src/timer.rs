@@ -345,6 +345,7 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
                 old(store).refs_view().dom().contains(n) && old(store).refs_view()[n] > 0),
         cspace::caps_consistent(old(store)),
         cspace::end_caps_sound(old(store)),
+        cspace::census_dom_complete(old(store)),
     ensures
         final(store).slot_view() == old(store).slot_view(),
         final(store).chan_view() == old(store).chan_view(),
@@ -354,6 +355,9 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
         final(store).timer_view().dom() == old(store).timer_view().dom(),
         cspace::timer_wf(final(store).timer_view(), final(store).timer_head_view()),
         cspace::refcount_sound(final(store)),
+        // `disarm` only lowers a census term and keeps the refs domain, so the coverage
+        // carries (an object with census >= 1 in the post-state had census >= 1 before).
+        cspace::census_dom_complete(final(store)),
         // `disarm` keeps the timer domain + `timer_wf` and frames every other object view,
         // so each live cap's (refs-free) consistency carries over (plan §6d).
         cspace::caps_consistent(final(store)),
@@ -413,6 +417,20 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
                 && !cspace::is_empty_cap(store.slot_view()[s].cap)
             implies cspace::cap_consistent(store, store.slot_view()[s].cap) by {
             assert(cspace::cap_consistent(old(store), old(store).slot_view()[s].cap));
+        }
+        // census_dom_complete: the refs domain is unchanged and the census only dropped (at
+        // `n` in the armed case; unchanged otherwise), so any object with census >= 1 now had
+        // census >= 1 before ⇒ it was already covered. Reuse the disarm census frame.
+        assert(store.refs_view().dom() == old(store).refs_view().dom());
+        assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o) >= 1
+            implies store.refs_view().dom().contains(o) by {
+            if !store.refs_view().dom().contains(o) {
+                if armed0 {
+                    cspace::lemma_armed_timer_disarm(tmv0, store.timer_view(), t, o);
+                }
+                // census(final, o) == census(old, o), which is 0 for o ∉ dom (census_dom_complete).
+                assert(cspace::obj_census(old(store), o) == 0);
+            }
         }
     }
 }

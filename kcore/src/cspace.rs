@@ -200,13 +200,15 @@ impl CSpaceObj {
 
 // `obj_ref` is verified — see the `verus!{}` block at the end of this file.
 
-// `obj_unref`, `unref_cspace`, `destroy_cspace`, and the helper `dec_ref` are verified —
-// see the `verus!{}` block at the end of this file (plan §6c, doc/results/43). They moved
-// out of this plain-Rust cluster as the teardown members that recurse only through the
-// *opaque* `delete`: with `delete`/`destroy_channel`/`destroy_tcb` still `external_body`,
-// Verus sees no recursion cycle, so they verify against `delete`'s contract under a plain
-// index-countdown loop (no cross-module `decreases` — that is 6d). `unref_aspace` (the
-// non-recursive aspace teardown) is likewise in that block (plan §6b, doc/results/42).
+// `obj_unref`, `unref_cspace`, `destroy_cspace`, the helper `dec_ref`, and now `delete`
+// itself are verified — see the `verus!{}` block at the end of this file (plan §6c/§6d,
+// doc/results/43, 50). With `delete`'s body proven, the cspace teardown cycle
+// `delete → obj_unref → destroy_cspace → delete` is closed in Verus under the shared
+// lexicographic `decreases (count_nonempty(slot_view), height)`. `destroy_channel`/
+// `destroy_tcb` keep `external_body` contracts (their bodies need new census invariants —
+// the 6d residue, doc 50 §3), so `obj_unref`'s Channel/Thread arms recurse through them as
+// trusted-but-host-checked black boxes. `unref_aspace` (the non-recursive aspace teardown)
+// is likewise in that block (plan §6b, doc/results/42).
 
 // ── CDT structure ───────────────────────────────────────────────────────
 
@@ -2438,6 +2440,41 @@ pub proof fn lemma_end_cap_count_positive(m: Map<SlotId, CapSlot>, s: SlotId, ch
     }
 }
 
+// A designating slot witnesses a positive slot census — `delete` uses it (with
+// `lemma_in_refs_from_census`) to place the deleted cap's object in the refs domain.
+pub proof fn lemma_slot_refs_positive(m: Map<SlotId, CapSlot>, s: SlotId, o: ObjId)
+    requires
+        m.dom().finite(),
+        m.dom().contains(s),
+        cap_obj(m[s].cap) == Some(o),
+    ensures
+        slot_refs(m, o) >= 1,
+{
+    let f = m.dom().filter(|k: SlotId| cap_obj(m[k].cap) == Some(o));
+    assert(f.contains(s));
+    assert(f.finite());
+    if f.len() == 0 {
+        assert(f =~= Set::empty());
+    }
+}
+
+// A mapping slot witnesses a positive frame-map census — the aspace analog of the above.
+pub proof fn lemma_frame_map_positive(m: Map<SlotId, CapSlot>, s: SlotId, o: ObjId)
+    requires
+        m.dom().finite(),
+        m.dom().contains(s),
+        cap_frame_aspace(m[s].cap) == Some(o),
+    ensures
+        frame_map_refs(m, o) >= 1,
+{
+    let f = m.dom().filter(|k: SlotId| cap_frame_aspace(m[k].cap) == Some(o));
+    assert(f.contains(s));
+    assert(f.finite());
+    if f.len() == 0 {
+        assert(f =~= Set::empty());
+    }
+}
+
 // Two census lemmas (the spec basis for refcount soundness — the stored
 // refcount must move in lockstep with the count of designating slots):
 
@@ -2723,6 +2760,29 @@ pub open spec fn refcount_sound<S: Store>(store: &S) -> bool {
             store,
             o,
         )
+}
+
+// The refs domain *covers* every referenced object: anything with a positive census (a
+// designating slot, a binding, a waiter, an armed timer, a frame mapping, or a thread hold)
+// is in `refs_view().dom()`. `refcount_sound` only constrains objects *already* in the domain;
+// this is the missing coverage `delete`'s body needs — its deleted cap's object `o` has
+// `slot_refs(o) >= 1`, so `o ∈ refs.dom`, which `obj_unref`/`unref_aspace` require and which
+// `census_off_by_one(·, o)` itself presupposes. Preserved by teardown: an object only leaves
+// `refs.dom` when its `refs` (hence, by `refcount_sound`, its census) is already zero.
+pub open spec fn census_dom_complete<S: Store>(store: &S) -> bool {
+    forall|o: ObjId| #[trigger] obj_census(store, o) >= 1 ==> store.refs_view().dom().contains(o)
+}
+
+// A positive census witness is in the refs domain — the `census_dom_complete` consequence
+// `delete` reads off to place its deleted cap's object (and the notifications its branches
+// reference) into `refs.dom` from the census.
+pub proof fn lemma_in_refs_from_census<S: Store>(store: &S, o: ObjId)
+    requires
+        census_dom_complete(store),
+        obj_census(store, o) >= 1,
+    ensures
+        store.refs_view().dom().contains(o),
+{
 }
 
 // `refs[x] - census(x)` is unchanged for every object across an edit — `refs` and the
@@ -3151,6 +3211,74 @@ proof fn lemma_clear_drops_count(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot)
     assert(f2 =~= f1.remove(k));
     assert(f1.contains(k));
     assert(f1.finite());
+}
+
+// The full `obj_census` drop for a slot clear, isolated as a per-`x` query so `delete_prepare`'s
+// forall instantiates it in a context-light SMT call (doc 25 §2). `s_new` is `s_old` with `slot`
+// cleared after a link-only edit (`cdt_unlink`, preserving caps via `sv_mid`); the four non-slot
+// terms are framed and a cap is either an object cap or a frame cap (never both), so the census
+// drops by exactly one — at `cap_obj(cap)`, else at `cap_frame_aspace(cap)`.
+pub proof fn lemma_clear_slot_obj_census<S: Store>(
+    s_old: &S,
+    s_new: &S,
+    sv_mid: Map<SlotId, CapSlot>,
+    slot: SlotId,
+    es: CapSlot,
+    cap: Cap,
+    x: ObjId,
+)
+    requires
+        s_new.slot_view() == sv_mid.insert(slot, es),
+        s_old.slot_view().dom() == sv_mid.dom(),
+        forall|k: SlotId| #[trigger] s_old.slot_view().dom().contains(k)
+            ==> s_old.slot_view()[k].cap == sv_mid[k].cap,
+        sv_mid.dom().contains(slot),
+        sv_mid.dom().finite(),
+        sv_mid[slot].cap == cap,
+        is_empty_cap(es.cap),
+        cap_obj(cap) is None || cap_frame_aspace(cap) is None,
+        s_new.chan_view() == s_old.chan_view(),
+        s_new.notif_view() == s_old.notif_view(),
+        s_new.tcb_view() == s_old.tcb_view(),
+        s_new.timer_view() == s_old.timer_view(),
+    ensures
+        // Additive form (no `nat` underflow): the deleted designating slot accounts for exactly
+        // the one census unit lost — at `cap_obj(cap)`, else at `cap_frame_aspace(cap)`.
+        obj_census(s_old, x) == obj_census(s_new, x) + (if cap_obj(cap) == Some(x)
+            || cap_frame_aspace(cap) == Some(x) {
+            1nat
+        } else {
+            0nat
+        }),
+{
+    // slot_refs/frame_map_refs: `s_old` → `sv_mid` (caps equal), then `sv_mid` → the clear.
+    lemma_same_caps_same_census(s_old.slot_view(), sv_mid, x);
+    lemma_same_caps_same_frame_map(s_old.slot_view(), sv_mid, x);
+    lemma_clear_slot_census(sv_mid, slot, es, x);
+    // A cap is either an object cap or a frame cap, never both, so at most one delta fires.
+    assert(!(cap_obj(cap) == Some(x) && cap_frame_aspace(cap) == Some(x)));
+    // When the deleted cap designates `x`, `slot` itself is in the relevant census filter, so
+    // the pre-clear count is ≥ 1 — the additive recombination has no `nat` underflow.
+    if cap_obj(cap) == Some(x) {
+        let f = sv_mid.dom().filter(|j: SlotId| cap_obj(sv_mid[j].cap) == Some(x));
+        assert(f.contains(slot));
+        assert(f.finite());
+        if f.len() == 0 {
+            assert(f =~= Set::empty());
+        }
+        assert(slot_refs(sv_mid, x) >= 1);
+    }
+    if cap_frame_aspace(cap) == Some(x) {
+        let f = sv_mid.dom().filter(|j: SlotId| cap_frame_aspace(sv_mid[j].cap) == Some(x));
+        assert(f.contains(slot));
+        assert(f.finite());
+        if f.len() == 0 {
+            assert(f =~= Set::empty());
+        }
+        assert(frame_map_refs(sv_mid, x) >= 1);
+    }
+    // `sv_mid[slot].cap == cap` rewrites the lemma's `cap_obj(sv_mid[slot].cap)` deltas to
+    // `cap_obj(cap)`/`cap_frame_aspace(cap)`; the four view terms read framed views (equal args).
 }
 
 // §3.3 endpoint-cap census drop: clearing a `Channel(ch, e)` slot to a non-channel
@@ -3926,6 +4054,66 @@ pub(crate) proof fn lemma_local_cap_edit_preserves_cspace_wf(
     }
     assert(cdt_wf(m1));
     // Ranks reuse m0's witnesses: parent/next links and the domain are identical.
+    let r0 = choose|r: Map<SlotId, nat>| valid_prank(m0, r);
+    assert(valid_prank(m1, r0));
+    let s0 = choose|s: Map<SlotId, nat>| valid_srank(m0, s);
+    assert(valid_srank(m1, s0));
+    assert(acyclic(m1));
+    assert(sib_acyclic(m1));
+}
+
+// Clearing an already-**detached** slot `k` (all four links null) to an empty,
+// detached cap preserves `cspace_wf`. The non-empty→empty direction `lemma_local_cap_edit`
+// forbids (it could strand a child) is safe here precisely because `k` is isolated: the
+// link clauses read identical (null) links, and `empty_slots_detached` holds because `k`'s
+// new (empty) cap is detached. `delete` (§6d) uses it on the `cdt_unlink`-detached slot.
+pub(crate) proof fn lemma_clear_detached_preserves_cspace_wf(
+    m0: Map<SlotId, CapSlot>,
+    k: SlotId,
+    v: CapSlot,
+)
+    requires
+        cspace_wf(m0),
+        m0.dom().contains(k),
+        m0[k].parent is None,
+        m0[k].first_child is None,
+        m0[k].next_sib is None,
+        m0[k].prev_sib is None,
+        v.parent is None,
+        v.first_child is None,
+        v.next_sib is None,
+        v.prev_sib is None,
+        is_empty_cap(v.cap),
+    ensures
+        cspace_wf(m0.insert(k, v)),
+        m0.insert(k, v).dom() == m0.dom(),
+{
+    let m1 = m0.insert(k, v);
+    assert(m1.dom() =~= m0.dom());
+    // Every slot's four CDT links agree with m0 (k null in both, all others untouched).
+    assert forall|j: SlotId| #[trigger] m1.dom().contains(j) implies {
+        &&& m1[j].parent == m0[j].parent
+        &&& m1[j].first_child == m0[j].first_child
+        &&& m1[j].next_sib == m0[j].next_sib
+        &&& m1[j].prev_sib == m0[j].prev_sib
+    } by {
+        if j != k {
+            assert(m1[j] == m0[j]);
+        }
+    }
+    // empty_slots_detached: `k`'s new cap is empty and detached; every other slot is
+    // unchanged (its emptiness ⟹ detachment carried from m0).
+    assert forall|j: SlotId| #[trigger] m1.dom().contains(j) implies (is_empty_cap(m1[j].cap) ==> {
+        &&& m1[j].parent == None
+        &&& m1[j].first_child == None
+        &&& m1[j].next_sib == None
+        &&& m1[j].prev_sib == None
+    }) by {
+        if j != k {
+            assert(m1[j] == m0[j]);
+        }
+    }
+    assert(cdt_wf(m1));
     let r0 = choose|r: Map<SlotId, nat>| valid_prank(m0, r);
     assert(valid_prank(m1, r0));
     let s0 = choose|s: Map<SlotId, nat>| valid_srank(m0, s);
@@ -6343,16 +6531,19 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
     }
 }
 
-// ── Cross-object teardown: the refcount plumbing (plan §6c, doc/results/43) ───────
+// ── Cross-object teardown: the refcount plumbing (plan §6c/§6d, doc/results/43, 50) ──
 //
-// `obj_unref`/`unref_cspace`/`destroy_cspace` and the shared `dec_ref` helper — the
-// teardown members that recurse only through the *opaque* `delete`. With
-// `delete`/`destroy_channel`/`destroy_tcb` still `external_body`, Verus sees no recursion
-// cycle, so these verify against `delete`'s contract with plain index-countdown loops (no
-// cross-module `decreases` — that is 6d). The load-bearing invariant is `refcount_sound`:
-// it is the underflow gate for every `refs - 1` (§1.3) and, at the zero point, its census
-// pins the *structural* emptiness each destructor's `requires` needs (no waiters, no armed
-// timers, …) — the §6c headline.
+// `obj_unref`/`unref_cspace`/`destroy_cspace`, the shared `dec_ref` helper, and `delete`
+// (below) — the teardown cycle. With `delete`'s body now proven (§6d), the cspace cycle
+// `delete → obj_unref → destroy_cspace → delete` is closed under the shared lexicographic
+// `decreases (count_nonempty(slot_view), height)` (`delete = 0 < destroy_cspace = 1 <
+// unref_cspace = 2 < obj_unref = 4`); `delete`'s `delete_prepare` empties its slot before
+// recursing, the one count-dropping edge, so the cycle strictly descends. `destroy_channel`/
+// `destroy_tcb` keep `external_body` contracts (the 6d residue, doc 50 §3), so `obj_unref`'s
+// Channel/Thread arms recurse through them as host-checked black boxes. The load-bearing
+// invariant is `refcount_sound`: the underflow gate for every `refs - 1` (§1.3) and, at the
+// zero point, its census pins the *structural* emptiness each destructor's `requires` needs
+// (no waiters, no armed timers, …) — the §6c headline.
 
 /// Drop one reference to object `o` and restore the census (plan §6c). The shared
 /// decrement step `obj_unref`/`unref_cspace` factor out: the caller hands an **off-by-one**
@@ -6374,6 +6565,9 @@ pub(crate) fn dec_ref<S: Store>(store: &mut S, o: ObjId)
         // The §3.3 endpoint-cap census is likewise refs-free (chan_view + slot_view, both
         // framed by `set_obj_refs`), so it rides through too (plan §6d body-removal gate).
         end_caps_sound(old(store)),
+        // Refs-domain completeness rides through: the census is framed and `set_obj_refs`
+        // keeps the domain (insert at an existing key), so the coverage carries (plan §6d).
+        census_dom_complete(old(store)),
     ensures
         refcount_sound(final(store)),
         final(store).refs_view() == old(store).refs_view().insert(
@@ -6389,6 +6583,7 @@ pub(crate) fn dec_ref<S: Store>(store: &mut S, o: ObjId)
         final(store).cspace_view() == old(store).cspace_view(),
         caps_consistent(final(store)),
         end_caps_sound(final(store)),
+        census_dom_complete(final(store)),
 {
     let r = store.obj_refs(o);
     store.set_obj_refs(o, r - 1);
@@ -6408,6 +6603,9 @@ pub(crate) fn dec_ref<S: Store>(store: &mut S, o: ObjId)
             implies cap_consistent(final(store), final(store).slot_view()[s].cap) by {
             assert(cap_consistent(old(store), old(store).slot_view()[s].cap));
         }
+        // census + refs-domain unchanged ⇒ coverage carries.
+        assert forall|x: ObjId| #[trigger] obj_census(final(store), x) >= 1
+            implies final(store).refs_view().dom().contains(x) by {}
     }
 }
 
@@ -6432,6 +6630,7 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
         refcount_sound(old(store)),
         caps_consistent(old(store)),
         end_caps_sound(old(store)),
+        census_dom_complete(old(store)),
         cspace_resident_wf(old(store), cs),
     ensures
         cspace_wf(final(store).slot_view()),
@@ -6441,7 +6640,14 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
         refcount_sound(final(store)),
         caps_consistent(final(store)),
         end_caps_sound(final(store)),
+        census_dom_complete(final(store)),
         only_empties(old(store).slot_view(), final(store).slot_view()),
+        // Residency is immutable: the resident `delete`s frame `cspace_view`, and emptying a
+        // resident never re-homes it, so the residency map rides through (plan §6d body PR).
+        final(store).cspace_view() == old(store).cspace_view(),
+    // SCC measure (plan §6d, doc 44 §3): `destroy_cspace` sits above `delete` (1 > 0); its
+    // resident-loop `delete` calls are count-flat on the first iteration, so the height drops.
+    decreases count_nonempty(old(store).slot_view()), 1int
 {
     let n = store.cspace_num_slots(cs);
     let mut i: u32 = 0;
@@ -6459,6 +6665,8 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
             caps_consistent(store),
             // …and the §3.3 endpoint-cap census (plan §6d body-removal gate).
             end_caps_sound(store),
+            // …and refs-domain completeness (each `delete` requires + re-establishes it).
+            census_dom_complete(store),
             // Teardown only empties slots (plan §6d) — composes across the resident deletes.
             only_empties(old(store).slot_view(), store.slot_view()),
             // Residency is immutable — `delete` frames `cspace_view`, and dom is preserved,
@@ -6537,6 +6745,10 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
         // The §3.3 endpoint-cap census (plan §6d body-removal gate): the recursive
         // destructors delete arbitrary channel caps, so it threads through here too.
         end_caps_sound(old(store)),
+        // Refs-domain completeness (plan §6d body-removal): threaded so the destructors keep
+        // it for their recursive `delete`s; the at-zero teardown only ever removes an object
+        // whose census is already 0, so coverage carries.
+        census_dom_complete(old(store)),
     ensures
         refcount_sound(final(store)),
         cspace_wf(final(store).slot_view()),
@@ -6544,9 +6756,15 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
         count_nonempty(final(store).slot_view()) <= count_nonempty(old(store).slot_view()),
         caps_consistent(final(store)),
         end_caps_sound(final(store)),
+        census_dom_complete(final(store)),
         // Teardown only empties slots (plan §6d): `dec_ref` frames `slot_view`, so the
         // dispatched destructor's `only_empties` carries straight through.
         only_empties(old(store).slot_view(), final(store).slot_view()),
+        // Residency is immutable across every arm: `dec_ref`/`unref_aspace` frame
+        // `cspace_view`, and each at-zero destructor frames it too (a destroyed cspace keeps
+        // its residency map). `delete` reads it off to discharge its own residency frame
+        // (plan §6d body PR).
+        final(store).cspace_view() == old(store).cspace_view(),
         // Non-designating caps: the store is untouched (the frame `delete` reads off for a
         // Frame cap — its frame-mapping release rode the frame-unmap branch, not here).
         cap_obj(cap) is None ==> {
@@ -6559,6 +6777,21 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             &&& final(store).timer_head_view() == old(store).timer_head_view()
             &&& final(store).cspace_view() == old(store).cspace_view()
         },
+        // Dropping a **notification** cap is robustly clean: `dec_ref` drops only `refs[n]`,
+        // and at zero `destroy_notif` is a model view no-op, so every object view *and* every
+        // slot's cap survive (only `refs[n]` moves). This is the additive enabling clause
+        // `delete`'s notification frame (and `thread::bind`) reads off (plan §4d/§6d body PR).
+        cap_notif(cap) is Some ==> {
+            &&& final(store).slot_view() == old(store).slot_view()
+            &&& final(store).chan_view() == old(store).chan_view()
+            &&& final(store).notif_view() == old(store).notif_view()
+            &&& final(store).tcb_view() == old(store).tcb_view()
+            &&& final(store).timer_view() == old(store).timer_view()
+            &&& final(store).timer_head_view() == old(store).timer_head_view()
+        },
+    // SCC measure (plan §6d, doc 44 §3): `obj_unref` is the top of the height order — its
+    // `dec_ref`-then-destructor calls are count-flat, so the descent to the destructors is by height.
+    decreases count_nonempty(old(store).slot_view()), 4int
 {
     match cap.kind {
         CapKind::CSpace(o) => {
@@ -6640,6 +6873,7 @@ pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId)
         old(store).slot_view().dom().finite(),
         caps_consistent(old(store)),
         end_caps_sound(old(store)),
+        census_dom_complete(old(store)),
         cspace_resident_wf(old(store), cs),
     ensures
         refcount_sound(final(store)),
@@ -6648,7 +6882,11 @@ pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId)
         count_nonempty(final(store).slot_view()) <= count_nonempty(old(store).slot_view()),
         caps_consistent(final(store)),
         end_caps_sound(final(store)),
+        census_dom_complete(final(store)),
         only_empties(old(store).slot_view(), final(store).slot_view()),
+        // Residency is immutable: `dec_ref` and `destroy_cspace` both frame `cspace_view`, so
+        // `destroy_tcb`'s cspace release carries it (plan §6d body PR).
+        final(store).cspace_view() == old(store).cspace_view(),
 {
     dec_ref(store, cs);
     if store.obj_refs(cs) == 0 {
@@ -6683,6 +6921,7 @@ pub fn unref_aspace<S: Store>(store: &mut S, a: ObjId)
             ==> #[trigger] old(store).refs_view()[o] == obj_census(old(store), o),
         caps_consistent(old(store)),
         end_caps_sound(old(store)),
+        census_dom_complete(old(store)),
     ensures
         refcount_sound(final(store)),
         old(store).refs_view()[a] == 1 ==>
@@ -6705,6 +6944,10 @@ pub fn unref_aspace<S: Store>(store: &mut S, a: ObjId)
         // The endpoint-cap census reads only chan_view + slot_view (both framed by
         // `set_obj_refs`/`aspace_destroy`), so it rides through (plan §6d body-removal gate).
         end_caps_sound(final(store)),
+        // Refs-domain completeness: `a` only leaves the domain when its census is 0 (it was
+        // last-ref, `refs[a] == 0 ⟹ census(a) == 0`); every other object's census and domain
+        // membership are framed, so the coverage carries (plan §6d).
+        census_dom_complete(final(store)),
 {
     let r = store.obj_refs(a);
     store.set_obj_refs(a, r - 1);
@@ -6731,37 +6974,229 @@ pub fn unref_aspace<S: Store>(store: &mut S, a: ObjId)
             implies cap_consistent(final(store), final(store).slot_view()[s].cap) by {
             assert(cap_consistent(old(store), old(store).slot_view()[s].cap));
         }
+        // census_dom_complete: census framed; `a` only left the domain when `refs[a]` hit 0,
+        // which (off-by-one) means `census(a) == 0`, so the coverage carries.
+        assert forall|o: ObjId| #[trigger] obj_census(final(store), o) >= 1
+            implies final(store).refs_view().dom().contains(o) by {
+            assert(obj_census(old(store), o) >= 1);
+        }
     }
+}
+
+/// `delete`'s first half — `cdt_unlink` + clear the slot — split out so its (heavy) census/
+/// `end_caps`/`caps_consistent` off-by-one proof is a self-contained SMT query, keeping
+/// `delete`'s body (the teardown branches + `obj_unref`) under the rlimit (doc 25 §2: split
+/// the query, don't bump the limit). Non-recursive, so it carries no `decreases`. Returns the
+/// deleted cap; leaves the store in the off-by-one window the teardown branches consume:
+/// the deleted designating slot is cleared (census/`end_caps` off by one at its object/aspace/
+/// end), with `cspace_wf`/`caps_consistent`/`census_dom_complete` and every object view intact.
+fn delete_prepare<S: Store>(store: &mut S, slot: SlotId) -> (cap: Cap)
+    requires
+        cspace_wf(old(store).slot_view()),
+        old(store).slot_view().dom().finite(),
+        old(store).slot_view().dom().contains(slot),
+        !is_empty_cap(old(store).slot_view()[slot].cap),
+        refcount_sound(old(store)),
+        caps_consistent(old(store)),
+        end_caps_sound(old(store)),
+        census_dom_complete(old(store)),
+    ensures
+        cap == old(store).slot_view()[slot].cap,
+        !is_empty_cap(cap),
+        cap_consistent(final(store), cap),
+        cspace_wf(final(store).slot_view()),
+        final(store).slot_view().dom() == old(store).slot_view().dom(),
+        final(store).slot_view().dom().finite(),
+        is_empty_cap(final(store).slot_view()[slot].cap),
+        count_nonempty(final(store).slot_view()) < count_nonempty(old(store).slot_view()),
+        final(store).refs_view() == old(store).refs_view(),
+        final(store).chan_view() == old(store).chan_view(),
+        final(store).notif_view() == old(store).notif_view(),
+        final(store).tcb_view() == old(store).tcb_view(),
+        final(store).timer_view() == old(store).timer_view(),
+        final(store).timer_head_view() == old(store).timer_head_view(),
+        final(store).cspace_view() == old(store).cspace_view(),
+        forall|x: SlotId| final(store).slot_view().dom().contains(x) && x != slot
+            ==> #[trigger] final(store).slot_view()[x].cap == old(store).slot_view()[x].cap,
+        caps_consistent(final(store)),
+        census_dom_complete(final(store)),
+        cap_obj(cap) matches Some(o) ==> census_off_by_one(final(store), o),
+        (cap_obj(cap) is None && cap_frame_aspace(cap) is Some)
+            ==> census_off_by_one(final(store), cap_frame_aspace(cap)->Some_0),
+        (cap_obj(cap) is None && cap_frame_aspace(cap) is None) ==> refcount_sound(final(store)),
+        cap_chan_end(cap) is Some ==> end_caps_off_by_one(
+            final(store),
+            cap_chan_end(cap)->Some_0.0,
+            cap_chan_end(cap)->Some_0.1,
+        ),
+        cap_chan_end(cap) is None ==> end_caps_sound(final(store)),
+{
+    let cap = store.slot(slot).cap;
+    let ghost o_opt = cap_obj(cap);
+    let ghost asp_opt = cap_frame_aspace(cap);
+    proof {
+        assert(cap_consistent(old(store), cap));
+    }
+    cdt_unlink(store, slot);
+    proof {
+        // `cdt_unlink` frames `refs` + every object view and preserves every cap, so the
+        // invariants ride through and the deleted cap is still at `slot`.
+        assert(store.slot_view()[slot].cap == cap);
+        assert forall|x: ObjId| #[trigger] obj_census(store, x) == obj_census(old(store), x) by {
+            lemma_same_caps_same_census(old(store).slot_view(), store.slot_view(), x);
+            lemma_same_caps_same_frame_map(old(store).slot_view(), store.slot_view(), x);
+        }
+        assert(refcount_sound(store));
+        assert forall|s2: SlotId| #![trigger store.slot_view()[s2]]
+            store.slot_view().dom().contains(s2) && !is_empty_cap(store.slot_view()[s2].cap)
+            implies cap_consistent(store, store.slot_view()[s2].cap) by {
+            assert(cap_consistent(old(store), old(store).slot_view()[s2].cap));
+        }
+        assert(caps_consistent(store));
+        assert forall|ch2: ObjId, e2: int|
+            store.chan_view().dom().contains(ch2) && store.chan_view()[ch2].end_caps.len() == 2
+                && 0 <= e2 < 2 implies #[trigger] store.chan_view()[ch2].end_caps[e2]
+                == end_cap_count(store.slot_view(), ch2, e2) by {
+            lemma_same_caps_same_end_cap(old(store).slot_view(), store.slot_view(), ch2, e2);
+        }
+        assert(end_caps_sound(store));
+        assert(census_dom_complete(store));
+    }
+    let ghost sv1 = store.slot_view();
+    let es = CapSlot::empty();
+    store.set_slot(slot, es);
+    proof {
+        // The slot clear. count drops by one; the census drops by one at `o`/`asp` (slot terms
+        // vs `sv1` by `lemma_clear_slot_census`, `sv1`-vs-`old` by the caps-preserved lemmas;
+        // the four non-slot terms are framed); `end_cap_count` likewise drops at `(co, e0)`.
+        lemma_clear_drops_count(sv1, slot, es);
+        assert(store.slot_view() == sv1.insert(slot, es));
+        // `cdt_unlink` left `slot` detached and `cspace_wf(sv1)`; clearing a detached slot to
+        // an empty cap preserves it, and drops the live-slot count by one (cdt_unlink kept it).
+        lemma_clear_detached_preserves_cspace_wf(sv1, slot, es);
+        // `slot` is non-empty in `sv1`, so the live-slot count is ≥ 1 — the clear strictly
+        // drops it (the count filter loses exactly `slot`).
+        assert(count_nonempty(sv1) >= 1) by {
+            let f = sv1.dom().filter(|j: SlotId| !is_empty_cap(sv1[j].cap));
+            assert(f.contains(slot));
+            assert(f.finite());
+            if f.len() == 0 {
+                assert(f =~= Set::empty());
+            }
+        }
+        assert(count_nonempty(sv1) == count_nonempty(old(store).slot_view()));
+        assert(count_nonempty(store.slot_view()) == (count_nonempty(sv1) - 1) as nat);
+        assert(count_nonempty(store.slot_view()) < count_nonempty(old(store).slot_view()));
+        // The cleared slot still names `cap` (cdt_unlink framed it), and a cap is either an
+        // object cap or a frame cap, never both — so the slot-clear drops the census by exactly
+        // one at a *single* object (its `cap_obj`, else its `cap_frame_aspace`).
+        assert(sv1[slot].cap == cap);
+        assert(o_opt is None || asp_opt is None);
+        assert(store.refs_view() == old(store).refs_view());
+        assert(store.chan_view() == old(store).chan_view());
+        assert(store.notif_view() == old(store).notif_view());
+        assert(store.tcb_view() == old(store).tcb_view());
+        assert(store.timer_view() == old(store).timer_view());
+        assert forall|x: ObjId| #[trigger] obj_census(old(store), x)
+            == obj_census(store, x) + (if o_opt == Some(x) || asp_opt == Some(x) {
+                1nat
+            } else {
+                0nat
+            }) by {
+            lemma_clear_slot_obj_census(old(store), store, sv1, slot, es, cap, x);
+        }
+        assert forall|ch2: ObjId, e2: int|
+            store.chan_view().dom().contains(ch2) && store.chan_view()[ch2].end_caps.len() == 2
+                && 0 <= e2 < 2 implies #[trigger] store.chan_view()[ch2].end_caps[e2]
+                == end_cap_count(store.slot_view(), ch2, e2) + (if cap_chan_end(cap) == Some(
+                (ch2, e2),
+            ) {
+                1nat
+            } else {
+                0nat
+            }) by {
+            lemma_clear_slot_end_cap(sv1, slot, es, ch2, e2);
+            lemma_same_caps_same_end_cap(old(store).slot_view(), sv1, ch2, e2);
+        }
+        assert forall|s2: SlotId| #![trigger store.slot_view()[s2]]
+            store.slot_view().dom().contains(s2) && !is_empty_cap(store.slot_view()[s2].cap)
+            implies cap_consistent(store, store.slot_view()[s2].cap) by {
+            assert(s2 != slot);
+            assert(store.slot_view()[s2] == sv1[s2]);
+        }
+        assert(caps_consistent(store));
+        // The deleted cap's object well-formedness rides through (its arms read framed object
+        // views; `chan_wf` survives any slot clear — it requires no slot to be non-empty).
+        assert(cap_consistent(store, cap)) by {
+            assert(cap_consistent(old(store), cap));
+        }
+        // census_dom_complete: refs domain unchanged, census only dropped ⇒ coverage carries.
+        assert forall|x: ObjId| #[trigger] obj_census(store, x) >= 1
+            implies store.refs_view().dom().contains(x) by {
+            // census(old,x) == census(store,x) + δ ≥ census(store,x) ≥ 1, then dom_complete(old).
+            assert(obj_census(old(store), x) >= 1);
+        }
+        // The off-by-one census / end_caps at the deleted cap's object/aspace/end. `refs` is
+        // framed (== old), `refcount_sound(old)` pins each `refs[x]`, and the additive census
+        // delta moves the deleted designation's one unit at `o`/`asp` and nothing elsewhere.
+        if let Some(o) = o_opt {
+            // δ at `o` is 1 (the deleted cap designates `o`); δ is 0 off `o` (mutual exclusion
+            // makes `asp_opt` None, and `o_opt == Some(o) != Some(x)` for `x != o`).
+            assert(obj_census(old(store), o) == obj_census(store, o) + 1);
+            lemma_in_refs_from_census(old(store), o);
+            assert forall|x: ObjId| x != o && store.refs_view().dom().contains(x)
+                implies store.refs_view()[x] == obj_census(store, x) by {
+                assert(obj_census(old(store), x) == obj_census(store, x));
+            }
+            assert(census_off_by_one(store, o));
+        } else if let Some(asp) = asp_opt {
+            assert(obj_census(old(store), asp) == obj_census(store, asp) + 1);
+            lemma_in_refs_from_census(old(store), asp);
+            assert forall|x: ObjId| x != asp && store.refs_view().dom().contains(x)
+                implies store.refs_view()[x] == obj_census(store, x) by {
+                assert(obj_census(old(store), x) == obj_census(store, x));
+            }
+            assert(census_off_by_one(store, asp));
+        } else {
+            // Neither designation present ⇒ δ is 0 everywhere ⇒ full soundness carries.
+            assert forall|x: ObjId| store.refs_view().dom().contains(x)
+                implies #[trigger] store.refs_view()[x] == obj_census(store, x) by {
+                assert(obj_census(old(store), x) == obj_census(store, x));
+            }
+            assert(refcount_sound(store));
+        }
+    }
+    cap
 }
 
 /// Delete one cap (children survive, re-parented one level up).
 ///
-/// **Trusted boundary (assumed contract).** The body is the real teardown:
-/// `cdt_unlink` + per-end channel `peer_closed` + frame unmap + `obj_unref`,
-/// whose last-ref path recurses across objects (`destroy_cspace` → `delete`).
-/// That cross-object recursion — the seL4-zombie measure — is the remaining
-/// kernel-core proof (it needs the channel/notification/thread destructors
-/// ported, plan phases 3–5), so `delete` is `external_body`: Verus trusts this
-/// contract and `revoke` (below) is verified against it. The contract states
-/// exactly what `revoke`'s termination needs — the live-slot count strictly
-/// drops, the domain and well-formedness are preserved — and is the obligation
-/// the future body proof must discharge.
+/// **Proven body (plan §6d).** No longer `external_body`: the real teardown —
+/// `delete_prepare` (`cdt_unlink` + clear) → per-end channel `peer_closed` →
+/// frame unmap → `obj_unref` — is verified against the full contract
+/// (`cspace_wf`/`refcount_sound`/`caps_consistent`/`end_caps_sound`/
+/// `census_dom_complete`/the `count_nonempty` drop/residency frame). The
+/// cross-object recursion `delete → obj_unref → destroy_cspace → delete`
+/// (the seL4-zombie cycle) terminates under the shared lexicographic measure
+/// `(count_nonempty(slot_view), height)` with `delete = 0` (`delete`'s
+/// `delete_prepare` empties its slot before recursing, the one count-dropping
+/// edge). `destroy_channel`/`destroy_tcb` keep `external_body` contracts (their
+/// bodies need new thread-state/binding-release census invariants — the
+/// recorded 6d residue, doc 50 §3), so `obj_unref`'s Channel/Thread arms recurse
+/// through trusted-but-host-checked destructors; the visible cspace cycle is
+/// closed in Verus.
 ///
 /// The contract is stated for the **general** (possibly non-leaf) case on
 /// purpose: `revoke` only ever passes a leaf, but `destroy_cspace` deletes
-/// non-leaf residents, so the body proof must handle `cdt_unlink`'s re-parenting
-/// — the harder `cdt_wf`-preservation case.
+/// non-leaf residents, so the body handles `cdt_unlink`'s re-parenting — the
+/// harder `cdt_wf`-preservation case.
 ///
-/// **Refcount census (plan §6a).** `delete` now also requires and preserves
-/// `refcount_sound` (the §4.1 obligation): the deleted cap lowers exactly its
-/// object's `slot_refs`/`frame_map_refs`, matched by the `obj_unref`/`unref_aspace`
-/// `-1` (and the per-end `endpoint_cap_dropped` by its `binding_refs` drop). The
-/// `requires` is the underflow gate the 6d body proof leans on (`refs[o] - 1`
-/// needs `refs[o] ≥ 1`, which the census-at-entry supplies, §1.3); stating it now
-/// means the verified callers (`bind`, `revoke`) carry the invariant against the
-/// *final* contract, so 6d's body closure adds no caller churn. Assumed here
-/// (`external_body`), host-checked against `ArrayStore` (`check_delete`).
-#[verifier::external_body]
+/// **Refcount census (plan §6a).** The deleted cap lowers exactly its object's
+/// `slot_refs`/`frame_map_refs`, matched by the `obj_unref`/`unref_aspace` `-1`
+/// (and the per-end `endpoint_cap_dropped` by its `binding_refs` drop); the
+/// `requires` census is the underflow gate (`refs[o] - 1` needs `refs[o] ≥ 1`,
+/// §1.3). The verified callers (`bind`, `revoke`, `destroy_cspace`) carry the
+/// four system invariants in.
 pub fn delete<S: Store>(store: &mut S, slot: SlotId)
     requires
         cspace_wf(old(store).slot_view()),
@@ -6771,16 +7206,18 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         refcount_sound(old(store)),
         // Cap→object consistency (plan §6d foundation): the body's `endpoint_cap_dropped`
         // and `obj_unref` calls need the deleted cap's object well-formed, which only this
-        // system invariant supplies. Assumed here (`external_body`), discharged by the body
-        // PR; host-checked (`check_delete`). The verified callers (`bind`, `revoke`,
-        // `destroy_cspace`) carry it like 6a's `refcount_sound`.
+        // system invariant supplies (discharged by the now-proven body). The verified callers
+        // (`bind`, `revoke`, `destroy_cspace`) carry it like 6a's `refcount_sound`.
         caps_consistent(old(store)),
         // The §3.3 endpoint-cap census (plan §6d body-removal gate, doc 45 §2): the body's
         // Channel branch deletes one of possibly several `(co, end)` caps; this equality is
         // what lets it re-prove `caps_consistent`'s `end_caps[end] > 0` for the surviving
-        // siblings. Assumed here (`external_body`), discharged by the body PR; host-checked
-        // (`check_delete`). The verified callers carry it like `refcount_sound`.
+        // siblings. The verified callers carry it like `refcount_sound`.
         end_caps_sound(old(store)),
+        // Refs-domain completeness (plan §6d body-removal): the body reads the deleted cap's
+        // object into `refs.dom` from the census via it (`delete_prepare` + `obj_unref`).
+        // The verified callers carry it.
+        census_dom_complete(old(store)),
     ensures
         cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom() == old(store).slot_view().dom(),
@@ -6790,25 +7227,26 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         refcount_sound(final(store)),
         caps_consistent(final(store)),
         end_caps_sound(final(store)),
+        census_dom_complete(final(store)),
         // Teardown only empties slots, never fills one (plan §6d): the just-cleared `slot`
         // and every already-empty slot stay empty through the recursive `obj_unref`. The
         // frame `destroy_channel`'s ring-cap loop carries; host-checked (`check_delete`).
         only_empties(old(store).slot_view(), final(store).slot_view()),
         // Residency is immutable (the kernel fixes it at construction; every internal
         // mutator frames `cspace_view`, swept in 6a) — `delete` re-parents CDT links and
-        // clears caps but never reassigns which slots a cspace owns. `destroy_cspace`'s
-        // resident loop (6c) reads `cspace_view[cs]` across its `delete` calls, so the
-        // frame is load-bearing there; host-checked (`check_delete`), as an assumed
-        // `external_body` clause must be.
+        // clears caps but never reassigns which slots a cspace owns. `delete_prepare` frames
+        // it, the teardown branches frame it, and `obj_unref` frames it unconditionally (each
+        // arm); `destroy_cspace`'s resident loop (6c) reads `cspace_view[cs]` across its
+        // `delete` calls, so the frame is load-bearing there.
         final(store).cspace_view() == old(store).cspace_view(),
         // Conditional-on-notification frame (plan §4d): deleting a **notification**
-        // cap is robustly clean — `cdt_unlink`/`set_slot` frame every object view,
-        // the `Channel`/mapped-`Frame` teardown branches don't fire, and `obj_unref`
-        // only drops `refs[n]` (and at zero calls the no-op `destroy_notif`). So the
-        // object views and every *other* slot's cap are untouched. This is the
-        // additive enabling clause `thread::bind` reads off (the displaced bind cap
-        // is always a notification); host-test-checked (`check_delete_notif`), as an
-        // assumed `external_body` clause must be. `refs_view` is deliberately left
+        // cap is robustly clean — `delete_prepare` frames every object view, the
+        // `Channel`/mapped-`Frame` teardown branches don't fire, and `obj_unref`'s
+        // Notification arm only drops `refs[n]` (and at zero calls the view no-op
+        // `destroy_notif`, its `cap_notif` ensure). So the object views and every
+        // *other* slot's cap are untouched. This is the additive enabling clause
+        // `thread::bind` reads off (the displaced bind cap is always a notification);
+        // host-test-checked (`check_delete_notif`). `refs_view` is deliberately left
         // out — the `refs[n] -= 1` rides the host test, not `bind`'s verified contract.
         cap_notif(old(store).slot_view()[slot].cap) is Some ==> {
             &&& final(store).tcb_view() == old(store).tcb_view()
@@ -6819,22 +7257,66 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
             &&& forall|x: SlotId| old(store).slot_view().dom().contains(x) && x != slot
                     ==> #[trigger] final(store).slot_view()[x].cap == old(store).slot_view()[x].cap
         },
+    // SCC measure (plan §6d, doc 44 §3): `delete` is the bottom of the height order — the only
+    // edge that drops `count_nonempty` (it empties its slot before recursing into `obj_unref`).
+    decreases count_nonempty(old(store).slot_view()), 0int
 {
-    let cap = store.slot(slot).cap;
-    debug_assert!(!cap.is_empty());
-    cdt_unlink(store, slot);
-    let mut s = store.slot(slot);
-    s.cap = Cap::EMPTY;
-    store.set_slot(slot, s);
+    // `cdt_unlink` + clear the slot, leaving the off-by-one census/`end_caps` window the
+    // teardown branches consume (its proof is isolated in `delete_prepare`, doc 25 §2).
+    let cap = delete_prepare(store, slot);
+    let ghost o_opt = cap_obj(cap);
+    let ghost asp_opt = cap_frame_aspace(cap);
     // Channel endpoint liveness is tracked per end for peer-closed (§3.3).
     if let CapKind::Channel(ch, end) = cap.kind {
+        proof {
+            assert(cap_consistent(old(store), cap));
+            let peer = 1 - crate::channel::end_idx_spec(end);
+            if store.chan_view()[ch].bindings[(peer, crate::channel::EV_PEER_CLOSED as int)].notif
+                is Some {
+                let m = store.chan_view()[ch].bindings[(peer,
+                    crate::channel::EV_PEER_CLOSED as int)].notif->Some_0;
+                if store.notif_view()[m].wait_head is Some {
+                    lemma_waiter_refs_pos_from_head(store.notif_view(), store.tcb_view(), m);
+                    // A queued waiter makes `census(m) >= 1`, so refs-domain completeness
+                    // (delete_prepare's `ensures`) places `m` in `refs.dom`; the off-by-one
+                    // then makes `refs[m] > 0` — `endpoint_cap_dropped`'s `binding_refs_ok`.
+                    assert(obj_census(store, m) >= 1);
+                    lemma_in_refs_from_census(store, m);
+                    lemma_refs_pos_from_off_by_one(store, o_opt->Some_0, m);
+                }
+            }
+        }
         crate::channel::endpoint_cap_dropped(store, ch, end);
     }
     // Deleting a mapped frame cap unmaps it — the one revocation story
     // for shared memory (§2.5).
     if let CapKind::Frame { pages, mapping: Some((asp, va)), .. } = cap.kind {
+        let ghost s_pre = *store;
         store.aspace_unmap(asp, va, pages);
+        proof {
+            // `aspace_unmap` frames every census view (it edits page tables, not caps/refs),
+            // so the off-by-one window at `asp` and the refs-domain coverage ride through
+            // unchanged from delete_prepare to `unref_aspace`.
+            assert forall|x: ObjId| #[trigger] obj_census(store, x) == obj_census(&s_pre, x) by {}
+            assert(census_off_by_one(store, asp));
+            assert(census_dom_complete(store));
+        }
         unref_aspace(store, asp);
+    }
+    proof {
+        // Discharge `obj_unref`'s Timer armed-notif-live precondition from the census.
+        if let CapKind::Timer(o) = cap.kind {
+            if store.timer_view()[o].armed {
+                if let Some(nn) = store.timer_view()[o].notif {
+                    lemma_armed_timer_refs_pos(store.timer_view(), o, nn);
+                    // The armed binding makes `census(nn) >= 1`, so refs-domain completeness
+                    // places `nn` in `refs.dom`; the off-by-one then makes `refs[nn] > 0`.
+                    assert(obj_census(store, nn) >= 1);
+                    lemma_in_refs_from_census(store, nn);
+                    lemma_refs_pos_from_off_by_one(store, o, nn);
+                }
+            }
+        }
     }
     obj_unref(store, cap);
 }
@@ -6909,14 +7391,15 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
         refcount_sound(old(store)),
         caps_consistent(old(store)),
         end_caps_sound(old(store)),
+        census_dom_complete(old(store)),
     ensures
         cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom().contains(slot),
         final(store).slot_view()[slot].first_child is None,
 {
-    // `refcount_sound`, `caps_consistent`, and the endpoint-cap census ride the loop as
-    // `delete`'s preconditions (§6a/§6d): each `delete` requires them (held by the
-    // invariant) and re-establishes them.
+    // `refcount_sound`, `caps_consistent`, the endpoint-cap census, and refs-domain
+    // completeness ride the loop as `delete`'s preconditions (§6a/§6d): each `delete`
+    // requires them (held by the invariant) and re-establishes them.
     while store.slot(slot).first_child.is_some()
         invariant
             cspace_wf(store.slot_view()),
@@ -6925,6 +7408,7 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
             refcount_sound(store),
             caps_consistent(store),
             end_caps_sound(store),
+            census_dom_complete(store),
         decreases count_nonempty(store.slot_view()),
     {
         // The first child is live (it names `slot` as parent, so it is not an

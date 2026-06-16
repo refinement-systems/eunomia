@@ -232,6 +232,7 @@ pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<S
         cspace::refcount_sound(old(store)),
         cspace::caps_consistent(old(store)),
         cspace::end_caps_sound(old(store)),
+        cspace::census_dom_complete(old(store)),
         old(store).tcb_view().dom().contains(t),
         which < 2,
         old(store).tcb_view()[t].bind_bits.len() == 2,
@@ -342,6 +343,8 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         // `delete`s thread it (the bind caps are notifications, but `delete` requires it
         // unconditionally). Assumed here, discharged by the body PR; host-checked.
         cspace::end_caps_sound(old(store)),
+        // Refs-domain completeness (plan §6d body-removal): the body's `delete`s thread it.
+        cspace::census_dom_complete(old(store)),
     ensures
         cspace::cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom() == old(store).slot_view().dom(),
@@ -350,7 +353,13 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         cspace::refcount_sound(final(store)),
         cspace::caps_consistent(final(store)),
         cspace::end_caps_sound(final(store)),
+        cspace::census_dom_complete(final(store)),
         cspace::only_empties(old(store).slot_view(), final(store).slot_view()),
+        // Residency is immutable: the bind-cap `delete`s, `unref_cspace`/`unref_aspace`, and
+        // `set_tcb_*` all frame `cspace_view` (a destroyed cspace keeps its residency map —
+        // its resident caps are emptied, not re-homed), so `obj_unref`'s Thread arm carries
+        // it (plan §6d body PR).
+        final(store).cspace_view() == old(store).cspace_view(),
         final(store).tcb_view().dom().contains(t),
         final(store).tcb_view()[t].state == ThreadState::Halted,
         final(store).tcb_view()[t].qnext is None,

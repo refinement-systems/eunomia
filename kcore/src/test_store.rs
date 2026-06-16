@@ -1251,11 +1251,14 @@ fn check_destroy_channel(st: &mut ArrayStore, ch: ObjId) {
     let consistent0 = caps_consistent_exec(st);
     let end_caps0 = end_caps_sound_exec(st);
     let empty0 = st.slots.clone();
+    let resid0 = st.cspaces.clone();
 
     destroy_channel(st, ch);
 
     assert_only_empties(&empty0, st, "destroy_channel post");
     assert!(cspace_wf_exec(st), "destroy_channel post: cspace_wf preserved");
+    // §6d: residency is immutable across teardown (the frame obj_unref's Channel arm reads).
+    assert!(st.cspaces == resid0, "destroy_channel post: cspace residency unchanged");
     assert_eq!(st.n(), n, "destroy_channel: arena extent unchanged");
     for cs in ring_caps {
         assert!(st.at(cs).cap.is_empty(), "destroy_channel: every ring cap slot emptied");
@@ -1464,11 +1467,14 @@ fn check_destroy_tcb(st: &mut ArrayStore, t: ObjId) {
     let consistent0 = caps_consistent_exec(st);
     let end_caps0 = end_caps_sound_exec(st);
     let empty0 = st.slots.clone();
+    let resid0 = st.cspaces.clone();
 
     destroy_tcb(st, t);
 
     assert_only_empties(&empty0, st, "destroy_tcb post");
     assert!(cspace_wf_exec(st), "destroy_tcb post: cspace_wf preserved");
+    // §6d: residency is immutable across teardown (the frame obj_unref's Thread arm reads).
+    assert!(st.cspaces == resid0, "destroy_tcb post: cspace residency unchanged");
     assert_eq!(st.n(), n, "destroy_tcb: arena extent unchanged");
     assert_eq!(st.tcbs[&t.0].state, ThreadState::Halted, "destroy_tcb: t halted");
     assert!(st.tcbs[&t.0].qnext.is_none(), "destroy_tcb: queue link cleared");
