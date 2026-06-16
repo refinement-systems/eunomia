@@ -436,6 +436,19 @@ pub struct TimerView {
     pub next: Option<ObjId>,
 }
 
+// Cspace residency (plan §6a) — the slot-handle list a cspace object owns. The
+// kernel fixes this at construction (`cspace_num_slots`/`cspace_slot` are getters
+// with no setter), so it is an immutable projection exactly like `ChanView
+// .ring_cap` / `TcbView.bind_slots`: every mutator frames it unchanged. It is the
+// residency `destroy_cspace`'s resident loop (6c) and 6e's revoke-root-survival
+// name "the slots `cs` owns" through. `num_slots` and `slots.len()` agree on a
+// well-formed cspace (the getter contracts require it).
+#[verifier::ext_equal]
+pub struct CSpaceView {
+    pub num_slots: nat,
+    pub slots: Seq<SlotId>,
+}
+
 // The abstract `Store` model: a slot arena + a refcount map. The trait stays
 // plain Rust (the kernel impls it without ghost members); this `external_trait
 // _specification` attaches the contract, and `external_trait_extension` adds the
@@ -451,6 +464,15 @@ pub trait ExStore {
     spec fn slot_view(&self) -> Map<SlotId, CapSlot>;
     // Object refcounts: handle → count.
     spec fn refs_view(&self) -> Map<ObjId, nat>;
+    // Cspace residency (plan §6a): handle → the slot-handle list the cspace owns.
+    // Immutable (the residency getters have no setter); every mutator frames it
+    // unchanged, so `destroy_cspace`'s resident loop (6c) and revoke-root-survival
+    // (6e) reason over a residency that stays stable across the teardown ops'
+    // internal setter calls (whose bodies land in 6d). The `chan_view` analog,
+    // residency edition. (`refcount_sound` does *not* read residency — its terms
+    // are over the slot/chan/notif/tcb/timer views — so the sweep is forward-looking
+    // for the resident-walk reasoning, not a census dependency.)
+    spec fn cspace_view(&self) -> Map<ObjId, CSpaceView>;
     // Channel state: handle → ghost view (plan §3b). The third independent view;
     // the slot/refs setters frame it unchanged and the channel setters frame
     // slot/refs unchanged, so the §4.3 ops can reason about one without the others.
@@ -487,7 +509,8 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     fn obj_refs(&self, o: ObjId) -> (r: u32)
         requires self.refs_view().dom().contains(o),
@@ -502,7 +525,28 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
+
+    // ── cspace residents (plan §6a) ─────────────────────────────────────────
+    //
+    // The two residency getters, contracted against `cspace_view` (they are in the
+    // plain `Store` trait uncontracted today). Immutable — no setter — so they only
+    // read; `destroy_cspace`'s loop (6c) and 6e's revoke-root-survival walk the
+    // residents through them. The `slots.len() == num_slots` precondition is the
+    // residency well-formedness the kernel maintains by construction.
+    fn cspace_num_slots(&self, cs: ObjId) -> (r: u32)
+        requires
+            self.cspace_view().dom().contains(cs),
+            self.cspace_view()[cs].slots.len() == self.cspace_view()[cs].num_slots,
+        ensures r as nat == self.cspace_view()[cs].num_slots;
+
+    fn cspace_slot(&self, cs: ObjId, i: u32) -> (r: SlotId)
+        requires
+            self.cspace_view().dom().contains(cs),
+            (i as nat) < self.cspace_view()[cs].num_slots,
+            self.cspace_view()[cs].slots.len() == self.cspace_view()[cs].num_slots,
+        ensures r == self.cspace_view()[cs].slots[i as int];
 
     // ── channel accessors (plan §3b) ────────────────────────────────────────
     //
@@ -537,7 +581,8 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     fn chan_head(&self, ch: ObjId, ring: usize) -> (r: u32)
         requires
@@ -562,7 +607,8 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     fn chan_count(&self, ch: ObjId, ring: usize) -> (r: u32)
         requires
@@ -587,7 +633,8 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     fn chan_binding(&self, ch: ObjId, end: usize, ev: usize) -> (r: Binding)
         requires
@@ -613,7 +660,8 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     // The ring cap-slot handle — immutable channel layout, so getter only.
     fn chan_ring_cap(&self, ch: ObjId, ring: usize, i: u32, c: usize) -> (r: SlotId)
@@ -645,7 +693,8 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     // Payload is abstracted out, so the write is a frame-only no-op on the
     // abstract state; `chan_msg_read` is `&self` (no obligation, omitted).
@@ -657,7 +706,8 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     // `&self` (only `buf` is written), so the store is unchanged automatically; the
     // payload is abstracted out, so no spec on `buf`. Needed in `verus!` since 3d's
@@ -683,7 +733,8 @@ pub trait ExStore {
             final(self).chan_view() == old(self).chan_view(),
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     fn notif_wait_head(&self, n: ObjId) -> (r: Option<ObjId>)
         requires self.notif_view().dom().contains(n),
@@ -699,7 +750,8 @@ pub trait ExStore {
             final(self).chan_view() == old(self).chan_view(),
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     fn notif_wait_tail(&self, n: ObjId) -> (r: Option<ObjId>)
         requires self.notif_view().dom().contains(n),
@@ -715,7 +767,8 @@ pub trait ExStore {
             final(self).chan_view() == old(self).chan_view(),
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     // ── thread (TCB) accessors (plan §4a) ───────────────────────────────────
     //
@@ -738,7 +791,8 @@ pub trait ExStore {
             final(self).chan_view() == old(self).chan_view(),
             final(self).notif_view() == old(self).notif_view(),
             final(self).timer_view() == old(self).timer_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     fn tcb_qnext(&self, t: ObjId) -> (r: Option<ObjId>)
         requires self.tcb_view().dom().contains(t),
@@ -754,7 +808,8 @@ pub trait ExStore {
             final(self).chan_view() == old(self).chan_view(),
             final(self).notif_view() == old(self).notif_view(),
             final(self).timer_view() == old(self).timer_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     fn tcb_wait_notif(&self, t: ObjId) -> (r: Option<ObjId>)
         requires self.tcb_view().dom().contains(t),
@@ -770,7 +825,8 @@ pub trait ExStore {
             final(self).chan_view() == old(self).chan_view(),
             final(self).notif_view() == old(self).notif_view(),
             final(self).timer_view() == old(self).timer_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     fn tcb_report(&self, t: ObjId) -> (r: Report)
         requires self.tcb_view().dom().contains(t),
@@ -786,7 +842,8 @@ pub trait ExStore {
             final(self).chan_view() == old(self).chan_view(),
             final(self).notif_view() == old(self).notif_view(),
             final(self).timer_view() == old(self).timer_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     fn tcb_bind_slot(&self, t: ObjId, which: usize) -> (r: SlotId)
         requires
@@ -816,7 +873,8 @@ pub trait ExStore {
             final(self).chan_view() == old(self).chan_view(),
             final(self).notif_view() == old(self).notif_view(),
             final(self).timer_view() == old(self).timer_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     fn tcb_cspace(&self, t: ObjId) -> (r: Option<ObjId>)
         requires self.tcb_view().dom().contains(t),
@@ -832,7 +890,8 @@ pub trait ExStore {
             final(self).chan_view() == old(self).chan_view(),
             final(self).notif_view() == old(self).notif_view(),
             final(self).timer_view() == old(self).timer_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     fn tcb_aspace(&self, t: ObjId) -> (r: Option<ObjId>)
         requires self.tcb_view().dom().contains(t),
@@ -848,7 +907,8 @@ pub trait ExStore {
             final(self).chan_view() == old(self).chan_view(),
             final(self).notif_view() == old(self).notif_view(),
             final(self).timer_view() == old(self).timer_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     fn set_tcb_retval(&mut self, t: ObjId, v: u64)
         requires old(self).tcb_view().dom().contains(t),
@@ -860,7 +920,8 @@ pub trait ExStore {
             final(self).chan_view() == old(self).chan_view(),
             final(self).notif_view() == old(self).notif_view(),
             final(self).timer_view() == old(self).timer_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     // ── timer accessors (plan §4a; the armed-list logic is phase 4e) ─────────
     //
@@ -880,7 +941,8 @@ pub trait ExStore {
             final(self).chan_view() == old(self).chan_view(),
             final(self).notif_view() == old(self).notif_view(),
             final(self).tcb_view() == old(self).tcb_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     fn timer_deadline(&self, t: ObjId) -> (r: u64)
         requires self.timer_view().dom().contains(t),
@@ -896,7 +958,8 @@ pub trait ExStore {
             final(self).chan_view() == old(self).chan_view(),
             final(self).notif_view() == old(self).notif_view(),
             final(self).tcb_view() == old(self).tcb_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     fn timer_notif(&self, t: ObjId) -> (r: Option<ObjId>)
         requires self.timer_view().dom().contains(t),
@@ -912,7 +975,8 @@ pub trait ExStore {
             final(self).chan_view() == old(self).chan_view(),
             final(self).notif_view() == old(self).notif_view(),
             final(self).tcb_view() == old(self).tcb_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     fn timer_bits(&self, t: ObjId) -> (r: u64)
         requires self.timer_view().dom().contains(t),
@@ -928,7 +992,8 @@ pub trait ExStore {
             final(self).chan_view() == old(self).chan_view(),
             final(self).notif_view() == old(self).notif_view(),
             final(self).tcb_view() == old(self).tcb_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     fn timer_next(&self, t: ObjId) -> (r: Option<ObjId>)
         requires self.timer_view().dom().contains(t),
@@ -944,7 +1009,8 @@ pub trait ExStore {
             final(self).chan_view() == old(self).chan_view(),
             final(self).notif_view() == old(self).notif_view(),
             final(self).tcb_view() == old(self).tcb_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     fn timer_armed_head(&self) -> (r: Option<ObjId>)
         ensures r == self.timer_head_view();
@@ -957,7 +1023,8 @@ pub trait ExStore {
             final(self).chan_view() == old(self).chan_view(),
             final(self).notif_view() == old(self).notif_view(),
             final(self).tcb_view() == old(self).tcb_view(),
-            final(self).timer_view() == old(self).timer_view();
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     // ── scheduler seam (plan §4a; §1.3) ─────────────────────────────────────
     //
@@ -978,7 +1045,8 @@ pub trait ExStore {
             final(self).chan_view() == old(self).chan_view(),
             final(self).notif_view() == old(self).notif_view(),
             final(self).timer_view() == old(self).timer_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     // ── aspace hardware seam (plan §1.4; the `aspace::map_in` post-map barrier) ─
     //
@@ -999,6 +1067,7 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view(),
             final(self).tlb_log_view() == old(self).tlb_log_view();
 
     // ── unmap hardware seam (plan §5e; the `aspace::unmap_in` TLBI ordering) ──
@@ -1017,7 +1086,8 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
-            final(self).timer_head_view() == old(self).timer_head_view();
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 
     // The trailing `dsb`/`isb` after the per-page TLBIs — a pure fence, framing
     // every object view *and* the accumulated TLBI log (so the loop's final log
@@ -1031,7 +1101,44 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view(),
             final(self).tlb_log_view() == old(self).tlb_log_view();
+
+    // ── aspace teardown seam (plan §6a; the cross-object-teardown phase) ──────
+    //
+    // Two shell-owned page-table ops kcore never sees the body of (the trusted
+    // base, plan §2). Assumed, host-checked against `ArrayStore` (the
+    // `make_runnable` precedent). `aspace_unmap` is page-table maintenance — no
+    // object state — so it frames every object view + `refs_view` + `cspace_view`
+    // (the TLBI log it may touch is left unconstrained, like the other hardware
+    // effects). `aspace_destroy` is the last-reference teardown `unref_aspace` and
+    // `delete`'s frame-unmap branch call once `refs[a] == 0`: it drops `a` from
+    // `refs_view` and frames the rest (an aspace is no cspace, so `cspace_view` is
+    // untouched).
+    fn aspace_unmap(&mut self, a: ObjId, va: u64, pages: u64)
+        ensures
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
+
+    fn aspace_destroy(&mut self, a: ObjId)
+        requires
+            old(self).refs_view().dom().contains(a),
+            old(self).refs_view()[a] == 0,
+        ensures
+            final(self).refs_view() == old(self).refs_view().remove(a),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
 }
 
 // The refcounted object a cap designates (the spec mirror of `Cap::obj`).
@@ -2248,6 +2355,365 @@ proof fn lemma_designation_bump(
     assert(f1.finite());
     assert(slot_refs(m2, obj) == f2.len());
     assert(slot_refs(m, obj) == f1.len());
+}
+
+// ── The full refcount census (plan §6a). `refs[o]` must equal `obj_census(o)` —
+//    the recount over *every* reference to `o`: slot designations (`slot_refs`)
+//    plus the five non-slot terms phases 3/4/5 landed as per-op deltas, here
+//    assembled. Each term is a `slot_refs`-style filter/length (or a `waiter_seq`
+//    length). `refcount_sound` is the system invariant the teardown family (6c/6d)
+//    and the ref-touching construction ops (6f) preserve. ──
+
+// The aspace a mapped Frame cap holds a (non-cap) reference on — the mapping's
+// target. `None` for an unmapped frame or any non-Frame cap. A mapped frame holds
+// its aspace ref through this field, *not* via cap designation (`cap_obj` is `None`
+// for a Frame, `obj_ref`/`obj_unref`'s Frame arm a no-op), which is exactly why
+// `frame_map_refs` is a census term distinct from `slot_refs`.
+pub open spec fn cap_frame_aspace(c: Cap) -> Option<ObjId> {
+    match c.kind {
+        CapKind::Frame { mapping: Some((a, _)), .. } => Some(a),
+        _ => None,
+    }
+}
+
+// Channel bindings naming `o`: the `(ch, end, ev)` triples whose binding's notif is
+// `Some(o)` (end ∈ {0,1}, ev ∈ {0,1,2}). A subset of `cv.dom() × {0,1} × {0,1,2}`,
+// finite when `cv.dom()` is. The §3.6 binding term (the `binding_refs_ok` companion).
+pub open spec fn binding_refs(cv: Map<ObjId, ChanView>, o: ObjId) -> nat {
+    Set::new(
+        |t: (ObjId, int, int)|
+            cv.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3
+                && cv[t.0].bindings[(t.1, t.2)].notif == Some(o),
+    ).len()
+}
+
+// Blocked waiters on `o`: the length of `o`'s FIFO waiter chain — each blocked TCB
+// holds one queued ref (the phase-4 waiter term, plan §4b/§4c).
+pub open spec fn waiter_refs(nv: Map<ObjId, NotifView>, tv: Map<ObjId, TcbView>, o: ObjId) -> nat {
+    waiter_seq(nv, tv, o).len()
+}
+
+// Armed timers naming `o`: each armed timer bound to `o` holds one queued ref while
+// armed (the phase-4e armed-timer term, plan §4e).
+pub open spec fn armed_timer_refs(tmv: Map<ObjId, TimerView>, o: ObjId) -> nat {
+    tmv.dom().filter(|k: ObjId| tmv[k].armed && tmv[k].notif == Some(o)).len()
+}
+
+// Frame mappings naming `o`: each mapped frame cap holds one ref on its target
+// aspace via the mapping field (the new phase-5-enabled aspace term, plan §6a).
+pub open spec fn frame_map_refs(sv: Map<SlotId, CapSlot>, o: ObjId) -> nat {
+    sv.dom().filter(|k: SlotId| cap_frame_aspace(sv[k].cap) == Some(o)).len()
+}
+
+// Thread holds on `o`: a bound thread holds one ref on its cspace and one on its
+// aspace — released by `destroy_tcb`'s `unref_cspace`/`unref_aspace` (plan §6a).
+pub open spec fn thread_hold_refs(tv: Map<ObjId, TcbView>, o: ObjId) -> nat {
+    tv.dom().filter(|k: ObjId| tv[k].cspace == Some(o)).len()
+        + tv.dom().filter(|k: ObjId| tv[k].aspace == Some(o)).len()
+}
+
+// The recount: `refs[o]` must equal this over the whole store.
+pub open spec fn obj_census<S: Store>(store: &S, o: ObjId) -> nat {
+    slot_refs(store.slot_view(), o) + binding_refs(store.chan_view(), o) + waiter_refs(
+        store.notif_view(),
+        store.tcb_view(),
+        o,
+    ) + armed_timer_refs(store.timer_view(), o) + frame_map_refs(store.slot_view(), o)
+        + thread_hold_refs(store.tcb_view(), o)
+}
+
+// Every live object's stored refcount equals its census. The teardown family
+// assumes this at entry and re-establishes it at exit (the §4.1 obligation).
+pub open spec fn refcount_sound<S: Store>(store: &S) -> bool {
+    forall|o: ObjId|
+        store.refs_view().dom().contains(o) ==> store.refs_view()[o] == #[trigger] obj_census(
+            store,
+            o,
+        )
+}
+
+// ── Per-term recount lemmas (plan §6a). The single-key bump/drop building blocks
+//    6b–6f compose: a one-key view edit raises/lowers exactly one census term by
+//    one, the others fixed. Each is the `lemma_designation_bump` shape over a
+//    different view (`slot_refs` already has its bump above); the drops are its
+//    `remove`-mirror, and the thread-hold pair frames the untouched half at `k`.
+//    The five single-domain terms (slot, frame-mapping, armed-timer, thread-hold
+//    ×2) are settled here. The sixth, `binding_refs`, counts over a *nested*
+//    domain (`(ch, end, ev)` triples), so its single-edit recount needs the triple
+//    set's finiteness (a subset of `cv.dom() × {0,1} × {0,1,2}`) — the doc-35 §2.6
+//    trigger hazard the plan flags (§3). It lands with `destroy_channel`'s binding
+//    release, the op that consumes it (6d), per the "count steps single-purpose,
+//    where consumed" discipline — recorded, not dropped. ──
+
+// Slot drop: clearing one slot's designation of `obj` lowers `obj`'s slot census.
+proof fn lemma_designation_drop(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot, obj: ObjId)
+    requires
+        m.dom().finite(),
+        m.dom().contains(k),
+        cap_obj(m[k].cap) == Some(obj),
+        cap_obj(v.cap) != Some(obj),
+    ensures
+        slot_refs(m.insert(k, v), obj) == (slot_refs(m, obj) - 1) as nat,
+{
+    let m2 = m.insert(k, v);
+    let f1 = m.dom().filter(|j: SlotId| cap_obj(m[j].cap) == Some(obj));
+    let f2 = m2.dom().filter(|j: SlotId| cap_obj(m2[j].cap) == Some(obj));
+    assert(m2.dom() =~= m.dom());
+    assert forall|j: SlotId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.remove(k).contains(j) by {
+        if j != k {
+            assert(m2[j] == m[j]);
+        }
+    }
+    assert(f2 =~= f1.remove(k));
+    assert(f1.contains(k));
+    assert(f1.finite());
+}
+
+// Frame-mapping bump: a slot newly designating `o` as its frame's target aspace
+// raises `o`'s frame-mapping census.
+proof fn lemma_frame_map_bump(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot, o: ObjId)
+    requires
+        m.dom().finite(),
+        m.dom().contains(k),
+        cap_frame_aspace(m[k].cap) != Some(o),
+        cap_frame_aspace(v.cap) == Some(o),
+    ensures
+        frame_map_refs(m.insert(k, v), o) == frame_map_refs(m, o) + 1,
+{
+    let m2 = m.insert(k, v);
+    let f1 = m.dom().filter(|j: SlotId| cap_frame_aspace(m[j].cap) == Some(o));
+    let f2 = m2.dom().filter(|j: SlotId| cap_frame_aspace(m2[j].cap) == Some(o));
+    assert(m2.dom() =~= m.dom());
+    assert forall|j: SlotId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.insert(k).contains(j) by {
+        if j != k {
+            assert(m2[j] == m[j]);
+        }
+    }
+    assert(f2 =~= f1.insert(k));
+    assert(!f1.contains(k));
+    assert(f1.finite());
+}
+
+// Frame-mapping drop: clearing/retargeting a frame's mapping away from `o` lowers
+// `o`'s frame-mapping census (the term `delete`'s frame-unmap branch lowers, 6b).
+proof fn lemma_frame_map_drop(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot, o: ObjId)
+    requires
+        m.dom().finite(),
+        m.dom().contains(k),
+        cap_frame_aspace(m[k].cap) == Some(o),
+        cap_frame_aspace(v.cap) != Some(o),
+    ensures
+        frame_map_refs(m.insert(k, v), o) == (frame_map_refs(m, o) - 1) as nat,
+{
+    let m2 = m.insert(k, v);
+    let f1 = m.dom().filter(|j: SlotId| cap_frame_aspace(m[j].cap) == Some(o));
+    let f2 = m2.dom().filter(|j: SlotId| cap_frame_aspace(m2[j].cap) == Some(o));
+    assert(m2.dom() =~= m.dom());
+    assert forall|j: SlotId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.remove(k).contains(j) by {
+        if j != k {
+            assert(m2[j] == m[j]);
+        }
+    }
+    assert(f2 =~= f1.remove(k));
+    assert(f1.contains(k));
+    assert(f1.finite());
+}
+
+// Armed-timer bump: a timer newly armed-and-bound to `o` raises `o`'s armed-timer
+// census.
+proof fn lemma_armed_timer_bump(m: Map<ObjId, TimerView>, k: ObjId, v: TimerView, o: ObjId)
+    requires
+        m.dom().finite(),
+        m.dom().contains(k),
+        !(m[k].armed && m[k].notif == Some(o)),
+        v.armed && v.notif == Some(o),
+    ensures
+        armed_timer_refs(m.insert(k, v), o) == armed_timer_refs(m, o) + 1,
+{
+    let m2 = m.insert(k, v);
+    let f1 = m.dom().filter(|j: ObjId| m[j].armed && m[j].notif == Some(o));
+    let f2 = m2.dom().filter(|j: ObjId| m2[j].armed && m2[j].notif == Some(o));
+    assert(m2.dom() =~= m.dom());
+    assert forall|j: ObjId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.insert(k).contains(j) by {
+        if j != k {
+            assert(m2[j] == m[j]);
+        }
+    }
+    assert(f2 =~= f1.insert(k));
+    assert(!f1.contains(k));
+    assert(f1.finite());
+}
+
+// Armed-timer drop: disarming/retargeting a timer away from `o` lowers `o`'s
+// armed-timer census (the term `disarm`/`destroy_timer` lowers; teardown, 6d).
+proof fn lemma_armed_timer_drop(m: Map<ObjId, TimerView>, k: ObjId, v: TimerView, o: ObjId)
+    requires
+        m.dom().finite(),
+        m.dom().contains(k),
+        m[k].armed && m[k].notif == Some(o),
+        !(v.armed && v.notif == Some(o)),
+    ensures
+        armed_timer_refs(m.insert(k, v), o) == (armed_timer_refs(m, o) - 1) as nat,
+{
+    let m2 = m.insert(k, v);
+    let f1 = m.dom().filter(|j: ObjId| m[j].armed && m[j].notif == Some(o));
+    let f2 = m2.dom().filter(|j: ObjId| m2[j].armed && m2[j].notif == Some(o));
+    assert(m2.dom() =~= m.dom());
+    assert forall|j: ObjId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.remove(k).contains(j) by {
+        if j != k {
+            assert(m2[j] == m[j]);
+        }
+    }
+    assert(f2 =~= f1.remove(k));
+    assert(f1.contains(k));
+    assert(f1.finite());
+}
+
+// Thread-hold bump (cspace edit): a thread newly holding `o` as its cspace raises
+// `o`'s thread-hold census (the aspace half is framed unchanged at `k`).
+proof fn lemma_thread_hold_cspace_bump(m: Map<ObjId, TcbView>, k: ObjId, v: TcbView, o: ObjId)
+    requires
+        m.dom().finite(),
+        m.dom().contains(k),
+        m[k].cspace != Some(o),
+        v.cspace == Some(o),
+        v.aspace == m[k].aspace,
+    ensures
+        thread_hold_refs(m.insert(k, v), o) == thread_hold_refs(m, o) + 1,
+{
+    let m2 = m.insert(k, v);
+    let c1 = m.dom().filter(|j: ObjId| m[j].cspace == Some(o));
+    let c2 = m2.dom().filter(|j: ObjId| m2[j].cspace == Some(o));
+    let a1 = m.dom().filter(|j: ObjId| m[j].aspace == Some(o));
+    let a2 = m2.dom().filter(|j: ObjId| m2[j].aspace == Some(o));
+    assert(m2.dom() =~= m.dom());
+    assert(m2[k] == v);
+    assert forall|j: ObjId| #![trigger c2.contains(j)] c2.contains(j) <==> c1.insert(k).contains(j) by {
+        if j != k {
+            assert(m2[j] == m[j]);
+        }
+    }
+    assert(c2 =~= c1.insert(k));
+    assert(!c1.contains(k));
+    assert(c1.finite());
+    assert forall|j: ObjId| #![trigger a2.contains(j)] a2.contains(j) <==> a1.contains(j) by {
+        if j != k {
+            assert(m2[j] == m[j]);
+        } else {
+            assert(m2[k].aspace == m[k].aspace);
+        }
+    }
+    assert(a2 =~= a1);
+}
+
+// Thread-hold drop (cspace edit): clearing a thread's `o` cspace hold lowers the
+// census (the term `destroy_tcb`'s `unref_cspace` releases; teardown, 6d).
+proof fn lemma_thread_hold_cspace_drop(m: Map<ObjId, TcbView>, k: ObjId, v: TcbView, o: ObjId)
+    requires
+        m.dom().finite(),
+        m.dom().contains(k),
+        m[k].cspace == Some(o),
+        v.cspace != Some(o),
+        v.aspace == m[k].aspace,
+    ensures
+        thread_hold_refs(m.insert(k, v), o) == (thread_hold_refs(m, o) - 1) as nat,
+{
+    let m2 = m.insert(k, v);
+    let c1 = m.dom().filter(|j: ObjId| m[j].cspace == Some(o));
+    let c2 = m2.dom().filter(|j: ObjId| m2[j].cspace == Some(o));
+    let a1 = m.dom().filter(|j: ObjId| m[j].aspace == Some(o));
+    let a2 = m2.dom().filter(|j: ObjId| m2[j].aspace == Some(o));
+    assert(m2.dom() =~= m.dom());
+    assert(m2[k] == v);
+    assert forall|j: ObjId| #![trigger c2.contains(j)] c2.contains(j) <==> c1.remove(k).contains(j) by {
+        if j != k {
+            assert(m2[j] == m[j]);
+        }
+    }
+    assert(c2 =~= c1.remove(k));
+    assert(c1.contains(k));
+    assert(c1.finite());
+    assert forall|j: ObjId| #![trigger a2.contains(j)] a2.contains(j) <==> a1.contains(j) by {
+        if j != k {
+            assert(m2[j] == m[j]);
+        } else {
+            assert(m2[k].aspace == m[k].aspace);
+        }
+    }
+    assert(a2 =~= a1);
+}
+
+// Thread-hold bump/drop (aspace edit): the symmetric pair over the aspace half,
+// the cspace half framed unchanged at `k`. `destroy_tcb`'s `unref_aspace` releases
+// the drop side (6d); the construction side rides 6f.
+proof fn lemma_thread_hold_aspace_bump(m: Map<ObjId, TcbView>, k: ObjId, v: TcbView, o: ObjId)
+    requires
+        m.dom().finite(),
+        m.dom().contains(k),
+        m[k].aspace != Some(o),
+        v.aspace == Some(o),
+        v.cspace == m[k].cspace,
+    ensures
+        thread_hold_refs(m.insert(k, v), o) == thread_hold_refs(m, o) + 1,
+{
+    let m2 = m.insert(k, v);
+    let c1 = m.dom().filter(|j: ObjId| m[j].cspace == Some(o));
+    let c2 = m2.dom().filter(|j: ObjId| m2[j].cspace == Some(o));
+    let a1 = m.dom().filter(|j: ObjId| m[j].aspace == Some(o));
+    let a2 = m2.dom().filter(|j: ObjId| m2[j].aspace == Some(o));
+    assert(m2.dom() =~= m.dom());
+    assert(m2[k] == v);
+    assert forall|j: ObjId| #![trigger a2.contains(j)] a2.contains(j) <==> a1.insert(k).contains(j) by {
+        if j != k {
+            assert(m2[j] == m[j]);
+        }
+    }
+    assert(a2 =~= a1.insert(k));
+    assert(!a1.contains(k));
+    assert(a1.finite());
+    assert forall|j: ObjId| #![trigger c2.contains(j)] c2.contains(j) <==> c1.contains(j) by {
+        if j != k {
+            assert(m2[j] == m[j]);
+        } else {
+            assert(m2[k].cspace == m[k].cspace);
+        }
+    }
+    assert(c2 =~= c1);
+}
+
+proof fn lemma_thread_hold_aspace_drop(m: Map<ObjId, TcbView>, k: ObjId, v: TcbView, o: ObjId)
+    requires
+        m.dom().finite(),
+        m.dom().contains(k),
+        m[k].aspace == Some(o),
+        v.aspace != Some(o),
+        v.cspace == m[k].cspace,
+    ensures
+        thread_hold_refs(m.insert(k, v), o) == (thread_hold_refs(m, o) - 1) as nat,
+{
+    let m2 = m.insert(k, v);
+    let c1 = m.dom().filter(|j: ObjId| m[j].cspace == Some(o));
+    let c2 = m2.dom().filter(|j: ObjId| m2[j].cspace == Some(o));
+    let a1 = m.dom().filter(|j: ObjId| m[j].aspace == Some(o));
+    let a2 = m2.dom().filter(|j: ObjId| m2[j].aspace == Some(o));
+    assert(m2.dom() =~= m.dom());
+    assert(m2[k] == v);
+    assert forall|j: ObjId| #![trigger a2.contains(j)] a2.contains(j) <==> a1.remove(k).contains(j) by {
+        if j != k {
+            assert(m2[j] == m[j]);
+        }
+    }
+    assert(a2 =~= a1.remove(k));
+    assert(a1.contains(k));
+    assert(a1.finite());
+    assert forall|j: ObjId| #![trigger c2.contains(j)] c2.contains(j) <==> c1.contains(j) by {
+        if j != k {
+            assert(m2[j] == m[j]);
+        } else {
+            assert(m2[k].cspace == m[k].cspace);
+        }
+    }
+    assert(c2 =~= c1);
 }
 
 // ── Construction-side acyclicity preservation (doc/results/21 §9). ──
@@ -4825,9 +5291,17 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
 /// The contract is stated for the **general** (possibly non-leaf) case on
 /// purpose: `revoke` only ever passes a leaf, but `destroy_cspace` deletes
 /// non-leaf residents, so the body proof must handle `cdt_unlink`'s re-parenting
-/// — the harder `cdt_wf`-preservation case. The contract is silent on
-/// `refs_view` (the teardown's refcount effects); the refcount discipline across
-/// teardown lands with the cross-object body proof (doc/results/21 §9).
+/// — the harder `cdt_wf`-preservation case.
+///
+/// **Refcount census (plan §6a).** `delete` now also requires and preserves
+/// `refcount_sound` (the §4.1 obligation): the deleted cap lowers exactly its
+/// object's `slot_refs`/`frame_map_refs`, matched by the `obj_unref`/`unref_aspace`
+/// `-1` (and the per-end `endpoint_cap_dropped` by its `binding_refs` drop). The
+/// `requires` is the underflow gate the 6d body proof leans on (`refs[o] - 1`
+/// needs `refs[o] ≥ 1`, which the census-at-entry supplies, §1.3); stating it now
+/// means the verified callers (`bind`, `revoke`) carry the invariant against the
+/// *final* contract, so 6d's body closure adds no caller churn. Assumed here
+/// (`external_body`), host-checked against `ArrayStore` (`check_delete`).
 #[verifier::external_body]
 pub fn delete<S: Store>(store: &mut S, slot: SlotId)
     requires
@@ -4835,12 +5309,14 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         old(store).slot_view().dom().finite(),
         old(store).slot_view().dom().contains(slot),
         !is_empty_cap(old(store).slot_view()[slot].cap),
+        refcount_sound(old(store)),
     ensures
         cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom() == old(store).slot_view().dom(),
         final(store).slot_view().dom().finite(),
         is_empty_cap(final(store).slot_view()[slot].cap),
         count_nonempty(final(store).slot_view()) < count_nonempty(old(store).slot_view()),
+        refcount_sound(final(store)),
         // Conditional-on-notification frame (plan §4d): deleting a **notification**
         // cap is robustly clean — `cdt_unlink`/`set_slot` frame every object view,
         // the `Channel`/mapped-`Frame` teardown branches don't fire, and `obj_unref`
@@ -4946,16 +5422,20 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
         old(store).slot_view().dom().finite(),
         old(store).slot_view().dom().contains(slot),
         !is_empty_cap(old(store).slot_view()[slot].cap),
+        refcount_sound(old(store)),
     ensures
         cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom().contains(slot),
         final(store).slot_view()[slot].first_child is None,
 {
+    // `refcount_sound` rides the loop as `delete`'s underflow gate (§6a/§1.3):
+    // each `delete` requires it (held by the invariant) and re-establishes it.
     while store.slot(slot).first_child.is_some()
         invariant
             cspace_wf(store.slot_view()),
             store.slot_view().dom().finite(),
             store.slot_view().dom().contains(slot),
+            refcount_sound(store),
         decreases count_nonempty(store.slot_view()),
     {
         // The first child is live (it names `slot` as parent, so it is not an

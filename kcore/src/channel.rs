@@ -1064,17 +1064,25 @@ verus! {
 /// its real body in `test_store.rs` (`check_destroy_channel`), not a Verus body
 /// proof. The contract states the robustly-true, checkable core — `cspace_wf`
 /// preserved, the arena unchanged in extent, and **every ring-cap slot emptied**.
-/// The per-binding ref release is entangled with the deletes' own refcount
-/// effects (no clean closed form here), so it is asserted directly on the
-/// concrete store by the host test.
+///
+/// **Refcount census (plan §6a).** The contract now also requires and preserves
+/// `refcount_sound` and states the `count_nonempty` non-increase 6d's measure
+/// needs. The per-binding ref release that had "no clean closed form here" is the
+/// census's job: each `-1` is matched by the corresponding `binding_refs` drop
+/// (6d closes the body proof). Stated now (still `external_body`, host-checked via
+/// `check_destroy_channel`) so `obj_unref` (6c) verifies against the final contract.
 #[verifier::external_body]
 pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
     requires
         cspace::cspace_wf(old(store).slot_view()),
         cspace::chan_wf(old(store).chan_view(), old(store).slot_view(), ch),
+        cspace::refcount_sound(old(store)),
     ensures
         cspace::cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom() == old(store).slot_view().dom(),
+        cspace::count_nonempty(final(store).slot_view())
+            <= cspace::count_nonempty(old(store).slot_view()),
+        cspace::refcount_sound(final(store)),
         forall|r: int, i: int, c: int|
             (0 <= r < 2 && 0 <= i < old(store).chan_view()[ch].depth && 0 <= c < 4)
                 ==> cspace::is_empty_cap(

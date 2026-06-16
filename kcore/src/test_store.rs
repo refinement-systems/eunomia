@@ -89,6 +89,7 @@ struct TimerState {
     next: Option<ObjId>,
 }
 
+#[derive(Clone)]
 struct ArrayStore {
     slots: Vec<CapSlot>,
     refs: BTreeMap<u64, u32>,
@@ -152,7 +153,13 @@ impl Store for ArrayStore {
     fn cspace_slot(&self, cs: ObjId, i: u32) -> SlotId {
         self.cspaces[&cs.0][i as usize]
     }
-    fn aspace_destroy(&mut self, _a: ObjId) {}
+    // Last-reference teardown (plan §6a): drop `a` from the refcount map, matching
+    // the `ExStore` contract `refs_view() == old.refs_view().remove(a)` (the real
+    // kernel frees the aspace object here). `aspace_unmap` is page-table maintenance
+    // with no object state, so the no-op faithfully "frames every view".
+    fn aspace_destroy(&mut self, a: ObjId) {
+        self.refs.remove(&a.0);
+    }
     fn aspace_unmap(&mut self, _a: ObjId, _va: u64, _pages: u64) {}
 
     // ── channel state (plan §3b): the `chan_*` accessors backed by `chans` ──
@@ -413,6 +420,103 @@ fn count_nonempty_exec(st: &ArrayStore) -> usize {
     (0..st.n()).filter(|&i| !st.slots[i].cap.is_empty()).count()
 }
 
+// ── The refcount census mirror (plan §6a) ───────────────────────────────────
+//
+// `refcount_sound_exec` is the executable counterpart of the ghost
+// `cspace::refcount_sound`: it recomputes every object's `obj_census` over the
+// concrete store and checks it equals the stored `refs`. The strengthened
+// `external_body` teardown contracts (`delete`/`destroy_channel`/`destroy_tcb`)
+// now require and preserve `refcount_sound`, so this mirror host-checks that
+// clause (`refcount_sound_exec_has_teeth` proves it is not vacuous).
+
+// Exec mirror of the spec `cap_obj` (the object a cap designates, if any).
+fn cap_obj_exec(cap: Cap) -> Option<ObjId> {
+    match cap.kind {
+        CapKind::Aspace(o)
+        | CapKind::CSpace(o)
+        | CapKind::Thread(o)
+        | CapKind::Channel(o, _)
+        | CapKind::Notification(o)
+        | CapKind::Timer(o) => Some(o),
+        CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => None,
+    }
+}
+
+// Exec mirror of the spec `cap_frame_aspace` (the aspace a mapped frame holds).
+fn cap_frame_aspace_exec(cap: Cap) -> Option<ObjId> {
+    match cap.kind {
+        CapKind::Frame { mapping: Some((a, _)), .. } => Some(a),
+        _ => None,
+    }
+}
+
+// Exec mirror of `waiter_seq(o).len()`: `o`'s FIFO waiter-chain length, walked from
+// `wait_head` via `qnext` (the `notif_wf_exec` walk). 0 for a non-notification `o`
+// (absent from `notifs`); the bounded guard mirrors the chain's acyclicity.
+fn waiter_count_exec(st: &ArrayStore, o: ObjId) -> u32 {
+    let mut count: u32 = 0;
+    if let Some(nst) = st.notifs.get(&o.0) {
+        let mut cur = nst.wait_head;
+        let mut guard = st.tcbs.len() + 1;
+        while let Some(t) = cur {
+            count += 1;
+            if guard == 0 {
+                break;
+            }
+            guard -= 1;
+            cur = st.tcbs.get(&t.0).and_then(|tc| tc.qnext);
+        }
+    }
+    count
+}
+
+// Exec mirror of `obj_census(o)`: the six census terms summed.
+fn obj_census_exec(st: &ArrayStore, o: ObjId) -> u32 {
+    let mut total: u32 = 0;
+    // slot_refs + frame_map_refs over the single arena.
+    for s in &st.slots {
+        if cap_obj_exec(s.cap) == Some(o) {
+            total += 1;
+        }
+        if cap_frame_aspace_exec(s.cap) == Some(o) {
+            total += 1;
+        }
+    }
+    // binding_refs: the (end, ev) ∈ {0,1}×{0,1,2} triples naming `o`.
+    for ch in st.chans.values() {
+        for e in 0..2usize {
+            for v in 0..3usize {
+                if ch.bindings.get(&(e, v)).and_then(|b| b.notif) == Some(o) {
+                    total += 1;
+                }
+            }
+        }
+    }
+    // waiter_refs.
+    total += waiter_count_exec(st, o);
+    // armed_timer_refs.
+    for tm in st.timers.values() {
+        if tm.armed && tm.notif == Some(o) {
+            total += 1;
+        }
+    }
+    // thread_hold_refs: cspace + aspace holds.
+    for tc in st.tcbs.values() {
+        if tc.cspace == Some(o) {
+            total += 1;
+        }
+        if tc.aspace == Some(o) {
+            total += 1;
+        }
+    }
+    total
+}
+
+// Every live object's stored refcount equals its census (`cspace::refcount_sound`).
+fn refcount_sound_exec(st: &ArrayStore) -> bool {
+    st.refs.iter().all(|(&o, &r)| obj_census_exec(st, ObjId(o)) == r)
+}
+
 // The exec mirror of the spec `in_live_window` (cspace.rs): ring index `i` is one
 // of the `count[ring]` positions starting at `head[ring]`, wrapping mod `depth`.
 fn in_live_window_exec(cs: &ChanState, ring: usize, i: u32) -> bool {
@@ -656,11 +760,18 @@ fn check_delete(st: &mut ArrayStore, slot: SlotId) {
     assert!(cspace_wf_exec(st), "delete pre: cspace_wf");
     assert!(!st.at(slot).cap.is_empty(), "delete pre: slot non-empty");
     let (n0, c0) = (st.n(), count_nonempty_exec(st));
+    // The §6a census clause is conditional on the precondition `refcount_sound`,
+    // so only assert it preserved when the fixture satisfied it (most generated
+    // forests carry no object caps, so they are vacuously sound).
+    let sound0 = refcount_sound_exec(st);
     delete(st, slot);
     assert!(cspace_wf_exec(st), "delete post: cspace_wf preserved");
     assert_eq!(st.n(), n0, "delete post: dom preserved");
     assert!(st.at(slot).cap.is_empty(), "delete post: target slot emptied");
     assert!(count_nonempty_exec(st) < c0, "delete post: count_nonempty strictly drops");
+    if sound0 {
+        assert!(refcount_sound_exec(st), "delete post: refcount_sound preserved");
+    }
 }
 
 fn check_cdt_unlink(st: &mut ArrayStore, slot: SlotId) {
@@ -1028,6 +1139,7 @@ fn check_destroy_channel(st: &mut ArrayStore, ch: ObjId) {
             }
         }
     }
+    let (c0, sound0) = (count_nonempty_exec(st), refcount_sound_exec(st));
 
     destroy_channel(st, ch);
 
@@ -1037,6 +1149,10 @@ fn check_destroy_channel(st: &mut ArrayStore, ch: ObjId) {
         assert!(st.at(cs).cap.is_empty(), "destroy_channel: every ring cap slot emptied");
     }
     assert_eq!(st.refs, expect_refs, "destroy_channel: each binding's notif ref released once");
+    assert!(count_nonempty_exec(st) <= c0, "destroy_channel: count_nonempty non-increase (§6a)");
+    if sound0 {
+        assert!(refcount_sound_exec(st), "destroy_channel post: refcount_sound preserved (§6a)");
+    }
 }
 
 // Run the real `delete` on a **notification** cap and assert the §4d conditional
@@ -1226,6 +1342,7 @@ fn check_destroy_tcb(st: &mut ArrayStore, t: ObjId) {
     let report0 = st.tcbs[&t.0].report;
     let s0 = st.tcbs[&t.0].bind_slots[0];
     let s1 = st.tcbs[&t.0].bind_slots[1];
+    let (c0, sound0) = (count_nonempty_exec(st), refcount_sound_exec(st));
 
     destroy_tcb(st, t);
 
@@ -1236,6 +1353,10 @@ fn check_destroy_tcb(st: &mut ArrayStore, t: ObjId) {
     assert_eq!(st.tcbs[&t.0].report, report0, "destroy_tcb: report unchanged");
     assert!(st.at(s0).cap.is_empty(), "destroy_tcb: EXIT bind slot emptied");
     assert!(st.at(s1).cap.is_empty(), "destroy_tcb: FAULT bind slot emptied");
+    assert!(count_nonempty_exec(st) <= c0, "destroy_tcb: count_nonempty non-increase (§6a)");
+    if sound0 {
+        assert!(refcount_sound_exec(st), "destroy_tcb post: refcount_sound preserved (§6a)");
+    }
 }
 
 // A halted thread (ObjId 200) with two bind slots (1 = EXIT, 2 = FAULT). With
@@ -1851,6 +1972,100 @@ fn notif_wf_exec_has_teeth() {
     assert!(!notif_wf_exec(&st, n), "a charted node with no live TCB must be rejected");
 
     assert!(!notif_wf_exec(&notif_fixture(), ObjId(999)), "unknown notification must be rejected");
+}
+
+// A store exercising **all six** census terms at once, with `refs` set to each
+// object's true `obj_census` — the positive witness and the base for the per-term
+// teeth perturbations. Objects: cspace C=1, aspace A=2, notif N=3, timer T=4,
+// channel CH=5, thread TH=6.
+fn refcount_sound_fixture() -> ArrayStore {
+    let mut st = ArrayStore::new(7);
+    // One designating slot cap per object (slot_refs).
+    st.slots[0] = detached(cspace_cap(1));
+    st.slots[1] = detached(Cap { kind: CapKind::Aspace(ObjId(2)), rights: Rights(0xff) });
+    st.slots[2] = detached(notif_cap(3));
+    st.slots[3] = detached(Cap { kind: CapKind::Timer(ObjId(4)), rights: Rights(0xff) });
+    st.slots[4] = detached(Cap { kind: CapKind::Channel(ObjId(5), ChanEnd::A), rights: Rights(0xff) });
+    st.slots[5] = detached(Cap { kind: CapKind::Thread(ObjId(6)), rights: Rights(0xff) });
+    // A frame mapped into A → frame_map_refs(A) += 1.
+    st.slots[6] = detached(Cap {
+        kind: CapKind::Frame { base: 0x1000, pages: 1, mapping: Some((ObjId(2), 0x4000)) },
+        rights: Rights(0xff),
+    });
+    // A channel binding (end 0, ev 0) naming N → binding_refs(N) += 1.
+    let mut bindings = BTreeMap::new();
+    for e in 0..2usize {
+        for v in 0..3usize {
+            let notif = if (e, v) == (0, 0) { Some(ObjId(3)) } else { None };
+            bindings.insert((e, v), Binding { notif, bits: 0 });
+        }
+    }
+    st.chans.insert(5, ChanState {
+        depth: 0,
+        end_caps: [0, 0],
+        head: [0, 0],
+        count: [0, 0],
+        bindings,
+        msg_len: BTreeMap::new(),
+        ring_cap: BTreeMap::new(),
+    });
+    // TH blocked on N (waiter_refs(N) += 1) and holding C/A (thread_hold).
+    st.notifs.insert(3, NotifState { word: 0, wait_head: Some(ObjId(6)), wait_tail: Some(ObjId(6)) });
+    st.tcbs.insert(6, TcbState {
+        state: ThreadState::BlockedNotif,
+        wait_notif: Some(ObjId(3)),
+        cspace: Some(ObjId(1)),
+        aspace: Some(ObjId(2)),
+        ..tcb_state_default()
+    });
+    // An armed timer bound to N → armed_timer_refs(N) += 1.
+    st.timers.insert(4, TimerState { armed: true, deadline: 0, notif: Some(ObjId(3)), bits: 0, next: None });
+    st.timer_armed_head = Some(ObjId(4));
+    // refs = census: C 1+1=2, A 1+1+1=3, N 1+1+1+1=4, T 1, CH 1, TH 1.
+    for (o, r) in [(1u64, 2u32), (2, 3), (3, 4), (4, 1), (5, 1), (6, 1)] {
+        st.refs.insert(o, r);
+    }
+    st
+}
+
+// `refcount_sound_exec` (the §6a census mirror the strengthened teardown contracts
+// are host-checked against) is only meaningful if it rejects a census mismatch in
+// **each** term. The assembled fixture is sound; perturbing any one term — slot,
+// frame-mapping, binding, waiter, armed-timer, thread-hold — must be rejected.
+#[test]
+fn refcount_sound_exec_has_teeth() {
+    let base = refcount_sound_fixture();
+    assert!(refcount_sound_exec(&base), "the all-terms fixture must be refcount_sound");
+
+    // slot_refs: drop a designating cap without lowering refs.
+    let mut st = base.clone();
+    st.slots[5] = detached(Cap::EMPTY);
+    assert!(!refcount_sound_exec(&st), "teeth: slot_refs term");
+
+    // frame_map_refs: unmap the frame (mapping → None).
+    let mut st = base.clone();
+    st.slots[6] = detached(frame_cap(0x1000));
+    assert!(!refcount_sound_exec(&st), "teeth: frame_map_refs term");
+
+    // binding_refs: drop the channel binding's notification.
+    let mut st = base.clone();
+    st.chan_mut(ObjId(5)).bindings.insert((0, 0), Binding { notif: None, bits: 0 });
+    assert!(!refcount_sound_exec(&st), "teeth: binding_refs term");
+
+    // waiter_refs: empty the waiter chain.
+    let mut st = base.clone();
+    st.notifs.get_mut(&3).unwrap().wait_head = None;
+    assert!(!refcount_sound_exec(&st), "teeth: waiter_refs term");
+
+    // armed_timer_refs: disarm the timer.
+    let mut st = base.clone();
+    st.timers.get_mut(&4).unwrap().armed = false;
+    assert!(!refcount_sound_exec(&st), "teeth: armed_timer_refs term");
+
+    // thread_hold_refs: clear the thread's cspace hold.
+    let mut st = base.clone();
+    st.tcbs.get_mut(&6).unwrap().cspace = None;
+    assert!(!refcount_sound_exec(&st), "teeth: thread_hold_refs term");
 }
 
 // `wait` on a nonzero word consumes it without blocking; the queue and refs are
