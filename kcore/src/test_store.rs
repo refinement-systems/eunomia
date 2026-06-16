@@ -693,6 +693,25 @@ fn caps_consistent_exec(st: &ArrayStore) -> bool {
     })
 }
 
+// Exec mirror of `cspace::end_caps_sound`: every live channel's `end_caps[e]` equals the
+// count of `Channel(ch, e)` caps in the arena (the §3.3 per-endpoint census; plan §6d
+// body-removal gate, doc 45 §2). Host-checks that assumed clause against the real
+// `ArrayStore` bodies until the body PR proves it (`end_caps_sound_exec_has_teeth` proves
+// it is not vacuous).
+fn end_caps_sound_exec(st: &ArrayStore) -> bool {
+    st.chans.iter().all(|(&ch, cs)| {
+        (0..2usize).all(|e| {
+            let count = st
+                .slots
+                .iter()
+                .filter(|s| matches!(s.cap.kind, CapKind::Channel(o, end)
+                    if o.0 == ch && end_idx_exec(end) == e))
+                .count() as u32;
+            cs.end_caps[e] == count
+        })
+    })
+}
+
 // ── Shape builders ─────────────────────────────────────────────────────────
 
 fn detached(cap: Cap) -> CapSlot {
@@ -819,6 +838,8 @@ fn check_delete(st: &mut ArrayStore, slot: SlotId) {
     let sound0 = refcount_sound_exec(st);
     // §6d foundation: the cap→object invariant is likewise a guarded precondition.
     let consistent0 = caps_consistent_exec(st);
+    // §6d body-removal gate: the endpoint-cap census is also a guarded precondition.
+    let end_caps0 = end_caps_sound_exec(st);
     delete(st, slot);
     assert!(cspace_wf_exec(st), "delete post: cspace_wf preserved");
     assert_eq!(st.n(), n0, "delete post: dom preserved");
@@ -831,6 +852,9 @@ fn check_delete(st: &mut ArrayStore, slot: SlotId) {
     }
     if consistent0 {
         assert!(caps_consistent_exec(st), "delete post: caps_consistent preserved (§6d)");
+    }
+    if end_caps0 {
+        assert!(end_caps_sound_exec(st), "delete post: end_caps_sound preserved (§6d)");
     }
     assert_only_empties(&empty0, st, "delete post");
 }
@@ -1225,6 +1249,7 @@ fn check_destroy_channel(st: &mut ArrayStore, ch: ObjId) {
     }
     let (c0, sound0) = (count_nonempty_exec(st), refcount_sound_exec(st));
     let consistent0 = caps_consistent_exec(st);
+    let end_caps0 = end_caps_sound_exec(st);
     let empty0 = st.slots.clone();
 
     destroy_channel(st, ch);
@@ -1242,6 +1267,9 @@ fn check_destroy_channel(st: &mut ArrayStore, ch: ObjId) {
     }
     if consistent0 {
         assert!(caps_consistent_exec(st), "destroy_channel post: caps_consistent preserved (§6d)");
+    }
+    if end_caps0 {
+        assert!(end_caps_sound_exec(st), "destroy_channel post: end_caps_sound preserved (§6d)");
     }
 }
 
@@ -1434,6 +1462,7 @@ fn check_destroy_tcb(st: &mut ArrayStore, t: ObjId) {
     let s1 = st.tcbs[&t.0].bind_slots[1];
     let (c0, sound0) = (count_nonempty_exec(st), refcount_sound_exec(st));
     let consistent0 = caps_consistent_exec(st);
+    let end_caps0 = end_caps_sound_exec(st);
     let empty0 = st.slots.clone();
 
     destroy_tcb(st, t);
@@ -1452,6 +1481,9 @@ fn check_destroy_tcb(st: &mut ArrayStore, t: ObjId) {
     }
     if consistent0 {
         assert!(caps_consistent_exec(st), "destroy_tcb post: caps_consistent preserved (§6d)");
+    }
+    if end_caps0 {
+        assert!(end_caps_sound_exec(st), "destroy_tcb post: end_caps_sound preserved (§6d)");
     }
 }
 
@@ -2215,6 +2247,46 @@ fn caps_consistent_exec_has_teeth() {
     let mut st = base.clone();
     st.cspaces.remove(&10);
     assert!(!caps_consistent_exec(&st), "teeth: CSpace cap with no live cspace");
+}
+
+// A minimal `end_caps_sound` fixture: channel 7 with `end_caps == [1, 1]` and exactly
+// one `Channel(7, A)` and one `Channel(7, B)` cap in the arena.
+fn end_caps_fixture() -> ArrayStore {
+    let mut st = ArrayStore::new(2);
+    st.slots[0] =
+        detached(Cap { kind: CapKind::Channel(ObjId(7), ChanEnd::A), rights: Rights(0xff) });
+    st.slots[1] =
+        detached(Cap { kind: CapKind::Channel(ObjId(7), ChanEnd::B), rights: Rights(0xff) });
+    st.chans.insert(
+        7,
+        ChanState {
+            depth: 1,
+            end_caps: [1, 1],
+            head: [0, 0],
+            count: [0, 0],
+            bindings: BTreeMap::new(),
+            msg_len: BTreeMap::new(),
+            ring_cap: BTreeMap::new(),
+        },
+    );
+    st
+}
+
+// `end_caps_sound_exec` is non-vacuous: it accepts the matched fixture and rejects both an
+// over-count (`end_caps` claims more caps than the arena holds) and an under-count (the
+// doc 45 §2 stranding shape — a live `(co, end)` cap `end_caps` fails to count).
+#[test]
+fn end_caps_sound_exec_has_teeth() {
+    let base = end_caps_fixture();
+    assert!(end_caps_sound_exec(&base), "the matched fixture must be end_caps_sound");
+
+    let mut st = base.clone();
+    st.chan_mut(ObjId(7)).end_caps[0] = 2;
+    assert!(!end_caps_sound_exec(&st), "teeth: end_caps[A] overcounts the arena");
+
+    let mut st = base.clone();
+    st.chan_mut(ObjId(7)).end_caps[1] = 0;
+    assert!(!end_caps_sound_exec(&st), "teeth: end_caps[B] undercounts the arena (stranding)");
 }
 
 // ── Aspace teardown (plan §6b): `unref_aspace` + delete's frame-unmap branch ──

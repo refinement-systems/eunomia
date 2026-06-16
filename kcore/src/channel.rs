@@ -1081,6 +1081,10 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
         // arbitrary kind, so it needs each one's object well-formed. Assumed here
         // (`external_body`), discharged by the body PR; host-checked (`check_destroy_channel`).
         cspace::caps_consistent(old(store)),
+        // The §3.3 endpoint-cap census (plan §6d body-removal gate): ring caps may be
+        // channel caps, so the body's `delete`s thread it. Assumed here, discharged by the
+        // body PR; host-checked (`check_destroy_channel`).
+        cspace::end_caps_sound(old(store)),
     ensures
         cspace::cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom() == old(store).slot_view().dom(),
@@ -1088,6 +1092,7 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
             <= cspace::count_nonempty(old(store).slot_view()),
         cspace::refcount_sound(final(store)),
         cspace::caps_consistent(final(store)),
+        cspace::end_caps_sound(final(store)),
         cspace::only_empties(old(store).slot_view(), final(store).slot_view()),
         forall|r: int, i: int, c: int|
             (0 <= r < 2 && 0 <= i < old(store).chan_view()[ch].depth && 0 <= c < 4)

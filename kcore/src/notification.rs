@@ -306,6 +306,7 @@ pub fn destroy_notif<S: Store>(store: &mut S, n: ObjId)
         old(store).notif_view().dom().contains(n),
         old(store).notif_view()[n].wait_head is None,
         cspace::caps_consistent(old(store)),
+        cspace::end_caps_sound(old(store)),
     ensures
         final(store).slot_view() == old(store).slot_view(),
         final(store).refs_view() == old(store).refs_view(),
@@ -318,6 +319,7 @@ pub fn destroy_notif<S: Store>(store: &mut S, n: ObjId)
         // A model no-op (the kernel reclaims the object's memory; the abstract views are
         // untouched), so the cap→object invariant rides through trivially (plan §6d).
         cspace::caps_consistent(final(store)),
+        cspace::end_caps_sound(final(store)),
 {
     let _ = n;
 }

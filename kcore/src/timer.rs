@@ -344,6 +344,7 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
             (old(store).timer_view()[t].notif matches Some(n) ==>
                 old(store).refs_view().dom().contains(n) && old(store).refs_view()[n] > 0),
         cspace::caps_consistent(old(store)),
+        cspace::end_caps_sound(old(store)),
     ensures
         final(store).slot_view() == old(store).slot_view(),
         final(store).chan_view() == old(store).chan_view(),
@@ -356,6 +357,9 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
         // `disarm` keeps the timer domain + `timer_wf` and frames every other object view,
         // so each live cap's (refs-free) consistency carries over (plan §6d).
         cspace::caps_consistent(final(store)),
+        // `disarm` frames chan_view + slot_view, so the endpoint-cap census rides through
+        // (plan §6d body-removal gate).
+        cspace::end_caps_sound(final(store)),
 {
     let ghost tmv0 = old(store).timer_view();
     let ghost head0 = old(store).timer_head_view();

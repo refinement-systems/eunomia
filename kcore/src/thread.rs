@@ -226,10 +226,12 @@ pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<S
         cspace::cspace_wf(old(store).slot_view()),
         old(store).slot_view().dom().finite(),
         // `delete` (the displaced-bind-cap teardown, the first mutation) requires
-        // `refcount_sound` (§6a/§1.3) and `caps_consistent` (§6d foundation); both hold
-        // unmutated from entry to that call.
+        // `refcount_sound` (§6a/§1.3), `caps_consistent` (§6d foundation), and the §3.3
+        // endpoint-cap census (§6d body-removal gate); all hold unmutated from entry to
+        // that call.
         cspace::refcount_sound(old(store)),
         cspace::caps_consistent(old(store)),
+        cspace::end_caps_sound(old(store)),
         old(store).tcb_view().dom().contains(t),
         which < 2,
         old(store).tcb_view()[t].bind_bits.len() == 2,
@@ -336,6 +338,10 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         // well-formed. Assumed here (`external_body`), discharged by the body PR;
         // host-checked (`check_destroy_tcb`).
         cspace::caps_consistent(old(store)),
+        // The §3.3 endpoint-cap census (plan §6d body-removal gate): the body's bind-slot
+        // `delete`s thread it (the bind caps are notifications, but `delete` requires it
+        // unconditionally). Assumed here, discharged by the body PR; host-checked.
+        cspace::end_caps_sound(old(store)),
     ensures
         cspace::cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom() == old(store).slot_view().dom(),
@@ -343,6 +349,7 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
             <= cspace::count_nonempty(old(store).slot_view()),
         cspace::refcount_sound(final(store)),
         cspace::caps_consistent(final(store)),
+        cspace::end_caps_sound(final(store)),
         cspace::only_empties(old(store).slot_view(), final(store).slot_view()),
         final(store).tcb_view().dom().contains(t),
         final(store).tcb_view()[t].state == ThreadState::Halted,
