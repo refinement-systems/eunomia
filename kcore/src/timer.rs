@@ -68,6 +68,7 @@ pub fn disarm<S: Store>(store: &mut S, t: ObjId)
         final(store).chan_view() == old(store).chan_view(),
         final(store).notif_view() == old(store).notif_view(),
         final(store).tcb_view() == old(store).tcb_view(),
+        final(store).cspace_view() == old(store).cspace_view(),
         final(store).timer_view().dom() == old(store).timer_view().dom(),
         cspace::timer_wf(final(store).timer_view(), final(store).timer_head_view()),
         // Not armed ⇒ nothing moves.
@@ -123,6 +124,7 @@ pub fn disarm<S: Store>(store: &mut S, t: ObjId)
             store.chan_view() == old(store).chan_view(),
             store.notif_view() == old(store).notif_view(),
             store.tcb_view() == old(store).tcb_view(),
+            store.cspace_view() == old(store).cspace_view(),
             store.refs_view() == old(store).refs_view(),
             store.timer_view() == tmv0,
             store.timer_head_view() == head0,
@@ -341,13 +343,19 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
         old(store).timer_view()[t].armed ==>
             (old(store).timer_view()[t].notif matches Some(n) ==>
                 old(store).refs_view().dom().contains(n) && old(store).refs_view()[n] > 0),
+        cspace::caps_consistent(old(store)),
     ensures
         final(store).slot_view() == old(store).slot_view(),
         final(store).chan_view() == old(store).chan_view(),
         final(store).notif_view() == old(store).notif_view(),
         final(store).tcb_view() == old(store).tcb_view(),
+        final(store).cspace_view() == old(store).cspace_view(),
+        final(store).timer_view().dom() == old(store).timer_view().dom(),
         cspace::timer_wf(final(store).timer_view(), final(store).timer_head_view()),
         cspace::refcount_sound(final(store)),
+        // `disarm` keeps the timer domain + `timer_wf` and frames every other object view,
+        // so each live cap's (refs-free) consistency carries over (plan §6d).
+        cspace::caps_consistent(final(store)),
 {
     let ghost tmv0 = old(store).timer_view();
     let ghost head0 = old(store).timer_head_view();
@@ -390,6 +398,17 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
                 implies store.refs_view()[o] == cspace::obj_census(store, o) by {
                 assert(cspace::obj_census(store, o) == cspace::obj_census(old(store), o));
             }
+        }
+        // caps_consistent: `disarm` frames cspace and keeps the timer domain, so the Timer
+        // arm reads an unchanged domain + the ensured `timer_wf`; every other arm reads a
+        // framed object view. Each live cap's consistency carries over.
+        assert(store.cspace_view() == old(store).cspace_view());
+        assert(store.timer_view().dom() == old(store).timer_view().dom());
+        assert forall|s: crate::id::SlotId| #![trigger store.slot_view()[s]]
+            store.slot_view().dom().contains(s)
+                && !cspace::is_empty_cap(store.slot_view()[s].cap)
+            implies cspace::cap_consistent(store, store.slot_view()[s].cap) by {
+            assert(cspace::cap_consistent(old(store), old(store).slot_view()[s].cap));
         }
     }
 }

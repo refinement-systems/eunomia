@@ -654,6 +654,45 @@ fn timer_wf_exec(st: &ArrayStore) -> bool {
     true
 }
 
+// ── The cap→object consistency mirror (plan §6d foundation) ──────────────────
+//
+// `caps_consistent_exec` is the executable counterpart of the ghost
+// `cspace::caps_consistent`: every live cap's designated object is well-formed (the
+// per-kind clauses mirror `cap_consistent`). The strengthened `external_body` teardown
+// contracts (`delete`/`destroy_channel`/`destroy_tcb`) now require and preserve it, so
+// this mirror host-checks that assumed clause against the real `ArrayStore` bodies until
+// the body PR proves it (`caps_consistent_exec_has_teeth` proves it is not vacuous).
+fn cap_consistent_exec(st: &ArrayStore, cap: Cap) -> bool {
+    match cap.kind {
+        CapKind::Channel(o, end) => {
+            st.chans.contains_key(&o.0)
+                && chan_wf_exec(st, o)
+                && st.chan(o).end_caps[end_idx_exec(end)] > 0
+                && binding_notif_wf_exec(st, o)
+        }
+        CapKind::CSpace(o) => {
+            st.cspaces.contains_key(&o.0)
+                && st.cspaces[&o.0].iter().all(|sid| (sid.0 as usize) < st.n())
+        }
+        CapKind::Thread(o) => {
+            st.tcbs.contains_key(&o.0)
+                && (st.tcbs[&o.0].bind_slots[0].0 as usize) < st.n()
+                && (st.tcbs[&o.0].bind_slots[1].0 as usize) < st.n()
+        }
+        CapKind::Notification(o) => notif_wf_exec(st, o),
+        CapKind::Timer(o) => st.timers.contains_key(&o.0) && timer_wf_exec(st),
+        // Empty / Untyped / Frame / Aspace: no destructor-bearing object constraint.
+        _ => true,
+    }
+}
+
+fn caps_consistent_exec(st: &ArrayStore) -> bool {
+    (0..st.n()).all(|i| {
+        let cap = st.slots[i].cap;
+        cap.is_empty() || cap_consistent_exec(st, cap)
+    })
+}
+
 // ── Shape builders ─────────────────────────────────────────────────────────
 
 fn detached(cap: Cap) -> CapSlot {
@@ -766,6 +805,8 @@ fn check_delete(st: &mut ArrayStore, slot: SlotId) {
     // so only assert it preserved when the fixture satisfied it (most generated
     // forests carry no object caps, so they are vacuously sound).
     let sound0 = refcount_sound_exec(st);
+    // §6d foundation: the cap→object invariant is likewise a guarded precondition.
+    let consistent0 = caps_consistent_exec(st);
     delete(st, slot);
     assert!(cspace_wf_exec(st), "delete post: cspace_wf preserved");
     assert_eq!(st.n(), n0, "delete post: dom preserved");
@@ -775,6 +816,9 @@ fn check_delete(st: &mut ArrayStore, slot: SlotId) {
     assert!(st.cspaces == resid0, "delete post: cspace residency unchanged");
     if sound0 {
         assert!(refcount_sound_exec(st), "delete post: refcount_sound preserved");
+    }
+    if consistent0 {
+        assert!(caps_consistent_exec(st), "delete post: caps_consistent preserved (§6d)");
     }
 }
 
@@ -1167,6 +1211,7 @@ fn check_destroy_channel(st: &mut ArrayStore, ch: ObjId) {
         }
     }
     let (c0, sound0) = (count_nonempty_exec(st), refcount_sound_exec(st));
+    let consistent0 = caps_consistent_exec(st);
 
     destroy_channel(st, ch);
 
@@ -1179,6 +1224,9 @@ fn check_destroy_channel(st: &mut ArrayStore, ch: ObjId) {
     assert!(count_nonempty_exec(st) <= c0, "destroy_channel: count_nonempty non-increase (§6a)");
     if sound0 {
         assert!(refcount_sound_exec(st), "destroy_channel post: refcount_sound preserved (§6a)");
+    }
+    if consistent0 {
+        assert!(caps_consistent_exec(st), "destroy_channel post: caps_consistent preserved (§6d)");
     }
 }
 
@@ -1370,6 +1418,7 @@ fn check_destroy_tcb(st: &mut ArrayStore, t: ObjId) {
     let s0 = st.tcbs[&t.0].bind_slots[0];
     let s1 = st.tcbs[&t.0].bind_slots[1];
     let (c0, sound0) = (count_nonempty_exec(st), refcount_sound_exec(st));
+    let consistent0 = caps_consistent_exec(st);
 
     destroy_tcb(st, t);
 
@@ -1383,6 +1432,9 @@ fn check_destroy_tcb(st: &mut ArrayStore, t: ObjId) {
     assert!(count_nonempty_exec(st) <= c0, "destroy_tcb: count_nonempty non-increase (§6a)");
     if sound0 {
         assert!(refcount_sound_exec(st), "destroy_tcb post: refcount_sound preserved (§6a)");
+    }
+    if consistent0 {
+        assert!(caps_consistent_exec(st), "destroy_tcb post: caps_consistent preserved (§6d)");
     }
 }
 
@@ -2093,6 +2145,59 @@ fn refcount_sound_exec_has_teeth() {
     let mut st = base.clone();
     st.tcbs.get_mut(&6).unwrap().cspace = None;
     assert!(!refcount_sound_exec(&st), "teeth: thread_hold_refs term");
+}
+
+// A `caps_consistent` store: slots 0..4 hold one well-formed object cap each (the objects
+// it designates are wf), slots 4/5 empty. The Channel arm is exercised separately by
+// `chan_wf_exec_has_teeth` + the `check_destroy_channel` path (a `chan_wf` channel needs the
+// full ring/window setup `signal_fixture` builds); this fixture covers the four kinds whose
+// objects are cheap to construct, which is enough to show the mirror is not vacuous.
+fn caps_consistent_fixture() -> ArrayStore {
+    let mut st = ArrayStore::new(6);
+    // CSpace(10): residents are the two in-bounds empty slots 4, 5.
+    st.slots[0] = detached(cspace_cap(10));
+    st.cspaces.insert(10, vec![SlotId(4), SlotId(5)]);
+    // Notification(20): an empty (and so well-formed) waiter queue.
+    st.slots[1] = detached(notif_cap(20));
+    st.notifs.insert(20, NotifState { word: 0, wait_head: None, wait_tail: None });
+    // Timer(30): disarmed, so the armed chain (empty) is complete and wf.
+    st.slots[2] = detached(Cap { kind: CapKind::Timer(ObjId(30)), rights: Rights(0xff) });
+    st.timers.insert(30, TimerState { armed: false, deadline: 0, notif: None, bits: 0, next: None });
+    // Thread(40): both bind slots in-bounds.
+    st.slots[3] = detached(Cap { kind: CapKind::Thread(ObjId(40)), rights: Rights(0xff) });
+    st.tcbs.insert(40, TcbState { bind_slots: [SlotId(4), SlotId(5)], ..tcb_state_default() });
+    st
+}
+
+#[test]
+fn caps_consistent_exec_has_teeth() {
+    let base = caps_consistent_fixture();
+    assert!(caps_consistent_exec(&base), "the all-kinds fixture must be caps_consistent");
+
+    // CSpace arm: a resident handle outside the arena.
+    let mut st = base.clone();
+    st.cspaces.get_mut(&10).unwrap()[0] = SlotId(999);
+    assert!(!caps_consistent_exec(&st), "teeth: CSpace resident out of arena");
+
+    // Notification arm: a head/tail disagreement breaks `notif_wf`.
+    let mut st = base.clone();
+    st.notifs.get_mut(&20).unwrap().wait_head = Some(ObjId(40));
+    assert!(!caps_consistent_exec(&st), "teeth: Notification waiter-chain malformed");
+
+    // Timer arm: an armed timer absent from the (empty) armed chain breaks `timer_wf`.
+    let mut st = base.clone();
+    st.timers.get_mut(&30).unwrap().armed = true;
+    assert!(!caps_consistent_exec(&st), "teeth: armed timer not charted");
+
+    // Thread arm: a bind slot outside the arena.
+    let mut st = base.clone();
+    st.tcbs.get_mut(&40).unwrap().bind_slots[0] = SlotId(999);
+    assert!(!caps_consistent_exec(&st), "teeth: Thread bind slot out of arena");
+
+    // The designating object missing entirely (CSpace cap with no cspace) also fails.
+    let mut st = base.clone();
+    st.cspaces.remove(&10);
+    assert!(!caps_consistent_exec(&st), "teeth: CSpace cap with no live cspace");
 }
 
 // ── Aspace teardown (plan §6b): `unref_aspace` + delete's frame-unmap branch ──
