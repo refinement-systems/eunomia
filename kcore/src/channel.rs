@@ -197,12 +197,34 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
             ==> final(store).refs_view() == old(store).refs_view(),
         cspace::binding_notif_wf(final(store).chan_view(), final(store).notif_view(),
             final(store).tcb_view(), ch),
+        // The refcount census rides through (plan §6d body PR, doc 45 §3): the only state
+        // change before a possible fire is `set_chan_end_caps`, and `end_caps` is **not** a
+        // census term — `binding_refs` reads only the (unchanged) bindings, the other five
+        // terms read framed views — so the census is unchanged across the decrement, and
+        // `fire` carries its own conditional preservation across the peer-closed fire.
+        // **Conditional** (no new `requires`) — `delete`'s Channel branch supplies the hypothesis.
+        cspace::refcount_sound(old(store)) ==> cspace::refcount_sound(final(store)),
 {
     let e = end_idx(end);
     store.set_chan_end_caps(ch, e, store.chan_end_caps(ch, e) - 1);
     // `set_chan_end_caps` left the bindings (and notif/TCB views) untouched, so the
     // binding invariant + the fired binding's refs side-condition carry to the fire.
     assert(store.chan_view()[ch].bindings == old(store).chan_view()[ch].bindings);
+    // The census is unchanged across the `end_caps` decrement (`end_caps` is no census
+    // term): `binding_refs` is framed (bindings unchanged), the other five read framed views.
+    proof {
+        assert(store.chan_view().dom() == old(store).chan_view().dom());
+        assert forall|c: ObjId| old(store).chan_view().dom().contains(c) implies
+            #[trigger] store.chan_view()[c].bindings == old(store).chan_view()[c].bindings by {
+            if c != ch {
+                assert(store.chan_view()[c] == old(store).chan_view()[c]);
+            }
+        }
+        assert forall|x: ObjId| #[trigger] cspace::obj_census(store, x)
+            == cspace::obj_census(old(store), x) by {
+            cspace::lemma_binding_refs_frame(old(store).chan_view(), store.chan_view(), x);
+        }
+    }
     if store.chan_end_caps(ch, e) == 0 {
         fire(store, ch, 1 - e, EV_PEER_CLOSED);
     }
@@ -232,6 +254,12 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
         final(store).chan_view() == old(store).chan_view(),
         cspace::binding_notif_wf(final(store).chan_view(), final(store).notif_view(),
             final(store).tcb_view(), ch),
+        // The refcount census rides through the fire (plan §6d body PR): `fire` reads a
+        // binding then either does nothing or calls `signal` (whose own conditional
+        // preservation applies, its `old` being this `old` — no mutation precedes it).
+        // **Conditional** so `send`/`recv` (the construction-op callers of `fire`) keep
+        // no `refcount_sound` obligation; the teardown caller `endpoint_cap_dropped` supplies it.
+        cspace::refcount_sound(old(store)) ==> cspace::refcount_sound(final(store)),
 {
     let b = store.chan_binding(ch, end, event);
     if let Some(n) = b.notif {
@@ -260,6 +288,14 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
                         old(store).tcb_view(), nvf, tvf, m);
                 }
             }
+        }
+    }
+    // The fire preserves `refcount_sound` (conditionally): in the bound branch `signal`'s
+    // own conditional ensures applies (nothing mutated before it, so its `old` is this
+    // `old`); in the unbound branch the store is untouched.
+    proof {
+        if cspace::refcount_sound(old(store)) {
+            assert(cspace::refcount_sound(store));
         }
     }
 }
