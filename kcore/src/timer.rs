@@ -321,10 +321,23 @@ pub fn arm<S: Store>(store: &mut S, t: ObjId, notif: ObjId, bits: u64, deadline:
 ///
 /// Verified (plan §4e, doc/results/35): teardown of a timer object — just `disarm`
 /// (release the notification ref, unlink from the armed list) if it is still armed.
+///
+/// **Refcount census (plan §6c).** Strengthened to require and preserve
+/// `refcount_sound`, so `obj_unref`'s Timer arm (6c) can conclude the invariant after
+/// the dispatch. The only ref `destroy_timer` touches is `disarm`'s release of `t`'s
+/// notification `n`: that `-1` is matched by `armed_timer_refs(n)` dropping by one (`t`
+/// is disarmed, every other timer's `armed`/`notif` framed — `lemma_armed_timer_disarm`),
+/// and `disarm` frames the slot/chan/notif/tcb views, so every other census term is
+/// unchanged. The not-armed path is a no-op (`disarm` leaves the store untouched), so
+/// the invariant carries trivially. The `timer_view` finiteness is the recount lemma's
+/// gate; the armed-notif-live precondition (inherited from `disarm`) is the underflow
+/// gate for that `-1`.
 pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
     requires
         old(store).timer_view().dom().contains(t),
+        old(store).timer_view().dom().finite(),
         cspace::timer_wf(old(store).timer_view(), old(store).timer_head_view()),
+        cspace::refcount_sound(old(store)),
         old(store).timer_view()[t].armed ==>
             (old(store).timer_view()[t].notif matches Some(n) ==>
                 old(store).refs_view().dom().contains(n) && old(store).refs_view()[n] > 0),
@@ -334,8 +347,51 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
         final(store).notif_view() == old(store).notif_view(),
         final(store).tcb_view() == old(store).tcb_view(),
         cspace::timer_wf(final(store).timer_view(), final(store).timer_head_view()),
+        cspace::refcount_sound(final(store)),
 {
+    let ghost tmv0 = old(store).timer_view();
+    let ghost head0 = old(store).timer_head_view();
+    let ghost armed0 = tmv0[t].armed;
     disarm(store, t);
+    proof {
+        let tmvf = store.timer_view();
+        // disarm frames the slot/chan/notif/tcb views, so only `armed_timer_refs` can
+        // move in the census; the other five terms are literally equal (same arguments).
+        assert(store.slot_view() == old(store).slot_view());
+        assert(store.chan_view() == old(store).chan_view());
+        assert(store.notif_view() == old(store).notif_view());
+        assert(store.tcb_view() == old(store).tcb_view());
+        if armed0 {
+            // armed ⟹ notif is Some: `t` is charted on the armed chain (completeness),
+            // and every charted timer carries `notif is Some` (timer_chain).
+            let ts0 = cspace::timer_seq(tmv0, head0);
+            assert(cspace::timer_chain(tmv0, head0, ts0) && cspace::timer_complete(tmv0, ts0));
+            assert(tmv0.dom().contains(t) && tmv0[t].armed);
+            assert(ts0.contains(t));
+            let i = ts0.index_of(t);
+            assert(0 <= i < ts0.len() && ts0[i] == t);
+            assert(tmv0[ts0[i]].notif is Some);
+            let n = tmv0[t].notif->Some_0;
+            // disarm's armed-case deltas (the `n` release + the armed/notif frame).
+            assert(store.refs_view() == old(store).refs_view().insert(
+                n, (old(store).refs_view()[n] - 1) as nat));
+            assert(store.refs_view().dom() =~= old(store).refs_view().dom());
+            assert(old(store).refs_view()[n] > 0);
+            // The census moves only at `n`, by exactly the `-1` that `disarm` released.
+            assert forall|o: ObjId| store.refs_view().dom().contains(o)
+                implies store.refs_view()[o] == cspace::obj_census(store, o) by {
+                cspace::lemma_armed_timer_disarm(tmv0, tmvf, t, o);
+                assert(old(store).refs_view()[o] == cspace::obj_census(old(store), o));
+            }
+        } else {
+            // Not armed ⇒ disarm is a no-op; the store (refs + every view) is unchanged.
+            assert(store.refs_view() == old(store).refs_view());
+            assert forall|o: ObjId| store.refs_view().dom().contains(o)
+                implies store.refs_view()[o] == cspace::obj_census(store, o) by {
+                assert(cspace::obj_census(store, o) == cspace::obj_census(old(store), o));
+            }
+        }
+    }
 }
 
 // `timer_notif_injective` survives `disarm(c)`: `c` is unarmed and every other timer keeps

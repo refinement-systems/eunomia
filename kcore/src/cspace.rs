@@ -128,20 +128,6 @@ impl Cap {
     pub fn is_empty(&self) -> bool {
         matches!(self.kind, CapKind::Empty)
     }
-
-    /// The refcounted object handle behind this cap, if any. Frames are
-    /// bare memory like untyped — no object, no refcount.
-    fn obj(&self) -> Option<ObjId> {
-        match self.kind {
-            CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => None,
-            CapKind::Aspace(o) => Some(o),
-            CapKind::CSpace(o) => Some(o),
-            CapKind::Thread(o) => Some(o),
-            CapKind::Channel(o, _) => Some(o),
-            CapKind::Notification(o) => Some(o),
-            CapKind::Timer(o) => Some(o),
-        }
-    }
 }
 
 /// A capability slot, CDT links included. Slots live inside cspace objects
@@ -214,57 +200,13 @@ impl CSpaceObj {
 
 // `obj_ref` is verified — see the `verus!{}` block at the end of this file.
 
-/// pre:  cap designates a live object (or none); refs > 0.
-/// post: refcount decremented; if it reached zero the object is destroyed
-///       (type-specific teardown).
-fn obj_unref<S: Store>(store: &mut S, cap: Cap) {
-    let Some(o) = cap.obj() else { return };
-    store.set_obj_refs(o, store.obj_refs(o) - 1);
-    if store.obj_refs(o) == 0 {
-        match cap.kind {
-            CapKind::CSpace(_) => destroy_cspace(store, o),
-            CapKind::Thread(_) => crate::thread::destroy_tcb(store, o),
-            CapKind::Channel(_, _) => crate::channel::destroy_channel(store, o),
-            CapKind::Notification(_) => crate::notification::destroy_notif(store, o),
-            CapKind::Timer(_) => crate::timer::destroy_timer(store, o),
-            CapKind::Aspace(_) => store.aspace_destroy(o),
-            CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => {}
-        }
-    }
-}
-
-// `unref_aspace` (drop a non-cap reference to an aspace — mapped frames and bound
-// threads hold these so the aspace can't die under them) is verified — see the
-// `verus!{}` block at the end of this file (plan §6b, doc/results/42). It moved out
-// of this plain-Rust cluster ahead of `obj_unref`/`unref_cspace`/`destroy_cspace`
-// (6c/6d) because the aspace teardown is non-recursive — `aspace_destroy` is a seam
-// black box, so it closes without the cross-module recursion cluster.
-
-// kani_contracts spike retired in the arena rewrite.
-pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId) {
-    store.set_obj_refs(cs, store.obj_refs(cs) - 1);
-    if store.obj_refs(cs) == 0 {
-        destroy_cspace(store, cs);
-    }
-}
-
-/// pre:  cspace refs == 0.
-/// post: every cap the cspace still held is deleted (their objects unref'd).
-///
-/// `pub(crate)` so the proof harness can drive the resident-teardown loop
-/// directly (plan §4.1 `check_destroy_cspace`); it has no callers outside
-/// this crate.
-pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId) {
-    let n = store.cspace_num_slots(cs);
-    for i in 0..n {
-        let sid = store.cspace_slot(cs, i);
-        if !store.slot(sid).cap.is_empty() {
-            delete(store, sid);
-        }
-    }
-    // Memory returns to the donor untyped only via revoke of the untyped
-    // cap; no allocator hands it back early (§3.2).
-}
+// `obj_unref`, `unref_cspace`, `destroy_cspace`, and the helper `dec_ref` are verified —
+// see the `verus!{}` block at the end of this file (plan §6c, doc/results/43). They moved
+// out of this plain-Rust cluster as the teardown members that recurse only through the
+// *opaque* `delete`: with `delete`/`destroy_channel`/`destroy_tcb` still `external_body`,
+// Verus sees no recursion cycle, so they verify against `delete`'s contract under a plain
+// index-countdown loop (no cross-module `decreases` — that is 6d). `unref_aspace` (the
+// non-recursive aspace teardown) is likewise in that block (plan §6b, doc/results/42).
 
 // ── CDT structure ───────────────────────────────────────────────────────
 
@@ -2430,6 +2372,19 @@ pub open spec fn refcount_sound<S: Store>(store: &S) -> bool {
         )
 }
 
+// Cspace residency well-formedness (plan §6c): `cs` is a known cspace, its residency
+// `Seq` agrees with `num_slots` (the getter contracts' precondition), and every resident
+// slot handle is live in the arena. `destroy_cspace`'s loop reads `cspace_slot(cs, i)`
+// and then `slot(sid)`, so it needs both the getter bounds and the residents-live fact;
+// `obj_unref`/`unref_cspace` thread it to that loop. The kernel maintains it by
+// construction (residency is fixed when the cspace is carved, §3.2).
+pub open spec fn cspace_resident_wf<S: Store>(store: &S, cs: ObjId) -> bool {
+    &&& store.cspace_view().dom().contains(cs)
+    &&& store.cspace_view()[cs].slots.len() == store.cspace_view()[cs].num_slots
+    &&& forall|i: int| 0 <= i < store.cspace_view()[cs].slots.len()
+            ==> #[trigger] store.slot_view().dom().contains(store.cspace_view()[cs].slots[i])
+}
+
 // ── Per-term recount lemmas (plan §6a). The single-key bump/drop building blocks
 //    6b–6f compose: a one-key view edit raises/lowers exactly one census term by
 //    one, the others fixed. Each is the `lemma_designation_bump` shape over a
@@ -2565,6 +2520,57 @@ proof fn lemma_armed_timer_drop(m: Map<ObjId, TimerView>, k: ObjId, v: TimerView
     assert(f2 =~= f1.remove(k));
     assert(f1.contains(k));
     assert(f1.finite());
+}
+
+// Armed-timer drop, **disarm-shaped** (plan §6c). `disarm` (`timer.rs`) edits *two*
+// keys — it disarms `t` *and* re-points the predecessor's `next` to splice `t` out —
+// so the post-state is not a single-key `insert` and `lemma_armed_timer_drop` does not
+// apply directly. But `armed_timer_refs` reads only `armed`/`notif`, and those are
+// exactly `disarm`'s frame (every `j != t` keeps both; `t` is disarmed), so the census
+// delta is still ±1 at `t`'s notification only. This is the lemma `destroy_timer`'s
+// `refcount_sound`-preservation (6c) consumes — `pub` so `crate::timer` can name it.
+pub proof fn lemma_armed_timer_disarm(
+    pre: Map<ObjId, TimerView>,
+    post: Map<ObjId, TimerView>,
+    t: ObjId,
+    o: ObjId,
+)
+    requires
+        pre.dom().finite(),
+        post.dom() == pre.dom(),
+        pre.dom().contains(t),
+        !post[t].armed,
+        forall|j: ObjId| #![trigger post[j]]
+            j != t ==> post[j].armed == pre[j].armed && post[j].notif == pre[j].notif,
+    ensures
+        // `+1` form (not `(x-1) as nat`) so the consumer's census arithmetic has no
+        // saturation ambiguity: the pre-count is provably ≥ 1 here (`t` is in the set).
+        (pre[t].armed && pre[t].notif == Some(o)) ==>
+            armed_timer_refs(pre, o) == armed_timer_refs(post, o) + 1,
+        !(pre[t].armed && pre[t].notif == Some(o)) ==>
+            armed_timer_refs(post, o) == armed_timer_refs(pre, o),
+{
+    let f1 = pre.dom().filter(|j: ObjId| pre[j].armed && pre[j].notif == Some(o));
+    let f2 = post.dom().filter(|j: ObjId| post[j].armed && post[j].notif == Some(o));
+    assert(!f2.contains(t));
+    if pre[t].armed && pre[t].notif == Some(o) {
+        assert forall|j: ObjId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.remove(t).contains(j) by {
+            if j != t {
+                assert(post[j].armed == pre[j].armed && post[j].notif == pre[j].notif);
+            }
+        }
+        assert(f2 =~= f1.remove(t));
+        assert(f1.contains(t));
+        assert(f1.finite());
+    } else {
+        assert(!f1.contains(t));
+        assert forall|j: ObjId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.contains(j) by {
+            if j != t {
+                assert(post[j].armed == pre[j].armed && post[j].notif == pre[j].notif);
+            }
+        }
+        assert(f2 =~= f1);
+    }
 }
 
 // Thread-hold bump (cspace edit): a thread newly holding `o` as its cspace raises
@@ -5372,6 +5378,273 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
     }
 }
 
+// ── Cross-object teardown: the refcount plumbing (plan §6c, doc/results/43) ───────
+//
+// `obj_unref`/`unref_cspace`/`destroy_cspace` and the shared `dec_ref` helper — the
+// teardown members that recurse only through the *opaque* `delete`. With
+// `delete`/`destroy_channel`/`destroy_tcb` still `external_body`, Verus sees no recursion
+// cycle, so these verify against `delete`'s contract with plain index-countdown loops (no
+// cross-module `decreases` — that is 6d). The load-bearing invariant is `refcount_sound`:
+// it is the underflow gate for every `refs - 1` (§1.3) and, at the zero point, its census
+// pins the *structural* emptiness each destructor's `requires` needs (no waiters, no armed
+// timers, …) — the §6c headline.
+
+/// Drop one reference to object `o` and restore the census (plan §6c). The shared
+/// decrement step `obj_unref`/`unref_cspace` factor out: the caller hands an **off-by-one**
+/// state — `refs[o] == census(o) + 1`, sound everywhere else (it already cleared the
+/// reference that named `o`) — and the `-1` lands the matching decrement, restoring the
+/// full `refcount_sound` invariant. Census-transparent (every object view framed), so the
+/// caller can dispatch the at-zero destructor against an unmoved census. The `unref_aspace`
+/// proof shape (doc/results/42), minus the aspace-specific last-ref `aspace_destroy`.
+fn dec_ref<S: Store>(store: &mut S, o: ObjId)
+    requires
+        old(store).refs_view().dom().contains(o),
+        old(store).refs_view()[o] > 0,
+        old(store).refs_view()[o] == obj_census(old(store), o) + 1,
+        forall|x: ObjId| x != o && old(store).refs_view().dom().contains(x)
+            ==> #[trigger] old(store).refs_view()[x] == obj_census(old(store), x),
+    ensures
+        refcount_sound(final(store)),
+        final(store).refs_view() == old(store).refs_view().insert(
+            o, (old(store).refs_view()[o] - 1) as nat),
+        final(store).refs_view().dom() == old(store).refs_view().dom(),
+        final(store).refs_view()[o] == old(store).refs_view()[o] - 1,
+        final(store).slot_view() == old(store).slot_view(),
+        final(store).chan_view() == old(store).chan_view(),
+        final(store).notif_view() == old(store).notif_view(),
+        final(store).tcb_view() == old(store).tcb_view(),
+        final(store).timer_view() == old(store).timer_view(),
+        final(store).timer_head_view() == old(store).timer_head_view(),
+        final(store).cspace_view() == old(store).cspace_view(),
+{
+    let r = store.obj_refs(o);
+    store.set_obj_refs(o, r - 1);
+    proof {
+        // Every census view is framed by `set_obj_refs`, so the recount is invariant.
+        assert forall|x: ObjId| #[trigger] obj_census(final(store), x)
+            == obj_census(old(store), x) by {}
+        // `o`'s term moved with the `-1`; every other object's refs and census are both
+        // untouched, so the off-by-one precondition carries to full soundness.
+        assert forall|x: ObjId| final(store).refs_view().dom().contains(x)
+            implies #[trigger] final(store).refs_view()[x] == obj_census(final(store), x) by {}
+    }
+}
+
+/// Tear a cspace down once its last cap is gone (`refs == 0`): delete every cap it still
+/// holds (its residents), each through the ordinary CDT cleanup (plan §6c). The loop reads
+/// residency through the immutable `cspace_view` and re-reads each slot's emptiness, so a
+/// resident already emptied by a sibling's teardown is skipped.
+///
+/// `delete` is **opaque** here (`external_body`), so there is no visible recursion: the loop
+/// `decreases` is the resident-index countdown, and `delete`'s contract re-establishes
+/// `cspace_wf`/`refcount_sound`/dom (and frames residency) each iteration. The loop invariant
+/// is designed so 6d's visible-`delete` re-verification reuses it unchanged.
+///
+/// `pub(crate)` so the proof harness can drive the resident loop directly
+/// (`check_destroy_cspace`); it has no callers outside this crate.
+pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
+    requires
+        old(store).refs_view().dom().contains(cs),
+        old(store).refs_view()[cs] == 0,
+        cspace_wf(old(store).slot_view()),
+        old(store).slot_view().dom().finite(),
+        refcount_sound(old(store)),
+        cspace_resident_wf(old(store), cs),
+    ensures
+        cspace_wf(final(store).slot_view()),
+        final(store).slot_view().dom() == old(store).slot_view().dom(),
+        final(store).slot_view().dom().finite(),
+        count_nonempty(final(store).slot_view()) <= count_nonempty(old(store).slot_view()),
+        refcount_sound(final(store)),
+{
+    let n = store.cspace_num_slots(cs);
+    let mut i: u32 = 0;
+    while i < n
+        invariant
+            0 <= i <= n,
+            n == old(store).cspace_view()[cs].num_slots,
+            cspace_wf(store.slot_view()),
+            store.slot_view().dom() == old(store).slot_view().dom(),
+            store.slot_view().dom().finite(),
+            count_nonempty(store.slot_view()) <= count_nonempty(old(store).slot_view()),
+            refcount_sound(store),
+            // Residency is immutable — `delete` frames `cspace_view`, and dom is preserved,
+            // so `cs`'s residents stay live and the getters stay in-bounds across the loop.
+            store.cspace_view() == old(store).cspace_view(),
+            cspace_resident_wf(store, cs),
+        decreases n - i,
+    {
+        let sid = store.cspace_slot(cs, i);
+        if !cap_is_empty(store.slot(sid).cap) {
+            delete(store, sid);
+        }
+        i += 1;
+    }
+    // Memory returns to the donor untyped only via revoke of the untyped cap; no
+    // allocator hands it back early (§3.2).
+}
+
+/// Drop the refcount a cap holds on its object; at zero, run the type-specific teardown
+/// (plan §6c). The shared decrement (`dec_ref`) carries the off-by-one census; at the zero
+/// point `refcount_sound` ⟹ `census(o) == 0`, which discharges each destructor's structural
+/// precondition (no waiters for `destroy_notif`; no self-bound armed timer for
+/// `destroy_timer`; …). The per-`CapKind` `requires` carry the well-formedness each
+/// destructor needs; `delete` (6d) — `obj_unref`'s only kcore caller — establishes them.
+///
+/// `pub(crate)` so the proof harness can drive the dispatch directly (`check_obj_unref`);
+/// `delete` is its only production caller.
+pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
+    requires
+        cspace_wf(old(store).slot_view()),
+        // Non-designating caps (Empty/Untyped/Frame): a pure no-op, census already sound.
+        cap_obj(cap) is None ==> refcount_sound(old(store)),
+        // Designating caps: the off-by-one census at `o` (the caller cleared `o`'s
+        // designating slot first), sound everywhere else — `dec_ref`'s precondition.
+        cap_obj(cap) matches Some(o) ==> {
+            &&& old(store).refs_view().dom().contains(o)
+            &&& old(store).refs_view()[o] > 0
+            &&& old(store).refs_view()[o] == obj_census(old(store), o) + 1
+            &&& forall|x: ObjId| x != o && old(store).refs_view().dom().contains(x)
+                    ==> #[trigger] old(store).refs_view()[x] == obj_census(old(store), x)
+        },
+        // Per-kind well-formedness each at-zero destructor's `requires` needs.
+        cap.kind matches CapKind::CSpace(o) ==> {
+            &&& old(store).slot_view().dom().finite()
+            &&& cspace_resident_wf(old(store), o)
+        },
+        cap.kind matches CapKind::Channel(o, _) ==>
+            chan_wf(old(store).chan_view(), old(store).slot_view(), o),
+        cap.kind matches CapKind::Thread(o) ==> {
+            &&& old(store).slot_view().dom().finite()
+            &&& old(store).tcb_view().dom().contains(o)
+            &&& old(store).tcb_view()[o].bind_slots.len() == 2
+            &&& old(store).slot_view().dom().contains(old(store).tcb_view()[o].bind_slots[0])
+            &&& old(store).slot_view().dom().contains(old(store).tcb_view()[o].bind_slots[1])
+        },
+        cap.kind matches CapKind::Notification(o) ==>
+            notif_wf(old(store).notif_view(), old(store).tcb_view(), o),
+        cap.kind matches CapKind::Timer(o) ==> {
+            &&& old(store).timer_view().dom().contains(o)
+            &&& old(store).timer_view().dom().finite()
+            &&& timer_wf(old(store).timer_view(), old(store).timer_head_view())
+            // `o`'s own armed binding names a live notification (the kernel invariant
+            // `disarm`/`destroy_timer` already require). The census rules out `o == n`
+            // (an armed self-bound timer would make `census(o) >= 1`, but the zero branch
+            // has `census(o) == 0`), so the `-1` on `refs[o]` never touches `refs[n]`.
+            &&& (old(store).timer_view()[o].armed ==>
+                    (old(store).timer_view()[o].notif matches Some(n) ==>
+                        old(store).refs_view().dom().contains(n)
+                        && old(store).refs_view()[n] > 0))
+        },
+    ensures
+        refcount_sound(final(store)),
+        cspace_wf(final(store).slot_view()),
+        final(store).slot_view().dom() == old(store).slot_view().dom(),
+        count_nonempty(final(store).slot_view()) <= count_nonempty(old(store).slot_view()),
+        // Non-designating caps: the store is untouched (the frame `delete` reads off for a
+        // Frame cap — its frame-mapping release rode the frame-unmap branch, not here).
+        cap_obj(cap) is None ==> {
+            &&& final(store).slot_view() == old(store).slot_view()
+            &&& final(store).refs_view() == old(store).refs_view()
+            &&& final(store).chan_view() == old(store).chan_view()
+            &&& final(store).notif_view() == old(store).notif_view()
+            &&& final(store).tcb_view() == old(store).tcb_view()
+            &&& final(store).timer_view() == old(store).timer_view()
+            &&& final(store).timer_head_view() == old(store).timer_head_view()
+            &&& final(store).cspace_view() == old(store).cspace_view()
+        },
+{
+    match cap.kind {
+        CapKind::CSpace(o) => {
+            dec_ref(store, o);
+            if store.obj_refs(o) == 0 {
+                destroy_cspace(store, o);
+            }
+        }
+        CapKind::Thread(o) => {
+            dec_ref(store, o);
+            if store.obj_refs(o) == 0 {
+                crate::thread::destroy_tcb(store, o);
+            }
+        }
+        CapKind::Channel(o, _) => {
+            dec_ref(store, o);
+            if store.obj_refs(o) == 0 {
+                crate::channel::destroy_channel(store, o);
+            }
+        }
+        CapKind::Notification(o) => {
+            dec_ref(store, o);
+            if store.obj_refs(o) == 0 {
+                proof {
+                    // census(o) == 0 ⟹ no waiters ⟹ wait_head is None (notif_wf's chain).
+                    assert(store.refs_view()[o] == obj_census(store, o));
+                    assert(waiter_refs(store.notif_view(), store.tcb_view(), o) == 0);
+                    let ws = waiter_seq(store.notif_view(), store.tcb_view(), o);
+                    assert(waiter_chain(store.notif_view(), store.tcb_view(), o, ws));
+                    assert(ws.len() == 0);
+                }
+                crate::notification::destroy_notif(store, o);
+            }
+        }
+        CapKind::Timer(o) => {
+            dec_ref(store, o);
+            if store.obj_refs(o) == 0 {
+                proof {
+                    // census(o) == 0 ⟹ armed_timer_refs(o) == 0 ⟹ no armed timer is bound
+                    // to `o`; in particular `o` is not self-bound, so `destroy_timer`'s
+                    // armed-notif-live precondition (`o.notif == Some(n)` ⟹ n live, n ≠ o)
+                    // is discharged from the off-by-one precondition's soundness at n ≠ o.
+                    assert(store.refs_view()[o] == obj_census(store, o));
+                    let armed = store.timer_view().dom().filter(
+                        |k: ObjId| store.timer_view()[k].armed && store.timer_view()[k].notif == Some(o));
+                    assert(armed_timer_refs(store.timer_view(), o) == 0);
+                    assert(armed.finite());
+                    assert(armed.len() == 0);
+                    assert(!armed.contains(o));
+                    // `o` not self-bound (else `o` would be in `armed`).
+                    assert(!(store.timer_view()[o].armed && store.timer_view()[o].notif == Some(o)));
+                    // dec_ref framed the timer view and dropped only refs[o] (to 0).
+                    assert(store.timer_view() == old(store).timer_view());
+                    assert(store.refs_view() == old(store).refs_view().insert(o, 0));
+                }
+                crate::timer::destroy_timer(store, o);
+            }
+        }
+        CapKind::Aspace(o) => {
+            // Decrement-then-maybe-`aspace_destroy` — exactly `unref_aspace`'s body, reused.
+            unref_aspace(store, o);
+        }
+        CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => {}
+    }
+}
+
+/// Drop one reference to cspace `cs` (a bound thread holds one — released by
+/// `destroy_tcb`); at zero, tear it down (plan §6c). `obj_unref`'s CSpace arm in isolation,
+/// for the non-cap holder path: the off-by-one decrement (`dec_ref`) then the at-zero
+/// `destroy_cspace`.
+pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId)
+    requires
+        old(store).refs_view().dom().contains(cs),
+        old(store).refs_view()[cs] > 0,
+        old(store).refs_view()[cs] == obj_census(old(store), cs) + 1,
+        forall|x: ObjId| x != cs && old(store).refs_view().dom().contains(x)
+            ==> #[trigger] old(store).refs_view()[x] == obj_census(old(store), x),
+        cspace_wf(old(store).slot_view()),
+        old(store).slot_view().dom().finite(),
+        cspace_resident_wf(old(store), cs),
+    ensures
+        refcount_sound(final(store)),
+        cspace_wf(final(store).slot_view()),
+        final(store).slot_view().dom() == old(store).slot_view().dom(),
+        count_nonempty(final(store).slot_view()) <= count_nonempty(old(store).slot_view()),
+{
+    dec_ref(store, cs);
+    if store.obj_refs(cs) == 0 {
+        destroy_cspace(store, cs);
+    }
+}
+
 /// Drop a non-cap reference to an aspace — mapped frames and bound threads hold
 /// these so the aspace can't die under them (plan §6b, doc/results/42). The first
 /// teardown op into `verus!{}`: non-recursive (`aspace_destroy` is a seam black box;
@@ -5476,6 +5749,13 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         is_empty_cap(final(store).slot_view()[slot].cap),
         count_nonempty(final(store).slot_view()) < count_nonempty(old(store).slot_view()),
         refcount_sound(final(store)),
+        // Residency is immutable (the kernel fixes it at construction; every internal
+        // mutator frames `cspace_view`, swept in 6a) — `delete` re-parents CDT links and
+        // clears caps but never reassigns which slots a cspace owns. `destroy_cspace`'s
+        // resident loop (6c) reads `cspace_view[cs]` across its `delete` calls, so the
+        // frame is load-bearing there; host-checked (`check_delete`), as an assumed
+        // `external_body` clause must be.
+        final(store).cspace_view() == old(store).cspace_view(),
         // Conditional-on-notification frame (plan §4d): deleting a **notification**
         // cap is robustly clean — `cdt_unlink`/`set_slot` frame every object view,
         // the `Channel`/mapped-`Frame` teardown branches don't fire, and `obj_unref`
