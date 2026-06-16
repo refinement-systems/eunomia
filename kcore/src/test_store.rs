@@ -796,11 +796,23 @@ fn gen_forest(seed: u64, n: usize, edges: usize) -> ArrayStore {
 
 // ── Contract checks (the op `ensures`, asserted against the real bodies) ────
 
+// The §6d `only_empties` frame, executable: every slot empty before is still empty after
+// (teardown only clears caps, never installs one). Host-checks the assumed `external_body`
+// clause on `delete`/`destroy_channel`/`destroy_tcb`.
+fn assert_only_empties(before: &[CapSlot], st: &ArrayStore, ctx: &str) {
+    for i in 0..before.len() {
+        if before[i].cap.is_empty() {
+            assert!(st.slots[i].cap.is_empty(), "{ctx}: empty slots stay empty (§6d only_empties)");
+        }
+    }
+}
+
 fn check_delete(st: &mut ArrayStore, slot: SlotId) {
     assert!(cspace_wf_exec(st), "delete pre: cspace_wf");
     assert!(!st.at(slot).cap.is_empty(), "delete pre: slot non-empty");
     let (n0, c0) = (st.n(), count_nonempty_exec(st));
     let resid0 = st.cspaces.clone();
+    let empty0 = st.slots.clone();
     // The §6a census clause is conditional on the precondition `refcount_sound`,
     // so only assert it preserved when the fixture satisfied it (most generated
     // forests carry no object caps, so they are vacuously sound).
@@ -820,6 +832,7 @@ fn check_delete(st: &mut ArrayStore, slot: SlotId) {
     if consistent0 {
         assert!(caps_consistent_exec(st), "delete post: caps_consistent preserved (§6d)");
     }
+    assert_only_empties(&empty0, st, "delete post");
 }
 
 // Assert `unref_aspace`'s §6b contract against the real body. The caller hands an
@@ -1212,9 +1225,11 @@ fn check_destroy_channel(st: &mut ArrayStore, ch: ObjId) {
     }
     let (c0, sound0) = (count_nonempty_exec(st), refcount_sound_exec(st));
     let consistent0 = caps_consistent_exec(st);
+    let empty0 = st.slots.clone();
 
     destroy_channel(st, ch);
 
+    assert_only_empties(&empty0, st, "destroy_channel post");
     assert!(cspace_wf_exec(st), "destroy_channel post: cspace_wf preserved");
     assert_eq!(st.n(), n, "destroy_channel: arena extent unchanged");
     for cs in ring_caps {
@@ -1419,9 +1434,11 @@ fn check_destroy_tcb(st: &mut ArrayStore, t: ObjId) {
     let s1 = st.tcbs[&t.0].bind_slots[1];
     let (c0, sound0) = (count_nonempty_exec(st), refcount_sound_exec(st));
     let consistent0 = caps_consistent_exec(st);
+    let empty0 = st.slots.clone();
 
     destroy_tcb(st, t);
 
+    assert_only_empties(&empty0, st, "destroy_tcb post");
     assert!(cspace_wf_exec(st), "destroy_tcb post: cspace_wf preserved");
     assert_eq!(st.n(), n, "destroy_tcb: arena extent unchanged");
     assert_eq!(st.tcbs[&t.0].state, ThreadState::Halted, "destroy_tcb: t halted");

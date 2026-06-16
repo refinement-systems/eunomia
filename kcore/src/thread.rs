@@ -343,6 +343,7 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
             <= cspace::count_nonempty(old(store).slot_view()),
         cspace::refcount_sound(final(store)),
         cspace::caps_consistent(final(store)),
+        cspace::only_empties(old(store).slot_view(), final(store).slot_view()),
         final(store).tcb_view().dom().contains(t),
         final(store).tcb_view()[t].state == ThreadState::Halted,
         final(store).tcb_view()[t].qnext is None,
