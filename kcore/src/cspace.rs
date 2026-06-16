@@ -2401,6 +2401,25 @@ pub open spec fn end_cap_count(m: Map<SlotId, CapSlot>, ch: ObjId, e: int) -> na
     m.dom().filter(|k: SlotId| cap_chan_end(m[k].cap) == Some((ch, e))).len()
 }
 
+// A witnessing slot makes the endpoint count positive — `endpoint_cap_dropped` uses it to
+// show a surviving sibling `Channel(ch, e)` cap keeps `end_caps[ch][e] > 0` after the
+// decrement (via `end_caps_sound`). The non-empty-finite-set-has-positive-len fact.
+pub proof fn lemma_end_cap_count_positive(m: Map<SlotId, CapSlot>, s: SlotId, ch: ObjId, e: int)
+    requires
+        m.dom().finite(),
+        m.dom().contains(s),
+        cap_chan_end(m[s].cap) == Some((ch, e)),
+    ensures
+        end_cap_count(m, ch, e) >= 1,
+{
+    let f = m.dom().filter(|k: SlotId| cap_chan_end(m[k].cap) == Some((ch, e)));
+    assert(f.contains(s));
+    assert(f.finite());
+    if f.len() == 0 {
+        assert(f =~= Set::empty());
+    }
+}
+
 // Two census lemmas (the spec basis for refcount soundness — the stored
 // refcount must move in lockstep with the count of designating slots):
 
@@ -2426,6 +2445,49 @@ proof fn lemma_same_caps_same_census(
     assert(s1 =~= s2);
     assert(slot_refs(m1, obj) == s1.len());
     assert(slot_refs(m2, obj) == s2.len());
+}
+
+// Same-dom, same-caps arenas have the same `frame_map_refs` (the `lemma_same_caps_same_census`
+// companion over `cap_frame_aspace`). `delete`/`cdt_unlink` link-only edits preserve caps, so
+// the frame-mapping census carries.
+proof fn lemma_same_caps_same_frame_map(m1: Map<SlotId, CapSlot>, m2: Map<SlotId, CapSlot>, o: ObjId)
+    requires
+        m1.dom() == m2.dom(),
+        forall|k: SlotId| #[trigger] m1.dom().contains(k) ==> m1[k].cap == m2[k].cap,
+    ensures
+        frame_map_refs(m1, o) == frame_map_refs(m2, o),
+{
+    let s1 = m1.dom().filter(|k: SlotId| cap_frame_aspace(m1[k].cap) == Some(o));
+    let s2 = m2.dom().filter(|k: SlotId| cap_frame_aspace(m2[k].cap) == Some(o));
+    assert forall|k: SlotId| s1.contains(k) <==> s2.contains(k) by {
+        if m1.dom().contains(k) {
+            assert(m1[k].cap == m2[k].cap);
+        }
+    }
+    assert(s1 =~= s2);
+}
+
+// Same-dom, same-caps arenas have the same `end_cap_count` (the `cap_chan_end` companion).
+proof fn lemma_same_caps_same_end_cap(
+    m1: Map<SlotId, CapSlot>,
+    m2: Map<SlotId, CapSlot>,
+    ch: ObjId,
+    e: int,
+)
+    requires
+        m1.dom() == m2.dom(),
+        forall|k: SlotId| #[trigger] m1.dom().contains(k) ==> m1[k].cap == m2[k].cap,
+    ensures
+        end_cap_count(m1, ch, e) == end_cap_count(m2, ch, e),
+{
+    let s1 = m1.dom().filter(|k: SlotId| cap_chan_end(m1[k].cap) == Some((ch, e)));
+    let s2 = m2.dom().filter(|k: SlotId| cap_chan_end(m2[k].cap) == Some((ch, e)));
+    assert forall|k: SlotId| s1.contains(k) <==> s2.contains(k) by {
+        if m1.dom().contains(k) {
+            assert(m1[k].cap == m2[k].cap);
+        }
+    }
+    assert(s1 =~= s2);
 }
 
 // Re-pointing one slot from designating nothing-of-`obj` to designating `obj`
@@ -2531,10 +2593,66 @@ pub open spec fn waiter_refs(nv: Map<ObjId, NotifView>, tv: Map<ObjId, TcbView>,
     }
 }
 
+// A non-empty wait queue means at least one queued waiter ref — `delete` uses it to
+// discharge `endpoint_cap_dropped`'s `binding_refs_ok` from the census (a bound notification
+// with `wait_head is Some` has `refs >= census >= waiter_refs >= 1`).
+pub proof fn lemma_waiter_refs_pos_from_head(
+    nv: Map<ObjId, NotifView>,
+    tv: Map<ObjId, TcbView>,
+    o: ObjId,
+)
+    requires
+        notif_wf(nv, tv, o),
+        nv[o].wait_head is Some,
+    ensures
+        waiter_refs(nv, tv, o) >= 1,
+{
+    let ws = waiter_seq(nv, tv, o);
+    assert(waiter_chain(nv, tv, o, ws));
+    // `wait_head is Some` excludes the empty chain (which forces `wait_head is None`).
+    assert(ws.len() >= 1);
+}
+
 // Armed timers naming `o`: each armed timer bound to `o` holds one queued ref while
 // armed (the phase-4e armed-timer term, plan §4e).
 pub open spec fn armed_timer_refs(tmv: Map<ObjId, TimerView>, o: ObjId) -> nat {
     tmv.dom().filter(|k: ObjId| tmv[k].armed && tmv[k].notif == Some(o)).len()
+}
+
+// An armed timer bound to `o` witnesses a positive armed-timer count — `delete`'s Timer
+// branch uses it to discharge `obj_unref`'s armed-notif-live precondition from the census.
+pub proof fn lemma_armed_timer_refs_pos(tmv: Map<ObjId, TimerView>, t: ObjId, o: ObjId)
+    requires
+        tmv.dom().finite(),
+        tmv.dom().contains(t),
+        tmv[t].armed,
+        tmv[t].notif == Some(o),
+    ensures
+        armed_timer_refs(tmv, o) >= 1,
+{
+    let f = tmv.dom().filter(|k: ObjId| tmv[k].armed && tmv[k].notif == Some(o));
+    assert(f.contains(t));
+    assert(f.finite());
+    if f.len() == 0 {
+        assert(f =~= Set::empty());
+    }
+}
+
+// A reference making `census(n) >= 1` forces `refs[n] > 0` under a census off by one at any
+// `z`: `refs[n] == census(n) + (1 if n == z else 0) >= 1`. `delete` uses it to discharge the
+// refs-coupled preconditions of `endpoint_cap_dropped` (`binding_refs_ok`) and `obj_unref`
+// (the Timer armed-notif-live) from the census in the off-by-one window.
+pub proof fn lemma_refs_pos_from_off_by_one<S: Store>(store: &S, z: ObjId, n: ObjId)
+    requires
+        census_off_by_one(store, z),
+        store.refs_view().dom().contains(n),
+        obj_census(store, n) >= 1,
+    ensures
+        store.refs_view()[n] > 0,
+{
+    if n != z {
+        assert(store.refs_view()[n] == obj_census(store, n));
+    }
 }
 
 // Frame mappings naming `o`: each mapped frame cap holds one ref on its target
@@ -2747,6 +2865,69 @@ pub open spec fn caps_consistent<S: Store>(store: &S) -> bool {
             ==> cap_consistent(store, store.slot_view()[s].cap)
 }
 
+// `caps_consistent` is preserved by a **signal-shaped** edit: one that frames the slot/chan/
+// timer/cspace views, changes the notif view only at the signalled `n` (keeping `notif_wf(n)`),
+// and changes only TCBs that were waiting on `n`, leaving every TCB's `bind_slots` fixed. Each
+// per-kind clause reads only framed data: Channel/CSpace/Timer off the framed views; the
+// Notification + Channel-binding `notif_wf` carries from `s0` (the fired `n` by hypothesis,
+// every other notification by `lemma_notif_wf_frame` — its waiters all name `m != n`, so they
+// were untouched); Thread off the framed slot dom + fixed `bind_slots`. The frame `fire`'s
+// `caps_consistent` preservation rests on (doc 48 §3).
+pub proof fn lemma_caps_consistent_frame<S: Store>(s0: &S, s1: &S, n: ObjId)
+    requires
+        caps_consistent(s0),
+        s1.slot_view() == s0.slot_view(),
+        s1.chan_view() == s0.chan_view(),
+        s1.timer_view() == s0.timer_view(),
+        s1.timer_head_view() == s0.timer_head_view(),
+        s1.cspace_view() == s0.cspace_view(),
+        s1.notif_view() == s0.notif_view().insert(n, s1.notif_view()[n]),
+        s1.tcb_view().dom() == s0.tcb_view().dom(),
+        notif_wf(s1.notif_view(), s1.tcb_view(), n),
+        forall|k: ObjId| #[trigger] s0.tcb_view()[k].wait_notif != Some(n)
+            ==> s1.tcb_view()[k] == s0.tcb_view()[k],
+        forall|k: ObjId| #[trigger] s1.tcb_view()[k].bind_slots == s0.tcb_view()[k].bind_slots,
+    ensures
+        caps_consistent(s1),
+{
+    // `notif_wf` carries from `s0` to `s1` for every notification (`n` by hypothesis, the rest
+    // by the frame lemma).
+    assert forall|m: ObjId| #[trigger] s0.notif_view().dom().contains(m)
+        && notif_wf(s0.notif_view(), s0.tcb_view(), m) implies
+        notif_wf(s1.notif_view(), s1.tcb_view(), m) by {
+        if m != n {
+            lemma_notif_wf_frame(s0.notif_view(), s0.tcb_view(), s1.notif_view(), s1.tcb_view(), m);
+        }
+    }
+    assert forall|s: SlotId| #![trigger s1.slot_view()[s]]
+        s1.slot_view().dom().contains(s) && !is_empty_cap(s1.slot_view()[s].cap)
+        implies cap_consistent(s1, s1.slot_view()[s].cap) by {
+        let c = s1.slot_view()[s].cap;
+        assert(c == s0.slot_view()[s].cap);
+        assert(cap_consistent(s0, c));
+        match c.kind {
+            CapKind::Notification(m) => {
+                assert(s0.notif_view().dom().contains(m));
+                assert(notif_wf(s0.notif_view(), s0.tcb_view(), m));
+            }
+            CapKind::Channel(co, _) => {
+                assert forall|e: int, v: int|
+                    (0 <= e < 2 && 0 <= v < 3
+                        && #[trigger] s1.chan_view()[co].bindings[(e, v)].notif is Some) implies {
+                        let m = s1.chan_view()[co].bindings[(e, v)].notif->Some_0;
+                        s1.notif_view().dom().contains(m) && notif_wf(s1.notif_view(), s1.tcb_view(), m)
+                    } by {
+                    let m = s1.chan_view()[co].bindings[(e, v)].notif->Some_0;
+                    assert(s0.chan_view()[co].bindings[(e, v)].notif == Some(m));
+                    assert(s0.notif_view().dom().contains(m));
+                    assert(notif_wf(s0.notif_view(), s0.tcb_view(), m));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 // The §3.3 per-endpoint cap census as a system invariant (the `caps_consistent`
 // analog for channel endpoint counts; plan §6d body-removal gate, doc 45 §2):
 // every live channel's `end_caps[e]` equals the count of `Channel(ch, e)` caps in
@@ -2765,6 +2946,23 @@ pub open spec fn end_caps_sound<S: Store>(store: &S) -> bool {
             ch,
             e,
         )
+}
+
+// `end_caps_sound` except off by one at `(co, e0)`: `end_caps[co][e0] == end_cap_count + 1`.
+// The state `delete` is in when it calls `endpoint_cap_dropped` — it cleared the deleted
+// `Channel(co, end)` cap's slot (dropping `end_cap_count(co, e0)` by one) but has not yet run
+// the matching `end_caps` decrement. `endpoint_cap_dropped` consumes it: the decrement lands
+// `end_caps_sound`, and the off-by-one is exactly what guarantees no sibling `(co, e0)` cap is
+// stranded (a live sibling makes `end_cap_count ≥ 1`, so `end_caps == end_cap_count + 1 ≥ 2`).
+pub open spec fn end_caps_off_by_one<S: Store>(store: &S, co: ObjId, e0: int) -> bool {
+    forall|ch: ObjId, e: int|
+        store.chan_view().dom().contains(ch) && store.chan_view()[ch].end_caps.len() == 2
+            && 0 <= e < 2
+            ==> #[trigger] store.chan_view()[ch].end_caps[e] == end_cap_count(
+            store.slot_view(),
+            ch,
+            e,
+        ) + (if ch == co && e == e0 { 1nat } else { 0nat })
 }
 
 // ── Per-term recount lemmas (plan §6a). The single-key bump/drop building blocks
@@ -2793,6 +2991,139 @@ proof fn lemma_designation_drop(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot, 
     let m2 = m.insert(k, v);
     let f1 = m.dom().filter(|j: SlotId| cap_obj(m[j].cap) == Some(obj));
     let f2 = m2.dom().filter(|j: SlotId| cap_obj(m2[j].cap) == Some(obj));
+    assert(m2.dom() =~= m.dom());
+    assert forall|j: SlotId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.remove(k).contains(j) by {
+        if j != k {
+            assert(m2[j] == m[j]);
+        }
+    }
+    assert(f2 =~= f1.remove(k));
+    assert(f1.contains(k));
+    assert(f1.finite());
+}
+
+// Clearing a slot to an EMPTY cap, the per-object effect on the two slot-dependent census
+// terms: `slot_refs`/`frame_map_refs` each drop by one at the cleared cap's designated object
+// / mapped aspace and are unchanged at every other object (the EMPTY cap designates and maps
+// nothing, so it never adds to any filter). `delete`'s body composes this with `set_slot`'s
+// frames of the other four (non-slot) census terms to get the off-by-one (or no) census shift.
+proof fn lemma_clear_slot_census(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot, x: ObjId)
+    requires
+        m.dom().finite(),
+        m.dom().contains(k),
+        is_empty_cap(v.cap),
+    ensures
+        slot_refs(m.insert(k, v), x) == (slot_refs(m, x) - (if cap_obj(m[k].cap) == Some(x) {
+            1nat
+        } else {
+            0nat
+        })) as nat,
+        frame_map_refs(m.insert(k, v), x) == (frame_map_refs(m, x) - (if cap_frame_aspace(
+            m[k].cap,
+        ) == Some(x) {
+            1nat
+        } else {
+            0nat
+        })) as nat,
+{
+    let m2 = m.insert(k, v);
+    assert(m2.dom() =~= m.dom());
+    let fs1 = m.dom().filter(|j: SlotId| cap_obj(m[j].cap) == Some(x));
+    let fs2 = m2.dom().filter(|j: SlotId| cap_obj(m2[j].cap) == Some(x));
+    assert(fs1.finite());
+    if cap_obj(m[k].cap) == Some(x) {
+        assert forall|j: SlotId| #![trigger fs2.contains(j)] fs2.contains(j) <==> fs1.remove(k).contains(j) by {
+            if j != k {
+                assert(m2[j] == m[j]);
+            }
+        }
+        assert(fs2 =~= fs1.remove(k));
+        assert(fs1.contains(k));
+    } else {
+        assert forall|j: SlotId| #![trigger fs2.contains(j)] fs2.contains(j) <==> fs1.contains(j) by {
+            if j != k {
+                assert(m2[j] == m[j]);
+            }
+        }
+        assert(fs2 =~= fs1);
+    }
+    let fm1 = m.dom().filter(|j: SlotId| cap_frame_aspace(m[j].cap) == Some(x));
+    let fm2 = m2.dom().filter(|j: SlotId| cap_frame_aspace(m2[j].cap) == Some(x));
+    assert(fm1.finite());
+    if cap_frame_aspace(m[k].cap) == Some(x) {
+        assert forall|j: SlotId| #![trigger fm2.contains(j)] fm2.contains(j) <==> fm1.remove(k).contains(j) by {
+            if j != k {
+                assert(m2[j] == m[j]);
+            }
+        }
+        assert(fm2 =~= fm1.remove(k));
+        assert(fm1.contains(k));
+    } else {
+        assert forall|j: SlotId| #![trigger fm2.contains(j)] fm2.contains(j) <==> fm1.contains(j) by {
+            if j != k {
+                assert(m2[j] == m[j]);
+            }
+        }
+        assert(fm2 =~= fm1);
+    }
+}
+
+// Clearing a slot to EMPTY, the per-`(ch, e)` effect on the endpoint count: `end_cap_count`
+// drops by one at the cleared cap's `(ch, e)` (if it is a `Channel(ch, e)` cap) and is fixed
+// at every other `(ch2, e2)` — the EMPTY cap names no endpoint. `delete`'s Channel branch
+// uses it to land `end_caps_off_by_one`; the non-Channel branches use the all-fixed case.
+proof fn lemma_clear_slot_end_cap(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot, ch: ObjId, e: int)
+    requires
+        m.dom().finite(),
+        m.dom().contains(k),
+        is_empty_cap(v.cap),
+    ensures
+        end_cap_count(m.insert(k, v), ch, e) == (end_cap_count(m, ch, e) - (if cap_chan_end(
+            m[k].cap,
+        ) == Some((ch, e)) {
+            1nat
+        } else {
+            0nat
+        })) as nat,
+{
+    let m2 = m.insert(k, v);
+    assert(m2.dom() =~= m.dom());
+    let f1 = m.dom().filter(|j: SlotId| cap_chan_end(m[j].cap) == Some((ch, e)));
+    let f2 = m2.dom().filter(|j: SlotId| cap_chan_end(m2[j].cap) == Some((ch, e)));
+    assert(f1.finite());
+    if cap_chan_end(m[k].cap) == Some((ch, e)) {
+        assert forall|j: SlotId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.remove(k).contains(j) by {
+            if j != k {
+                assert(m2[j] == m[j]);
+            }
+        }
+        assert(f2 =~= f1.remove(k));
+        assert(f1.contains(k));
+    } else {
+        assert forall|j: SlotId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.contains(j) by {
+            if j != k {
+                assert(m2[j] == m[j]);
+            }
+        }
+        assert(f2 =~= f1);
+    }
+}
+
+// `count_nonempty` drops by one when a non-empty slot is cleared to empty — the
+// `lemma_designation_drop` shape over the `is_empty` filter. `delete`'s body consumes it for
+// the strict `count_nonempty` decrease its `ensures` (and the SCC measure) state.
+proof fn lemma_clear_drops_count(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot)
+    requires
+        m.dom().finite(),
+        m.dom().contains(k),
+        !is_empty_cap(m[k].cap),
+        is_empty_cap(v.cap),
+    ensures
+        count_nonempty(m.insert(k, v)) == (count_nonempty(m) - 1) as nat,
+{
+    let m2 = m.insert(k, v);
+    let f1 = m.dom().filter(|j: SlotId| !is_empty_cap(m[j].cap));
+    let f2 = m2.dom().filter(|j: SlotId| !is_empty_cap(m2[j].cap));
     assert(m2.dom() =~= m.dom());
     assert forall|j: SlotId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.remove(k).contains(j) by {
         if j != k {

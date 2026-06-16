@@ -70,6 +70,9 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
     ensures
         final(store).slot_view() == old(store).slot_view(),
         final(store).chan_view() == old(store).chan_view(),
+        // `signal` touches no cspace residency (every setter frames it) — the frame
+        // `lemma_caps_consistent_frame` (via `fire`) needs (plan §6d body PR).
+        final(store).cspace_view() == old(store).cspace_view(),
         // The refcount census moves in lockstep (plan §6d body PR): a wake drops `refs[n]`
         // and `waiter_seq(n)` together, so `refs[x] - census(x)` is frozen at every `x`.
         // Unconditional and `requires`-free, so the kernel-shell callers
@@ -112,6 +115,10 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
             &&& final(store).tcb_view() == old(store).tcb_view().insert(t, final(store).tcb_view()[t])
             &&& final(store).tcb_view()[t].state == ThreadState::Runnable
             &&& final(store).tcb_view()[t].retval == (old(store).notif_view()[n].word | bits)
+            // The woken thread's binding slots are untouched — `signal` moves only its
+            // queue/wait/retval fields. The frame `caps_consistent` preservation needs (a
+            // Thread cap for `t` reads its `bind_slots`; plan §6d body PR).
+            &&& final(store).tcb_view()[t].bind_slots == old(store).tcb_view()[t].bind_slots
             &&& final(store).notif_view()[n].word == 0
             &&& final(store).refs_view()
                     == old(store).refs_view().insert(n, (old(store).refs_view()[n] - 1) as nat)

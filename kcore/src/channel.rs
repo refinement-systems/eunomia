@@ -183,8 +183,17 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
             old(store).tcb_view(), ch),
         cspace::binding_refs_ok(old(store).chan_view(), old(store).notif_view(),
             old(store).refs_view(), ch, 1 - end_idx_spec(end), EV_PEER_CLOSED as int),
+        // The cap→object invariant + the §3.3 endpoint census, both off by one at `(ch, end)`
+        // (plan §6d body PR): `delete` cleared the deleted cap's slot before this call, so
+        // `end_caps[ch][end]` over-counts the arena by one. The decrement here restores
+        // `end_caps_sound` and re-establishes `caps_consistent` (no sibling stranded — a live
+        // sibling makes the count ≥ 1, so the over-count is ≥ 2). `delete`-supplied.
+        cspace::caps_consistent(old(store)),
+        cspace::end_caps_off_by_one(old(store), ch, end_idx_spec(end)),
     ensures
         final(store).slot_view() == old(store).slot_view(),
+        cspace::caps_consistent(final(store)),
+        cspace::end_caps_sound(final(store)),
         final(store).chan_view() == old(store).chan_view().insert(
             ch,
             ChanView {
@@ -229,9 +238,42 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
             == cspace::obj_census(old(store), x) by {
             cspace::lemma_binding_refs_frame(old(store).chan_view(), store.chan_view(), x);
         }
+        // end_caps_sound after the decrement: the off-by-one at `(ch, e)` is landed (the
+        // decrement), every other `(ch2, e2)` was already sound (off-by-one offset 0), and
+        // `set_chan_end_caps` frames `slot_view` so `end_cap_count` is unchanged.
+        assert(store.slot_view() == old(store).slot_view());
+        assert forall|ch2: ObjId, e2: int|
+            store.chan_view().dom().contains(ch2) && store.chan_view()[ch2].end_caps.len() == 2
+                && 0 <= e2 < 2 implies #[trigger] store.chan_view()[ch2].end_caps[e2]
+                == cspace::end_cap_count(store.slot_view(), ch2, e2) by {
+            assert(cspace::end_cap_count(store.slot_view(), ch2, e2)
+                == cspace::end_cap_count(old(store).slot_view(), ch2, e2));
+        }
+        // caps_consistent after the decrement: the only changed term is `end_caps[ch][e]`,
+        // which `end_caps_sound` keeps `> 0` for any live `Channel(ch, e)` sibling; every
+        // other cap reads framed views (chan `bindings`/depth, notif/tcb/timer/cspace/slot).
+        assert forall|s: SlotId| #![trigger store.slot_view()[s]]
+            store.slot_view().dom().contains(s) && !cspace::is_empty_cap(store.slot_view()[s].cap)
+            implies cspace::cap_consistent(store, store.slot_view()[s].cap) by {
+            let c = store.slot_view()[s].cap;
+            assert(c == old(store).slot_view()[s].cap);
+            assert(cspace::cap_consistent(old(store), c));
+            // A live Channel cap makes its endpoint count >= 1, so `end_caps_sound` (above)
+            // keeps `end_caps[..] > 0` — the only `cap_consistent` clause reading `end_caps`.
+            if let Some((ch2, e2idx)) = cspace::cap_chan_end(c) {
+                cspace::lemma_end_cap_count_positive(store.slot_view(), s, ch2, e2idx);
+            }
+        }
     }
     if store.chan_end_caps(ch, e) == 0 {
         fire(store, ch, 1 - e, EV_PEER_CLOSED);
+    }
+    // caps_consistent + end_caps_sound at exit: established after the decrement above; in the
+    // fired branch `fire` carries `caps_consistent` (its conditional ensures) and frames
+    // chan/slot so `end_caps_sound` rides through; in the unfired branch the store is unchanged.
+    proof {
+        assert(cspace::end_caps_sound(store));
+        assert(cspace::caps_consistent(store));
     }
     // census_delta_frozen(old, final): the `set_chan_end_caps` step left refs *and* census
     // equal to `old` (above), and `fire` froze the delta across the peer-closed fire — so
@@ -270,6 +312,12 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
         final(store).chan_view() == old(store).chan_view(),
         cspace::binding_notif_wf(final(store).chan_view(), final(store).notif_view(),
             final(store).tcb_view(), ch),
+        // The cap→object invariant survives the fire (plan §6d body PR): `signal` keeps every
+        // notification well-formed (the fired one by its own `ensures`, the rest by
+        // `lemma_notif_wf_frame`) and every TCB's `bind_slots`, so `lemma_caps_consistent_frame`
+        // applies. **Conditional** (no new `requires`) so `send`/`recv` keep no obligation;
+        // `endpoint_cap_dropped`/`delete` supply the hypothesis.
+        cspace::caps_consistent(old(store)) ==> cspace::caps_consistent(final(store)),
         // The refcount census moves in lockstep across the fire (plan §6d body PR): `fire`
         // reads a binding then either does nothing or calls `signal` (whose own
         // `census_delta_frozen` applies, its `old` being this `old` — no mutation precedes
@@ -307,6 +355,13 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
                     cspace::lemma_notif_wf_frame(old(store).notif_view(),
                         old(store).tcb_view(), nvf, tvf, m);
                 }
+            }
+            // caps_consistent preservation across the signal (the bound branch): every
+            // notification stays wf and every TCB's bind_slots are fixed, so the frame applies.
+            if cspace::caps_consistent(old(store)) {
+                assert forall|k: ObjId| #[trigger] tvf[k].bind_slots
+                    == old(store).tcb_view()[k].bind_slots by {}
+                cspace::lemma_caps_consistent_frame(old(store), store, n);
             }
         }
     }
