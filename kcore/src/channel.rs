@@ -1088,6 +1088,7 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
             <= cspace::count_nonempty(old(store).slot_view()),
         cspace::refcount_sound(final(store)),
         cspace::caps_consistent(final(store)),
+        cspace::only_empties(old(store).slot_view(), final(store).slot_view()),
         forall|r: int, i: int, c: int|
             (0 <= r < 2 && 0 <= i < old(store).chan_view()[ch].depth && 0 <= c < 4)
                 ==> cspace::is_empty_cap(

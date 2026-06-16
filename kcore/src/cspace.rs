@@ -2228,6 +2228,37 @@ pub open spec fn count_nonempty(m: Map<SlotId, CapSlot>) -> nat {
     m.dom().filter(|k: SlotId| !is_empty_cap(m[k].cap)).len()
 }
 
+// Teardown only ever *empties* slots, it never fills an empty one (plan §6d): `cdt_unlink`
+// moves links not caps, `set_slot` only clears, and the recursive destructors only delete.
+// This is the frame `delete`'s own `is_empty_cap(final[slot])` ensures rests on (`obj_unref`
+// must leave the just-cleared slot empty) and that `destroy_channel`'s ring-cap loop carries
+// to conclude every ring slot ends empty. Refs-free and slot-local, so it composes
+// transitively across the teardown recursion.
+pub open spec fn only_empties(sv0: Map<SlotId, CapSlot>, sv1: Map<SlotId, CapSlot>) -> bool {
+    forall|s: SlotId|
+        sv0.dom().contains(s) && is_empty_cap(sv0[s].cap) ==> is_empty_cap(#[trigger] sv1[s].cap)
+}
+
+// `only_empties` composes along the teardown chain (each `delete` empties some more).
+pub proof fn lemma_only_empties_trans(
+    a: Map<SlotId, CapSlot>,
+    b: Map<SlotId, CapSlot>,
+    c: Map<SlotId, CapSlot>,
+)
+    requires
+        only_empties(a, b),
+        only_empties(b, c),
+        a.dom() == b.dom(),
+    ensures
+        only_empties(a, c),
+{
+    assert forall|s: SlotId| a.dom().contains(s) && is_empty_cap(a[s].cap) implies is_empty_cap(
+        #[trigger] c[s].cap,
+    ) by {
+        assert(is_empty_cap(b[s].cap));
+    }
+}
+
 // ── Refcount census: the stored refcount equals the count of designating slots
 //    (cspace residents; channel-queue and TCB-bind homes ride the same arena),
 //    plus the non-slot references (bindings/waiters/armed timers) the later
@@ -2445,6 +2476,11 @@ pub open spec fn cap_consistent<S: Store>(store: &S, c: Cap) -> bool {
 // arena is finite — the `obj_unref` CSpace/Thread/Timer arms' standing precondition).
 pub open spec fn caps_consistent<S: Store>(store: &S) -> bool {
     &&& store.slot_view().dom().finite()
+    // The channel arena is finite too (the §6d binding-census recount `lemma_binding_drop`
+    // needs it — its triple set is a subset of `chan_view.dom() × {0,1} × {0,1,2}`). Refs-free
+    // and structural like the slot-finiteness companion; every mutator frames `chan_view` or
+    // `insert`s one channel, both finiteness-preserving.
+    &&& store.chan_view().dom().finite()
     &&& forall|s: SlotId| #![trigger store.slot_view()[s]]
             store.slot_view().dom().contains(s) && !is_empty_cap(store.slot_view()[s].cap)
             ==> cap_consistent(store, store.slot_view()[s].cap)
@@ -2881,6 +2917,164 @@ proof fn lemma_frame_clear_census(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot
     }
     assert forall|o: ObjId| #[trigger] slot_refs(m.insert(k, v), o) == slot_refs(m, o) by {
         lemma_nondesignating_edit_slot_refs(m, k, v, o);
+    }
+}
+
+// ── `destroy_channel`'s binding-release census lemma (plan §6d, doc/results/45). ──
+//
+// The sixth census term, `binding_refs`, was quarantined by 6a (the comment above
+// `lemma_designation_drop`): unlike the five single-domain terms it counts over the
+// *nested* `(ch, end, ev)` triple domain via `Set::new(..)`, so a single-edit recount
+// needs the triple set's **finiteness** established by hand (the five `filter`-of-a-
+// finite-map terms get it for free from `group_set_axioms`). `destroy_channel`'s
+// binding-release loop is the op that consumes it (6d), so it lands here.
+
+// The universe of in-bounds binding triples over a finite channel domain is finite:
+// it is `⋃` of the six maps `d ↦ (c, e, ev)` (one per `(e, ev) ∈ {0,1}×{0,1,2}`), each
+// finite because `d` is. `binding_refs`'s set is a subset of this, hence finite.
+proof fn lemma_binding_triples_finite(d: Set<ObjId>)
+    requires
+        d.finite(),
+    ensures
+        Set::new(|t: (ObjId, int, int)| d.contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3).finite(),
+{
+    let univ = Set::new(|t: (ObjId, int, int)| d.contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3);
+    let m00 = d.map(|c: ObjId| (c, 0int, 0int));
+    let m01 = d.map(|c: ObjId| (c, 0int, 1int));
+    let m02 = d.map(|c: ObjId| (c, 0int, 2int));
+    let m10 = d.map(|c: ObjId| (c, 1int, 0int));
+    let m11 = d.map(|c: ObjId| (c, 1int, 1int));
+    let m12 = d.map(|c: ObjId| (c, 1int, 2int));
+    d.lemma_map_finite(|c: ObjId| (c, 0int, 0int));
+    d.lemma_map_finite(|c: ObjId| (c, 0int, 1int));
+    d.lemma_map_finite(|c: ObjId| (c, 0int, 2int));
+    d.lemma_map_finite(|c: ObjId| (c, 1int, 0int));
+    d.lemma_map_finite(|c: ObjId| (c, 1int, 1int));
+    d.lemma_map_finite(|c: ObjId| (c, 1int, 2int));
+    let u1 = m00.union(m01);
+    let u2 = u1.union(m02);
+    let u3 = u2.union(m10);
+    let u4 = u3.union(m11);
+    let big = u4.union(m12);
+    vstd::set_lib::lemma_set_union_finite_iff(m00, m01);
+    vstd::set_lib::lemma_set_union_finite_iff(u1, m02);
+    vstd::set_lib::lemma_set_union_finite_iff(u2, m10);
+    vstd::set_lib::lemma_set_union_finite_iff(u3, m11);
+    vstd::set_lib::lemma_set_union_finite_iff(u4, m12);
+    assert forall|t: (ObjId, int, int)| univ.contains(t) implies big.contains(t) by {
+        assert(d.contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3);
+        if t.1 == 0 {
+            if t.2 == 0 {
+                assert(m00.contains((t.0, 0int, 0int)));
+            } else if t.2 == 1 {
+                assert(m01.contains((t.0, 0int, 1int)));
+            } else {
+                assert(m02.contains((t.0, 0int, 2int)));
+            }
+        } else {
+            if t.2 == 0 {
+                assert(m10.contains((t.0, 1int, 0int)));
+            } else if t.2 == 1 {
+                assert(m11.contains((t.0, 1int, 1int)));
+            } else {
+                assert(m12.contains((t.0, 1int, 2int)));
+            }
+        }
+    }
+    assert(univ.subset_of(big));
+    vstd::set_lib::lemma_set_subset_finite(big, univ);
+}
+
+// Clearing one channel binding (`ch`'s `(e, ev)` binding, which named `o`) to a binding
+// that does not name `o` lowers `binding_refs(o)` by exactly one and leaves every other
+// object's binding census fixed. The new chan_view is `set_chan_binding`'s exact shape, so
+// `destroy_channel` consumes this directly (the drop = `dec_ref`'s off-by-one at `o`, the
+// others-fixed = `dec_ref`'s "sound elsewhere"). The removed triple is the only difference.
+pub(crate) proof fn lemma_binding_drop(
+    cv: Map<ObjId, ChanView>,
+    ch: ObjId,
+    e: int,
+    ev: int,
+    b: Binding,
+    o: ObjId,
+)
+    requires
+        cv.dom().finite(),
+        cv.dom().contains(ch),
+        0 <= e < 2,
+        0 <= ev < 3,
+        cv[ch].bindings[(e, ev)].notif == Some(o),
+        b.notif is None,
+    ensures
+        binding_refs(
+            cv.insert(ch, ChanView { bindings: cv[ch].bindings.insert((e, ev), b), ..cv[ch] }),
+            o,
+        ) == (binding_refs(cv, o) - 1) as nat,
+        forall|x: ObjId| x != o ==> binding_refs(
+            cv.insert(ch, ChanView { bindings: cv[ch].bindings.insert((e, ev), b), ..cv[ch] }),
+            x,
+        ) == #[trigger] binding_refs(cv, x),
+{
+    let v = ChanView { bindings: cv[ch].bindings.insert((e, ev), b), ..cv[ch] };
+    let cv2 = cv.insert(ch, v);
+    let s1 = Set::new(
+        |t: (ObjId, int, int)|
+            cv.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3 && cv[t.0].bindings[(t.1, t.2)].notif
+                == Some(o),
+    );
+    let s2 = Set::new(
+        |t: (ObjId, int, int)|
+            cv2.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3 && cv2[t.0].bindings[(t.1, t.2)].notif
+                == Some(o),
+    );
+    let univ = Set::new(|t: (ObjId, int, int)| cv.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3);
+    lemma_binding_triples_finite(cv.dom());
+    assert(s1.subset_of(univ));
+    vstd::set_lib::lemma_set_subset_finite(univ, s1);
+    let x = (ch, e, ev);
+    assert(cv2.dom() =~= cv.dom());
+    assert(cv2[ch] == v);
+    assert forall|t: (ObjId, int, int)| #![trigger s2.contains(t)]
+        s2.contains(t) <==> s1.remove(x).contains(t) by {
+        if t != x {
+            if t.0 == ch {
+                if (t.1, t.2) != (e, ev) {
+                    assert(v.bindings[(t.1, t.2)] == cv[ch].bindings[(t.1, t.2)]);
+                }
+            } else {
+                assert(cv2[t.0] == cv[t.0]);
+            }
+        }
+    }
+    assert(s2 =~= s1.remove(x));
+    assert(s1.contains(x));
+    // Every other object's binding census is fixed: the cleared triple named `o`, never any
+    // `y != o`, so neither its old nor its new value is in `y`'s set — pure extensionality.
+    assert forall|y: ObjId| y != o implies #[trigger] binding_refs(cv2, y) == binding_refs(cv, y) by {
+        let g1 = Set::new(
+            |t: (ObjId, int, int)|
+                cv.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3 && cv[t.0].bindings[(t.1, t.2)].notif
+                    == Some(y),
+        );
+        let g2 = Set::new(
+            |t: (ObjId, int, int)|
+                cv2.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3 && cv2[t.0].bindings[(t.1, t.2)].notif
+                    == Some(y),
+        );
+        assert forall|t: (ObjId, int, int)| #![trigger g2.contains(t)] g2.contains(t) <==> g1.contains(t) by {
+            if t.0 == ch {
+                if (t.1, t.2) != (e, ev) {
+                    assert(v.bindings[(t.1, t.2)] == cv[ch].bindings[(t.1, t.2)]);
+                } else {
+                    // The cleared triple: now `None` (not `Some(y)`), and was `Some(o)` (not
+                    // `Some(y)` since `y != o`) — absent from both `y`-sets.
+                    assert(v.bindings[(e, ev)].notif is None);
+                }
+            } else {
+                assert(cv2[t.0] == cv[t.0]);
+            }
+        }
+        assert(g2 =~= g1);
     }
 }
 
@@ -4807,6 +5001,11 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
         final(store).slot_view()[slot].next_sib is None,
         final(store).slot_view()[slot].prev_sib is None,
         count_nonempty(final(store).slot_view()) == count_nonempty(old(store).slot_view()),
+        // Unlink moves links, never caps: every slot's cap rides through unchanged (the
+        // closed form `unlinked` rebuilds each entry's `cap` from `m0`). This is the
+        // cap-frame `delete`'s "teardown only empties slots" reasoning rests on (§6d).
+        forall|x: SlotId| old(store).slot_view().dom().contains(x)
+            ==> #[trigger] final(store).slot_view()[x].cap == old(store).slot_view()[x].cap,
 {
     let ghost m0 = old(store).slot_view();
     let ghost r0 = old(store).refs_view();
@@ -5065,6 +5264,12 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
                     }
                 }
             }
+        }
+        // Every slot's cap rode through: `mfin == unlinked`, and `unlinked` rebuilds
+        // each entry's `.cap` from `m0` (the cap-frame `delete`'s "only empties" rests on).
+        assert forall|x: SlotId| m0.dom().contains(x) implies #[trigger] mfin[x].cap
+            == m0[x].cap by {
+            assert(unlinked(m0, slot, last)[x].cap == m0[x].cap);
         }
         lemma_unlink_preserves_cspace_wf(m0, slot, last);
         lemma_unlink_count(m0, slot, last);
@@ -5461,7 +5666,7 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
 /// full `refcount_sound` invariant. Census-transparent (every object view framed), so the
 /// caller can dispatch the at-zero destructor against an unmoved census. The `unref_aspace`
 /// proof shape (doc/results/42), minus the aspace-specific last-ref `aspace_destroy`.
-fn dec_ref<S: Store>(store: &mut S, o: ObjId)
+pub(crate) fn dec_ref<S: Store>(store: &mut S, o: ObjId)
     requires
         old(store).refs_view().dom().contains(o),
         old(store).refs_view()[o] > 0,
@@ -5535,6 +5740,7 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
         count_nonempty(final(store).slot_view()) <= count_nonempty(old(store).slot_view()),
         refcount_sound(final(store)),
         caps_consistent(final(store)),
+        only_empties(old(store).slot_view(), final(store).slot_view()),
 {
     let n = store.cspace_num_slots(cs);
     let mut i: u32 = 0;
@@ -5550,6 +5756,8 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
             // `delete` (assumed `external_body`) preserves the cap→object invariant, so the
             // resident-walk maintains it for the next iteration's `delete` (plan §6d).
             caps_consistent(store),
+            // Teardown only empties slots (plan §6d) — composes across the resident deletes.
+            only_empties(old(store).slot_view(), store.slot_view()),
             // Residency is immutable — `delete` frames `cspace_view`, and dom is preserved,
             // so `cs`'s residents stay live and the getters stay in-bounds across the loop.
             store.cspace_view() == old(store).cspace_view(),
@@ -5558,7 +5766,9 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
     {
         let sid = store.cspace_slot(cs, i);
         if !cap_is_empty(store.slot(sid).cap) {
+            let ghost sv_before = store.slot_view();
             delete(store, sid);
+            proof { lemma_only_empties_trans(old(store).slot_view(), sv_before, store.slot_view()); }
         }
         i += 1;
     }
@@ -5627,6 +5837,9 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
         final(store).slot_view().dom() == old(store).slot_view().dom(),
         count_nonempty(final(store).slot_view()) <= count_nonempty(old(store).slot_view()),
         caps_consistent(final(store)),
+        // Teardown only empties slots (plan §6d): `dec_ref` frames `slot_view`, so the
+        // dispatched destructor's `only_empties` carries straight through.
+        only_empties(old(store).slot_view(), final(store).slot_view()),
         // Non-designating caps: the store is untouched (the frame `delete` reads off for a
         // Frame cap — its frame-mapping release rode the frame-unmap branch, not here).
         cap_obj(cap) is None ==> {
@@ -5726,6 +5939,7 @@ pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId)
         final(store).slot_view().dom() == old(store).slot_view().dom(),
         count_nonempty(final(store).slot_view()) <= count_nonempty(old(store).slot_view()),
         caps_consistent(final(store)),
+        only_empties(old(store).slot_view(), final(store).slot_view()),
 {
     dec_ref(store, cs);
     if store.obj_refs(cs) == 0 {
@@ -5856,6 +6070,10 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         count_nonempty(final(store).slot_view()) < count_nonempty(old(store).slot_view()),
         refcount_sound(final(store)),
         caps_consistent(final(store)),
+        // Teardown only empties slots, never fills one (plan §6d): the just-cleared `slot`
+        // and every already-empty slot stay empty through the recursive `obj_unref`. The
+        // frame `destroy_channel`'s ring-cap loop carries; host-checked (`check_delete`).
+        only_empties(old(store).slot_view(), final(store).slot_view()),
         // Residency is immutable (the kernel fixes it at construction; every internal
         // mutator frames `cspace_view`, swept in 6a) — `delete` re-parents CDT links and
         // clears caps but never reassigns which slots a cspace owns. `destroy_cspace`'s
