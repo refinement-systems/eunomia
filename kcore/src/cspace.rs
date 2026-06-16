@@ -2018,6 +2018,30 @@ pub proof fn lemma_timer_chain_unique(
 // — the head re-pointed past `t` when `t` was the head (`k == 0`), the predecessor's
 // `next` re-threaded past `t` otherwise (`k > 0`), and `t` itself dropped from the chain
 // (its own post-state fields are irrelevant — it is no longer charted).
+// `Seq::remove(k)` of a duplicate-free seq is duplicate-free. Generic and isolated in its
+// own query — the `no_duplicates` `self[i] != self[j]` is an n² trigger (doc 25 §2 / 35 §2.6),
+// so proving it with only `Seq` in context (rather than inside the timer/waiter-chain proofs,
+// whose `Map`/view definitions add instantiation pressure) keeps those proofs well under the
+// rlimit across platforms (Z3's resource counting varies Linux↔macOS, so a borderline proof
+// flakes in CI; this is the headroom fix).
+pub proof fn lemma_seq_remove_no_dup<A>(s: Seq<A>, k: int)
+    requires
+        s.no_duplicates(),
+        0 <= k < s.len(),
+    ensures
+        s.remove(k).no_duplicates(),
+{
+    let r = s.remove(k);
+    s.remove_ensures(k);
+    assert forall|i: int, j: int|
+        0 <= i < r.len() && 0 <= j < r.len() && i != j implies r[i] != r[j] by {
+        let ii = if i < k { i } else { i + 1 };
+        let jj = if j < k { j } else { j + 1 };
+        assert(r[i] == s[ii] && r[j] == s[jj]);
+        assert(ii != jj);
+    }
+}
+
 pub proof fn lemma_timer_remove_chain(
     tmv0: Map<ObjId, TimerView>,
     head0: Option<ObjId>,
@@ -2050,15 +2074,9 @@ pub proof fn lemma_timer_remove_chain(
     ts0.remove_ensures(k);
     // dts.len() == len - 1; dts[i] == ts0[i] for i<k, ts0[i+1] for k<=i<len-1.
 
-    assert(dts.no_duplicates()) by {
-        assert forall|i: int, j: int|
-            0 <= i < dts.len() && 0 <= j < dts.len() && i != j implies dts[i] != dts[j] by {
-            let ii = if i < k { i } else { i + 1 };
-            let jj = if j < k { j } else { j + 1 };
-            assert(dts[i] == ts0[ii] && dts[j] == ts0[jj]);
-            assert(ii != jj);
-        }
-    }
+    // `timer_chain` gives `ts0.no_duplicates()`; the splice preserves it (offloaded query).
+    assert(ts0.no_duplicates());
+    lemma_seq_remove_no_dup(ts0, k);
 
     // Per-node: domain, next-threading, armed+notif.
     assert forall|i: int| #![trigger dts[i]] 0 <= i < dts.len() implies
