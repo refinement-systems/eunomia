@@ -2589,6 +2589,76 @@ pub open spec fn refcount_sound<S: Store>(store: &S) -> bool {
         )
 }
 
+// `refs[x] - census(x)` is unchanged for every object across an edit — `refs` and the
+// census move in lockstep (additive form, so no `nat` underflow). The contract the fire/wait
+// ops (`signal`/`fire`/`endpoint_cap_dropped`/`remove_waiter`) carry **unconditionally** (a
+// wake/splice drops one waiter's queued `refs` and its `waiter_seq` length together; an
+// `end_caps` decrement touches no census term). It is what `delete`'s body needs that the
+// conditional `refcount_sound(old) ==> refcount_sound(final)` could not give: `delete` runs
+// `endpoint_cap_dropped` in the window after clearing the deleted slot — where the census is
+// off by one at the channel object, so `refcount_sound` is *false* — and must still carry
+// the off-by-one across the peer-closed fire (`lemma_off_by_one_frozen`).
+pub open spec fn census_delta_frozen<S: Store>(s0: &S, s1: &S) -> bool {
+    &&& s1.refs_view().dom() == s0.refs_view().dom()
+    // Trigger on `obj_census(s1, x)` — the *final* census — so the quantifier instantiates
+    // only where someone reasons about the census (the teardown ops), not in census-agnostic
+    // callers that merely carry the ensures (e.g. `check_expired`'s `signal`-in-a-loop, which
+    // would otherwise blow the rlimit instantiating `obj_census` per object per iteration).
+    &&& forall|x: ObjId| s0.refs_view().dom().contains(x)
+            ==> s1.refs_view()[x] + obj_census(s0, x) == s0.refs_view()[x] + #[trigger] obj_census(s1, x)
+}
+
+// The census is sound everywhere **except** off by one at `z` (`refs[z] == census(z) + 1`):
+// the `obj_unref` precondition shape after `delete` clears the deleted cap's slot but before
+// `dec_ref` restores the count. `delete`'s Channel branch carries it across the peer-closed
+// fire — the fire/wait ops state `census_off_by_one`-preservation as an `ensures` so it
+// applies to the call automatically (the trigger keeps census-agnostic callers free of it).
+pub open spec fn census_off_by_one<S: Store>(store: &S, z: ObjId) -> bool {
+    &&& store.refs_view().dom().contains(z)
+    &&& store.refs_view()[z] == obj_census(store, z) + 1
+    &&& forall|x: ObjId| x != z && store.refs_view().dom().contains(x)
+            ==> store.refs_view()[x] == obj_census(store, x)
+}
+
+// A frozen delta turns `refcount_sound` at the start into `refcount_sound` at the end —
+// the form `destroy_tcb` consumes for its `remove_waiter` call (where `refcount_sound` holds).
+pub proof fn lemma_refcount_sound_from_frozen<S: Store>(s0: &S, s1: &S)
+    requires
+        census_delta_frozen(s0, s1),
+        refcount_sound(s0),
+    ensures
+        refcount_sound(s1),
+{
+    assert forall|x: ObjId| s1.refs_view().dom().contains(x) implies #[trigger] s1.refs_view()[x]
+        == obj_census(s1, x) by {
+        assert(s0.refs_view().dom().contains(x));
+        assert(s0.refs_view()[x] == obj_census(s0, x));
+    }
+}
+
+// A frozen delta carries the census **off-by-one at `z`** (the `obj_unref` precondition shape)
+// from start to end — `delete`'s Channel branch consumes it across `endpoint_cap_dropped`.
+pub proof fn lemma_off_by_one_frozen<S: Store>(s0: &S, s1: &S, z: ObjId)
+    requires
+        census_delta_frozen(s0, s1),
+        s0.refs_view().dom().contains(z),
+        s0.refs_view()[z] == obj_census(s0, z) + 1,
+        forall|x: ObjId| x != z && s0.refs_view().dom().contains(x)
+            ==> #[trigger] s0.refs_view()[x] == obj_census(s0, x),
+    ensures
+        s1.refs_view().dom().contains(z),
+        s1.refs_view()[z] == obj_census(s1, z) + 1,
+        forall|x: ObjId| x != z && s1.refs_view().dom().contains(x)
+            ==> #[trigger] s1.refs_view()[x] == obj_census(s1, x),
+{
+    assert(s1.refs_view()[z] + obj_census(s0, z) == s0.refs_view()[z] + obj_census(s1, z));
+    assert forall|x: ObjId| x != z && s1.refs_view().dom().contains(x) implies
+        #[trigger] s1.refs_view()[x] == obj_census(s1, x) by {
+        assert(s0.refs_view().dom().contains(x));
+        assert(s1.refs_view()[x] + obj_census(s0, x) == s0.refs_view()[x] + obj_census(s1, x));
+    }
+}
+
 // Cspace residency well-formedness (plan §6c): `cs` is a known cspace, its residency
 // `Seq` agrees with `num_slots` (the getter contracts' precondition), and every resident
 // slot handle is live in the arena. `destroy_cspace`'s loop reads `cspace_slot(cs, i)`
