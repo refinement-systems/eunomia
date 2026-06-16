@@ -1644,6 +1644,117 @@ pub proof fn lemma_drop_first_chain(
     }
 }
 
+// A waiter chain `ws` for `o` transports verbatim across a frame that changes only `o`'s
+// own notif view (held equal) and a *set* of TCBs none of which is on `o`'s chain: every
+// chain node names `o` (clause 6), but every changed TCB has `wait_notif != Some(o)` in
+// the source state, so no chain node is changed — and the chain holds in the target. The
+// directional building block of `lemma_waiter_refs_frame`, set-shaped so it covers both
+// `signal`'s single-node wake and `remove_waiter`'s two-node (head + predecessor) splice.
+pub proof fn lemma_chain_frame_set(
+    anv: Map<ObjId, NotifView>,
+    atv: Map<ObjId, TcbView>,
+    bnv: Map<ObjId, NotifView>,
+    btv: Map<ObjId, TcbView>,
+    o: ObjId,
+    ws: Seq<ObjId>,
+)
+    requires
+        waiter_chain(anv, atv, o, ws),
+        bnv[o] == anv[o],
+        btv.dom() == atv.dom(),
+        forall|k: ObjId| #[trigger] btv[k] != atv[k] ==> atv[k].wait_notif != Some(o),
+    ensures
+        waiter_chain(bnv, btv, o, ws),
+{
+    assert forall|i: int| #![trigger ws[i]] 0 <= i < ws.len() implies
+        btv[ws[i]] == atv[ws[i]] by {
+        assert(atv[ws[i]].wait_notif == Some(o));
+        if btv[ws[i]] != atv[ws[i]] {
+            assert(false);
+        }
+    }
+}
+
+// `waiter_refs(o)` is unchanged by an edit that holds `o`'s notif view fixed and changes
+// only TCBs that are *not* on `o`'s chain (every changed TCB has `wait_notif != Some(o)`
+// in both states). For `o != n`, both `signal`'s wake (it dequeues a waiter on `n`) and
+// `remove_waiter`'s splice (it touches the removed head and its predecessor, both waiters
+// on `n`) meet this: the chain set is preserved (transport both ways via
+// `lemma_chain_frame_set`), so existence agrees and (by uniqueness) the chosen seq agrees;
+// the robust `waiter_refs` keeps the no-chain case at 0 in both. The frame the wake/splice
+// `refcount_sound` preservation rests on (doc 45 §3).
+pub proof fn lemma_waiter_refs_frame(
+    nv0: Map<ObjId, NotifView>,
+    tv0: Map<ObjId, TcbView>,
+    nvf: Map<ObjId, NotifView>,
+    tvf: Map<ObjId, TcbView>,
+    n: ObjId,
+    o: ObjId,
+)
+    requires
+        o != n,
+        nvf[o] == nv0[o],
+        tvf.dom() == tv0.dom(),
+        forall|k: ObjId| #[trigger] tvf[k] != tv0[k]
+            ==> tv0[k].wait_notif != Some(o) && tvf[k].wait_notif != Some(o),
+    ensures
+        waiter_refs(nvf, tvf, o) == waiter_refs(nv0, tv0, o),
+{
+    if exists|ws: Seq<ObjId>| waiter_chain(nv0, tv0, o, ws) {
+        let a = waiter_seq(nv0, tv0, o);
+        assert(waiter_chain(nv0, tv0, o, a));
+        lemma_chain_frame_set(nv0, tv0, nvf, tvf, o, a);
+        let b = waiter_seq(nvf, tvf, o);
+        assert(waiter_chain(nvf, tvf, o, b));
+        lemma_chain_frame_set(nvf, tvf, nv0, tv0, o, b);
+        lemma_waiter_chain_unique(nv0, tv0, o, a, b);
+    } else {
+        // No chain for `o` in old ⇒ none in new either (a new chain would transport back).
+        assert(!exists|ws: Seq<ObjId>| waiter_chain(nvf, tvf, o, ws)) by {
+            if exists|ws: Seq<ObjId>| waiter_chain(nvf, tvf, o, ws) {
+                let wf = choose|ws: Seq<ObjId>| waiter_chain(nvf, tvf, o, ws);
+                lemma_chain_frame_set(nvf, tvf, nv0, tv0, o, wf);
+            }
+        }
+    }
+}
+
+// `waiter_refs(o)` is unchanged by an edit that changes only `o`'s OWN notif view (and
+// leaves it equal) with the TCB view fixed — the `signal` accumulate path's word-only
+// edit (and any `nv[n].word` bump): `waiter_chain` reads `nv` only at the queried object
+// `o` (the head/tail clauses), so `nvf[o] == nv0[o]` makes the chain predicate identical,
+// hence the existence and the chosen seq agree. The accumulate-path companion of
+// `lemma_waiter_refs_frame`.
+pub proof fn lemma_waiter_refs_frame_nv(
+    nv0: Map<ObjId, NotifView>,
+    nvf: Map<ObjId, NotifView>,
+    tv: Map<ObjId, TcbView>,
+    o: ObjId,
+)
+    requires
+        nvf[o] == nv0[o],
+    ensures
+        waiter_refs(nvf, tv, o) == waiter_refs(nv0, tv, o),
+{
+    assert forall|ws: Seq<ObjId>| #[trigger] waiter_chain(nv0, tv, o, ws)
+        == waiter_chain(nvf, tv, o, ws) by {}
+    if exists|ws: Seq<ObjId>| waiter_chain(nv0, tv, o, ws) {
+        let a = waiter_seq(nv0, tv, o);
+        let b = waiter_seq(nvf, tv, o);
+        assert(waiter_chain(nv0, tv, o, a));
+        assert(waiter_chain(nvf, tv, o, b));
+        assert(waiter_chain(nv0, tv, o, b));
+        lemma_waiter_chain_unique(nv0, tv, o, a, b);
+    } else {
+        assert(!exists|ws: Seq<ObjId>| waiter_chain(nvf, tv, o, ws)) by {
+            if exists|ws: Seq<ObjId>| waiter_chain(nvf, tv, o, ws) {
+                let w = choose|ws: Seq<ObjId>| waiter_chain(nvf, tv, o, ws);
+                assert(waiter_chain(nv0, tv, o, w));
+            }
+        }
+    }
+}
+
 // `remove_waiter`'s splice step (plan §4c): unlinking `t == ws0[k]` from a waiter
 // chain yields `ws0.remove(k)` in the post-state, given the imperative link fixups —
 // the head re-pointed past `t` when `t` was the head (`k == 0`), the predecessor's
@@ -2379,10 +2490,45 @@ pub open spec fn binding_refs(cv: Map<ObjId, ChanView>, o: ObjId) -> nat {
     ).len()
 }
 
+// `binding_refs(o)` reads `cv` only through each channel's `bindings` map, so any edit
+// that leaves every live channel's `bindings` unchanged (whatever else it touches —
+// `end_caps`, `head`, `count`, …) frames the term. The frame `endpoint_cap_dropped`'s
+// `refcount_sound` preservation needs: its `set_chan_end_caps` moves only `end_caps`.
+pub proof fn lemma_binding_refs_frame(cv0: Map<ObjId, ChanView>, cvf: Map<ObjId, ChanView>, o: ObjId)
+    requires
+        cvf.dom() == cv0.dom(),
+        forall|c: ObjId| #[trigger] cv0.dom().contains(c) ==> cvf[c].bindings == cv0[c].bindings,
+    ensures
+        binding_refs(cvf, o) == binding_refs(cv0, o),
+{
+    assert(Set::new(
+        |t: (ObjId, int, int)|
+            cvf.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3
+                && cvf[t.0].bindings[(t.1, t.2)].notif == Some(o),
+    ) =~= Set::new(
+        |t: (ObjId, int, int)|
+            cv0.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3
+                && cv0[t.0].bindings[(t.1, t.2)].notif == Some(o),
+    ));
+}
+
 // Blocked waiters on `o`: the length of `o`'s FIFO waiter chain — each blocked TCB
-// holds one queued ref (the phase-4 waiter term, plan §4b/§4c).
+// holds one queued ref (the phase-4 waiter term, plan §4b/§4c). **Robust** when no
+// waiter chain exists (`o` is not a well-formed notification): then the term is 0, not
+// the `choose`-garbage `waiter_seq` would otherwise yield. This matches the exec mirror
+// (`waiter_count_exec` returns 0 for a non-notification `o`) and is what lets `signal`
+// frame `waiter_refs(x)` for every `x != n` it does not signal: the wake perturbs only
+// `n`'s chain and the woken head `t`, so for `x != n` the chain predicate is unchanged
+// (`lemma_waiter_refs_frame`) — and an `x` with no chain stays at 0 in both states,
+// which the bare `waiter_seq(x).len()` could not guarantee across the edit. Where a
+// chain provably exists (every `notif_wf` notification), the `if` reduces to the plain
+// length, so the phase-4 contracts and the `obj_unref` Notification arm are unaffected.
 pub open spec fn waiter_refs(nv: Map<ObjId, NotifView>, tv: Map<ObjId, TcbView>, o: ObjId) -> nat {
-    waiter_seq(nv, tv, o).len()
+    if exists|ws: Seq<ObjId>| waiter_chain(nv, tv, o, ws) {
+        waiter_seq(nv, tv, o).len()
+    } else {
+        0
+    }
 }
 
 // Armed timers naming `o`: each armed timer bound to `o` holds one queued ref while
@@ -2402,6 +2548,25 @@ pub open spec fn frame_map_refs(sv: Map<SlotId, CapSlot>, o: ObjId) -> nat {
 pub open spec fn thread_hold_refs(tv: Map<ObjId, TcbView>, o: ObjId) -> nat {
     tv.dom().filter(|k: ObjId| tv[k].cspace == Some(o)).len()
         + tv.dom().filter(|k: ObjId| tv[k].aspace == Some(o)).len()
+}
+
+// `thread_hold_refs(o)` depends only on every TCB's `cspace`/`aspace` fields, so any edit
+// that leaves those two fields untouched (whatever else it changes — state, qnext,
+// wait_notif, retval) frames the term. The frame `signal`/`remove_waiter`'s
+// `refcount_sound` preservation needs: they move a TCB's queue/wait fields but never its
+// cspace/aspace (plan §6d body PR).
+pub proof fn lemma_thread_hold_frame(tv0: Map<ObjId, TcbView>, tvf: Map<ObjId, TcbView>, o: ObjId)
+    requires
+        tvf.dom() == tv0.dom(),
+        forall|k: ObjId| #[trigger] tvf[k].cspace == tv0[k].cspace,
+        forall|k: ObjId| #[trigger] tvf[k].aspace == tv0[k].aspace,
+    ensures
+        thread_hold_refs(tvf, o) == thread_hold_refs(tv0, o),
+{
+    assert(tv0.dom().filter(|k: ObjId| tv0[k].cspace == Some(o))
+        =~= tvf.dom().filter(|k: ObjId| tvf[k].cspace == Some(o)));
+    assert(tv0.dom().filter(|k: ObjId| tv0[k].aspace == Some(o))
+        =~= tvf.dom().filter(|k: ObjId| tvf[k].aspace == Some(o)));
 }
 
 // The recount: `refs[o]` must equal this over the whole store.
@@ -2502,6 +2667,11 @@ pub open spec fn caps_consistent<S: Store>(store: &S) -> bool {
     // and structural like the slot-finiteness companion; every mutator frames `chan_view` or
     // `insert`s one channel, both finiteness-preserving.
     &&& store.chan_view().dom().finite()
+    // The TCB arena is finite too (the §6d body PR's `destroy_tcb` needs it for the
+    // `thread_hold_refs` recount when it clears `tcb.cspace`/`tcb.aspace`). Refs-free and
+    // structural like the slot/chan companions; every mutator frames `tcb_view` or `insert`s
+    // one TCB, both finiteness-preserving.
+    &&& store.tcb_view().dom().finite()
     &&& forall|s: SlotId| #![trigger store.slot_view()[s]]
             store.slot_view().dom().contains(s) && !is_empty_cap(store.slot_view()[s].cap)
             ==> cap_consistent(store, store.slot_view()[s].cap)
@@ -2804,7 +2974,7 @@ proof fn lemma_thread_hold_cspace_bump(m: Map<ObjId, TcbView>, k: ObjId, v: TcbV
 
 // Thread-hold drop (cspace edit): clearing a thread's `o` cspace hold lowers the
 // census (the term `destroy_tcb`'s `unref_cspace` releases; teardown, 6d).
-proof fn lemma_thread_hold_cspace_drop(m: Map<ObjId, TcbView>, k: ObjId, v: TcbView, o: ObjId)
+pub(crate) proof fn lemma_thread_hold_cspace_drop(m: Map<ObjId, TcbView>, k: ObjId, v: TcbView, o: ObjId)
     requires
         m.dom().finite(),
         m.dom().contains(k),
@@ -2877,7 +3047,7 @@ proof fn lemma_thread_hold_aspace_bump(m: Map<ObjId, TcbView>, k: ObjId, v: TcbV
     assert(c2 =~= c1);
 }
 
-proof fn lemma_thread_hold_aspace_drop(m: Map<ObjId, TcbView>, k: ObjId, v: TcbView, o: ObjId)
+pub(crate) proof fn lemma_thread_hold_aspace_drop(m: Map<ObjId, TcbView>, k: ObjId, v: TcbView, o: ObjId)
     requires
         m.dom().finite(),
         m.dom().contains(k),
@@ -5097,6 +5267,15 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
         // cap-frame `delete`'s "teardown only empties slots" reasoning rests on (§6d).
         forall|x: SlotId| old(store).slot_view().dom().contains(x)
             ==> #[trigger] final(store).slot_view()[x].cap == old(store).slot_view()[x].cap,
+        // Unlink edits only CDT links in `slot_view`; every object view is framed (each
+        // `set_slot` frames them). `delete`'s census/`end_caps`/`caps_consistent` proofs
+        // (§6d body PR) read these across the `cdt_unlink` that precedes the teardown.
+        final(store).chan_view() == old(store).chan_view(),
+        final(store).notif_view() == old(store).notif_view(),
+        final(store).tcb_view() == old(store).tcb_view(),
+        final(store).timer_view() == old(store).timer_view(),
+        final(store).timer_head_view() == old(store).timer_head_view(),
+        final(store).cspace_view() == old(store).cspace_view(),
 {
     let ghost m0 = old(store).slot_view();
     let ghost r0 = old(store).refs_view();
@@ -5136,6 +5315,12 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
             store.slot_view().dom() == m0.dom(),
             store.slot_view().dom().finite(),
             store.refs_view() == r0,
+            store.chan_view() == old(store).chan_view(),
+            store.notif_view() == old(store).notif_view(),
+            store.tcb_view() == old(store).tcb_view(),
+            store.timer_view() == old(store).timer_view(),
+            store.timer_head_view() == old(store).timer_head_view(),
+            store.cspace_view() == old(store).cspace_view(),
             cspace_wf(m0),
             valid_srank(m0, srk),
             parent == m0[slot].parent,
