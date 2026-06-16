@@ -1077,12 +1077,17 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
         cspace::cspace_wf(old(store).slot_view()),
         cspace::chan_wf(old(store).chan_view(), old(store).slot_view(), ch),
         cspace::refcount_sound(old(store)),
+        // Cap→object consistency (plan §6d foundation): the body deletes ring caps of
+        // arbitrary kind, so it needs each one's object well-formed. Assumed here
+        // (`external_body`), discharged by the body PR; host-checked (`check_destroy_channel`).
+        cspace::caps_consistent(old(store)),
     ensures
         cspace::cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom() == old(store).slot_view().dom(),
         cspace::count_nonempty(final(store).slot_view())
             <= cspace::count_nonempty(old(store).slot_view()),
         cspace::refcount_sound(final(store)),
+        cspace::caps_consistent(final(store)),
         forall|r: int, i: int, c: int|
             (0 <= r < 2 && 0 <= i < old(store).chan_view()[ch].depth && 0 <= c < 4)
                 ==> cspace::is_empty_cap(

@@ -2385,6 +2385,71 @@ pub open spec fn cspace_resident_wf<S: Store>(store: &S, cs: ObjId) -> bool {
             ==> #[trigger] store.slot_view().dom().contains(store.cspace_view()[cs].slots[i])
 }
 
+// ── Cap→object consistency (plan §6d foundation, `doc/results/44`). The teardown
+//    *body* proofs (the follow-on §6d PR) cannot run from `cspace_wf` + `refcount_sound`
+//    alone: `delete`'s body calls `endpoint_cap_dropped` (Channel branch) and `obj_unref`,
+//    both of which demand the *designated object's* well-formedness — `chan_wf`/`notif_wf`/
+//    `cspace_resident_wf`/the tcb-bind facts/`timer_wf` — none of which `cspace_wf` carries.
+//    Because the teardown recursion deletes *arbitrary-kind* caps (`destroy_cspace` over
+//    residents, `revoke` over descendants, `destroy_channel` over ring caps), each caller
+//    needs that wf for caps it doesn't statically know — so it must be a *system* invariant
+//    over every live cap, not a per-call precondition. This foundation states it; the body
+//    PR consumes it. Preservation across teardown rests on `refcount_sound`: a last-ref
+//    destroy leaves no cap designating the freed object, so no surviving cap's consistency
+//    can depend on it (the refs-coupled clauses below — the Channel `end_caps`/`binding_refs_ok`
+//    and the Timer armed-notif-live — are exactly that entanglement). ──
+
+// One cap's designated-object consistency, kind by kind. The clauses mirror `obj_unref`'s
+// per-`CapKind` `requires` (so the body proof maps `caps_consistent` to it mechanically),
+// plus the structural Channel facts `delete`'s `endpoint_cap_dropped` call needs beyond
+// `chan_wf` (the peer-closed end's live end-cap count + `binding_notif_wf`).
+//
+// **`caps_consistent` is deliberately refs-free** — every clause reads only object views
+// (slot/chan/notif/tcb/timer/cspace), never `refs_view`. That is what makes it a clean
+// *structural* invariant the `dec_ref` `-1` preserves by framing alone (no census/finiteness
+// gymnastics in this foundation). The refs-coupled object-wf facts the body PR also needs
+// — `endpoint_cap_dropped`'s `binding_refs_ok` and `obj_unref`'s Timer armed-notif-live —
+// are **not** carried here: each is "a reference to `n` ⟹ `refs[n] > 0`", which is exactly
+// a `refcount_sound` consequence (the reference makes `census(n) ≥ 1`), so the body PR
+// derives them at the call site where `refs` is in scope, rather than threading them
+// through teardown (which would couple this invariant to the census and re-introduce the
+// nested-`(ch,e,v)` / armed-timer finiteness the recount lemmas were quarantined for).
+pub open spec fn cap_consistent<S: Store>(store: &S, c: Cap) -> bool {
+    match c.kind {
+        CapKind::Channel(o, end) => {
+            &&& chan_wf(store.chan_view(), store.slot_view(), o)
+            &&& store.chan_view()[o].end_caps[crate::channel::end_idx_spec(end)] > 0
+            &&& binding_notif_wf(store.chan_view(), store.notif_view(), store.tcb_view(), o)
+        }
+        CapKind::CSpace(o) => cspace_resident_wf(store, o),
+        CapKind::Thread(o) => {
+            &&& store.tcb_view().dom().contains(o)
+            &&& store.tcb_view()[o].bind_slots.len() == 2
+            &&& store.slot_view().dom().contains(store.tcb_view()[o].bind_slots[0])
+            &&& store.slot_view().dom().contains(store.tcb_view()[o].bind_slots[1])
+        }
+        CapKind::Notification(o) => notif_wf(store.notif_view(), store.tcb_view(), o),
+        CapKind::Timer(o) => {
+            &&& store.timer_view().dom().contains(o)
+            &&& store.timer_view().dom().finite()
+            &&& timer_wf(store.timer_view(), store.timer_head_view())
+        }
+        // Empty / Untyped / Frame / Aspace designate no destructor-bearing object here:
+        // `obj_unref` is a no-op (Frame/Untyped/Empty) or the `unref_aspace` leaf (Aspace),
+        // neither of which reads an object well-formedness term.
+        _ => true,
+    }
+}
+
+// The system invariant: every live cap's designated object is consistent (and the slot
+// arena is finite — the `obj_unref` CSpace/Thread/Timer arms' standing precondition).
+pub open spec fn caps_consistent<S: Store>(store: &S) -> bool {
+    &&& store.slot_view().dom().finite()
+    &&& forall|s: SlotId| #![trigger store.slot_view()[s]]
+            store.slot_view().dom().contains(s) && !is_empty_cap(store.slot_view()[s].cap)
+            ==> cap_consistent(store, store.slot_view()[s].cap)
+}
+
 // ── Per-term recount lemmas (plan §6a). The single-key bump/drop building blocks
 //    6b–6f compose: a one-key view edit raises/lowers exactly one census term by
 //    one, the others fixed. Each is the `lemma_designation_bump` shape over a
@@ -5403,6 +5468,9 @@ fn dec_ref<S: Store>(store: &mut S, o: ObjId)
         old(store).refs_view()[o] == obj_census(old(store), o) + 1,
         forall|x: ObjId| x != o && old(store).refs_view().dom().contains(x)
             ==> #[trigger] old(store).refs_view()[x] == obj_census(old(store), x),
+        // The cap→object invariant rides through unchanged — it reads only object views, all
+        // framed by `set_obj_refs` (plan §6d foundation).
+        caps_consistent(old(store)),
     ensures
         refcount_sound(final(store)),
         final(store).refs_view() == old(store).refs_view().insert(
@@ -5416,6 +5484,7 @@ fn dec_ref<S: Store>(store: &mut S, o: ObjId)
         final(store).timer_view() == old(store).timer_view(),
         final(store).timer_head_view() == old(store).timer_head_view(),
         final(store).cspace_view() == old(store).cspace_view(),
+        caps_consistent(final(store)),
 {
     let r = store.obj_refs(o);
     store.set_obj_refs(o, r - 1);
@@ -5427,6 +5496,14 @@ fn dec_ref<S: Store>(store: &mut S, o: ObjId)
         // untouched, so the off-by-one precondition carries to full soundness.
         assert forall|x: ObjId| final(store).refs_view().dom().contains(x)
             implies #[trigger] final(store).refs_view()[x] == obj_census(final(store), x) by {}
+        // `caps_consistent` is refs-free: every per-cap clause reads only the object views
+        // `set_obj_refs` left equal to `old`, so each live cap's consistency carries over.
+        assert forall|s: SlotId| #![trigger final(store).slot_view()[s]]
+            final(store).slot_view().dom().contains(s)
+                && !is_empty_cap(final(store).slot_view()[s].cap)
+            implies cap_consistent(final(store), final(store).slot_view()[s].cap) by {
+            assert(cap_consistent(old(store), old(store).slot_view()[s].cap));
+        }
     }
 }
 
@@ -5449,6 +5526,7 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
         cspace_wf(old(store).slot_view()),
         old(store).slot_view().dom().finite(),
         refcount_sound(old(store)),
+        caps_consistent(old(store)),
         cspace_resident_wf(old(store), cs),
     ensures
         cspace_wf(final(store).slot_view()),
@@ -5456,6 +5534,7 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
         final(store).slot_view().dom().finite(),
         count_nonempty(final(store).slot_view()) <= count_nonempty(old(store).slot_view()),
         refcount_sound(final(store)),
+        caps_consistent(final(store)),
 {
     let n = store.cspace_num_slots(cs);
     let mut i: u32 = 0;
@@ -5468,6 +5547,9 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
             store.slot_view().dom().finite(),
             count_nonempty(store.slot_view()) <= count_nonempty(old(store).slot_view()),
             refcount_sound(store),
+            // `delete` (assumed `external_body`) preserves the cap→object invariant, so the
+            // resident-walk maintains it for the next iteration's `delete` (plan §6d).
+            caps_consistent(store),
             // Residency is immutable — `delete` frames `cspace_view`, and dom is preserved,
             // so `cs`'s residents stay live and the getters stay in-bounds across the loop.
             store.cspace_view() == old(store).cspace_view(),
@@ -5536,11 +5618,15 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                         old(store).refs_view().dom().contains(n)
                         && old(store).refs_view()[n] > 0))
         },
+        // The system cap→object invariant (plan §6d): needed for the `destroy_channel`/
+        // `destroy_tcb` arms (which delete arbitrary caps) and preserved through the `-1`.
+        caps_consistent(old(store)),
     ensures
         refcount_sound(final(store)),
         cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom() == old(store).slot_view().dom(),
         count_nonempty(final(store).slot_view()) <= count_nonempty(old(store).slot_view()),
+        caps_consistent(final(store)),
         // Non-designating caps: the store is untouched (the frame `delete` reads off for a
         // Frame cap — its frame-mapping release rode the frame-unmap branch, not here).
         cap_obj(cap) is None ==> {
@@ -5632,12 +5718,14 @@ pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId)
             ==> #[trigger] old(store).refs_view()[x] == obj_census(old(store), x),
         cspace_wf(old(store).slot_view()),
         old(store).slot_view().dom().finite(),
+        caps_consistent(old(store)),
         cspace_resident_wf(old(store), cs),
     ensures
         refcount_sound(final(store)),
         cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom() == old(store).slot_view().dom(),
         count_nonempty(final(store).slot_view()) <= count_nonempty(old(store).slot_view()),
+        caps_consistent(final(store)),
 {
     dec_ref(store, cs);
     if store.obj_refs(cs) == 0 {
@@ -5670,6 +5758,7 @@ pub fn unref_aspace<S: Store>(store: &mut S, a: ObjId)
         old(store).refs_view()[a] == obj_census(old(store), a) + 1,
         forall|o: ObjId| o != a && old(store).refs_view().dom().contains(o)
             ==> #[trigger] old(store).refs_view()[o] == obj_census(old(store), o),
+        caps_consistent(old(store)),
     ensures
         refcount_sound(final(store)),
         old(store).refs_view()[a] == 1 ==>
@@ -5686,6 +5775,9 @@ pub fn unref_aspace<S: Store>(store: &mut S, a: ObjId)
         final(store).timer_view() == old(store).timer_view(),
         final(store).timer_head_view() == old(store).timer_head_view(),
         final(store).cspace_view() == old(store).cspace_view(),
+        // Aspaces appear in no `cap_consistent` arm and every object view is framed, so the
+        // invariant is preserved (plan §6d).
+        caps_consistent(final(store)),
 {
     let r = store.obj_refs(a);
     store.set_obj_refs(a, r - 1);
@@ -5704,6 +5796,14 @@ pub fn unref_aspace<S: Store>(store: &mut S, a: ObjId)
         // and census are both untouched, so the precond's soundness carries over.
         assert forall|o: ObjId| final(store).refs_view().dom().contains(o)
             implies #[trigger] final(store).refs_view()[o] == obj_census(final(store), o) by {}
+        // caps_consistent: every object view is framed equal to `old`, so each live cap's
+        // (refs-free) consistency carries over.
+        assert forall|s: SlotId| #![trigger final(store).slot_view()[s]]
+            final(store).slot_view().dom().contains(s)
+                && !is_empty_cap(final(store).slot_view()[s].cap)
+            implies cap_consistent(final(store), final(store).slot_view()[s].cap) by {
+            assert(cap_consistent(old(store), old(store).slot_view()[s].cap));
+        }
     }
 }
 
@@ -5742,6 +5842,12 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         old(store).slot_view().dom().contains(slot),
         !is_empty_cap(old(store).slot_view()[slot].cap),
         refcount_sound(old(store)),
+        // Cap→object consistency (plan §6d foundation): the body's `endpoint_cap_dropped`
+        // and `obj_unref` calls need the deleted cap's object well-formed, which only this
+        // system invariant supplies. Assumed here (`external_body`), discharged by the body
+        // PR; host-checked (`check_delete`). The verified callers (`bind`, `revoke`,
+        // `destroy_cspace`) carry it like 6a's `refcount_sound`.
+        caps_consistent(old(store)),
     ensures
         cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom() == old(store).slot_view().dom(),
@@ -5749,6 +5855,7 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         is_empty_cap(final(store).slot_view()[slot].cap),
         count_nonempty(final(store).slot_view()) < count_nonempty(old(store).slot_view()),
         refcount_sound(final(store)),
+        caps_consistent(final(store)),
         // Residency is immutable (the kernel fixes it at construction; every internal
         // mutator frames `cspace_view`, swept in 6a) — `delete` re-parents CDT links and
         // clears caps but never reassigns which slots a cspace owns. `destroy_cspace`'s
@@ -5862,19 +5969,21 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
         old(store).slot_view().dom().contains(slot),
         !is_empty_cap(old(store).slot_view()[slot].cap),
         refcount_sound(old(store)),
+        caps_consistent(old(store)),
     ensures
         cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom().contains(slot),
         final(store).slot_view()[slot].first_child is None,
 {
-    // `refcount_sound` rides the loop as `delete`'s underflow gate (§6a/§1.3):
-    // each `delete` requires it (held by the invariant) and re-establishes it.
+    // `refcount_sound` and `caps_consistent` ride the loop as `delete`'s preconditions
+    // (§6a/§6d): each `delete` requires them (held by the invariant) and re-establishes them.
     while store.slot(slot).first_child.is_some()
         invariant
             cspace_wf(store.slot_view()),
             store.slot_view().dom().finite(),
             store.slot_view().dom().contains(slot),
             refcount_sound(store),
+            caps_consistent(store),
         decreases count_nonempty(store.slot_view()),
     {
         // The first child is live (it names `slot` as parent, so it is not an
