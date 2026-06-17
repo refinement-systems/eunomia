@@ -345,6 +345,19 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         cspace::end_caps_sound(old(store)),
         // Refs-domain completeness (plan §6d body-removal): the body's `delete`s thread it.
         cspace::census_dom_complete(old(store)),
+        // The bound cspace is resident-wf (plan §6d-final-thread): `unref_cspace` needs it to
+        // drive the at-zero `destroy_cspace`. The TCB's own Thread cap is already gone by the
+        // time this destructor runs, so `obj_unref` supplies it (sourced, in turn, from
+        // `delete`'s `caps_consistent` over the live Thread cap).
+        old(store).tcb_view()[t].cspace matches Some(cs) ==>
+            cspace::cspace_resident_wf(old(store), cs),
+        // Waiter-coherence (plan §6d-final-thread): if `t` is blocked, its `wait_notif` names a
+        // `notif_wf` notification — the precondition the BlockedNotif branch's `remove_waiter`
+        // needs. Same provenance as the cspace fact: `obj_unref` ← `delete`'s `caps_consistent`
+        // over the (now-deleted) live Thread cap's `cap_consistent` clause.
+        old(store).tcb_view()[t].state == ThreadState::BlockedNotif ==>
+            (old(store).tcb_view()[t].wait_notif matches Some(wn) ==>
+                cspace::notif_wf(old(store).notif_view(), old(store).tcb_view(), wn)),
     ensures
         cspace::cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom() == old(store).slot_view().dom(),
