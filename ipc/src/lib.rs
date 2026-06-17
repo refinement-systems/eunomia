@@ -69,7 +69,3 @@ pub mod fuzz_support;
 mod sync;
 #[cfg(any(test, loom, shuttle))]
 pub mod model;
-
-/// Kani harnesses (plan §4.7), compiled only under `cargo kani`.
-#[cfg(kani)]
-mod proofs;
