@@ -158,9 +158,29 @@ pub fn endpoint_cap_added<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
                     (old(store).chan_view()[ch].end_caps[end_idx_spec(end)] + 1) as nat),
                 ..old(store).chan_view()[ch]
             }),
+        // `refcount_sound` as a system invariant (plan §6f): `end_caps` is no census term and the
+        // bindings are untouched, so refs and census are both unchanged ⇒ a sound census carries.
+        cspace::refcount_sound(old(store)) ==> cspace::refcount_sound(final(store)),
 {
     let e = end_idx(end);
     store.set_chan_end_caps(ch, e, store.chan_end_caps(ch, e) + 1);
+    proof {
+        // census-neutral: only `end_caps[ch]` moved (not a census term), the bindings frame.
+        if cspace::refcount_sound(old(store)) {
+            assert(store.chan_view().dom() == old(store).chan_view().dom());
+            assert forall|c: ObjId| #[trigger] old(store).chan_view().dom().contains(c)
+                implies store.chan_view()[c].bindings == old(store).chan_view()[c].bindings by {
+                if c != ch {
+                    assert(store.chan_view()[c] == old(store).chan_view()[c]);
+                }
+            }
+            assert forall|x: ObjId| #[trigger] cspace::obj_census(store, x)
+                == cspace::obj_census(old(store), x) by {
+                cspace::lemma_binding_refs_frame(old(store).chan_view(), store.chan_view(), x);
+            }
+            cspace::lemma_refcount_sound_from_census_eq(old(store), store);
+        }
+    }
 }
 
 /// Called on every endpoint-cap deletion; the last cap of an end raises
@@ -216,6 +236,11 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
         // and `fire` freezes the delta across the peer-closed fire. Unconditional and
         // `requires`-free — `delete`'s Channel branch consumes it in the off-by-one window.
         cspace::census_delta_frozen(old(store), final(store)),
+        // `refcount_sound` as a system invariant (plan §6f): the frozen delta bridges it.
+        // Conditional + `requires`-free — `delete`'s Channel branch runs this in the off-by-one
+        // window where `refcount_sound` is *false*, so it consumes the frozen delta directly,
+        // never this clause; a census-sound caller gets a census-sound result.
+        cspace::refcount_sound(old(store)) ==> cspace::refcount_sound(final(store)),
         // …and a census off by one at any `z` survives — exactly the shape `delete` carries
         // across the peer-closed fire (its deleted channel cap's slot was just cleared).
         forall|z: ObjId| cspace::census_off_by_one(old(store), z)
@@ -304,6 +329,10 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
     // survives by `lemma_off_by_one_frozen` applied to that frozen delta.
     proof {
         assert(cspace::census_delta_frozen(old(store), store));
+        // refcount_sound (conditional, plan §6f): the frozen delta bridges it.
+        if cspace::refcount_sound(old(store)) {
+            cspace::lemma_refcount_sound_from_frozen(old(store), store);
+        }
         assert forall|z: ObjId| cspace::census_off_by_one(old(store), z) implies
             #[trigger] cspace::census_off_by_one(store, z) by {
             cspace::lemma_off_by_one_frozen(old(store), store, z);
@@ -478,6 +507,47 @@ pub open spec fn bind_refs_post(
     }
 }
 
+/// The per-object delta of `bind_refs_post`, additive form (plan §6f): `refs[x]` drops at the
+/// old notif and rises at the new one, matching `lemma_binding_replace`'s binding-census delta
+/// term-for-term — the lockstep `channel::bind` reads off to preserve `refcount_sound`. The
+/// `old > 0` guard is the same `nat`-underflow gate the body's `- 1` already requires.
+proof fn lemma_bind_refs_post_at(
+    r0: Map<ObjId, nat>,
+    old_notif: Option<ObjId>,
+    new_notif: Option<ObjId>,
+    x: ObjId,
+)
+    requires
+        old_notif matches Some(no) ==> r0.dom().contains(no) && r0[no] > 0,
+        new_notif matches Some(nn) ==> r0.dom().contains(nn),
+    ensures
+        bind_refs_post(r0, old_notif, new_notif)[x] + (if old_notif == Some(x) {
+            1nat
+        } else {
+            0nat
+        }) == r0[x] + (if new_notif == Some(x) { 1nat } else { 0nat }),
+{
+    let r1 = match old_notif {
+        Some(no) => r0.insert(no, (r0[no] - 1) as nat),
+        None => r0,
+    };
+    if let Some(no) = old_notif {
+        assert(r0[no] > 0);
+        assert(r1[x] == if x == no { (r0[no] - 1) as nat } else { r0[x] });
+    } else {
+        assert(r1[x] == r0[x]);
+    }
+    if let Some(nn) = new_notif {
+        assert(bind_refs_post(r0, old_notif, new_notif)[x] == if x == nn {
+            (r1[nn] + 1) as nat
+        } else {
+            r1[x]
+        });
+    } else {
+        assert(bind_refs_post(r0, old_notif, new_notif)[x] == r1[x]);
+    }
+}
+
 /// Configure an endpoint's event binding (holder-configured, §3.6).
 /// Replacing a binding releases the old notification's ref and adds the new
 /// one's (§3.6 binding-refcount discipline).
@@ -518,8 +588,18 @@ pub fn bind<S: Store>(
             old(store).refs_view(),
             old(store).chan_view()[ch].bindings[(end_idx_spec(end), event as int)].notif,
             notif),
+        // `refcount_sound` as a system invariant (plan §6f): the binding-census delta
+        // (`lemma_binding_replace`) matches the `bind_refs_post` refs delta
+        // (`lemma_bind_refs_post_at`) term-for-term — `refs` and the census move in lockstep at
+        // the old and new notifications. Conditional + `requires`-free; the finiteness antecedent
+        // is the `binding_refs` `len` well-definedness `caps_consistent` carries (it is no extra
+        // burden on a well-formed store).
+        (old(store).chan_view().dom().finite() && cspace::refcount_sound(old(store)))
+            ==> cspace::refcount_sound(final(store)),
 {
     let e = end_idx(end);
+    let ghost old_notif =
+        old(store).chan_view()[ch].bindings[(end_idx_spec(end), event as int)].notif;
     let old_b = store.chan_binding(ch, e, event);
     if let Some(n) = old_b.notif {
         store.set_obj_refs(n, store.obj_refs(n) - 1);
@@ -528,6 +608,33 @@ pub fn bind<S: Store>(
         store.set_obj_refs(n, store.obj_refs(n) + 1);
     }
     store.set_chan_binding(ch, e, event, Binding { notif, bits });
+    proof {
+        if old(store).chan_view().dom().finite() && cspace::refcount_sound(old(store)) {
+            let cv0 = old(store).chan_view();
+            // The five non-binding census terms frame: the slot/notif/tcb/timer views are
+            // untouched (the setters frame them), so only `binding_refs` moves.
+            assert(store.slot_view() == old(store).slot_view());
+            assert(store.notif_view() == old(store).notif_view());
+            assert(store.tcb_view() == old(store).tcb_view());
+            assert(store.timer_view() == old(store).timer_view());
+            assert(store.chan_view() == cv0.insert(
+                ch,
+                ChanView {
+                    bindings: cv0[ch].bindings.insert(
+                        (end_idx_spec(end), event as int),
+                        Binding { notif, bits }),
+                    ..cv0[ch]
+                }));
+            assert forall|x: ObjId| store.refs_view().dom().contains(x) implies
+                #[trigger] store.refs_view()[x] == cspace::obj_census(store, x) by {
+                cspace::lemma_binding_replace(cv0, ch, end_idx_spec(end), event as int,
+                    Binding { notif, bits }, x);
+                lemma_bind_refs_post_at(old(store).refs_view(), old_notif, notif, x);
+                // refcount_sound(old) at x; the binding delta == the refs delta closes refs == census.
+                assert(old(store).refs_view()[x] == cspace::obj_census(old(store), x));
+            }
+        }
+    }
 }
 
 /// Send: copy the payload into the ring and move caps from the sender's

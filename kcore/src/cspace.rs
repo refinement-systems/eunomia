@@ -4332,6 +4332,120 @@ pub proof fn lemma_clear_slot_obj_census<S: Store>(
     // `cap_obj(cap)`/`cap_frame_aspace(cap)`; the four view terms read framed views (equal args).
 }
 
+// The dual of `lemma_clear_slot_census` (plan §6f): *installing* a cap into a previously EMPTY
+// slot raises the two slot-dependent census terms by one at the new cap's designated object /
+// mapped aspace (the EMPTY old cap added to no filter). `derive`/`retype_install` compose this
+// with `set_slot`'s frames of the four non-slot census terms to get the +1 (or no) census shift.
+proof fn lemma_set_slot_census(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot, x: ObjId)
+    requires
+        m.dom().finite(),
+        m.dom().contains(k),
+        is_empty_cap(m[k].cap),
+    ensures
+        slot_refs(m.insert(k, v), x) == slot_refs(m, x) + (if cap_obj(v.cap) == Some(x) {
+            1nat
+        } else {
+            0nat
+        }),
+        frame_map_refs(m.insert(k, v), x) == frame_map_refs(m, x) + (if cap_frame_aspace(v.cap)
+            == Some(x) {
+            1nat
+        } else {
+            0nat
+        }),
+{
+    let m2 = m.insert(k, v);
+    assert(m2.dom() =~= m.dom());
+    // The EMPTY old cap designates and maps nothing, so `k` is in neither old filter set.
+    assert(cap_obj(m[k].cap) is None);
+    assert(cap_frame_aspace(m[k].cap) is None);
+    let fs1 = m.dom().filter(|j: SlotId| cap_obj(m[j].cap) == Some(x));
+    let fs2 = m2.dom().filter(|j: SlotId| cap_obj(m2[j].cap) == Some(x));
+    assert(fs1.finite());
+    assert(!fs1.contains(k));
+    if cap_obj(v.cap) == Some(x) {
+        assert forall|j: SlotId| #![trigger fs2.contains(j)] fs2.contains(j) <==> fs1.insert(k).contains(j) by {
+            if j != k {
+                assert(m2[j] == m[j]);
+            }
+        }
+        assert(fs2 =~= fs1.insert(k));
+    } else {
+        assert forall|j: SlotId| #![trigger fs2.contains(j)] fs2.contains(j) <==> fs1.contains(j) by {
+            if j != k {
+                assert(m2[j] == m[j]);
+            }
+        }
+        assert(fs2 =~= fs1);
+    }
+    let fm1 = m.dom().filter(|j: SlotId| cap_frame_aspace(m[j].cap) == Some(x));
+    let fm2 = m2.dom().filter(|j: SlotId| cap_frame_aspace(m2[j].cap) == Some(x));
+    assert(fm1.finite());
+    assert(!fm1.contains(k));
+    if cap_frame_aspace(v.cap) == Some(x) {
+        assert forall|j: SlotId| #![trigger fm2.contains(j)] fm2.contains(j) <==> fm1.insert(k).contains(j) by {
+            if j != k {
+                assert(m2[j] == m[j]);
+            }
+        }
+        assert(fm2 =~= fm1.insert(k));
+    } else {
+        assert forall|j: SlotId| #![trigger fm2.contains(j)] fm2.contains(j) <==> fm1.contains(j) by {
+            if j != k {
+                assert(m2[j] == m[j]);
+            }
+        }
+        assert(fm2 =~= fm1);
+    }
+}
+
+// The dual of `lemma_clear_slot_obj_census` (plan §6f): the full `obj_census` *rise* for
+// installing a designating cap `v` into a previously EMPTY slot after a link-only edit
+// (`sv_mid` is `s_old.slot_view()` with `slot` set to `v`; `s_new.slot_view()` is a cap-equal
+// re-link of `sv_mid` — `cdt_insert_child`). A cap is either an object cap or a frame cap (never
+// both), so the census rises by exactly one — at `cap_obj(v.cap)`, else at `cap_frame_aspace(v.cap)`.
+pub proof fn lemma_set_slot_obj_census<S: Store>(
+    s_old: &S,
+    s_new: &S,
+    sv_mid: Map<SlotId, CapSlot>,
+    slot: SlotId,
+    v: CapSlot,
+    x: ObjId,
+)
+    requires
+        sv_mid == s_old.slot_view().insert(slot, v),
+        s_new.slot_view().dom() == sv_mid.dom(),
+        forall|k: SlotId| #[trigger] s_new.slot_view().dom().contains(k)
+            ==> s_new.slot_view()[k].cap == sv_mid[k].cap,
+        s_old.slot_view().dom().contains(slot),
+        s_old.slot_view().dom().finite(),
+        is_empty_cap(s_old.slot_view()[slot].cap),
+        cap_obj(v.cap) is None || cap_frame_aspace(v.cap) is None,
+        s_new.chan_view() == s_old.chan_view(),
+        s_new.notif_view() == s_old.notif_view(),
+        s_new.tcb_view() == s_old.tcb_view(),
+        s_new.timer_view() == s_old.timer_view(),
+    ensures
+        obj_census(s_new, x) == obj_census(s_old, x) + (if cap_obj(v.cap) == Some(x)
+            || cap_frame_aspace(v.cap) == Some(x) {
+            1nat
+        } else {
+            0nat
+        }),
+{
+    // slot_refs/frame_map_refs: `s_old` → `sv_mid` (the install), then `sv_mid` → `s_new` (caps equal).
+    lemma_set_slot_census(s_old.slot_view(), slot, v, x);
+    assert forall|k: SlotId| #[trigger] sv_mid.dom().contains(k)
+        implies sv_mid[k].cap == s_new.slot_view()[k].cap by {
+        assert(s_new.slot_view().dom().contains(k));
+    }
+    lemma_same_caps_same_census(sv_mid, s_new.slot_view(), x);
+    lemma_same_caps_same_frame_map(sv_mid, s_new.slot_view(), x);
+    // A cap is either an object cap or a frame cap, never both, so at most one delta fires.
+    assert(!(cap_obj(v.cap) == Some(x) && cap_frame_aspace(v.cap) == Some(x)));
+    // The four view terms read framed views (equal args).
+}
+
 // §3.3 endpoint-cap census drop: clearing a `Channel(ch, e)` slot to a non-channel
 // cap lowers `end_cap_count(ch, e)` by one and leaves every other `(ch2, e2)` fixed.
 // The `lemma_designation_drop` shape over the `cap_chan_end` filter; `delete`'s body
@@ -5162,6 +5276,83 @@ pub(crate) proof fn lemma_binding_drop(
             }
         }
         assert(g2 =~= g1);
+    }
+}
+
+// Replacing a single binding at `(ch, e, ev)` with `b` (the §6f generalization of
+// `lemma_binding_drop`, which only cleared): the per-object binding census moves by at most one
+// — down at the *old* notif, up at `b`'s notif. Stated in additive form (no `nat` underflow) so
+// it composes with `bind_refs_post`'s matching refs delta to give `channel::bind`'s
+// `refcount_sound` preservation (the lockstep the binding term was landed for, plan §3e/§6f).
+pub proof fn lemma_binding_replace(
+    cv: Map<ObjId, ChanView>,
+    ch: ObjId,
+    e: int,
+    ev: int,
+    b: Binding,
+    x: ObjId,
+)
+    requires
+        cv.dom().finite(),
+        cv.dom().contains(ch),
+        0 <= e < 2,
+        0 <= ev < 3,
+    ensures
+        binding_refs(
+            cv.insert(ch, ChanView { bindings: cv[ch].bindings.insert((e, ev), b), ..cv[ch] }),
+            x,
+        ) + (if cv[ch].bindings[(e, ev)].notif == Some(x) { 1nat } else { 0nat })
+            == binding_refs(cv, x) + (if b.notif == Some(x) { 1nat } else { 0nat }),
+{
+    let v = ChanView { bindings: cv[ch].bindings.insert((e, ev), b), ..cv[ch] };
+    let cv2 = cv.insert(ch, v);
+    let s1 = Set::new(
+        |t: (ObjId, int, int)|
+            cv.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3 && cv[t.0].bindings[(t.1, t.2)].notif
+                == Some(x),
+    );
+    let s2 = Set::new(
+        |t: (ObjId, int, int)|
+            cv2.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3 && cv2[t.0].bindings[(t.1, t.2)].notif
+                == Some(x),
+    );
+    let univ = Set::new(|t: (ObjId, int, int)| cv.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3);
+    lemma_binding_triples_finite(cv.dom());
+    assert(s1.subset_of(univ));
+    vstd::set_lib::lemma_set_subset_finite(univ, s1);
+    let x0 = (ch, e, ev);
+    assert(cv2.dom() =~= cv.dom());
+    assert(cv2[ch] == v);
+    // `x0` is the only triple whose binding moved; off it the two sets agree.
+    assert forall|t: (ObjId, int, int)| t != x0 implies (#[trigger] s2.contains(t) <==> s1.contains(t)) by {
+        if t.0 == ch {
+            if (t.1, t.2) != (e, ev) {
+                assert(v.bindings[(t.1, t.2)] == cv[ch].bindings[(t.1, t.2)]);
+            }
+        } else {
+            assert(cv2[t.0] == cv[t.0]);
+        }
+    }
+    assert(s1.contains(x0) == (cv[ch].bindings[(e, ev)].notif == Some(x)));
+    assert(s2.contains(x0) == (b.notif == Some(x)));
+    if cv[ch].bindings[(e, ev)].notif == Some(x) {
+        if b.notif == Some(x) {
+            assert(s2 =~= s1);
+        } else {
+            assert forall|t: (ObjId, int, int)| #![trigger s2.contains(t)]
+                s2.contains(t) <==> s1.remove(x0).contains(t) by {}
+            assert(s2 =~= s1.remove(x0));
+            assert(s1.contains(x0));
+        }
+    } else {
+        if b.notif == Some(x) {
+            assert forall|t: (ObjId, int, int)| #![trigger s2.contains(t)]
+                s2.contains(t) <==> s1.insert(x0).contains(t) by {}
+            assert(s2 =~= s1.insert(x0));
+            assert(!s1.contains(x0));
+        } else {
+            assert(s2 =~= s1);
+        }
     }
 }
 
@@ -6849,6 +7040,15 @@ pub fn obj_ref<S: Store>(store: &mut S, cap: Cap)
         cap_obj(cap) matches Some(o) ==> final(store).refs_view()
             =~= old(store).refs_view().insert(o, (old(store).refs_view()[o] + 1) as nat),
         cap_obj(cap) is None ==> final(store).refs_view() == old(store).refs_view(),
+        // The non-refs views are framed (the body is a single `set_obj_refs`, or nothing) — the
+        // frame `derive`'s §6f census reasoning composes to carry the four census-bearing views
+        // (chan/notif/tcb/timer) across the bump.
+        final(store).chan_view() == old(store).chan_view(),
+        final(store).notif_view() == old(store).notif_view(),
+        final(store).tcb_view() == old(store).tcb_view(),
+        final(store).timer_view() == old(store).timer_view(),
+        final(store).timer_head_view() == old(store).timer_head_view(),
+        final(store).cspace_view() == old(store).cspace_view(),
 {
     match cap.kind {
         CapKind::Aspace(o)
@@ -6895,6 +7095,13 @@ pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
         // (plan §3c) needs to carry `chan_view` across the two inserts it threads
         // between `endpoint_cap_added(A)` and `endpoint_cap_added(B)` (doc 28).
         final(store).chan_view() == old(store).chan_view(),
+        // The other four object views are framed too (the surgery is pure `set_slot`) — the
+        // §6f frame `derive` carries the census-bearing notif/tcb/timer views across the splice.
+        final(store).notif_view() == old(store).notif_view(),
+        final(store).tcb_view() == old(store).tcb_view(),
+        final(store).timer_view() == old(store).timer_view(),
+        final(store).timer_head_view() == old(store).timer_head_view(),
+        final(store).cspace_view() == old(store).cspace_view(),
         forall|k: SlotId| #[trigger] old(store).slot_view().dom().contains(k)
             ==> final(store).slot_view()[k].cap == old(store).slot_view()[k].cap,
         final(store).slot_view()[child].cap == old(store).slot_view()[child].cap,
@@ -7029,6 +7236,11 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (r
             &&& final(store).slot_view() == old(store).slot_view()
             &&& final(store).refs_view() == old(store).refs_view()
         },
+        // `refcount_sound` as a system invariant (plan §6f): a designating copy raises `refs[o]`
+        // and the slot census by one in lockstep, so a sound census in yields a sound census out
+        // (the Err paths are pure no-ops). Conditional + `requires`-free — the syscall shell, the
+        // only caller, is undisturbed.
+        refcount_sound(old(store)) ==> refcount_sound(final(store)),
 {
     let ghost m0 = old(store).slot_view();
     let s = store.slot(src);
@@ -7139,6 +7351,42 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (r
                 lemma_same_caps_same_census(m1, store.slot_view(), o);
             }
             None => {}
+        }
+        // refcount_sound (conditional, plan §6f): the full census rises by one exactly at the
+        // newly-designated object (`lemma_set_slot_obj_census` composes the slot delta with the
+        // four framed non-slot terms), matched by `obj_ref`'s `refs[o] + 1`; a bare/unmapped-frame
+        // copy moves neither. So `refs` and the census stay in lockstep ⇒ `refcount_sound` carries.
+        if refcount_sound(old(store)) {
+            // The derived cap maps no aspace (object caps and the freshly-unmapped frame copy
+            // both have `cap_frame_aspace == None`), so the census shift lands only on `cap_obj`.
+            assert(cap_frame_aspace(cap) is None);
+            match cap_obj(cap) {
+                Some(o) => {
+                    assert forall|x: ObjId| #[trigger] obj_census(store, x)
+                        == obj_census(old(store), x) + (if x == o { 1nat } else { 0nat }) by {
+                        lemma_set_slot_obj_census(old(store), store, m1, dst, d, x);
+                    }
+                    // refs rose by one at `o` (`obj_ref`), matching the census; the domain is
+                    // unchanged (`o` was already live), so `refs == census` carries everywhere.
+                    assert(store.refs_view()
+                        =~= old(store).refs_view().insert(o, (old(store).refs_view()[o] + 1) as nat));
+                    assert(old(store).refs_view().dom().contains(o));
+                    assert forall|x: ObjId| store.refs_view().dom().contains(x) implies
+                        #[trigger] store.refs_view()[x] == obj_census(store, x) by {
+                        assert(obj_census(store, x)
+                            == obj_census(old(store), x) + (if x == o { 1nat } else { 0nat }));
+                        assert(old(store).refs_view()[x] == obj_census(old(store), x));
+                    }
+                }
+                None => {
+                    assert forall|x: ObjId| #[trigger] obj_census(store, x)
+                        == obj_census(old(store), x) by {
+                        lemma_set_slot_obj_census(old(store), store, m1, dst, d, x);
+                    }
+                    assert(store.refs_view() == old(store).refs_view());
+                    lemma_refcount_sound_from_census_eq(old(store), store);
+                }
+            }
         }
     }
     Ok(())
