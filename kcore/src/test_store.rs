@@ -3204,6 +3204,9 @@ fn destroy_tcb_structural() {
     st.slots[1] = detached(notif_cap(51));
     st.refs.insert(50, 2);
     st.refs.insert(51, 2);
+    // `t` is dead (its last designating cap is gone — `obj_unref` calls `destroy_tcb` only at
+    // `refs[t] == 0`), the precondition the §6d-final-thread `dead_tcb_frozen` frame needs.
+    st.refs.insert(200, 0);
     let t = ObjId(200);
     st.tcbs.insert(
         200,
