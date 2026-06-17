@@ -94,13 +94,15 @@ proofs to deductive verification (see **Verus** below), deleting
 `kcore/src/proofs` and the off-CI deep-Kani machinery (`scripts/deep-verify.sh`,
 `kani-deep.yml`, the `kani_deep`/`kani_contracts` features) it subsumed; `cargo
 kani -p kcore` is no longer run. Kani is retained for the host-side §4.7
-chokepoints (`urt`, `ipc`, `cas`, `dma-pool`), which keep their own
-`#[cfg(kani)]` harnesses until their Verus ports land (plan phase 6). The
+chokepoints (`cas`, `dma-pool`, and `urt`'s `time` harness), which keep their
+own `#[cfg(kani)]` harnesses until their Verus ports land (plan phase 7). `ipc`
+has fully ported (7a/7b, `proofs.rs` deleted) and `urt`'s `slots` free-list ported
+in 7c, so `urt` is now Kani-resident only for `time` (phase 7d). The
 historical kcore findings/bounds remain recorded across
 `doc/results/2_kani-findings.md` … `8_kani-findings-7.md`.
 
 ```sh
-cargo kani -p urt -p dma-pool                        # urt time/slots, dma-pool (ipc fully on Verus)
+cargo kani -p urt -p dma-pool                        # urt time (slots on Verus, 7c), dma-pool (ipc fully on Verus)
 cargo kani -p cas -Z stubbing                        # cas superblock (blake3 stubbed)
 cargo test -p kcore                                  # kcore host unit tests
 ```
@@ -243,11 +245,25 @@ modular pre/post-condition of every op, so `remaining()`'s `budget - granted` is
 *all* sequences, vs Kani's hard 3-step unwind. The private `budget`/`granted` are kept off the public
 contracts via `closed` accessors (`well_formed`, `spec_remaining`); the `&mut` postconditions use the
 new-mut-ref `final(self)` form. `ipc/src/proofs.rs` is **deleted** (the last 5 session harnesses), so
-`ipc` is fully off Kani — `-p ipc` drops from the `kani` job.
+`ipc` is fully off Kani — `-p ipc` drops from the `kani` job. **7c (`doc/results/59`):** the
+cspace-slot bitmap free-list `urt::slots` — proven ∀ `cap` and `WORDS` (vs Kani's CAP=4): `alloc`
+hands out an in-window slot that was free and is now used (so distinctness is a *corollary* of the
+modular contract, not a bounded drain loop); exhaustion is exact; `free` makes a slot free again with
+the **double-free `!is_free_spec` precondition** a contract-checked impossibility; `alloc_range` hands
+out a contiguous in-window run. The first 7-series port that is not straight-line byte arithmetic: the
+`.find().map()` combinators are restructured into invariant-carrying loops, and the packed bitmap
+`free[i/64] & (1<<(i%64))` is bridged to a per-slot `is_free_spec` by three `by (bit_vector)` frame
+lemmas. The model (`wf`/`is_free_spec`/`spec_base`/`spec_cap`) is `closed` (the 7b opaque-field rule).
+`debug_assert!` is forbidden inside `verus!{}` (it lowers to `panic!`), so the runtime double-free
+guard the host `double_free_panics` test exercises moves to one `#[verifier::external_body]` helper —
+the module's only trusted residue; the static guarantee is `free`'s precondition. `urt` **stays** on
+the `kani` job: its `time` tick→ns harness is 7d, so `urt/src/proofs.rs` is trimmed (3 `check_slots_*`
+deleted), not removed.
 
 ```sh
 cargo verus verify -p kcore        # the kcore proofs (CI-gated)
 cargo verus verify -p ipc          # §4.7 host chokepoints — phase 7a ipc::header + 7b ipc::session (CI-gated)
+cargo verus verify -p urt          # §4.7 host chokepoints — phase 7c urt::slots bitmap free-list (CI-gated)
 cargo verus verify -p scratchpad   # the spec fn min smoke example
 ```
 
@@ -557,8 +573,8 @@ non-`#[inline(always)]` helpers in user.rs.
 | Tool | Scope | When |
 |------|-------|------|
 | TLA+ / TLC | commit protocol, cap revocation | Before respective milestone |
-| Kani | host chokepoints (`urt`, `ipc`, `cas`, `dma-pool`); the `kcore` kernel-core harnesses were migrated to Verus (plan `doc/plans/3_verus-rewrite.md` phase 2) | During kernel development |
-| Verus | **mechanized implementation tier for `kcore`** (plan `doc/plans/3_verus-rewrite.md`): unbounded/functional proofs on the real handle/`Store` code — `untyped::carve` (phase 0); the non-recursive cspace/CDT ops `derive`/`cdt_insert_child`/`obj_ref`, now preserving full `cspace_wf` (parent+sibling acyclicity composition, phase 2c); `revoke`/`descend_to_leaf` termination (phase 2b); `slot_move` and `cdt_unlink` in full (body proofs — `slot_move`'s transposition lands the renaming, `doc/results/24`; `cdt_unlink`'s sibling-list merge lands `unlinked`, parent-rank witness reused / sibling-rank rescaled, `doc/results/25`); **phase 3** the untyped remainder `retype_check`/`retype_install`/`reset` (the §2.5 sub-`Untyped`-never-`PHYS` rights theorem) + the channel ops `send`/`recv`/`endpoint_cap_added`/`endpoint_cap_dropped`/`bind`/`fire` against `chan_wf` + the FIFO `Seq` model (`doc/results/26`…`30`); **phase 4** the notification ops `signal`/`wait`/`remove_waiter`/`destroy_notif` (the `waiter_seq` FIFO model — wake order = block order; `signal` graduates `external_body` → proven), the thread ops `report_terminal` (ReportMonotone + FireSafe) / `bind`, and the timer ops `arm`/`disarm`/`check_expired`/`destroy_timer` (the head-only armed-list `timer_wf`; the waiter + armed-timer `refcount_sound` terms) (`doc/results/31`…`35`); **phase 5** the sysabi `decode`/`decode_prio` + `ObjType::from_u64` and the aspace walker `pte_encode` (the §2.5/§4.5 isolation theorem) / `pte_output_pa` / `va_range_ok` / `range_mapped_in` / `map_in` / `unmap_in` against the `pt_wf` page-table tree model + the TLBI effect-ordering log (`doc/results/36`…`40`) — the first Verus reasoning over concrete Rust slices, **no `external_body`**; **phase 6** the cross-object teardown cluster `delete`/`obj_unref`/`destroy_cspace`/`unref_cspace`/`unref_aspace`/`channel::destroy_channel`/`thread::destroy_tcb` — **all `external_body` removed**, the cross-module recursion closed under the seL4-zombie `(count_nonempty(slot_view), height)` measure — plus `revoke` conditional non-zombie root-survival and the full `refcount_sound` census (a system invariant on the teardown family + the construction ops `derive`/`channel::bind`/`endpoint_cap_added`/`signal`/`remove_waiter`/`endpoint_cap_dropped`; the remaining construction ops keep their landed per-op delta with the system clause a recorded follow-on) (`doc/results/41`…`56`) — **kcore's object operations now carry zero `external_body` and zero plain-Rust**, the trusted base reduced to the `Store` hardware/scheduler seam; **phase 7** the §4.7 host chokepoints port off Kani per target (7a: the `ipc::header` §3.7 message-header bijection, `doc/results/57`; 7b: the §4.6 `ipc::session` codecs + the `Admission` never-over-grant quota ∀ sequences, `doc/results/58` — `ipc` now fully off Kani). + `scratchpad` smoke | CI `verus` job (`cargo verus verify -p kcore -p ipc`); during the Verus rewrite |
+| Kani | host chokepoints (`cas`, `dma-pool`, `urt::time`); `ipc` (7a/7b) + `urt::slots` (7c) migrated to Verus, and the `kcore` kernel-core harnesses too (plan `doc/plans/3_verus-rewrite.md` phase 2) | During kernel development |
+| Verus | **mechanized implementation tier for `kcore`** (plan `doc/plans/3_verus-rewrite.md`): unbounded/functional proofs on the real handle/`Store` code — `untyped::carve` (phase 0); the non-recursive cspace/CDT ops `derive`/`cdt_insert_child`/`obj_ref`, now preserving full `cspace_wf` (parent+sibling acyclicity composition, phase 2c); `revoke`/`descend_to_leaf` termination (phase 2b); `slot_move` and `cdt_unlink` in full (body proofs — `slot_move`'s transposition lands the renaming, `doc/results/24`; `cdt_unlink`'s sibling-list merge lands `unlinked`, parent-rank witness reused / sibling-rank rescaled, `doc/results/25`); **phase 3** the untyped remainder `retype_check`/`retype_install`/`reset` (the §2.5 sub-`Untyped`-never-`PHYS` rights theorem) + the channel ops `send`/`recv`/`endpoint_cap_added`/`endpoint_cap_dropped`/`bind`/`fire` against `chan_wf` + the FIFO `Seq` model (`doc/results/26`…`30`); **phase 4** the notification ops `signal`/`wait`/`remove_waiter`/`destroy_notif` (the `waiter_seq` FIFO model — wake order = block order; `signal` graduates `external_body` → proven), the thread ops `report_terminal` (ReportMonotone + FireSafe) / `bind`, and the timer ops `arm`/`disarm`/`check_expired`/`destroy_timer` (the head-only armed-list `timer_wf`; the waiter + armed-timer `refcount_sound` terms) (`doc/results/31`…`35`); **phase 5** the sysabi `decode`/`decode_prio` + `ObjType::from_u64` and the aspace walker `pte_encode` (the §2.5/§4.5 isolation theorem) / `pte_output_pa` / `va_range_ok` / `range_mapped_in` / `map_in` / `unmap_in` against the `pt_wf` page-table tree model + the TLBI effect-ordering log (`doc/results/36`…`40`) — the first Verus reasoning over concrete Rust slices, **no `external_body`**; **phase 6** the cross-object teardown cluster `delete`/`obj_unref`/`destroy_cspace`/`unref_cspace`/`unref_aspace`/`channel::destroy_channel`/`thread::destroy_tcb` — **all `external_body` removed**, the cross-module recursion closed under the seL4-zombie `(count_nonempty(slot_view), height)` measure — plus `revoke` conditional non-zombie root-survival and the full `refcount_sound` census (a system invariant on the teardown family + the construction ops `derive`/`channel::bind`/`endpoint_cap_added`/`signal`/`remove_waiter`/`endpoint_cap_dropped`; the remaining construction ops keep their landed per-op delta with the system clause a recorded follow-on) (`doc/results/41`…`56`) — **kcore's object operations now carry zero `external_body` and zero plain-Rust**, the trusted base reduced to the `Store` hardware/scheduler seam; **phase 7** the §4.7 host chokepoints port off Kani per target (7a: the `ipc::header` §3.7 message-header bijection, `doc/results/57`; 7b: the §4.6 `ipc::session` codecs + the `Admission` never-over-grant quota ∀ sequences, `doc/results/58` — `ipc` now fully off Kani; 7c: the `urt::slots` bitmap free-list ∀ `cap`/`WORDS` — alloc distinctness/exact-exhaustion, `alloc_range` contiguity, the double-free precondition, via loop restructuring + `by (bit_vector)` frame lemmas, `doc/results/59` — `urt` stays on Kani for its `time` harness until 7d). + `scratchpad` smoke | CI `verus` job (`cargo verus verify -p kcore -p ipc -p urt`); during the Verus rewrite |
 | Loom / Shuttle | IPC crate, userspace servers | During M1+ development |
 | Miri + proptest | everything; chunker + prolly tree esp. | Continuous |
 | cargo-fuzz | IPC decoder, postcard payloads | From M1 |
@@ -605,9 +621,12 @@ deleted. The historical findings/bounds remain recorded:
   chokepoints. The `kcore` kernel-core leg was migrated to Verus (the `verus`
   job; plan phase 2); `ipc` migrated wholesale too — header (phase 7a) and the §4.6
   session codecs + `Admission` quota (phase 7b) — so `ipc/src/proofs.rs` is deleted
-  and `-p ipc` has dropped from this job entirely. No `--harness` filter, so a new
-  harness gates automatically.
-- **verus** — `cargo verus verify -p kcore -p ipc` (pinned Verus `0.2026.06.07.cd03505`,
+  and `-p ipc` has dropped from this job entirely. `urt`'s `slots` free-list
+  migrated in phase 7c (now on the `verus` job), but `-p urt` **stays** here for its
+  `time` tick→ns harness (`check_time_conversion_total`, phase 7d): `urt/src/proofs.rs`
+  is trimmed (the 3 `check_slots_*` deleted), not removed. No `--harness` filter, so a
+  new harness gates automatically.
+- **verus** — `cargo verus verify -p kcore -p ipc -p urt` (pinned Verus `0.2026.06.07.cd03505`,
   release zip cached): the deductive kernel-core proofs (`untyped::carve`; the
   non-recursive cspace/CDT ops `derive`/`cdt_insert_child`/`obj_ref` preserving
   full `cspace_wf`; `revoke`/`descend_to_leaf` termination; the full body proofs of
@@ -617,8 +636,10 @@ deleted. The historical findings/bounds remain recorded:
   `signal`/`wait`/`remove_waiter`/`destroy_notif`, thread `report_terminal`/`bind`,
   and timer `arm`/`disarm`/`check_expired`/`destroy_timer` against `notif_wf` +
   `timer_wf`); plus the phase-7 §4.7 host chokepoints `ipc::header` (7a — the §3.7
-  message-header bijection) and `ipc::session` (7b — the §4.6 `ConnectReq`/`GrantReply`
-  codec bijections + the `Admission` never-over-grant quota ∀ admit/release sequences).
+  message-header bijection), `ipc::session` (7b — the §4.6 `ConnectReq`/`GrantReply`
+  codec bijections + the `Admission` never-over-grant quota ∀ admit/release sequences),
+  and `urt::slots` (7c — the bitmap free-list ∀ `cap`/`WORDS`: alloc distinctness +
+  exact exhaustion, `alloc_range` contiguity, the double-free precondition).
   No per-proof filter, so a new `verus!{}` obligation gates automatically.
   The `host-tests` job's `kcore` leg now also runs `test_store` — `check_delete`/
   `check_destroy_channel`/`check_destroy_tcb` were the executable check of those ops'
