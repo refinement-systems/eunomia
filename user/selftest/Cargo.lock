@@ -441,6 +441,7 @@ dependencies = [
  "ipc",
  "loom",
  "shuttle",
+ "vstd",
 ]
 
 [[package]]

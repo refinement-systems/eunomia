@@ -11,6 +11,14 @@
 
 #![no_std]
 
+// Verus (plan doc/plans/3_verus-rewrite.md phase 7c): the deductive-proof tier
+// for the §4.7 host chokepoints. `vstd::prelude` supplies the `verus!{}` macro +
+// ghost vocabulary the `slots` proof uses; Verus requires it imported at the crate
+// root. In an ordinary build the macro erases ghost code, so this import is
+// otherwise unused — hence the allow (same as kcore/src/lib.rs, ipc/src/lib.rs).
+#[allow(unused_imports)]
+use vstd::prelude::*;
+
 pub mod slots;
 pub mod time;
 

@@ -6,6 +6,19 @@ edition.workspace = true
 [dependencies]
 ipc = { path = "../ipc" }
 
+# vstd is the *Verus* dependency (plan doc/plans/3_verus-rewrite.md phase 7c):
+# the `verus!{}` macro + ghost vocabulary for the §4.7 host-chokepoint proof of
+# the cspace-slot bitmap free-list (`slots.rs`). `default-features = false` ⇒
+# no_std, no alloc, so it rides into the alloc-free user binaries unchanged — and
+# it already arrives transitively via the `ipc` path-dep (which carries vstd since
+# 7a), so the userspace cross-build risk 7a cleared does not recur. In an ordinary
+# build (host `cargo test` *and* the aarch64 userspace cross-build via
+# kernel/build.rs) the `verus!{}` macro erases to plain Rust and vstd compiles to
+# nothing load-bearing (`slots` calls no vstd exec fn). Pinned (=version) in
+# lockstep with kcore/ipc: an upgrade is a deliberate PR. Same recipe as
+# kcore/Cargo.toml + ipc/Cargo.toml.
+vstd = { version = "=0.0.0-2026-05-31-0205", default-features = false }
+
 [dev-dependencies]
 proptest = "1"
 
@@ -22,8 +35,14 @@ loom = "0.7"
 [target.'cfg(shuttle)'.dependencies]
 shuttle = "0.7"
 
+# `cargo verus verify -p urt` targets this crate (the same flag kcore/ipc/scratchpad use).
+[package.metadata.verus]
+verify = true
+
 # cfg(kani) is injected by cargo-kani; cfg(loom)/cfg(shuttle) are set by
 # RUSTFLAGS="--cfg loom|shuttle" for the time-page seqlock models (plan
-# 1_loom-shuttle-rewrite §4.1). Teach plain cargo all are expected (like kcore).
+# 1_loom-shuttle-rewrite §4.1); cfg(verus_keep_ghost)/cfg(verus_only) by Verus
+# during `cargo verus verify` (plan 3_verus-rewrite §7c). Teach plain cargo all
+# are expected (same handling as ipc/kcore).
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)", "cfg(loom)", "cfg(shuttle)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)", "cfg(loom)", "cfg(shuttle)", "cfg(verus_keep_ghost)", "cfg(verus_only)"] }
