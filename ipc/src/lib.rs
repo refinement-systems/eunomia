@@ -17,6 +17,14 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+// Verus (plan doc/plans/3_verus-rewrite.md phase 7a): the deductive-proof tier
+// for the §4.7 host chokepoints. `vstd::prelude` supplies the `verus!{}` macro +
+// ghost vocabulary the `header` proof uses; Verus requires it imported at the
+// crate root. In an ordinary build the macro erases ghost code, so this import is
+// otherwise unused — hence the allow (same as kcore/src/lib.rs).
+#[allow(unused_imports)]
+use vstd::prelude::*;
+
 // alloc rides with the `wire` feature: the wire codec (§3.7) (de)serializes
 // owned, variable-length bodies, so it needs the heap (urt provides it on the
 // OS), exactly like storage-server. Minimal binaries that use only `ipc::sys`
