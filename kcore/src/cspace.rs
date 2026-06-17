@@ -1367,32 +1367,43 @@ pub open spec fn chan_wf(cv: Map<ObjId, ChanView>, sv: Map<SlotId, CapSlot>, ch:
             (0 <= e < 2 && 0 <= v < 3) ==> #[trigger] cv[ch].bindings.dom().contains((e, v))
 }
 
-// `chan_wf` reads only `ch`'s `depth`/`end_caps`/`head`/`count`/`ring_cap`/`msg_len`/
-// `bindings.dom()` (never a binding *value*) and the slot arena. So a channel edit that
-// touches only a binding's value — `endpoint_cap_dropped`'s `end_caps` is *not* a binding,
-// but `set_chan_binding`'s release in `release_binding` is — carries `chan_wf` unchanged.
-// Quarantined into its own lemma (doc 25 §2): proving the `chan_wf` lift inline blew the
-// trigger context once the strengthened `cap_consistent(Thread)` clause widened it (the
-// doc 51 §2 trigger-perturbation hazard), pulling in unrelated census/timer triggers.
+// `chan_wf` reads only `ch`'s `depth`/`end_caps.len()`/`head`/`count`/`ring_cap`/`msg_len`/
+// `bindings.dom()` (never a binding *value* nor an `end_caps` *count*) and the slot arena's
+// dom + the *emptiness* of `ch`'s ring slots. So `chan_wf` is carried by any edit that fixes
+// those `ChanView` fields and only **empties** slots (or leaves them) — exactly the window
+// `delete`'s Channel branch lives in: `delete_prepare` clears the deleted cap's slot, then
+// `endpoint_cap_dropped` decrements `end_caps[end]` (a count, not the `.len()`). Quarantined
+// into a deterministic lemma (doc 25 §2): proving the lift inline relied on auto-derivation
+// that flakes CI's Z3 once the strengthened `cap_consistent(Thread)` widened the context
+// (the doc 51 §2 / §6d-final-thread trigger-perturbation hazard).
 pub proof fn lemma_chan_wf_frame(
     cv0: Map<ObjId, ChanView>,
     cv1: Map<ObjId, ChanView>,
-    sv: Map<SlotId, CapSlot>,
+    sv0: Map<SlotId, CapSlot>,
+    sv1: Map<SlotId, CapSlot>,
     ch: ObjId,
 )
     requires
-        chan_wf(cv0, sv, ch),
+        chan_wf(cv0, sv0, ch),
         cv1.dom().contains(ch),
         cv1[ch].depth == cv0[ch].depth,
-        cv1[ch].end_caps == cv0[ch].end_caps,
+        cv1[ch].end_caps.len() == cv0[ch].end_caps.len(),
         cv1[ch].head == cv0[ch].head,
         cv1[ch].count == cv0[ch].count,
         cv1[ch].ring_cap == cv0[ch].ring_cap,
         cv1[ch].msg_len == cv0[ch].msg_len,
         cv1[ch].bindings.dom() == cv0[ch].bindings.dom(),
+        sv1.dom() == sv0.dom(),
+        // Each live slot is either unchanged or emptied — `chan_wf`'s only slot requirement is
+        // that out-of-window ring slots (always in dom) are empty, which emptying preserves.
+        forall|s: SlotId| #[trigger] sv1.dom().contains(s)
+            ==> (sv1[s].cap == sv0[s].cap || is_empty_cap(sv1[s].cap)),
     ensures
-        chan_wf(cv1, sv, ch),
+        chan_wf(cv1, sv1, ch),
 {
+    // `in_live_window` reads only `head`/`count`/`depth`, all framed, so the window is identical.
+    assert forall|r: int, i: int| #[trigger] in_live_window(cv1[ch], r, i)
+        == in_live_window(cv0[ch], r, i) by {}
 }
 
 // ── The FIFO Seq model (the §4.3 centerpiece; plan §3d) ──────────────────────
@@ -7877,12 +7888,21 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
                 }
             }
         }
-        // Re-establish `obj_unref`'s Channel-arm `chan_wf` precondition explicitly: the Thread
-        // case-split above shifts auto-trigger selection and otherwise un-fires the auto-derived
-        // `chan_wf` (the doc 51 §2 hazard — expose the fact rather than re-derive by case-split).
-        // `endpoint_cap_dropped` preserves `chan_wf` (it touches `end_caps`, not the layout).
+        // Re-establish `obj_unref`'s Channel-arm `chan_wf` precondition **deterministically**
+        // (the doc 51 §2 / §6d-final-thread hazard — a plain `assert` here relied on
+        // auto-derivation that flakes CI's Z3 once the strengthened `cap_consistent` widened the
+        // context). `cap_consistent(old, cap)` gives `chan_wf(cv0, old.slot_view, o)`;
+        // `delete_prepare` only emptied the deleted cap's slot and `endpoint_cap_dropped` only
+        // decremented `end_caps[end]` (a count, not `.len()`) — exactly `lemma_chan_wf_frame`'s
+        // window. The other arms left `chan_view`/`slot_view` framed.
         if let CapKind::Channel(o, _) = cap.kind {
-            assert(chan_wf(store.chan_view(), store.slot_view(), o));
+            assert(cap_consistent(old(store), cap));
+            assert(chan_wf(cv0, old(store).slot_view(), o));
+            assert forall|s: SlotId| #[trigger] store.slot_view().dom().contains(s) implies
+                store.slot_view()[s].cap == old(store).slot_view()[s].cap
+                    || is_empty_cap(store.slot_view()[s].cap) by {}
+            lemma_chan_wf_frame(cv0, store.chan_view(), old(store).slot_view(),
+                store.slot_view(), o);
         }
         // Discharge `obj_unref`'s Timer armed-notif-live precondition from the census.
         if let CapKind::Timer(o) = cap.kind {

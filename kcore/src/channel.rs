@@ -1295,7 +1295,9 @@ fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
                         // `chan_wf` lift via the dedicated frame lemma — proving it inline blew
                         // the trigger context after the `cap_consistent` strengthening widened it
                         // (doc 51 §2 hazard); the lemma isolates a clean context (plan §6d-final).
-                        cspace::lemma_chan_wf_frame(cv_b, store.chan_view(), store.slot_view(), ch);
+                        // `release_binding` touches no slot, so `sv0 == sv1`.
+                        cspace::lemma_chan_wf_frame(cv_b, store.chan_view(), store.slot_view(),
+                            store.slot_view(), ch);
                         assert(cspace::binding_notif_wf(
                             store.chan_view(), store.notif_view(), store.tcb_view(), ch)) by {
                             assert forall|e2: int, v2: int| #![trigger cvf[ch].bindings[(e2, v2)]]
