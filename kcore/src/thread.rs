@@ -322,9 +322,17 @@ verus! {
 // `refcount_sound` and states the `count_nonempty` non-increase 6d's measure needs:
 // the bind-cap deletes drop `slot_refs`, and the `unref_cspace`/`unref_aspace`
 // releases drop `thread_hold_refs`, each matched by its `-1` (6d closes the body).
-// Stated now (still `external_body`, host-checked) so `obj_unref` (6c) verifies
-// against the final contract.
-#[verifier::external_body]
+// **Proven body (plan §6d-final-thread-body-2).** The `external_body` is gone — the real
+// teardown (detach → halt → bind-slot `delete`s → clear-before-unref cspace/aspace) is verified
+// against the full contract. Un-`external_body`-ing it opens the cross-module cycle
+// `destroy_tcb → unref_cspace → destroy_cspace → delete → obj_unref → destroy_tcb`, closed under
+// the shared lexicographic measure `(count_nonempty(slot_view), height)` with `destroy_tcb = 3`
+// (its calls to `delete`/`unref_cspace`/`unref_aspace` are count-flat-or-dropping, the descent by
+// height). The halted subject `t`'s `report`/`state`/`qnext` survive the recursion because once
+// halted with `wait_notif` cleared it is dead (`refs[t] == 0`) and queue-detached, so the
+// `dead_tcb_frozen` frame fixes its TCB; the census rides the **clear-before-unref** discipline
+// (`lemma_census_after_hold_clear` opens the off-by-one window `unref_cspace`/`unref_aspace`
+// consume). The last `external_body` object op in `kcore` — phase 6d is now complete.
 pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
     requires
         cspace::cspace_wf(old(store).slot_view()),
@@ -398,31 +406,255 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         // composes this with `dec_ref` to carry the base `dead_tcb_frozen` up the recursion.
         forall|x: ObjId|
             x != t ==> #[trigger] cspace::dead_tcb_frozen_at(old(store), final(store), x),
+    decreases cspace::count_nonempty(old(store).slot_view()), 3int
 {
-    if store.tcb_state(t) == ThreadState::Runnable {
+    let ghost st0 = *store;
+    let ghost report0 = store.tcb_view()[t].report;
+    let ghost cs_opt = store.tcb_view()[t].cspace;
+    let ghost a_opt = store.tcb_view()[t].aspace;
+    let ghost bs0 = store.tcb_view()[t].bind_slots[0];
+    let ghost bs1 = store.tcb_view()[t].bind_slots[1];
+
+    // ── 1. Detach: pull `t` off the ready queue (scheduler-side) or its notification's
+    //    waiter chain (a kcore object). Both leave the seven object views — and `refs[t]` —
+    //    otherwise intact; the BlockedNotif path additionally splices `t` out of `wn`'s FIFO. ──
+    if matches!(store.tcb_state(t), ThreadState::Runnable) {
         store.unqueue_ready(t);
-    } else if store.tcb_state(t) == ThreadState::BlockedNotif {
+        proof {
+            cspace::lemma_dead_tcb_frozen_refl(&st0, store);
+            cspace::lemma_thread_off_all_chains(store, t);   // Runnable ⇒ not BlockedNotif
+            cspace::lemma_sysinv_frame_equal_views(&st0, store);  // `unqueue_ready` frames every view
+        }
+    } else if matches!(store.tcb_state(t), ThreadState::BlockedNotif) {
         if let Some(wn) = store.tcb_wait_notif(t) {
+            proof {
+                // `remove_waiter`'s refs side-condition: a non-empty queue forces `refs[wn] > 0`
+                // (a waiter ⇒ `census(wn) >= 1`, pinned by `refcount_sound` + `census_dom_complete`).
+                if store.notif_view()[wn].wait_head is Some {
+                    cspace::lemma_waiter_refs_pos_from_head(store.notif_view(), store.tcb_view(), wn);
+                    cspace::lemma_in_refs_from_census(store, wn);
+                }
+            }
             crate::notification::remove_waiter(store, wn, t);
+            proof {
+                // `refcount_sound` rides the splice (`census_delta_frozen`); `refs[t]` is untouched
+                // — `wn != t` (a queued `t` makes `refs[wn] >= 1 != 0 == refs[t]`; an unqueued `t`
+                // leaves the whole store fixed), so the splice's only `refs` edit misses `t`. The
+                // other invariants ride `remove_waiter`'s conditional ensures (antecedents hold).
+                cspace::lemma_refcount_sound_from_frozen(&st0, store);
+                assert(cspace::caps_consistent(store));
+                assert(cspace::end_caps_sound(store));
+                assert(cspace::census_dom_complete(store));
+                let ws0 = cspace::waiter_seq(st0.notif_view(), st0.tcb_view(), wn);
+                if ws0.contains(t) {
+                    assert(cspace::waiter_refs(st0.notif_view(), st0.tcb_view(), wn) >= 1);
+                    cspace::lemma_in_refs_from_census(&st0, wn);
+                    assert(wn != t);
+                }
+                assert(store.refs_view()[t] == 0);
+                // `t` is off every chain: present ⇒ `wait_notif` cleared to `None`; absent ⇒ still
+                // `Some(wn)` but provably off `wn`'s queue (the only chain it could be on), with
+                // `wn` still `notif_wf` — the third disjunct of `lemma_thread_off_all_chains`.
+                if store.tcb_view()[t].wait_notif is Some {
+                    // `wait_notif` still `Some` ⇒ the present arm (which clears it) didn't fire ⇒
+                    // `!ws0.contains(t)` ⇒ the absent arm froze `notif`/`tcb`.
+                    assert(!ws0.contains(t));
+                    assert(store.notif_view() == st0.notif_view());
+                    assert(store.tcb_view() == st0.tcb_view());
+                }
+                cspace::lemma_thread_off_all_chains(store, t);
+            }
+        } else {
+            proof {
+                cspace::lemma_dead_tcb_frozen_refl(&st0, store);
+                cspace::lemma_thread_off_all_chains(store, t);   // wait_notif None
+                cspace::lemma_sysinv_frame_equal_views(&st0, store);
+            }
+        }
+    } else {
+        proof {
+            cspace::lemma_dead_tcb_frozen_refl(&st0, store);
+            cspace::lemma_thread_off_all_chains(store, t);   // not BlockedNotif
+            cspace::lemma_sysinv_frame_equal_views(&st0, store);
         }
     }
+    let ghost st_detach = *store;
+    proof {
+        // After the detach: the slot/cspace views are pinned, `t`'s holds/report survived, the
+        // four system invariants hold (the detach is a signal-shaped splice or a no-op), and `t`
+        // is off every waiter chain (established per-branch above, carried to the `st_detach` snapshot).
+        assert(store.tcb_view()[t].cspace == cs_opt);
+        assert(store.tcb_view()[t].aspace == a_opt);
+        assert(store.tcb_view()[t].report == report0);
+        assert(store.refs_view()[t] == 0);
+        assert forall|o: ObjId, ws: Seq<ObjId>|
+            cspace::waiter_chain(st_detach.notif_view(), st_detach.tcb_view(), o, ws)
+            implies !ws.contains(t) by {}
+    }
+
+    // ── 2. Halt: clear `t`'s queue/wait links and mark it Halted (report untouched — §5.1).
+    //    This makes `t` *dead and queue-detached* (`refs[t] == 0` ∧ `wait_notif is None`), so the
+    //    `dead_tcb_frozen` frame fixes `t`'s TCB across every recursive teardown call below. ──
     store.set_tcb_qnext(t, None);
+    store.set_tcb_wait_notif(t, None);
     store.set_tcb_state(t, ThreadState::Halted);
-    // Binding caps die with the TCB by ordinary CDT cleanup, exactly as
-    // queued caps die with their channel (§3.4).
-    for i in 0..2 {
-        let s = store.tcb_bind_slot(t, i);
-        if !store.slot(s).cap.is_empty() {
-            crate::cspace::delete(store, s);
+    let ghost st_halt = *store;
+    proof {
+        // `t` is off every waiter chain (Halted ⇒ not BlockedNotif), so the halt edit froze the
+        // census (`lemma_census_frame_thread_halt`) — hence `refcount_sound`/`census_dom_complete`
+        // ride it — and `caps_consistent` rides via the halt-clear frame (`refs[t] == 0` ⇒ no
+        // live `Thread(t)` cap; `t` off all chains both sides).
+        // The three `set_tcb_*` setters re-insert the in-domain key `t`, so the tcb domain is
+        // unchanged (the dom precondition the halt-frame lemmas need).
+        assert(st_detach.tcb_view().dom().contains(t));
+        assert(store.tcb_view().dom() =~= st_detach.tcb_view().dom());
+        // `t` off all chains: at `st_detach` (carried from the detach branches), and at `st_halt`
+        // (now Halted ⇒ not BlockedNotif).
+        cspace::lemma_thread_off_all_chains(store, t);
+        cspace::lemma_census_frame_thread_halt(&st_detach, store, t);
+        cspace::lemma_refcount_sound_from_census_eq(&st_detach, store);
+        cspace::lemma_no_live_thread_cap_from_dead(&st_detach, t);
+        cspace::lemma_caps_consistent_frame_thread_halt_clear(&st_detach, store, t);
+        // `census_dom_complete`/`end_caps_sound` ride the halt (census frozen + `refs` fixed; the
+        // endpoint census reads only the framed chan/slot views).
+        assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o) >= 1
+            implies store.refs_view().dom().contains(o) by {
+            assert(cspace::obj_census(&st_detach, o) == cspace::obj_census(store, o));
+            cspace::lemma_in_refs_from_census(&st_detach, o);
+        }
+        assert(cspace::end_caps_sound(store));
+        // except-`t` dead-frame of the halt (only `t` moved, `refs` fixed).
+        cspace::lemma_dead_tcb_frozen_except_single_t(&st_detach, store, t);
+        // and the detach's except-`t` frame (full ⇒ except-`t`), composed to `st0 → st_halt`.
+        cspace::lemma_dead_tcb_frozen_to_except(&st0, &st_detach, t);
+        cspace::lemma_dead_tcb_frozen_except_trans(&st0, &st_detach, store, t);
+    }
+
+    // ── 3. Delete the two binding caps (they die with the TCB by ordinary CDT cleanup, exactly
+    //    as queued caps die with their channel, §3.4). Each `delete` is a visible cluster member;
+    //    `t` (dead + detached) is frozen across it, so its TCB survives. ──
+    // The bind-slot `delete`s carry the **full** `dead_tcb_frozen(st_halt, ·)` (a `delete` ensures
+    // it), composed across the two by `_trans`; this fixes the dead+detached subject `t` itself,
+    // and weakens to the except-`t` running frame at the end.
+    let s0 = store.tcb_bind_slot(t, 0);
+    if !cspace::cap_is_empty(store.slot(s0).cap) {
+        crate::cspace::delete(store, s0);
+    } else {
+        proof { cspace::lemma_dead_tcb_frozen_refl(&st_halt, store); }
+    }
+    let ghost st_d0 = *store;
+    proof {
+        assert(cspace::dead_tcb_frozen(&st_halt, &st_d0));
+        // `t` (dead + detached at `st_halt`) is frozen across the first delete, so it is still in
+        // `tcb.dom()` with its `bind_slots` intact; `bs1` is still a live slot (delete preserves
+        // `slot.dom`). These are the second `delete`'s preconditions.
+        assert(cspace::dead_tcb_frozen_at(&st_halt, store, t));
+        assert(store.tcb_view().dom().contains(t));
+        assert(store.tcb_view()[t].bind_slots == st_halt.tcb_view()[t].bind_slots);
+        assert(store.slot_view().dom().contains(bs1));
+    }
+    let s1 = store.tcb_bind_slot(t, 1);
+    if !cspace::cap_is_empty(store.slot(s1).cap) {
+        crate::cspace::delete(store, s1);
+    } else {
+        proof { cspace::lemma_dead_tcb_frozen_refl(&st_d0, store); }
+    }
+    proof {
+        cspace::lemma_dead_tcb_frozen_trans(&st_halt, &st_d0, store);
+        // `t` survived both deletes (dead + detached at `st_halt` ⇒ `dead_tcb_frozen_at` fixes it),
+        // and both bind slots ended empty (each delete empties, `only_empties` keeps the other).
+        assert(cspace::dead_tcb_frozen_at(&st_halt, store, t));
+        assert(store.tcb_view()[t].state == ThreadState::Halted);
+        assert(store.tcb_view()[t].qnext is None);
+        assert(store.tcb_view()[t].report == report0);
+        assert(store.tcb_view()[t].cspace == cs_opt);
+        assert(store.tcb_view()[t].aspace == a_opt);
+        assert(cspace::is_empty_cap(store.slot_view()[bs0].cap));
+        assert(cspace::is_empty_cap(store.slot_view()[bs1].cap));
+        assert(store.refs_view()[t] == 0);
+        cspace::lemma_thread_off_all_chains(store, t);
+        // running except-`t`(st0, store): except-`t`(st0, st_halt) ∘ (st_halt → store full).
+        cspace::lemma_dead_tcb_frozen_to_except(&st_halt, store, t);
+        cspace::lemma_dead_tcb_frozen_except_trans(&st0, &st_halt, store, t);
+    }
+
+    // ── 4. Release the cspace/aspace holds, **clearing the field before the unref** so the census
+    //    drops by one at the held object *before* `refs` does — the `census_off_by_one` window
+    //    `unref_cspace`/`unref_aspace` consume (clear-after-unref would leave `refcount_sound`
+    //    transiently false the wrong way). Behavior-equivalent: the destructors never read `tcb[t]`. ──
+    if let Some(cs) = store.tcb_cspace(t) {
+        let ghost st_pre_cs = *store;
+        proof {
+            // `unref_cspace` needs `cspace_resident_wf(·, cs)`: it holds at entry (the contract's
+            // conditional clause, `cs == old.tcb[t].cspace`) and survives the teardown (every op
+            // frames `cspace_view` and preserves `slot_view.dom()`).
+            assert(st0.tcb_view()[t].cspace == Some(cs));
+            assert(cspace::cspace_resident_wf(&st0, cs));
+            assert(store.cspace_view() == st0.cspace_view());
+            assert(store.slot_view().dom() == st0.slot_view().dom());
+            assert(cspace::cspace_resident_wf(store, cs));
+        }
+        store.set_tcb_cspace(t, None);
+        let ghost st_csclear = *store;
+        proof {
+            assert(st_pre_cs.tcb_view().dom().contains(t));
+            assert(store.tcb_view().dom() =~= st_pre_cs.tcb_view().dom());
+            cspace::lemma_thread_off_all_chains(&st_pre_cs, t);
+            cspace::lemma_thread_off_all_chains(store, t);
+            cspace::lemma_census_after_hold_clear(&st_pre_cs, store, t, cs);
+            cspace::lemma_no_live_thread_cap_from_dead(&st_pre_cs, t);
+            cspace::lemma_caps_consistent_frame_thread_halt_clear(&st_pre_cs, store, t);
+            assert(cspace::cspace_resident_wf(store, cs));   // clear frames cspace_view + slot
+            assert(cspace::end_caps_sound(store));           // clear frames chan + slot
+            cspace::lemma_dead_tcb_frozen_except_single_t(&st_pre_cs, store, t);
+            cspace::lemma_dead_tcb_frozen_except_trans(&st0, &st_pre_cs, store, t);
+            // `t`'s report/state/qnext survive the single-field clear.
+            assert(store.tcb_view()[t].state == ThreadState::Halted);
+            assert(store.tcb_view()[t].qnext is None);
+            assert(store.tcb_view()[t].report == report0);
+            assert(store.refs_view()[t] == 0);
+        }
+        crate::cspace::unref_cspace(store, cs);
+        proof {
+            // full frame (`unref_cspace` ensures) ⇒ `t` frozen + running except-`t`.
+            assert(cspace::dead_tcb_frozen_at(&st_csclear, store, t));
+            cspace::lemma_dead_tcb_frozen_to_except(&st_csclear, store, t);
+            cspace::lemma_dead_tcb_frozen_except_trans(&st0, &st_csclear, store, t);
         }
     }
-    if let Some(cs) = store.tcb_cspace(t) {
-        crate::cspace::unref_cspace(store, cs);
-        store.set_tcb_cspace(t, None);
+    proof {
+        assert(store.tcb_view()[t].state == ThreadState::Halted);
+        assert(store.tcb_view()[t].qnext is None);
+        assert(store.tcb_view()[t].report == report0);
+        assert(store.refs_view()[t] == 0);
+        cspace::lemma_thread_off_all_chains(store, t);
     }
     if let Some(a) = store.tcb_aspace(t) {
-        crate::cspace::unref_aspace(store, a);
+        let ghost st_pre_as = *store;
         store.set_tcb_aspace(t, None);
+        let ghost st_asclear = *store;
+        proof {
+            assert(st_pre_as.tcb_view().dom().contains(t));
+            assert(store.tcb_view().dom() =~= st_pre_as.tcb_view().dom());
+            cspace::lemma_thread_off_all_chains(&st_pre_as, t);
+            cspace::lemma_thread_off_all_chains(store, t);
+            cspace::lemma_census_after_hold_clear_aspace(&st_pre_as, store, t, a);
+            cspace::lemma_no_live_thread_cap_from_dead(&st_pre_as, t);
+            cspace::lemma_caps_consistent_frame_thread_halt_clear(&st_pre_as, store, t);
+            assert(cspace::end_caps_sound(store));
+            cspace::lemma_dead_tcb_frozen_except_single_t(&st_pre_as, store, t);
+            cspace::lemma_dead_tcb_frozen_except_trans(&st0, &st_pre_as, store, t);
+            assert(store.tcb_view()[t].state == ThreadState::Halted);
+            assert(store.tcb_view()[t].qnext is None);
+            assert(store.tcb_view()[t].report == report0);
+            assert(store.refs_view()[t] == 0);
+        }
+        crate::cspace::unref_aspace(store, a);
+        proof {
+            assert(cspace::dead_tcb_frozen_at(&st_asclear, store, t));
+            cspace::lemma_dead_tcb_frozen_to_except(&st_asclear, store, t);
+            cspace::lemma_dead_tcb_frozen_except_trans(&st0, &st_asclear, store, t);
+        }
     }
 }
 

@@ -526,6 +526,19 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
                     &&& final(store).tcb_view()[t].wait_notif is None
                     &&& final(store).refs_view()
                             == old(store).refs_view().insert(n, (old(store).refs_view()[n] - 1) as nat)
+                    // The splice writes only `t`'s queue links (`qnext`/`wait_notif`); `t`'s
+                    // every *other* field survives. `destroy_tcb` (the only kcore caller) reads
+                    // this off across the BlockedNotif detach: it needs `t`'s `cspace`/`aspace`
+                    // (to drive `unref_cspace`/`unref_aspace` with their resident-wf precondition)
+                    // and `report`/`bind_slots`/`state` (its own structural postconditions) to
+                    // have come through the detach unchanged (plan §6d-final-thread-body-2).
+                    &&& final(store).tcb_view()[t].cspace == old(store).tcb_view()[t].cspace
+                    &&& final(store).tcb_view()[t].aspace == old(store).tcb_view()[t].aspace
+                    &&& final(store).tcb_view()[t].state == old(store).tcb_view()[t].state
+                    &&& final(store).tcb_view()[t].report == old(store).tcb_view()[t].report
+                    &&& final(store).tcb_view()[t].retval == old(store).tcb_view()[t].retval
+                    &&& final(store).tcb_view()[t].bind_bits == old(store).tcb_view()[t].bind_bits
+                    &&& final(store).tcb_view()[t].bind_slots == old(store).tcb_view()[t].bind_slots
                 }
         }),
         // Dead, queue-detached TCBs are frozen across the splice (plan §6d-final-thread-body):
@@ -698,6 +711,15 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
                 }
                 assert forall|kk: ObjId| #[trigger] tvf[kk].bind_slots == tv0[kk].bind_slots by {}
                 assert forall|kk: ObjId| #[trigger] tvf[kk].cspace == tv0[kk].cspace by {}
+                // `t`'s remaining non-queue fields are untouched (the splice writes only `t`'s
+                // `qnext`/`wait_notif`), so the field-frame ensures hold (plan §6d-final-thread-body-2).
+                // Single-key asserts (not domain `forall`s) keep the hot loop body under rlimit
+                // (the doc-25 §2 decomposition discipline).
+                assert(tvf[t].aspace == tv0[t].aspace);
+                assert(tvf[t].state == tv0[t].state);
+                assert(tvf[t].report == tv0[t].report);
+                assert(tvf[t].retval == tv0[t].retval);
+                assert(tvf[t].bind_bits == tv0[t].bind_bits);
                 // A changed TCB still blocked in the post-state is blocked on `n` (the
                 // waiter-coherence frame, plan §6d-final-thread): the only changed TCBs are `t`
                 // (its `wait_notif` cleared to `None`, so not `Some(wn)`) and `t`'s predecessor

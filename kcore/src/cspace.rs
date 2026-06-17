@@ -2964,6 +2964,33 @@ pub proof fn lemma_slot_refs_positive(m: Map<SlotId, CapSlot>, s: SlotId, o: Obj
     }
 }
 
+// No live cap designates a dead object (plan §6d-final-thread-body-2): `refs[o] == 0` forces
+// `obj_census(o) == 0` (refcount_sound), so `slot_refs(o) == 0` — no live cap has `cap_obj ==
+// Some(o)`. `destroy_tcb` reads the `Thread(t)` instance off to discharge
+// `lemma_caps_consistent_frame_thread_halt_clear`'s "no live `Thread(t)` cap" precondition (its
+// subject `t` is dead, `refs[t] == 0`, by the time `obj_unref` calls the destructor).
+pub proof fn lemma_no_live_thread_cap_from_dead<S: Store>(s: &S, t: ObjId)
+    requires
+        refcount_sound(s),
+        s.slot_view().dom().finite(),
+        s.refs_view().dom().contains(t),
+        s.refs_view()[t] == 0,
+    ensures
+        forall|sl: SlotId| #[trigger] s.slot_view().dom().contains(sl)
+            && !is_empty_cap(s.slot_view()[sl].cap)
+            ==> s.slot_view()[sl].cap.kind != CapKind::Thread(t),
+{
+    assert(s.refs_view()[t] == obj_census(s, t));
+    assert forall|sl: SlotId| #[trigger] s.slot_view().dom().contains(sl)
+        && !is_empty_cap(s.slot_view()[sl].cap)
+        implies s.slot_view()[sl].cap.kind != CapKind::Thread(t) by {
+        if s.slot_view()[sl].cap.kind == CapKind::Thread(t) {
+            assert(cap_obj(s.slot_view()[sl].cap) == Some(t));
+            lemma_slot_refs_positive(s.slot_view(), sl, t);
+        }
+    }
+}
+
 // A mapping slot witnesses a positive frame-map census — the aspace analog of the above.
 pub proof fn lemma_frame_map_positive(m: Map<SlotId, CapSlot>, s: SlotId, o: ObjId)
     requires
@@ -3481,6 +3508,52 @@ pub proof fn lemma_dead_tcb_frozen_refl<S: Store>(s0: &S, s1: &S)
     assert forall|x: ObjId| #[trigger] dead_tcb_frozen_at(s0, s1, x) by {}
 }
 
+// ── The except-`t` frame for `destroy_tcb`'s body (plan §6d-final-thread-body-2). ──
+//
+// `destroy_tcb` rewrites its own halted subject `t` (halts it, clears its holds), so the *full*
+// `dead_tcb_frozen` cannot hold across its body — but the frame `obj_unref`'s Thread arm needs
+// is the **except-`t`** one (`forall x != t. dead_tcb_frozen_at(old, final, x)`, `t` excepted
+// because `obj_unref` re-establishes `t`'s own facts separately). These three helpers build it:
+// `_to_except` weakens a recursive call's full frame to except-`t`; `_except_single_t` supplies
+// the except-`t` frame of `t`'s own halt/clear edits (which touch only `tcb[t]`); `_except_trans`
+// composes two except-`t` segments. The body threads a running `forall x != t.
+// dead_tcb_frozen_at(old, store, x)` invariant across its segments with these.
+
+pub proof fn lemma_dead_tcb_frozen_to_except<S: Store>(s0: &S, s1: &S, t: ObjId)
+    requires
+        dead_tcb_frozen(s0, s1),
+    ensures
+        forall|x: ObjId| x != t ==> #[trigger] dead_tcb_frozen_at(s0, s1, x),
+{
+    assert forall|x: ObjId| x != t implies #[trigger] dead_tcb_frozen_at(s0, s1, x) by {
+        assert(dead_tcb_frozen_at(s0, s1, x));
+    }
+}
+
+pub proof fn lemma_dead_tcb_frozen_except_single_t<S: Store>(s0: &S, s1: &S, t: ObjId)
+    requires
+        s1.refs_view() == s0.refs_view(),
+        s1.tcb_view().dom() == s0.tcb_view().dom(),
+        forall|x: ObjId| x != t ==> #[trigger] s1.tcb_view()[x] == s0.tcb_view()[x],
+    ensures
+        forall|x: ObjId| x != t ==> #[trigger] dead_tcb_frozen_at(s0, s1, x),
+{
+    assert forall|x: ObjId| x != t implies #[trigger] dead_tcb_frozen_at(s0, s1, x) by {}
+}
+
+pub proof fn lemma_dead_tcb_frozen_except_trans<S: Store>(s0: &S, s1: &S, s2: &S, t: ObjId)
+    requires
+        forall|x: ObjId| x != t ==> #[trigger] dead_tcb_frozen_at(s0, s1, x),
+        forall|x: ObjId| x != t ==> #[trigger] dead_tcb_frozen_at(s1, s2, x),
+    ensures
+        forall|x: ObjId| x != t ==> #[trigger] dead_tcb_frozen_at(s0, s2, x),
+{
+    assert forall|x: ObjId| x != t implies #[trigger] dead_tcb_frozen_at(s0, s2, x) by {
+        assert(dead_tcb_frozen_at(s0, s1, x));
+        assert(dead_tcb_frozen_at(s1, s2, x));
+    }
+}
+
 // A frozen delta turns `refcount_sound` at the start into `refcount_sound` at the end —
 // the form `destroy_tcb` consumes for its `remove_waiter` call (where `refcount_sound` holds).
 pub proof fn lemma_refcount_sound_from_frozen<S: Store>(s0: &S, s1: &S)
@@ -3494,6 +3567,63 @@ pub proof fn lemma_refcount_sound_from_frozen<S: Store>(s0: &S, s1: &S)
         == obj_census(s1, x) by {
         assert(s0.refs_view().dom().contains(x));
         assert(s0.refs_view()[x] == obj_census(s0, x));
+    }
+}
+
+// The four teardown system invariants ride an edit that frames every object view + `refs`
+// (a no-op step, or one whose only effect is scheduler-side like `unqueue_ready`). Plan
+// §6d-final-thread-body-2: `destroy_tcb`'s detach branches use it where the store is unchanged.
+pub proof fn lemma_sysinv_frame_equal_views<S: Store>(s0: &S, s1: &S)
+    requires
+        refcount_sound(s0),
+        caps_consistent(s0),
+        end_caps_sound(s0),
+        census_dom_complete(s0),
+        s1.slot_view() == s0.slot_view(),
+        s1.refs_view() == s0.refs_view(),
+        s1.chan_view() == s0.chan_view(),
+        s1.notif_view() == s0.notif_view(),
+        s1.tcb_view() == s0.tcb_view(),
+        s1.timer_view() == s0.timer_view(),
+        s1.timer_head_view() == s0.timer_head_view(),
+        s1.cspace_view() == s0.cspace_view(),
+    ensures
+        refcount_sound(s1),
+        caps_consistent(s1),
+        end_caps_sound(s1),
+        census_dom_complete(s1),
+{
+    assert forall|o: ObjId| #[trigger] obj_census(s1, o) == obj_census(s0, o) by {}
+    lemma_refcount_sound_from_census_eq(s0, s1);
+    assert forall|o: ObjId| #[trigger] obj_census(s1, o) >= 1
+        implies s1.refs_view().dom().contains(o) by {
+        lemma_in_refs_from_census(s0, o);
+    }
+    // Every object view is equal to `s0`'s, so each live cap's (view-only) consistency carries
+    // (the `unref_aspace`-body pattern — a per-slot forall avoids the bare-`caps_consistent`
+    // existential/`choose` triggers).
+    assert forall|s: SlotId| #![trigger s1.slot_view()[s]]
+        s1.slot_view().dom().contains(s) && !is_empty_cap(s1.slot_view()[s].cap)
+        implies cap_consistent(s1, s1.slot_view()[s].cap) by {
+        assert(cap_consistent(s0, s0.slot_view()[s].cap));
+    }
+    assert(end_caps_sound(s1));
+}
+
+// `refcount_sound` rides an edit that holds `refs` fixed and every object's census fixed — the
+// `destroy_tcb` halt step (`lemma_census_frame_thread_halt` supplies the census equality, the
+// `set_tcb_*` setters frame `refs`). Plan §6d-final-thread-body-2.
+pub proof fn lemma_refcount_sound_from_census_eq<S: Store>(s0: &S, s1: &S)
+    requires
+        refcount_sound(s0),
+        s1.refs_view() == s0.refs_view(),
+        forall|o: ObjId| #[trigger] obj_census(s1, o) == obj_census(s0, o),
+    ensures
+        refcount_sound(s1),
+{
+    assert forall|o: ObjId| s1.refs_view().dom().contains(o) implies #[trigger] s1.refs_view()[o]
+        == obj_census(s1, o) by {
+        assert(s0.refs_view()[o] == obj_census(s0, o));
     }
 }
 
@@ -4355,6 +4485,234 @@ pub(crate) proof fn lemma_thread_hold_aspace_drop(m: Map<ObjId, TcbView>, k: Obj
         }
     }
     assert(c2 =~= c1);
+}
+
+// ── `destroy_tcb`'s clear-before-unref census lemmas (plan §6d-final-thread-body-2). ──
+//
+// `destroy_tcb` releases its halted subject's cspace/aspace holds by **clearing the field
+// first, then `unref_cspace`/`unref_aspace`** — so at the unref call the census has already
+// dropped by one at the held object while `refs` has not, i.e. `census_off_by_one(·, held)`,
+// the exact window `unref_cspace`/`unref_aspace` consume (`cspace.rs` requires
+// `refs[x] == census(x) + 1` + soundness elsewhere). These two lemmas establish that window
+// from the single-field clear: `thread_hold_refs(held)` drops by one
+// (`lemma_thread_hold_{cspace,aspace}_drop`); the five other census terms are framed (a tcb
+// edit touches no slot/chan/timer view, and the waiter term rides
+// `lemma_waiter_refs_frame_dequeued` because the halted subject `t` is off every chain — the
+// edited field, `cspace`/`aspace`, is one `waiter_chain` never reads); `refcount_sound(s0)` +
+// the unchanged `refs` then give the off-by-one at the held object and full soundness elsewhere.
+
+pub proof fn lemma_census_after_hold_clear<S: Store>(s0: &S, s1: &S, t: ObjId, cs: ObjId)
+    requires
+        refcount_sound(s0),
+        census_dom_complete(s0),
+        s0.tcb_view().dom().finite(),
+        s0.tcb_view().dom().contains(t),
+        s0.tcb_view()[t].cspace == Some(cs),
+        s1.slot_view() == s0.slot_view(),
+        s1.chan_view() == s0.chan_view(),
+        s1.notif_view() == s0.notif_view(),
+        s1.timer_view() == s0.timer_view(),
+        s1.refs_view() == s0.refs_view(),
+        s1.tcb_view() == s0.tcb_view().insert(
+            t, TcbView { cspace: None, ..s0.tcb_view()[t] }),
+        // `t` is off every waiter chain (supplied by `lemma_thread_off_all_chains` once `t` is
+        // halted with `wait_notif` cleared) — so the cspace clear perturbs no `waiter_refs`.
+        forall|o: ObjId, ws: Seq<ObjId>|
+            waiter_chain(s0.notif_view(), s0.tcb_view(), o, ws) ==> !ws.contains(t),
+    ensures
+        census_off_by_one(s1, cs),
+        // Refs-domain coverage rides the clear (a census term only *dropped*, `refs` fixed) — the
+        // precondition `unref_cspace` consumes alongside the off-by-one window.
+        census_dom_complete(s1),
+{
+    let nv = s0.notif_view();
+    let tv0 = s0.tcb_view();
+    let tvf = s1.tcb_view();
+    let v = TcbView { cspace: None, ..tv0[t] };
+    assert(tvf == tv0.insert(t, v));
+    assert(tvf.dom() =~= tv0.dom());
+    // Queue/wait/state/aspace fields agree everywhere (only `cspace` moved, at `t`), so every
+    // `waiter_chain` is preserved and the aspace half of `thread_hold_refs` is framed.
+    assert forall|k: ObjId| #[trigger] tvf[k].qnext == tv0[k].qnext by {}
+    assert forall|k: ObjId| #[trigger] tvf[k].wait_notif == tv0[k].wait_notif by {}
+    assert forall|k: ObjId| #[trigger] tvf[k].state == tv0[k].state by {}
+    assert forall|k: ObjId| #[trigger] tvf[k].aspace == tv0[k].aspace by {}
+
+    lemma_thread_hold_cspace_drop(tv0, t, v, cs);
+    // `cs` is referenced (the hold), so its census is positive — needed *before* the per-object
+    // step so the `o == cs` drop is exact (not nat-saturated).
+    assert(thread_hold_refs(tv0, cs) >= 1) by {
+        let c1 = tv0.dom().filter(|j: ObjId| tv0[j].cspace == Some(cs));
+        assert(c1.contains(t));
+        assert(c1.finite());
+        if c1.len() == 0 {
+            assert(c1 =~= Set::<ObjId>::empty());
+        }
+    }
+    assert(obj_census(s0, cs) >= 1);
+
+    assert forall|o: ObjId| #[trigger] obj_census(s1, o)
+        == (if o == cs { (obj_census(s0, o) - 1) as nat } else { obj_census(s0, o) }) by {
+        // waiter term framed: `t` off every chain in both states (cspace ignored by the chain).
+        assert forall|ws: Seq<ObjId>| waiter_chain(nv, tvf, o, ws) implies !ws.contains(t) by {
+            assert(waiter_chain(nv, tv0, o, ws));
+        }
+        lemma_waiter_refs_frame_dequeued(nv, tv0, tvf, t, o);
+        // thread-hold term: drops at `cs`, framed elsewhere (`t`'s old/new cspace miss `o != cs`).
+        if o != cs {
+            let c1 = tv0.dom().filter(|j: ObjId| tv0[j].cspace == Some(o));
+            let c2 = tvf.dom().filter(|j: ObjId| tvf[j].cspace == Some(o));
+            assert(c2 =~= c1) by {
+                assert forall|j: ObjId| #![trigger c2.contains(j)] c2.contains(j) <==> c1.contains(j) by {
+                    if j != t { assert(tvf[j] == tv0[j]); }
+                }
+            }
+            let a1 = tv0.dom().filter(|j: ObjId| tv0[j].aspace == Some(o));
+            let a2 = tvf.dom().filter(|j: ObjId| tvf[j].aspace == Some(o));
+            assert(a2 =~= a1) by {
+                assert forall|j: ObjId| #![trigger a2.contains(j)] a2.contains(j) <==> a1.contains(j) by {
+                    if j != t { assert(tvf[j] == tv0[j]); }
+                }
+            }
+            assert(thread_hold_refs(tvf, o) == thread_hold_refs(tv0, o));
+        }
+    }
+
+    lemma_in_refs_from_census(s0, cs);
+    assert(s1.refs_view()[cs] == obj_census(s1, cs) + 1);
+    assert forall|x: ObjId| x != cs && s1.refs_view().dom().contains(x)
+        implies s1.refs_view()[x] == obj_census(s1, x) by {
+        assert(s0.refs_view()[x] == obj_census(s0, x));
+    }
+    assert forall|o: ObjId| #[trigger] obj_census(s1, o) >= 1
+        implies s1.refs_view().dom().contains(o) by {
+        if o != cs {
+            assert(obj_census(s1, o) == obj_census(s0, o));
+            lemma_in_refs_from_census(s0, o);
+        }
+    }
+}
+
+pub proof fn lemma_census_after_hold_clear_aspace<S: Store>(s0: &S, s1: &S, t: ObjId, a: ObjId)
+    requires
+        refcount_sound(s0),
+        census_dom_complete(s0),
+        s0.tcb_view().dom().finite(),
+        s0.tcb_view().dom().contains(t),
+        s0.tcb_view()[t].aspace == Some(a),
+        s1.slot_view() == s0.slot_view(),
+        s1.chan_view() == s0.chan_view(),
+        s1.notif_view() == s0.notif_view(),
+        s1.timer_view() == s0.timer_view(),
+        s1.refs_view() == s0.refs_view(),
+        s1.tcb_view() == s0.tcb_view().insert(
+            t, TcbView { aspace: None, ..s0.tcb_view()[t] }),
+        forall|o: ObjId, ws: Seq<ObjId>|
+            waiter_chain(s0.notif_view(), s0.tcb_view(), o, ws) ==> !ws.contains(t),
+    ensures
+        census_off_by_one(s1, a),
+        census_dom_complete(s1),
+{
+    let nv = s0.notif_view();
+    let tv0 = s0.tcb_view();
+    let tvf = s1.tcb_view();
+    let v = TcbView { aspace: None, ..tv0[t] };
+    assert(tvf == tv0.insert(t, v));
+    assert(tvf.dom() =~= tv0.dom());
+    assert forall|k: ObjId| #[trigger] tvf[k].qnext == tv0[k].qnext by {}
+    assert forall|k: ObjId| #[trigger] tvf[k].wait_notif == tv0[k].wait_notif by {}
+    assert forall|k: ObjId| #[trigger] tvf[k].state == tv0[k].state by {}
+    assert forall|k: ObjId| #[trigger] tvf[k].cspace == tv0[k].cspace by {}
+
+    lemma_thread_hold_aspace_drop(tv0, t, v, a);
+    assert(thread_hold_refs(tv0, a) >= 1) by {
+        let a1 = tv0.dom().filter(|j: ObjId| tv0[j].aspace == Some(a));
+        assert(a1.contains(t));
+        assert(a1.finite());
+        if a1.len() == 0 {
+            assert(a1 =~= Set::<ObjId>::empty());
+        }
+    }
+    assert(obj_census(s0, a) >= 1);
+
+    assert forall|o: ObjId| #[trigger] obj_census(s1, o)
+        == (if o == a { (obj_census(s0, o) - 1) as nat } else { obj_census(s0, o) }) by {
+        assert forall|ws: Seq<ObjId>| waiter_chain(nv, tvf, o, ws) implies !ws.contains(t) by {
+            assert(waiter_chain(nv, tv0, o, ws));
+        }
+        lemma_waiter_refs_frame_dequeued(nv, tv0, tvf, t, o);
+        if o != a {
+            let a1 = tv0.dom().filter(|j: ObjId| tv0[j].aspace == Some(o));
+            let a2 = tvf.dom().filter(|j: ObjId| tvf[j].aspace == Some(o));
+            assert(a2 =~= a1) by {
+                assert forall|j: ObjId| #![trigger a2.contains(j)] a2.contains(j) <==> a1.contains(j) by {
+                    if j != t { assert(tvf[j] == tv0[j]); }
+                }
+            }
+            let c1 = tv0.dom().filter(|j: ObjId| tv0[j].cspace == Some(o));
+            let c2 = tvf.dom().filter(|j: ObjId| tvf[j].cspace == Some(o));
+            assert(c2 =~= c1) by {
+                assert forall|j: ObjId| #![trigger c2.contains(j)] c2.contains(j) <==> c1.contains(j) by {
+                    if j != t { assert(tvf[j] == tv0[j]); }
+                }
+            }
+            assert(thread_hold_refs(tvf, o) == thread_hold_refs(tv0, o));
+        }
+    }
+
+    lemma_in_refs_from_census(s0, a);
+    assert(s1.refs_view()[a] == obj_census(s1, a) + 1);
+    assert forall|x: ObjId| x != a && s1.refs_view().dom().contains(x)
+        implies s1.refs_view()[x] == obj_census(s1, x) by {
+        assert(s0.refs_view()[x] == obj_census(s0, x));
+    }
+    assert forall|o: ObjId| #[trigger] obj_census(s1, o) >= 1
+        implies s1.refs_view().dom().contains(o) by {
+        if o != a {
+            assert(obj_census(s1, o) == obj_census(s0, o));
+            lemma_in_refs_from_census(s0, o);
+        }
+    }
+}
+
+// `destroy_tcb`'s halt edit (clear `qnext`/`wait_notif`, set `state = Halted`; holds unchanged)
+// of an off-chain thread `t` leaves every object's census fixed (plan §6d-final-thread-body-2):
+// the four non-tcb terms are framed (the halt setters touch only `tcb_view`), `thread_hold_refs`
+// is framed (`t`'s cspace/aspace unchanged), and `waiter_refs` is framed because `t` is off every
+// chain in both states (`lemma_waiter_refs_frame_offchain` — only `t` moved). So `refcount_sound`
+// rides the halt unchanged, the precondition the bind-slot `delete`s need.
+pub proof fn lemma_census_frame_thread_halt<S: Store>(s0: &S, s1: &S, t: ObjId)
+    requires
+        s1.slot_view() == s0.slot_view(),
+        s1.chan_view() == s0.chan_view(),
+        s1.notif_view() == s0.notif_view(),
+        s1.timer_view() == s0.timer_view(),
+        s1.tcb_view().dom() == s0.tcb_view().dom(),
+        forall|k: ObjId| k != t ==> #[trigger] s1.tcb_view()[k] == s0.tcb_view()[k],
+        s1.tcb_view()[t].cspace == s0.tcb_view()[t].cspace,
+        s1.tcb_view()[t].aspace == s0.tcb_view()[t].aspace,
+        // `t` is off every chain in BOTH states — the full `dequeued` form (not the simple
+        // `wait_notif is None || not-BlockedNotif` disjunct) so it also covers a thread that is
+        // BlockedNotif-on-`wn` yet absent from `wn`'s queue (the `remove_waiter` absent path).
+        forall|o: ObjId, ws: Seq<ObjId>|
+            waiter_chain(s0.notif_view(), s0.tcb_view(), o, ws) ==> !ws.contains(t),
+        forall|o: ObjId, ws: Seq<ObjId>|
+            waiter_chain(s1.notif_view(), s1.tcb_view(), o, ws) ==> !ws.contains(t),
+    ensures
+        forall|o: ObjId| #[trigger] obj_census(s1, o) == obj_census(s0, o),
+{
+    let tv0 = s0.tcb_view();
+    let tvf = s1.tcb_view();
+    assert forall|k: ObjId| #[trigger] tvf[k].cspace == tv0[k].cspace by {
+        if k != t {}
+    }
+    assert forall|k: ObjId| #[trigger] tvf[k].aspace == tv0[k].aspace by {
+        if k != t {}
+    }
+    assert forall|o: ObjId| #[trigger] obj_census(s1, o) == obj_census(s0, o) by {
+        lemma_waiter_refs_frame_dequeued(s0.notif_view(), tv0, tvf, t, o);
+        lemma_thread_hold_frame(tv0, tvf, o);
+    }
 }
 
 // ── `delete`'s frame-unmap-branch census lemma (plan §6b, doc/results/42). ──
@@ -7739,6 +8097,12 @@ pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId)
         // set), and `destroy_cspace` carries it. `destroy_tcb`'s cspace release reads it off to
         // preserve its own halted subject.
         dead_tcb_frozen(old(store), final(store)),
+    // SCC measure (plan §6d-final-thread-body-2): once `destroy_tcb` is a proven body the cycle
+    // `destroy_tcb → unref_cspace → destroy_cspace → delete → obj_unref → destroy_tcb` is visible,
+    // so `unref_cspace` joins the SCC and needs the shared lexicographic measure. Height 2 (above
+    // `destroy_cspace`=1/`delete`=0, below `destroy_tcb`=3): its `dec_ref`-then-`destroy_cspace`
+    // call is count-flat, so the descent is by height.
+    decreases count_nonempty(old(store).slot_view()), 2int
 {
     let ghost st0 = *store;
     dec_ref(store, cs);
