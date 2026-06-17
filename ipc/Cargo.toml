@@ -21,6 +21,18 @@ fuzzing = ["wire"]
 serde = { version = "1", default-features = false, features = ["derive", "alloc"], optional = true }
 postcard = { version = "1", default-features = false, features = ["alloc"], optional = true }
 
+# vstd is the *Verus* dependency (plan doc/plans/3_verus-rewrite.md phase 7a):
+# the `verus!{}` macro + ghost vocabulary for the §4.7 host-chokepoint proofs
+# (the §3.7 message header in `header.rs`). `default-features = false` ⇒ no_std,
+# no alloc, so it rides into the minimal alloc-free user binaries unchanged. In an
+# ordinary build (host `cargo test` *and* the aarch64 userspace cross-build via
+# kernel/build.rs) the `feature(..)` flags are gated on `verus_keep_ghost` — set
+# only under `cargo verus verify` — so `verus!{}` erases to plain Rust and vstd
+# compiles to nothing load-bearing (the header codec calls no vstd exec fn). Pinned
+# (=version) in lockstep with kcore: an upgrade is a deliberate PR. Same recipe as
+# kcore/Cargo.toml.
+vstd = { version = "=0.0.0-2026-05-31-0205", default-features = false }
+
 # loom/shuttle reach the IPC model's *library* code (ModelTransport's sync
 # primitives), so they are real deps, not dev-deps — but only when a model is
 # being built (RUSTFLAGS="--cfg loom|shuttle"); a normal/aarch64 build never
@@ -38,8 +50,13 @@ shuttle = "0.7"
 name = "gen_ipc_corpus"
 required-features = ["fuzzing"]
 
+# `cargo verus verify -p ipc` targets this crate (the same flag kcore/scratchpad use).
+[package.metadata.verus]
+verify = true
+
 # cfg(kani) is injected by cargo-kani; cfg(loom)/cfg(shuttle) by
-# RUSTFLAGS="--cfg loom|shuttle" for the IPC reactor models (plan 2_ipc.md §5.2).
+# RUSTFLAGS="--cfg loom|shuttle" for the IPC reactor models (plan 2_ipc.md §5.2);
+# cfg(verus_keep_ghost)/cfg(verus_only) by Verus during `cargo verus verify`.
 # Teach plain cargo all are expected (same handling as urt/kcore).
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)", "cfg(loom)", "cfg(shuttle)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)", "cfg(loom)", "cfg(shuttle)", "cfg(verus_keep_ghost)", "cfg(verus_only)"] }

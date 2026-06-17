@@ -226,14 +226,16 @@ jobs:
           fi
           echo "kcore layering clean."
 
-  # Deductive verification of kcore with Verus (plan doc/plans/3_verus-rewrite.md,
-  # phase 0). PINNED to 0.2026.06.07.cd03505 (the `vstd` companion is pinned in
-  # kcore/Cargo.toml); an upgrade is a deliberate PR that re-runs the proofs, like
-  # the cargo-kani pin. Phase 0 verifies `untyped::carve`/`carve_place`; no
-  # per-proof filter, so a new verus!{} obligation auto-gates (the property the
-  # kani/concurrency jobs also prize). Verus ships no crates.io binary — the
-  # release zip (verus + cargo-verus + z3 + prebuilt vstd) is fetched and cached,
-  # keyed on the version so a bump busts the cache.
+  # Deductive verification with Verus (plan doc/plans/3_verus-rewrite.md). PINNED
+  # to 0.2026.06.07.cd03505 (the `vstd` companion is pinned in kcore/Cargo.toml +
+  # ipc/Cargo.toml); an upgrade is a deliberate PR that re-runs the proofs, like
+  # the cargo-kani pin. Covers `kcore` (the kernel object core, phases 0–6) and,
+  # since phase 7a, the §4.7 host chokepoints as they port off Kani — `ipc` first
+  # (the §3.7 message header in `ipc::header`). No per-proof filter, so a new
+  # verus!{} obligation auto-gates (the property the kani/concurrency jobs also
+  # prize). Verus ships no crates.io binary — the release zip (verus + cargo-verus
+  # + z3 + prebuilt vstd) is fetched and cached, keyed on the version so a bump
+  # busts the cache.
   verus:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -263,7 +265,7 @@ jobs:
           url="https://github.com/verus-lang/verus/releases/download/release/${VERUS_VERSION}/verus-${VERUS_VERSION}-x86-linux.zip"
           curl -fsSL "$url" -o verus.zip
           unzip -q verus.zip && rm verus.zip
-      - name: Verify kcore (cargo verus verify -p kcore)
+      - name: Verify kcore + host chokepoints (cargo verus verify)
         run: |
           # The zip extracts to a dir holding `verus`/`cargo-verus`/`z3`; put it on
           # PATH so `cargo verus` resolves (works whether or not it nests a subdir).
@@ -271,3 +273,5 @@ jobs:
           if [ -z "$bindir" ]; then echo "::error::cargo-verus not found in the Verus release"; exit 1; fi
           export PATH="$bindir:$PATH"
           cargo verus verify -p kcore
+          # §4.7 host chokepoints, one -p per landing PR (phase 7a: ipc::header).
+          cargo verus verify -p ipc
