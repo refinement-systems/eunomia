@@ -89,6 +89,12 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
         // is unchanged) — `delete`'s Channel branch carries it across the fire to `obj_unref`.
         // Conditional + obj_census-triggered, so `check_expired` is undisturbed (doc 50).
         cspace::census_dom_complete(old(store)) ==> cspace::census_dom_complete(final(store)),
+        // Dead, queue-detached TCBs are frozen across the wake (plan §6d-final-thread-body): a
+        // signal touches only the woken head (`wait_notif == Some(n)`) and drops `refs[n]` (which
+        // a waiter held, so `refs[n] > 0`), so a `wait_notif is None`, `refs == 0` object `x` is
+        // not the head (`x != n`) and is untouched. `fire`/`endpoint_cap_dropped`/`delete` carry
+        // it up the teardown chain.
+        cspace::dead_tcb_frozen(old(store), final(store)),
         // The timer views are untouched (plan §4d): every setter in the body frames
         // them and `make_runnable` frames them, so `report_terminal` (which fires
         // `signal` and otherwise touches no timer) can frame timers across the wake.
@@ -178,6 +184,14 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
                 assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o) >= 1 implies
                     store.refs_view().dom().contains(o) by {}
             }
+            // dead_tcb_frozen: the accumulate path moved no TCB and no ref, so every dead,
+            // detached object is trivially frozen (signal-shaped with no waiter moved).
+            assert(store.refs_view() == old(store).refs_view());
+            assert forall|k: ObjId| #[trigger] store.tcb_view()[k] == old(store).tcb_view()[k]
+                || old(store).tcb_view()[k].wait_notif == Some(n) by {}
+            assert(store.refs_view().dom() =~= old(store).refs_view().dom());
+            assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
+            cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, n);
         }
         return;
     }
@@ -274,6 +288,22 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
                 assert(cspace::obj_census(old(store), o) >= 1);
             }
         }
+        // dead_tcb_frozen: a signal-shaped edit. Only the woken head `t` (`wait_notif == Some(n)`)
+        // moved; `refs` dropped only at `n`, which had `refs > 0` (the woken waiter held it), so a
+        // dead (`refs 0`), detached (`wait_notif is None`) `x` is neither `t` nor `n` and is frozen.
+        assert(old(store).refs_view()[n] > 0);
+        assert(store.refs_view()
+            == old(store).refs_view().insert(n, (old(store).refs_view()[n] - 1) as nat));
+        assert forall|x: ObjId|
+            old(store).refs_view().dom().contains(x) && old(store).refs_view()[x] == 0
+            implies #[trigger] store.refs_view()[x] == 0 by {
+            assert(x != n);
+        }
+        assert forall|k: ObjId| #[trigger] store.tcb_view()[k] == old(store).tcb_view()[k]
+            || old(store).tcb_view()[k].wait_notif == Some(n) by {}
+        assert(store.refs_view().dom() =~= old(store).refs_view().dom());
+        assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
+        cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, n);
     }
 }
 
@@ -498,6 +528,12 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
                             == old(store).refs_view().insert(n, (old(store).refs_view()[n] - 1) as nat)
                 }
         }),
+        // Dead, queue-detached TCBs are frozen across the splice (plan §6d-final-thread-body):
+        // a signal-shaped edit — only `t` and its chain predecessor (both `wait_notif == Some(n)`)
+        // move, and `refs` drops only at `n` (which had a waiter, so `refs[n] > 0`). So a
+        // `wait_notif is None`, `refs == 0` object is untouched. `destroy_tcb` reads it off for
+        // its own promise about the *other* dead objects (its subject is excepted separately).
+        cspace::dead_tcb_frozen(old(store), final(store)),
 {
     let ghost nv0 = old(store).notif_view();
     let ghost tv0 = old(store).tcb_view();
@@ -705,6 +741,21 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
                         cspace::lemma_in_refs_from_census(old(store), o);
                     }
                 }
+                // dead_tcb_frozen (present): only `n`'s waiters moved, and `refs` dropped only at
+                // `n` (which had a waiter, so `refs[n] > 0`) — so a dead, detached object is frozen.
+                assert(old(store).refs_view()[n] > 0);
+                assert(store.refs_view()
+                    == old(store).refs_view().insert(n, (old(store).refs_view()[n] - 1) as nat));
+                assert forall|x: ObjId|
+                    old(store).refs_view().dom().contains(x) && old(store).refs_view()[x] == 0
+                    implies #[trigger] store.refs_view()[x] == 0 by {
+                    assert(x != n);
+                }
+                assert forall|kk: ObjId| #[trigger] store.tcb_view()[kk] == old(store).tcb_view()[kk]
+                    || old(store).tcb_view()[kk].wait_notif == Some(n) by {}
+                assert(store.refs_view().dom() =~= old(store).refs_view().dom());
+                assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
+                cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, n);
             }
             return;
         }
@@ -732,6 +783,12 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
         assert(cspace::caps_consistent(old(store)) ==> cspace::caps_consistent(store));
         assert(cspace::end_caps_sound(old(store)) ==> cspace::end_caps_sound(store));
         assert(cspace::census_dom_complete(old(store)) ==> cspace::census_dom_complete(store));
+        // dead_tcb_frozen (absent): the store is unchanged, so it is trivially frozen.
+        assert forall|kk: ObjId| #[trigger] store.tcb_view()[kk] == old(store).tcb_view()[kk]
+            || old(store).tcb_view()[kk].wait_notif == Some(n) by {}
+        assert(store.refs_view().dom() =~= old(store).refs_view().dom());
+        assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
+        cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, n);
     }
 }
 

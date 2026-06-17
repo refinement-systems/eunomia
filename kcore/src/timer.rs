@@ -364,6 +364,10 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
         // `disarm` frames chan_view + slot_view, so the endpoint-cap census rides through
         // (plan §6d body-removal gate).
         cspace::end_caps_sound(final(store)),
+        // Dead, queue-detached TCBs are frozen (plan §6d-final-thread-body): `disarm` frames
+        // `tcb` whole and drops `refs` only at the armed binding's notification (which had
+        // `refs > 0`), so a dead, detached object is untouched. `obj_unref`'s Timer arm reads it.
+        cspace::dead_tcb_frozen(old(store), final(store)),
 {
     let ghost tmv0 = old(store).timer_view();
     let ghost head0 = old(store).timer_head_view();
@@ -393,6 +397,11 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
                 n, (old(store).refs_view()[n] - 1) as nat));
             assert(store.refs_view().dom() =~= old(store).refs_view().dom());
             assert(old(store).refs_view()[n] > 0);
+            // dead-stays-dead (armed): `refs` moved only at `n` (`refs[n] > 0`), so a dead `x`
+            // is `x != n` and keeps `refs[x] == 0` (plan §6d-final-thread-body).
+            assert forall|x: ObjId|
+                old(store).refs_view().dom().contains(x) && old(store).refs_view()[x] == 0
+                implies #[trigger] store.refs_view()[x] == 0 by { assert(x != n); }
             // The census moves only at `n`, by exactly the `-1` that `disarm` released.
             assert forall|o: ObjId| store.refs_view().dom().contains(o)
                 implies store.refs_view()[o] == cspace::obj_census(store, o) by {
@@ -406,6 +415,10 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
                 implies store.refs_view()[o] == cspace::obj_census(store, o) by {
                 assert(cspace::obj_census(store, o) == cspace::obj_census(old(store), o));
             }
+            // dead-stays-dead (not armed): `refs` is unchanged.
+            assert forall|x: ObjId|
+                old(store).refs_view().dom().contains(x) && old(store).refs_view()[x] == 0
+                implies #[trigger] store.refs_view()[x] == 0 by {}
         }
         // caps_consistent: `disarm` frames cspace and keeps the timer domain, so the Timer
         // arm reads an unchanged domain + the ensured `timer_wf`; every other arm reads a
@@ -432,6 +445,14 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
                 assert(cspace::obj_census(old(store), o) == 0);
             }
         }
+        // dead_tcb_frozen: `tcb` is framed whole, and the dead-stays-dead refs fact was
+        // established in each `armed0` branch (the only `refs` move is at the bound notification,
+        // which had `refs > 0`). So a dead object stays dead and detached.
+        assert forall|k: ObjId| #[trigger] store.tcb_view()[k] == old(store).tcb_view()[k]
+            || old(store).tcb_view()[k].wait_notif == Some(t) by {}
+        assert(store.refs_view().dom() =~= old(store).refs_view().dom());
+        assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
+        cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, t);
     }
 }
 

@@ -2119,6 +2119,133 @@ pub proof fn lemma_caps_consistent_frame_thread_dequeued<S: Store>(s0: &S, s1: &
     }
 }
 
+// Halting + hold-clearing the single dead TCB `t` preserves `caps_consistent` (plan
+// §6d-final-thread-body — `destroy_tcb`'s halt + clear-before-unref steps). `t` is designated by
+// no live cap (`refs[t] == 0`), so the only `cap_consistent` clauses reading `t`'s fields — a
+// `Thread(t)` cap's `cspace_resident_wf`/waiter-coherence — are never instantiated; every other
+// clause reads a framed field, and `t` lies on no waiter chain, so its edits break no
+// notification's `notif_wf`. Unlike `_dequeued` this allows `t`'s `cspace`/`aspace`/`state`/
+// `wait_notif`/`qnext` to change freely (the hold-clear), traded for the no-`Thread(t)`-cap fact.
+pub proof fn lemma_caps_consistent_frame_thread_halt_clear<S: Store>(s0: &S, s1: &S, t: ObjId)
+    requires
+        caps_consistent(s0),
+        s1.slot_view() == s0.slot_view(),
+        s1.chan_view() == s0.chan_view(),
+        s1.timer_view() == s0.timer_view(),
+        s1.timer_head_view() == s0.timer_head_view(),
+        s1.cspace_view() == s0.cspace_view(),
+        s1.notif_view() == s0.notif_view(),
+        s1.tcb_view().dom() == s0.tcb_view().dom(),
+        forall|k: ObjId| k != t ==> #[trigger] s1.tcb_view()[k] == s0.tcb_view()[k],
+        // `t` is designated by no live cap (sourced from `refs[t] == 0` at the call site).
+        forall|s: SlotId| #[trigger] s0.slot_view().dom().contains(s)
+            && !is_empty_cap(s0.slot_view()[s].cap)
+            ==> s0.slot_view()[s].cap.kind != CapKind::Thread(t),
+        // `t` is a node of no waiter chain in either state.
+        forall|o: ObjId, ws: Seq<ObjId>|
+            waiter_chain(s0.notif_view(), s0.tcb_view(), o, ws) ==> !ws.contains(t),
+        forall|o: ObjId, ws: Seq<ObjId>|
+            waiter_chain(s1.notif_view(), s1.tcb_view(), o, ws) ==> !ws.contains(t),
+    ensures
+        caps_consistent(s1),
+{
+    // `notif_wf(m)` carries: `m`'s chain nodes name `m` and `t` is on no chain, so every node
+    // differs from `t`, hence is unchanged — the chain is preserved (same as `_dequeued`).
+    assert forall|m: ObjId| #[trigger] s0.notif_view().dom().contains(m)
+        && notif_wf(s0.notif_view(), s0.tcb_view(), m) implies
+        notif_wf(s1.notif_view(), s1.tcb_view(), m) by {
+        let ws = waiter_seq(s0.notif_view(), s0.tcb_view(), m);
+        assert(waiter_chain(s0.notif_view(), s0.tcb_view(), m, ws));
+        assert(!ws.contains(t));
+        assert(waiter_chain(s1.notif_view(), s1.tcb_view(), m, ws)) by {
+            assert forall|i: int| #![trigger ws[i]] 0 <= i < ws.len() implies
+                s1.tcb_view()[ws[i]] == s0.tcb_view()[ws[i]] by {
+                assert(ws.contains(ws[i]));
+            }
+        }
+    }
+    assert forall|s: SlotId| #![trigger s1.slot_view()[s]]
+        s1.slot_view().dom().contains(s) && !is_empty_cap(s1.slot_view()[s].cap)
+        implies cap_consistent(s1, s1.slot_view()[s].cap) by {
+        let c = s1.slot_view()[s].cap;
+        assert(c == s0.slot_view()[s].cap);
+        assert(cap_consistent(s0, c));
+        // No live cap is `Thread(t)`.
+        assert(s0.slot_view()[s].cap.kind != CapKind::Thread(t));
+        match c.kind {
+            CapKind::Notification(m) => {
+                assert(s0.notif_view().dom().contains(m));
+                assert(notif_wf(s0.notif_view(), s0.tcb_view(), m));
+            }
+            CapKind::Thread(m) => {
+                // `c` is a live `Thread(m)` cap, and no live cap is `Thread(t)`, so `m != t`;
+                // hence `tcb[m]` is unchanged and its coherence clauses carry.
+                assert(m != t);
+                assert(s1.tcb_view()[m] == s0.tcb_view()[m]);
+                if let Some(cs) = s1.tcb_view()[m].cspace {
+                    assert(s0.tcb_view()[m].cspace == Some(cs));
+                    assert(cspace_resident_wf(s0, cs));
+                    assert(cspace_resident_wf(s1, cs));
+                }
+                if s1.tcb_view()[m].state == ThreadState::BlockedNotif {
+                    if let Some(wn) = s1.tcb_view()[m].wait_notif {
+                        assert(s0.notif_view().dom().contains(wn));
+                        assert(notif_wf(s0.notif_view(), s0.tcb_view(), wn));
+                    }
+                }
+            }
+            CapKind::Channel(co, _) => {
+                assert forall|e: int, v: int|
+                    (0 <= e < 2 && 0 <= v < 3
+                        && #[trigger] s1.chan_view()[co].bindings[(e, v)].notif is Some) implies {
+                        let m = s1.chan_view()[co].bindings[(e, v)].notif->Some_0;
+                        s1.notif_view().dom().contains(m)
+                            && notif_wf(s1.notif_view(), s1.tcb_view(), m)
+                    } by {
+                    let m = s1.chan_view()[co].bindings[(e, v)].notif->Some_0;
+                    assert(s0.chan_view()[co].bindings[(e, v)].notif == Some(m));
+                    assert(s0.notif_view().dom().contains(m));
+                    assert(notif_wf(s0.notif_view(), s0.tcb_view(), m));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+// A thread that is not a blocked waiter of any live chain lies on no waiter chain (plan
+// §6d-final-thread-body — `destroy_tcb`'s post-detach state). A `waiter_chain` node is
+// `BlockedNotif` and names its notification, so `t` can be a node only of its own
+// `wait_notif`'s chain; if `t` is not `BlockedNotif`, or `wait_notif is None`, or it is
+// `notif_wf`-absent from that one chain, it is on no chain at all.
+pub proof fn lemma_thread_off_all_chains<S: Store>(s: &S, t: ObjId)
+    requires
+        s.tcb_view()[t].state != ThreadState::BlockedNotif
+        || s.tcb_view()[t].wait_notif is None
+        || (s.tcb_view()[t].wait_notif matches Some(wn)
+            && notif_wf(s.notif_view(), s.tcb_view(), wn)
+            && !waiter_seq(s.notif_view(), s.tcb_view(), wn).contains(t)),
+    ensures
+        forall|o: ObjId, ws: Seq<ObjId>|
+            waiter_chain(s.notif_view(), s.tcb_view(), o, ws) ==> !ws.contains(t),
+{
+    assert forall|o: ObjId, ws: Seq<ObjId>|
+        waiter_chain(s.notif_view(), s.tcb_view(), o, ws) implies !ws.contains(t) by {
+        if ws.contains(t) {
+            let i = ws.index_of(t);
+            assert(0 <= i < ws.len() && ws[i] == t);
+            // A chain node names `o` and is `BlockedNotif`, so the first two disjuncts are out.
+            assert(s.tcb_view()[t].wait_notif == Some(o)
+                && s.tcb_view()[t].state == ThreadState::BlockedNotif);
+            // The third disjunct then has `wn == o`, and `t` is absent from `o`'s *unique* chain —
+            // but `ws` is that chain (uniqueness), contradicting `ws.contains(t)`.
+            let wsq = waiter_seq(s.notif_view(), s.tcb_view(), o);
+            assert(waiter_chain(s.notif_view(), s.tcb_view(), o, wsq));
+            lemma_waiter_chain_unique(s.notif_view(), s.tcb_view(), o, wsq, ws);
+        }
+    }
+}
+
 // `remove_waiter`'s splice step (plan §4c): unlinking `t == ws0[k]` from a waiter
 // chain yields `ws0.remove(k)` in the post-state, given the imperative link fixups —
 // the head re-pointed past `t` when `t` was the head (`k == 0`), the predecessor's
@@ -3240,6 +3367,118 @@ pub open spec fn census_off_by_one<S: Store>(store: &S, z: ObjId) -> bool {
     &&& store.refs_view()[z] == obj_census(store, z) + 1
     &&& forall|x: ObjId| x != z && store.refs_view().dom().contains(x)
             ==> store.refs_view()[x] == obj_census(store, x)
+}
+
+// A teardown-stable frame for "dead, queue-detached" TCBs (plan §6d-final-thread-body, doc 52
+// §3 — the `tcb_view` frame the cross-object recursion lacked). An object `x` with
+// `refs[x] == 0` whose TCB entry is off every waiter queue (`wait_notif is None`) is untouched
+// by any teardown op: `refs[x] == 0` ⟹ no cap designates it (so no `dec_ref`/`destroy_*`
+// targets it, hence no `set_tcb_*` runs on it), and `wait_notif is None` ⟹ it sits on no
+// notification's waiter chain (so no `signal`/`remove_waiter` wakes it — `signal`'s frame keys
+// exactly on `wait_notif != Some(n)`). **Self-composing:** the antecedent is itself preserved
+// (a frozen `tcb[x]` keeps `wait_notif is None`, and `refs[x]` stays `0` in-domain), so the
+// frame threads through the cross-module cluster and `destroy_cspace`'s resident loop without an
+// external refs-monotonicity lemma. The five non-`destroy_tcb` cluster members carry this base
+// form; `destroy_tcb` carries it with its own subject excepted (it *does* rewrite `tcb[t]`,
+// then re-qualifies `t` — halted with `wait_notif` cleared — to read `t`'s own postconditions
+// off the recursive `unref_cspace`/`delete`).
+// The per-object kernel of `dead_tcb_frozen` (a clean predicate so the system quantifier triggers
+// on `dead_tcb_frozen_at(s0, s1, x)`, not the fragile `s1.tcb_view()[x]` map index).
+pub open spec fn dead_tcb_frozen_at<S: Store>(s0: &S, s1: &S, x: ObjId) -> bool {
+    (s0.tcb_view().dom().contains(x) && s0.refs_view().dom().contains(x)
+        && s0.refs_view()[x] == 0 && s0.tcb_view()[x].wait_notif is None)
+        ==> (s1.tcb_view().dom().contains(x) && s1.refs_view().dom().contains(x)
+            && s1.refs_view()[x] == 0 && s1.tcb_view()[x] == s0.tcb_view()[x])
+}
+
+pub open spec fn dead_tcb_frozen<S: Store>(s0: &S, s1: &S) -> bool {
+    forall|x: ObjId| #[trigger] dead_tcb_frozen_at(s0, s1, x)
+}
+
+// `dead_tcb_frozen` composes (the antecedent is self-preserving): the building block
+// `destroy_cspace`'s resident loop and `delete`/`destroy_tcb`'s sequential teardown steps use to
+// thread the frame across each sub-call (plan §6d-final-thread-body).
+pub proof fn lemma_dead_tcb_frozen_trans<S: Store>(s0: &S, s1: &S, s2: &S)
+    requires
+        dead_tcb_frozen(s0, s1),
+        dead_tcb_frozen(s1, s2),
+    ensures
+        dead_tcb_frozen(s0, s2),
+{
+    assert forall|x: ObjId| #[trigger] dead_tcb_frozen_at(s0, s2, x) by {
+        // Instantiate both frames at `x` (clean predicate triggers).
+        assert(dead_tcb_frozen_at(s0, s1, x));
+        assert(dead_tcb_frozen_at(s1, s2, x));
+        // Chain: if `x` is dead+detached in s0, frame 1 makes it dead+detached in s1 (with
+        // `tcb[x] == s0.tcb[x]`, so still `wait_notif is None`), then frame 2 reaches s2.
+        if s0.tcb_view().dom().contains(x) && s0.refs_view().dom().contains(x)
+            && s0.refs_view()[x] == 0 && s0.tcb_view()[x].wait_notif is None {
+            assert(s1.tcb_view()[x] == s0.tcb_view()[x]);
+            assert(s1.tcb_view()[x].wait_notif is None);
+        }
+    }
+}
+
+// Derive `dead_tcb_frozen` from a **signal-shaped** edit (plan §6d-final-thread-body): only TCBs
+// waiting on `n` move (the woken/spliced waiter), and `refs` keeps already-dead objects dead. A
+// dead (`refs 0`), detached (`wait_notif is None`) `x` is not waiting on `n`, so its TCB is
+// frozen, and it stays dead. `signal`/`fire`/`endpoint_cap_dropped`/`remove_waiter` feed this
+// with their fired/spliced `n`; `release_binding` feeds it with `n` arbitrary (no TCB moves, so
+// the left disjunct holds for every `k`). `delete`/`destroy_channel` read the result off.
+pub proof fn lemma_dead_tcb_frozen_signal_shaped<S: Store>(s0: &S, s1: &S, n: ObjId)
+    requires
+        s1.refs_view().dom() == s0.refs_view().dom(),
+        s1.tcb_view().dom() == s0.tcb_view().dom(),
+        forall|x: ObjId| s0.refs_view().dom().contains(x) && s0.refs_view()[x] == 0
+            ==> #[trigger] s1.refs_view()[x] == 0,
+        forall|k: ObjId| #[trigger] s1.tcb_view()[k] == s0.tcb_view()[k]
+            || s0.tcb_view()[k].wait_notif == Some(n),
+    ensures
+        dead_tcb_frozen(s0, s1),
+{
+    assert forall|x: ObjId| #[trigger] dead_tcb_frozen_at(s0, s1, x) by {
+        if s0.tcb_view().dom().contains(x) && s0.refs_view().dom().contains(x)
+            && s0.refs_view()[x] == 0 && s0.tcb_view()[x].wait_notif is None {
+            // Detached `x`: `wait_notif is None != Some(n)`, so the disjunction's right fails and
+            // the left (`tcb` frozen) holds; the refs hypothesis keeps it dead-in-domain.
+            assert(s1.tcb_view()[x] == s0.tcb_view()[x] || s0.tcb_view()[x].wait_notif == Some(n));
+        }
+    }
+}
+
+// `dec_ref(o)` (with `refs[o] > 0`) is dead-tcb-frozen: it frames `tcb` whole and drops only
+// `refs[o]` (a positive object, so never a dead one). `obj_unref`'s arms read it off after the
+// `dec_ref` before composing with the at-zero destructor (plan §6d-final-thread-body).
+pub proof fn lemma_dead_tcb_frozen_dec_ref<S: Store>(s0: &S, s1: &S, o: ObjId)
+    requires
+        s0.refs_view().dom().contains(o),
+        s0.refs_view()[o] > 0,
+        s1.tcb_view() == s0.tcb_view(),
+        s1.refs_view() == s0.refs_view().insert(o, (s0.refs_view()[o] - 1) as nat),
+    ensures
+        dead_tcb_frozen(s0, s1),
+{
+    // `insert` at the in-domain `o` keeps the refs domain (set extensionality).
+    assert(s1.refs_view().dom() =~= s0.refs_view().dom());
+    assert forall|x: ObjId| s0.refs_view().dom().contains(x) && s0.refs_view()[x] == 0
+        implies #[trigger] s1.refs_view()[x] == 0 by {
+        assert(x != o);
+    }
+    assert forall|k: ObjId| #[trigger] s1.tcb_view()[k] == s0.tcb_view()[k]
+        || s0.tcb_view()[k].wait_notif == Some(o) by {}
+    lemma_dead_tcb_frozen_signal_shaped(s0, s1, o);
+}
+
+// `dead_tcb_frozen` when `refs`/`tcb` are framed whole — a no-op step or a destructor whose
+// every view is framed (`destroy_notif`). The reflexive base of the composition.
+pub proof fn lemma_dead_tcb_frozen_refl<S: Store>(s0: &S, s1: &S)
+    requires
+        s1.refs_view() == s0.refs_view(),
+        s1.tcb_view() == s0.tcb_view(),
+    ensures
+        dead_tcb_frozen(s0, s1),
+{
+    assert forall|x: ObjId| #[trigger] dead_tcb_frozen_at(s0, s1, x) by {}
 }
 
 // A frozen delta turns `refcount_sound` at the start into `refcount_sound` at the end —
@@ -7165,6 +7404,11 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
         final(store).cspace_view() == old(store).cspace_view(),
         // The channel skeleton rides through every resident `delete` (plan §6d body PR).
         chan_struct_frame(old(store).chan_view(), final(store).chan_view()),
+        // Dead, queue-detached TCBs are frozen across the resident loop (plan
+        // §6d-final-thread-body): each `delete` carries `dead_tcb_frozen`, and the loop invariant
+        // threads it (the antecedent is self-preserving). `unref_cspace`/`obj_unref` read it off;
+        // `destroy_tcb` consumes it for its halted subject across its `unref_cspace`.
+        dead_tcb_frozen(old(store), final(store)),
     // SCC measure (plan §6d, doc 44 §3): `destroy_cspace` sits above `delete` (1 > 0); its
     // resident-loop `delete` calls are count-flat on the first iteration, so the height drops.
     decreases count_nonempty(old(store).slot_view()), 1int
@@ -7194,6 +7438,9 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
             store.cspace_view() == old(store).cspace_view(),
             // The channel skeleton composes across the resident deletes (plan §6d body PR).
             chan_struct_frame(old(store).chan_view(), store.chan_view()),
+            // Dead, queue-detached TCBs are frozen across the resident deletes so far (plan
+            // §6d-final-thread-body) — `lemma_dead_tcb_frozen_trans` extends it past each `delete`.
+            dead_tcb_frozen(old(store), store),
             cspace_resident_wf(store, cs),
         decreases n - i,
     {
@@ -7201,10 +7448,12 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
         if !cap_is_empty(store.slot(sid).cap) {
             let ghost sv_before = store.slot_view();
             let ghost cv_before = store.chan_view();
+            let ghost st_before = *store;
             delete(store, sid);
             proof {
                 lemma_only_empties_trans(old(store).slot_view(), sv_before, store.slot_view());
                 lemma_chan_struct_frame_trans(old(store).chan_view(), cv_before, store.chan_view());
+                lemma_dead_tcb_frozen_trans(old(store), &st_before, store);
             }
         }
         i += 1;
@@ -7306,6 +7555,12 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
         // recursive ones carry it, `destroy_notif`/`destroy_timer` frame `chan_view` whole);
         // `delete` reads it off (plan §6d body PR).
         chan_struct_frame(old(store).chan_view(), final(store).chan_view()),
+        // Dead, queue-detached TCBs are frozen (plan §6d-final-thread-body): `dec_ref` frames
+        // `tcb`/`refs` whole except the unref'd `o` (which had `refs[o] > 0`, so it is not in the
+        // dead set), and each at-zero destructor carries `dead_tcb_frozen` (its Thread arm with
+        // its own subject excepted — but that subject is `o`, again refs-positive at entry). So
+        // `delete` reads it off (plan §6d body PR).
+        dead_tcb_frozen(old(store), final(store)),
         // Non-designating caps: the store is untouched (the frame `delete` reads off for a
         // Frame cap — its frame-mapping release rode the frame-unmap branch, not here).
         cap_obj(cap) is None ==> {
@@ -7334,27 +7589,55 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
     // `dec_ref`-then-destructor calls are count-flat, so the descent to the destructors is by height.
     decreases count_nonempty(old(store).slot_view()), 4int
 {
+    let ghost st0 = *store;
     match cap.kind {
         CapKind::CSpace(o) => {
             dec_ref(store, o);
+            let ghost st1 = *store;
+            proof { lemma_dead_tcb_frozen_dec_ref(&st0, store, o); }
             if store.obj_refs(o) == 0 {
                 destroy_cspace(store, o);
+                proof { lemma_dead_tcb_frozen_trans(&st0, &st1, store); }
             }
         }
         CapKind::Thread(o) => {
             dec_ref(store, o);
+            let ghost st1 = *store;
+            proof { lemma_dead_tcb_frozen_dec_ref(&st0, store, o); }
             if store.obj_refs(o) == 0 {
                 crate::thread::destroy_tcb(store, o);
+                proof {
+                    // `destroy_tcb` carries the dead frame with its own subject `o` excepted; but
+                    // `o` had `refs[o] > 0` at entry (`st0`), so it is not in the dead set anyway.
+                    // Compose `st0 → st1` (`dec_ref`) with `st1 → final` (`destroy_tcb`-except-`o`).
+                    assert forall|x: ObjId| #[trigger] dead_tcb_frozen_at(&st0, store, x) by {
+                        assert(dead_tcb_frozen_at(&st0, &st1, x));
+                        if x != o {
+                            assert(dead_tcb_frozen_at(&st1, store, x));
+                        }
+                        if st0.tcb_view().dom().contains(x) && st0.refs_view().dom().contains(x)
+                            && st0.refs_view()[x] == 0 && st0.tcb_view()[x].wait_notif is None {
+                            // `o` had `refs[o] > 0` at `st0`, so a dead `x != o`.
+                            assert(x != o);
+                            assert(st1.tcb_view()[x] == st0.tcb_view()[x]);
+                        }
+                    }
+                }
             }
         }
         CapKind::Channel(o, _) => {
             dec_ref(store, o);
+            let ghost st1 = *store;
+            proof { lemma_dead_tcb_frozen_dec_ref(&st0, store, o); }
             if store.obj_refs(o) == 0 {
                 crate::channel::destroy_channel(store, o);
+                proof { lemma_dead_tcb_frozen_trans(&st0, &st1, store); }
             }
         }
         CapKind::Notification(o) => {
             dec_ref(store, o);
+            let ghost st1 = *store;
+            proof { lemma_dead_tcb_frozen_dec_ref(&st0, store, o); }
             if store.obj_refs(o) == 0 {
                 proof {
                     // census(o) == 0 ⟹ no waiters ⟹ wait_head is None (notif_wf's chain).
@@ -7365,10 +7648,17 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                     assert(ws.len() == 0);
                 }
                 crate::notification::destroy_notif(store, o);
+                proof {
+                    // `destroy_notif` frames every view (a model no-op), so `store == st1`.
+                    lemma_dead_tcb_frozen_refl(&st1, store);
+                    lemma_dead_tcb_frozen_trans(&st0, &st1, store);
+                }
             }
         }
         CapKind::Timer(o) => {
             dec_ref(store, o);
+            let ghost st1 = *store;
+            proof { lemma_dead_tcb_frozen_dec_ref(&st0, store, o); }
             if store.obj_refs(o) == 0 {
                 proof {
                     // census(o) == 0 ⟹ armed_timer_refs(o) == 0 ⟹ no armed timer is bound
@@ -7389,13 +7679,26 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                     assert(store.refs_view() == old(store).refs_view().insert(o, 0));
                 }
                 crate::timer::destroy_timer(store, o);
+                proof { lemma_dead_tcb_frozen_trans(&st0, &st1, store); }
             }
         }
         CapKind::Aspace(o) => {
             // Decrement-then-maybe-`aspace_destroy` — exactly `unref_aspace`'s body, reused.
             unref_aspace(store, o);
+            proof {
+                // `unref_aspace` frames `tcb` whole and drops `refs` only at `o` (`refs[o] > 0` at
+                // entry, so a dead `x != o`); `o` may leave the domain, but no dead object does.
+                assert forall|x: ObjId| #[trigger] dead_tcb_frozen_at(&st0, store, x) by {
+                    if st0.tcb_view().dom().contains(x) && st0.refs_view().dom().contains(x)
+                        && st0.refs_view()[x] == 0 && st0.tcb_view()[x].wait_notif is None {
+                        assert(x != o);
+                    }
+                }
+            }
         }
-        CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => {}
+        CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => {
+            proof { lemma_dead_tcb_frozen_refl(&st0, store); }
+        }
     }
 }
 
@@ -7431,10 +7734,24 @@ pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId)
         // The channel skeleton rides through (`dec_ref` frames `chan_view`; `destroy_cspace`
         // carries the skeleton) — `destroy_tcb`'s cspace release reads it (plan §6d body PR).
         chan_struct_frame(old(store).chan_view(), final(store).chan_view()),
+        // Dead, queue-detached TCBs are frozen (plan §6d-final-thread-body): `dec_ref` frames
+        // `tcb` whole (and `refs` except `cs`, which is refs-positive at entry so not in the dead
+        // set), and `destroy_cspace` carries it. `destroy_tcb`'s cspace release reads it off to
+        // preserve its own halted subject.
+        dead_tcb_frozen(old(store), final(store)),
 {
+    let ghost st0 = *store;
     dec_ref(store, cs);
+    let ghost st1 = *store;
+    proof {
+        // `dec_ref` froze `tcb` whole and only dropped `refs[cs]` (cs ∉ dead set: `refs[cs] > 0`).
+        lemma_dead_tcb_frozen_dec_ref(&st0, store, cs);
+    }
     if store.obj_refs(cs) == 0 {
         destroy_cspace(store, cs);
+        proof {
+            lemma_dead_tcb_frozen_trans(&st0, &st1, store);
+        }
     }
 }
 
@@ -7789,6 +8106,14 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         // `destroy_channel`'s ring-cap loop reads off to keep `old.ring_cap[ch]` valid across
         // its `delete`s (plan §6d body PR).
         chan_struct_frame(old(store).chan_view(), final(store).chan_view()),
+        // Dead, queue-detached TCBs are frozen across the teardown (plan §6d-final-thread-body):
+        // `delete_prepare` frames `tcb`/`refs` whole, the teardown branches touch only `chan`/
+        // `aspace`/`refs[asp]` (a dead `x ≠ asp`, since a mapping made `refs[asp] > 0`) or fire a
+        // peer-closed notification (which wakes only `wait_notif`-bearing waiters, never a
+        // `wait_notif is None` thread), and `obj_unref` carries it. This is the frame
+        // `destroy_tcb` reads off to preserve its halted subject's `report`/`state`/`qnext`
+        // across the recursive `unref_cspace`/`destroy_cspace`.
+        dead_tcb_frozen(old(store), final(store)),
         // Conditional-on-notification frame (plan §4d): deleting a **notification**
         // cap is robustly clean — `delete_prepare` frames every object view, the
         // `Channel`/mapped-`Frame` teardown branches don't fire, and `obj_unref`'s
@@ -7812,11 +8137,16 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
     decreases count_nonempty(old(store).slot_view()), 0int
 {
     let ghost cv0 = store.chan_view();
+    let ghost st0 = *store;
     // `cdt_unlink` + clear the slot, leaving the off-by-one census/`end_caps` window the
     // teardown branches consume (its proof is isolated in `delete_prepare`, doc 25 §2).
     let cap = delete_prepare(store, slot);
     let ghost o_opt = cap_obj(cap);
     let ghost asp_opt = cap_frame_aspace(cap);
+    // `delete_prepare` framed `refs` + `tcb` whole, so it is dead-tcb-frozen (plan
+    // §6d-final-thread-body) — the base the teardown branches + `obj_unref` compose onto.
+    proof { lemma_dead_tcb_frozen_refl(&st0, store); }
+    let ghost st_prep = *store;
     // Channel endpoint liveness is tracked per end for peer-closed (§3.3).
     if let CapKind::Channel(ch, end) = cap.kind {
         proof {
@@ -7838,12 +8168,17 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
             }
         }
         crate::channel::endpoint_cap_dropped(store, ch, end);
+        // `endpoint_cap_dropped` is dead-tcb-frozen (st_prep → here).
+    } else {
+        proof { lemma_dead_tcb_frozen_refl(&st_prep, store); }
     }
+    let ghost st_chan = *store;
     // Deleting a mapped frame cap unmaps it — the one revocation story
     // for shared memory (§2.5).
     if let CapKind::Frame { pages, mapping: Some((asp, va)), .. } = cap.kind {
         let ghost s_pre = *store;
         store.aspace_unmap(asp, va, pages);
+        let ghost st_unmap = *store;
         proof {
             // `aspace_unmap` frames every census view (it edits page tables, not caps/refs),
             // so the off-by-one window at `asp` and the refs-domain coverage ride through
@@ -7851,8 +8186,31 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
             assert forall|x: ObjId| #[trigger] obj_census(store, x) == obj_census(&s_pre, x) by {}
             assert(census_off_by_one(store, asp));
             assert(census_dom_complete(store));
+            // `aspace_unmap` frames `refs` + `tcb` whole (page-table maintenance), so
+            // `st_chan → st_unmap` is dead-tcb-frozen.
+            lemma_dead_tcb_frozen_refl(&st_chan, store);
         }
         unref_aspace(store, asp);
+        proof {
+            // `unref_aspace` frames `tcb` whole and drops `refs` only at `asp`; the off-by-one
+            // makes `refs[asp] > 0`, so a dead `x != asp` is frozen. Compose with `aspace_unmap`.
+            assert(st_unmap.refs_view()[asp] > 0);
+            assert forall|x: ObjId| #[trigger] dead_tcb_frozen_at(&st_unmap, store, x) by {
+                if st_unmap.tcb_view().dom().contains(x) && st_unmap.refs_view().dom().contains(x)
+                    && st_unmap.refs_view()[x] == 0 && st_unmap.tcb_view()[x].wait_notif is None {
+                    assert(x != asp);
+                }
+            }
+            lemma_dead_tcb_frozen_trans(&st_chan, &st_unmap, store);
+        }
+    } else {
+        proof { lemma_dead_tcb_frozen_refl(&st_chan, store); }
+    }
+    let ghost st_frame = *store;
+    proof {
+        // Compose the dead-tcb-frozen segments so far: prepare → channel → frame-unmap.
+        lemma_dead_tcb_frozen_trans(&st0, &st_prep, &st_chan);
+        lemma_dead_tcb_frozen_trans(&st0, &st_chan, &st_frame);
     }
     proof {
         // The channel skeleton is preserved up to here: `delete_prepare` framed `chan_view`;
@@ -7922,6 +8280,9 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
     proof {
         // `obj_unref` preserves the skeleton; compose with the pre-unref preservation.
         lemma_chan_struct_frame_trans(cv0, cv_pre_unref, store.chan_view());
+        // dead_tcb_frozen: compose the pre-`obj_unref` segments (`st0 → st_frame`) with
+        // `obj_unref`'s own frame (`st_frame → final`). Plan §6d-final-thread-body.
+        lemma_dead_tcb_frozen_trans(&st0, &st_frame, store);
     }
 }
 

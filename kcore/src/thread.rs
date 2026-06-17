@@ -330,6 +330,12 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         cspace::cspace_wf(old(store).slot_view()),
         old(store).slot_view().dom().finite(),
         cspace::refcount_sound(old(store)),
+        // `t` is already dead (its last designating cap is gone — `obj_unref` calls this only at
+        // `refs[t] == 0`). Needed so the cross-object teardown's `dead_tcb_frozen` frame applies to
+        // `t` itself, preserving `t`'s `report`/`state`/`qnext` across the recursive
+        // `unref_cspace`/`delete` (plan §6d-final-thread-body).
+        old(store).refs_view().dom().contains(t),
+        old(store).refs_view()[t] == 0,
         old(store).tcb_view().dom().contains(t),
         old(store).tcb_view()[t].bind_slots.len() == 2,
         old(store).slot_view().dom().contains(old(store).tcb_view()[t].bind_slots[0]),
@@ -387,6 +393,11 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
             final(store).slot_view()[old(store).tcb_view()[t].bind_slots[0]].cap),
         cspace::is_empty_cap(
             final(store).slot_view()[old(store).tcb_view()[t].bind_slots[1]].cap),
+        // Dead, queue-detached TCBs *other than `t`* are frozen (plan §6d-final-thread-body). `t`
+        // itself is excepted — the body rewrites `tcb[t]` (halts it). `obj_unref`'s Thread arm
+        // composes this with `dec_ref` to carry the base `dead_tcb_frozen` up the recursion.
+        forall|x: ObjId|
+            x != t ==> #[trigger] cspace::dead_tcb_frozen_at(old(store), final(store), x),
 {
     if store.tcb_state(t) == ThreadState::Runnable {
         store.unqueue_ready(t);

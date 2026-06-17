@@ -226,9 +226,14 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
         // The channel skeleton rides through the `end_caps`-only update (`fire` frames
         // `chan_view`): `delete`'s Channel branch composes it to `obj_unref` (plan §6d-final).
         cspace::chan_struct_frame(old(store).chan_view(), final(store).chan_view()),
+        // Dead, queue-detached TCBs are frozen (plan §6d-final-thread-body): `set_chan_end_caps`
+        // frames `tcb`/`refs` whole, and the peer-closed `fire` is signal-shaped (its own
+        // `dead_tcb_frozen`). `delete`'s Channel branch reads it off.
+        cspace::dead_tcb_frozen(old(store), final(store)),
 {
     let e = end_idx(end);
     store.set_chan_end_caps(ch, e, store.chan_end_caps(ch, e) - 1);
+    let ghost st_mid = *store;
     // `set_chan_end_caps` left the bindings (and notif/TCB views) untouched, so the
     // binding invariant + the fired binding's refs side-condition carry to the fire.
     assert(store.chan_view()[ch].bindings == old(store).chan_view()[ch].bindings);
@@ -276,6 +281,9 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
     }
     if store.chan_end_caps(ch, e) == 0 {
         fire(store, ch, 1 - e, EV_PEER_CLOSED);
+    } else {
+        // No fire ⇒ the store is unchanged since `st_mid`, so it is trivially dead-tcb-frozen.
+        proof { assert(cspace::dead_tcb_frozen(&st_mid, store)); }
     }
     // caps_consistent + end_caps_sound at exit: established after the decrement above; in the
     // fired branch `fire` carries `caps_consistent` (its conditional ensures) and frames
@@ -301,6 +309,16 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
         let v = store.chan_view()[ch];
         assert(store.chan_view() =~= old(store).chan_view().insert(ch, v));
         cspace::lemma_chan_field_update_struct_frame(old(store).chan_view(), ch, v);
+        // dead_tcb_frozen: `set_chan_end_caps` froze `tcb` + `refs` (so `old → st_mid` is frozen);
+        // the fire (or no-op) carries `st_mid → final`.
+        assert(st_mid.tcb_view() == old(store).tcb_view());
+        assert(st_mid.refs_view() == old(store).refs_view());
+        assert(cspace::dead_tcb_frozen(old(store), &st_mid)) by {
+            assert forall|k: ObjId| #[trigger] st_mid.tcb_view()[k] == old(store).tcb_view()[k]
+                || old(store).tcb_view()[k].wait_notif == Some(ch) by {}
+            cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), &st_mid, ch);
+        }
+        cspace::lemma_dead_tcb_frozen_trans(old(store), &st_mid, store);
     }
 }
 
@@ -350,6 +368,11 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
         // …and refs-domain completeness survives (`signal`'s own conditional, or the unbound
         // no-op) — the teardown chain carries it to `obj_unref`.
         cspace::census_dom_complete(old(store)) ==> cspace::census_dom_complete(final(store)),
+        // Dead, queue-detached TCBs are frozen across the fire (plan §6d-final-thread-body): the
+        // bound branch rides `signal`'s own `dead_tcb_frozen` (its `old` is this `old`, nothing
+        // mutated before it); the unbound branch is a no-op. `endpoint_cap_dropped`/`delete`
+        // carry it up the teardown chain.
+        cspace::dead_tcb_frozen(old(store), final(store)),
 {
     let b = store.chan_binding(ch, end, event);
     if let Some(n) = b.notif {
@@ -1226,6 +1249,10 @@ fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
         final(store).cspace_view() == old(store).cspace_view(),
         final(store).chan_view().dom() == old(store).chan_view().dom(),
         cspace::chan_struct_frame(old(store).chan_view(), final(store).chan_view()),
+        // Dead, queue-detached TCBs are frozen (plan §6d-final-thread-body): `release_binding`
+        // frames `tcb` whole and drops `refs` only at the binding's notification (which had a
+        // binding ref, so `refs > 0`). `destroy_channel`'s binding-release loop reads it off.
+        cspace::dead_tcb_frozen(old(store), final(store)),
 {
     let b = store.chan_binding(ch, end, ev);
     if let Some(n) = b.notif {
@@ -1324,6 +1351,30 @@ fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
             }
             // The skeleton rides through the bindings-only update.
             cspace::lemma_chan_field_update_struct_frame(cv_b, ch, cvf[ch]);
+            // dead_tcb_frozen: `tcb` framed whole (the two setters touch only `refs[n]` + `ch`'s
+            // binding), and `refs` dropped only at `n` (which held a binding ref, so `refs > 0`).
+            // `s_b` is captured before any mutation, so it equals the function entry state.
+            assert(s_b.refs_view() == old(store).refs_view());
+            assert(s_b.tcb_view() == old(store).tcb_view());
+            assert(old(store).refs_view()[n] > 0);
+            assert(store.tcb_view() == old(store).tcb_view());
+            assert forall|x: ObjId|
+                old(store).refs_view().dom().contains(x) && old(store).refs_view()[x] == 0
+                implies #[trigger] store.refs_view()[x] == 0 by { assert(x != n); }
+            assert forall|k: ObjId| #[trigger] store.tcb_view()[k] == old(store).tcb_view()[k]
+                || old(store).tcb_view()[k].wait_notif == Some(n) by {}
+            assert(store.refs_view().dom() =~= old(store).refs_view().dom());
+            assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
+            cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, n);
+        }
+    } else {
+        // No bound notification ⇒ the store is unchanged, so it is trivially dead-tcb-frozen.
+        proof {
+            assert forall|k: ObjId| #[trigger] store.tcb_view()[k] == old(store).tcb_view()[k]
+                || old(store).tcb_view()[k].wait_notif == Some(ch) by {}
+            assert(store.refs_view().dom() =~= old(store).refs_view().dom());
+            assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
+            cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, ch);
         }
     }
 }
@@ -1376,6 +1427,10 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                 ==> cspace::is_empty_cap(
                     final(store).slot_view()[
                         #[trigger] old(store).chan_view()[ch].ring_cap[(r, i, c)]].cap),
+        // Dead, queue-detached TCBs are frozen across the teardown (plan §6d-final-thread-body):
+        // each ring-cap `delete` and binding `release_binding` carries `dead_tcb_frozen`, threaded
+        // through the loops by `lemma_dead_tcb_frozen_trans`. `obj_unref`'s Channel arm reads it.
+        cspace::dead_tcb_frozen(old(store), final(store)),
     // SCC measure (plan §6d-final): height 3 — above `delete` (0), below `obj_unref` (4); its
     // ring-cap `delete`s are count-flat on the first iteration, so the height drops.
     decreases cspace::count_nonempty(old(store).slot_view()), 3int
@@ -1402,6 +1457,7 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
             cspace::only_empties(old(store).slot_view(), store.slot_view()),
             store.cspace_view() == old(store).cspace_view(),
             cspace::chan_struct_frame(old(store).chan_view(), store.chan_view()),
+            cspace::dead_tcb_frozen(old(store), store),
             store.chan_view().dom().contains(ch),
             store.chan_view()[ch].ring_cap == rc,
             forall|r: int, i: int, c: int|
@@ -1428,6 +1484,7 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                 cspace::only_empties(old(store).slot_view(), store.slot_view()),
                 store.cspace_view() == old(store).cspace_view(),
                 cspace::chan_struct_frame(old(store).chan_view(), store.chan_view()),
+                cspace::dead_tcb_frozen(old(store), store),
                 store.chan_view().dom().contains(ch),
                 store.chan_view()[ch].ring_cap == rc,
                 forall|r: int, ii: int, c: int|
@@ -1459,6 +1516,7 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                     cspace::only_empties(old(store).slot_view(), store.slot_view()),
                     store.cspace_view() == old(store).cspace_view(),
                     cspace::chan_struct_frame(old(store).chan_view(), store.chan_view()),
+                    cspace::dead_tcb_frozen(old(store), store),
                     store.chan_view().dom().contains(ch),
                     store.chan_view()[ch].ring_cap == rc,
                     forall|r: int, ii: int, cc: int|
@@ -1482,6 +1540,7 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                 assert(old(store).slot_view().dom().contains(cs));
                 let ghost sv_before = store.slot_view();
                 let ghost cv_before = store.chan_view();
+                let ghost st_before = *store;
                 if !cspace::cap_is_empty(store.slot(cs).cap) {
                     cspace::delete(store, cs);
                     proof {
@@ -1489,6 +1548,7 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                             old(store).slot_view(), sv_before, store.slot_view());
                         cspace::lemma_chan_struct_frame_trans(
                             old(store).chan_view(), cv_before, store.chan_view());
+                        cspace::lemma_dead_tcb_frozen_trans(old(store), &st_before, store);
                     }
                 }
                 // Re-establish the empty prefix: prior empties stay empty (`only_empties` from
@@ -1531,6 +1591,7 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
             cspace::only_empties(old(store).slot_view(), store.slot_view()),
             store.cspace_view() == old(store).cspace_view(),
             cspace::chan_struct_frame(old(store).chan_view(), store.chan_view()),
+            cspace::dead_tcb_frozen(old(store), store),
             store.chan_view().dom().contains(ch),
             forall|r: int, i: int, c: int|
                 (0 <= r < 2 && 0 <= i < depth0 && 0 <= c < 4)
@@ -1552,16 +1613,19 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                 cspace::only_empties(old(store).slot_view(), store.slot_view()),
                 store.cspace_view() == old(store).cspace_view(),
                 cspace::chan_struct_frame(old(store).chan_view(), store.chan_view()),
+                cspace::dead_tcb_frozen(old(store), store),
                 store.chan_view().dom().contains(ch),
                 forall|r: int, i: int, c: int|
                     (0 <= r < 2 && 0 <= i < depth0 && 0 <= c < 4)
                         ==> cspace::is_empty_cap(#[trigger] store.slot_view()[rc[(r, i, c)]].cap),
         {
             let ghost cv_before = store.chan_view();
+            let ghost st_before = *store;
             release_binding(store, ch, end, ev);
             proof {
                 cspace::lemma_chan_struct_frame_trans(
                     old(store).chan_view(), cv_before, store.chan_view());
+                cspace::lemma_dead_tcb_frozen_trans(old(store), &st_before, store);
             }
         }
     }
