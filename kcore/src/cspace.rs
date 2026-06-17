@@ -3554,6 +3554,199 @@ pub proof fn lemma_dead_tcb_frozen_except_trans<S: Store>(s0: &S, s1: &S, s2: &S
     }
 }
 
+// ── §6e: slot "home" residency + the structured-emptying provenance frame. ──────────────
+//
+// A teardown op clears a slot's cap only for (a) the directly-deleted target or (b) a slot that
+// is an internal **home handle** of some object it tore down: a `cspace` resident, a channel
+// `ring_cap`, or a TCB `bind_slot`. `destroy_cspace` empties its residents, `destroy_channel`
+// its ring caps, `destroy_tcb` its bind slots; everything else they empty is the recursive
+// closure of those, themselves home handles. So an **un-homed** slot other than the deleted
+// target keeps its exact cap across the whole teardown — the provenance frame `revoke` reads
+// off to prove its root survives (a root that is no object's home handle can be emptied only by
+// a *direct* `delete`, which `revoke` never does to its root — it deletes descendants). The
+// three home maps are immutable across teardown (`cspace_view` framed equal, `ring_cap` via
+// `chan_struct_frame`, `bind_slots` has no setter), so `is_homed` is stable; `home_views_frozen`
+// packages exactly that stability for the composition lemmas.
+
+pub open spec fn homed_in_cspace<S: Store>(s: &S, x: SlotId) -> bool {
+    exists|cs: ObjId, i: int|
+        #![trigger s.cspace_view()[cs].slots[i]]
+        s.cspace_view().dom().contains(cs) && 0 <= i < s.cspace_view()[cs].slots.len()
+            && s.cspace_view()[cs].slots[i] == x
+}
+
+pub open spec fn homed_in_chan<S: Store>(s: &S, x: SlotId) -> bool {
+    exists|ch: ObjId, k: (int, int, int)|
+        #![trigger s.chan_view()[ch].ring_cap[k]]
+        s.chan_view().dom().contains(ch) && s.chan_view()[ch].ring_cap[k] == x
+}
+
+pub open spec fn homed_in_tcb<S: Store>(s: &S, x: SlotId) -> bool {
+    exists|t: ObjId, j: int|
+        #![trigger s.tcb_view()[t].bind_slots[j]]
+        s.tcb_view().dom().contains(t) && 0 <= j < s.tcb_view()[t].bind_slots.len()
+            && s.tcb_view()[t].bind_slots[j] == x
+}
+
+// `x` is some object's internal home handle (a cspace resident / channel ring cap / TCB bind
+// slot). The teardown clears a non-target slot only if it is homed.
+pub open spec fn is_homed<S: Store>(s: &S, x: SlotId) -> bool {
+    homed_in_cspace(s, x) || homed_in_chan(s, x) || homed_in_tcb(s, x)
+}
+
+// Every un-homed slot other than `target` keeps its exact cap — the §6e provenance frame for an
+// op with a single directly-deleted `target` (`delete`).
+pub open spec fn unhomed_frozen<S: Store>(s0: &S, s1: &S, target: SlotId) -> bool {
+    forall|x: SlotId|
+        s1.slot_view().dom().contains(x) && x != target && !is_homed(s0, x)
+            ==> #[trigger] s1.slot_view()[x].cap == s0.slot_view()[x].cap
+}
+
+// The target-free form (`obj_unref` and the destructors empty only homed slots — every slot they
+// clear is one of their residents/ring-caps/bind-slots or the recursive closure of those).
+pub open spec fn unhomed_frozen_free<S: Store>(s0: &S, s1: &S) -> bool {
+    forall|x: SlotId|
+        s1.slot_view().dom().contains(x) && !is_homed(s0, x)
+            ==> #[trigger] s1.slot_view()[x].cap == s0.slot_view()[x].cap
+}
+
+// The three home maps are framed — the stability `is_homed` (hence the §6e frame) composes on.
+// `cspace_view` equal + `ring_cap`/depth equal (`chan_struct_frame`) + the TCB domain and every
+// TCB's immutable `bind_slots` fixed. Every teardown member ensures this (the leaves frame the
+// views whole; the recursive members compose it).
+pub open spec fn home_views_frozen<S: Store>(s0: &S, s1: &S) -> bool {
+    &&& s1.cspace_view() == s0.cspace_view()
+    &&& chan_struct_frame(s0.chan_view(), s1.chan_view())
+    &&& s1.tcb_view().dom() == s0.tcb_view().dom()
+    &&& forall|t: ObjId| #[trigger] s1.tcb_view()[t].bind_slots == s0.tcb_view()[t].bind_slots
+}
+
+pub proof fn lemma_home_views_frozen_refl<S: Store>(s0: &S, s1: &S)
+    requires
+        s1.cspace_view() == s0.cspace_view(),
+        s1.chan_view() == s0.chan_view(),
+        s1.tcb_view() == s0.tcb_view(),
+    ensures
+        home_views_frozen(s0, s1),
+{
+    assert(chan_struct_frame(s0.chan_view(), s1.chan_view()));
+}
+
+pub proof fn lemma_home_views_frozen_trans<S: Store>(s0: &S, s1: &S, s2: &S)
+    requires
+        home_views_frozen(s0, s1),
+        home_views_frozen(s1, s2),
+    ensures
+        home_views_frozen(s0, s2),
+{
+    lemma_chan_struct_frame_trans(s0.chan_view(), s1.chan_view(), s2.chan_view());
+}
+
+// `is_homed` is stable across a home-frame edit (plan §6e). `cspace_view` is equal, so the cspace
+// disjunct is identical; the channel/TCB disjuncts transfer their witnesses through the per-key
+// `ring_cap`/`bind_slots` equalities.
+pub proof fn lemma_is_homed_stable<S: Store>(s0: &S, s1: &S, x: SlotId)
+    requires
+        home_views_frozen(s0, s1),
+    ensures
+        is_homed(s0, x) == is_homed(s1, x),
+{
+    // Channel: dom equal (`chan_struct_frame`) and `ring_cap` equal per channel, so a witness
+    // `(ch, k)` for one side witnesses the other.
+    if homed_in_chan(s0, x) {
+        let (ch, k) = choose|ch: ObjId, k: (int, int, int)|
+            #![trigger s0.chan_view()[ch].ring_cap[k]]
+            s0.chan_view().dom().contains(ch) && s0.chan_view()[ch].ring_cap[k] == x;
+        assert(s1.chan_view()[ch].ring_cap == s0.chan_view()[ch].ring_cap);
+        assert(s1.chan_view()[ch].ring_cap[k] == x);
+    }
+    if homed_in_chan(s1, x) {
+        let (ch, k) = choose|ch: ObjId, k: (int, int, int)|
+            #![trigger s1.chan_view()[ch].ring_cap[k]]
+            s1.chan_view().dom().contains(ch) && s1.chan_view()[ch].ring_cap[k] == x;
+        assert(s1.chan_view()[ch].ring_cap == s0.chan_view()[ch].ring_cap);
+        assert(s0.chan_view()[ch].ring_cap[k] == x);
+    }
+    // TCB: dom equal and `bind_slots` equal per TCB.
+    if homed_in_tcb(s0, x) {
+        let (t, j) = choose|t: ObjId, j: int|
+            #![trigger s0.tcb_view()[t].bind_slots[j]]
+            s0.tcb_view().dom().contains(t) && 0 <= j < s0.tcb_view()[t].bind_slots.len()
+                && s0.tcb_view()[t].bind_slots[j] == x;
+        assert(s1.tcb_view()[t].bind_slots == s0.tcb_view()[t].bind_slots);
+        assert(s1.tcb_view()[t].bind_slots[j] == x);
+    }
+    if homed_in_tcb(s1, x) {
+        let (t, j) = choose|t: ObjId, j: int|
+            #![trigger s1.tcb_view()[t].bind_slots[j]]
+            s1.tcb_view().dom().contains(t) && 0 <= j < s1.tcb_view()[t].bind_slots.len()
+                && s1.tcb_view()[t].bind_slots[j] == x;
+        assert(s1.tcb_view()[t].bind_slots == s0.tcb_view()[t].bind_slots);
+        assert(s0.tcb_view()[t].bind_slots[j] == x);
+    }
+}
+
+// A slot-view-framing step (no cap moves) trivially freezes every un-homed slot.
+pub proof fn lemma_unhomed_frozen_free_from_slot_eq<S: Store>(s0: &S, s1: &S)
+    requires
+        s1.slot_view() == s0.slot_view(),
+    ensures
+        unhomed_frozen_free(s0, s1),
+{
+}
+
+// When the directly-deleted target is itself homed (a resident / ring cap / bind slot), the
+// target-aware frame is already target-free: every un-homed slot differs from the homed target.
+// The destructors use this to lift each resident/ring/bind `delete` to the free frame.
+pub proof fn lemma_unhomed_frozen_free_from_homed<S: Store>(s0: &S, s1: &S, target: SlotId)
+    requires
+        unhomed_frozen(s0, s1, target),
+        is_homed(s0, target),
+    ensures
+        unhomed_frozen_free(s0, s1),
+{
+    assert forall|x: SlotId| s1.slot_view().dom().contains(x) && !is_homed(s0, x) implies
+        #[trigger] s1.slot_view()[x].cap == s0.slot_view()[x].cap by {
+        assert(x != target);
+    }
+}
+
+// `unhomed_frozen_free` composes across a sub-call (homes immutable, slot dom preserved) — the
+// §6e analog of `lemma_only_empties_trans`.
+pub proof fn lemma_unhomed_frozen_free_trans<S: Store>(a: &S, b: &S, c: &S)
+    requires
+        unhomed_frozen_free(a, b),
+        unhomed_frozen_free(b, c),
+        home_views_frozen(a, b),
+        a.slot_view().dom() == b.slot_view().dom(),
+        b.slot_view().dom() == c.slot_view().dom(),
+    ensures
+        unhomed_frozen_free(a, c),
+{
+    assert forall|x: SlotId| c.slot_view().dom().contains(x) && !is_homed(a, x) implies
+        #[trigger] c.slot_view()[x].cap == a.slot_view()[x].cap by {
+        lemma_is_homed_stable(a, b, x);
+    }
+}
+
+// Compose `delete`'s target-aware frame with a following target-free step.
+pub proof fn lemma_unhomed_frozen_compose<S: Store>(a: &S, b: &S, c: &S, target: SlotId)
+    requires
+        unhomed_frozen(a, b, target),
+        unhomed_frozen_free(b, c),
+        home_views_frozen(a, b),
+        a.slot_view().dom() == b.slot_view().dom(),
+        b.slot_view().dom() == c.slot_view().dom(),
+    ensures
+        unhomed_frozen(a, c, target),
+{
+    assert forall|x: SlotId|
+        c.slot_view().dom().contains(x) && x != target && !is_homed(a, x) implies
+        #[trigger] c.slot_view()[x].cap == a.slot_view()[x].cap by {
+        lemma_is_homed_stable(a, b, x);
+    }
+}
+
 // A frozen delta turns `refcount_sound` at the start into `refcount_sound` at the end —
 // the form `destroy_tcb` consumes for its `remove_waiter` call (where `refcount_sound` holds).
 pub proof fn lemma_refcount_sound_from_frozen<S: Store>(s0: &S, s1: &S)
@@ -7767,6 +7960,12 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
         // threads it (the antecedent is self-preserving). `unref_cspace`/`obj_unref` read it off;
         // `destroy_tcb` consumes it for its halted subject across its `unref_cspace`.
         dead_tcb_frozen(old(store), final(store)),
+        // The home maps are framed (plan §6e): the residency is immutable, the channel skeleton
+        // rides through, and each resident `delete` keeps the TCB domain + every `bind_slots`.
+        home_views_frozen(old(store), final(store)),
+        // §6e provenance: this destructor empties only homed slots (its residents — each itself a
+        // resident of `cs` — and their recursive closure), so every un-homed slot keeps its cap.
+        unhomed_frozen_free(old(store), final(store)),
     // SCC measure (plan §6d, doc 44 §3): `destroy_cspace` sits above `delete` (1 > 0); its
     // resident-loop `delete` calls are count-flat on the first iteration, so the height drops.
     decreases count_nonempty(old(store).slot_view()), 1int
@@ -7799,6 +7998,10 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
             // Dead, queue-detached TCBs are frozen across the resident deletes so far (plan
             // §6d-final-thread-body) — `lemma_dead_tcb_frozen_trans` extends it past each `delete`.
             dead_tcb_frozen(old(store), store),
+            // The home maps stay framed across the resident deletes (plan §6e).
+            home_views_frozen(old(store), store),
+            // §6e provenance composes across the resident deletes: only homed slots emptied.
+            unhomed_frozen_free(old(store), store),
             cspace_resident_wf(store, cs),
         decreases n - i,
     {
@@ -7812,6 +8015,14 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
                 lemma_only_empties_trans(old(store).slot_view(), sv_before, store.slot_view());
                 lemma_chan_struct_frame_trans(old(store).chan_view(), cv_before, store.chan_view());
                 lemma_dead_tcb_frozen_trans(old(store), &st_before, store);
+                // §6e: `sid` is a resident of `cs` (the loop index `i` witnesses it), so it is
+                // homed — lifting `delete`'s target-aware frame to the free frame this destructor
+                // exports, then composing across the loop.
+                assert(st_before.cspace_view()[cs].slots[i as int] == sid);
+                assert(is_homed(&st_before, sid));
+                lemma_unhomed_frozen_free_from_homed(&st_before, store, sid);
+                lemma_unhomed_frozen_free_trans(old(store), &st_before, store);
+                lemma_home_views_frozen_trans(old(store), &st_before, store);
             }
         }
         i += 1;
@@ -7919,6 +8130,12 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
         // its own subject excepted — but that subject is `o`, again refs-positive at entry). So
         // `delete` reads it off (plan §6d body PR).
         dead_tcb_frozen(old(store), final(store)),
+        // The home maps are framed (plan §6e): `dec_ref` frames them whole, every destructor
+        // carries them. `delete` reads it off for its own `home_views_frozen`.
+        home_views_frozen(old(store), final(store)),
+        // §6e provenance: the dispatched destructor empties only homed slots (`dec_ref` frames
+        // `slot_view`), so every un-homed slot keeps its cap. `delete` composes it onto `slot`.
+        unhomed_frozen_free(old(store), final(store)),
         // Non-designating caps: the store is untouched (the frame `delete` reads off for a
         // Frame cap — its frame-mapping release rode the frame-unmap branch, not here).
         cap_obj(cap) is None ==> {
@@ -7952,16 +8169,33 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
         CapKind::CSpace(o) => {
             dec_ref(store, o);
             let ghost st1 = *store;
-            proof { lemma_dead_tcb_frozen_dec_ref(&st0, store, o); }
+            proof {
+                lemma_dead_tcb_frozen_dec_ref(&st0, store, o);
+                // §6e: `dec_ref` frames `slot_view` + every object view (so the home maps are
+                // framed and no slot is emptied) — the base the at-zero destructor composes onto.
+                lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
+                lemma_home_views_frozen_refl(&st0, store);
+            }
             if store.obj_refs(o) == 0 {
                 destroy_cspace(store, o);
-                proof { lemma_dead_tcb_frozen_trans(&st0, &st1, store); }
+                proof {
+                    lemma_dead_tcb_frozen_trans(&st0, &st1, store);
+                    // §6e: `destroy_cspace` exports the free + home frames; compose with `dec_ref`.
+                    lemma_unhomed_frozen_free_trans(&st0, &st1, store);
+                    lemma_home_views_frozen_trans(&st0, &st1, store);
+                }
             }
         }
         CapKind::Thread(o) => {
             dec_ref(store, o);
             let ghost st1 = *store;
-            proof { lemma_dead_tcb_frozen_dec_ref(&st0, store, o); }
+            proof {
+                lemma_dead_tcb_frozen_dec_ref(&st0, store, o);
+                // §6e: `dec_ref` frames `slot_view` + every object view (so the home maps are
+                // framed and no slot is emptied) — the base the at-zero destructor composes onto.
+                lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
+                lemma_home_views_frozen_refl(&st0, store);
+            }
             if store.obj_refs(o) == 0 {
                 crate::thread::destroy_tcb(store, o);
                 proof {
@@ -7980,22 +8214,42 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                             assert(st1.tcb_view()[x] == st0.tcb_view()[x]);
                         }
                     }
+                    // §6e: `destroy_tcb` exports the free + home frames; compose with `dec_ref`.
+                    lemma_unhomed_frozen_free_trans(&st0, &st1, store);
+                    lemma_home_views_frozen_trans(&st0, &st1, store);
                 }
             }
         }
         CapKind::Channel(o, _) => {
             dec_ref(store, o);
             let ghost st1 = *store;
-            proof { lemma_dead_tcb_frozen_dec_ref(&st0, store, o); }
+            proof {
+                lemma_dead_tcb_frozen_dec_ref(&st0, store, o);
+                // §6e: `dec_ref` frames `slot_view` + every object view (so the home maps are
+                // framed and no slot is emptied) — the base the at-zero destructor composes onto.
+                lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
+                lemma_home_views_frozen_refl(&st0, store);
+            }
             if store.obj_refs(o) == 0 {
                 crate::channel::destroy_channel(store, o);
-                proof { lemma_dead_tcb_frozen_trans(&st0, &st1, store); }
+                proof {
+                    lemma_dead_tcb_frozen_trans(&st0, &st1, store);
+                    // §6e: `destroy_channel` exports the free + home frames; compose with `dec_ref`.
+                    lemma_unhomed_frozen_free_trans(&st0, &st1, store);
+                    lemma_home_views_frozen_trans(&st0, &st1, store);
+                }
             }
         }
         CapKind::Notification(o) => {
             dec_ref(store, o);
             let ghost st1 = *store;
-            proof { lemma_dead_tcb_frozen_dec_ref(&st0, store, o); }
+            proof {
+                lemma_dead_tcb_frozen_dec_ref(&st0, store, o);
+                // §6e: `dec_ref` frames `slot_view` + every object view (so the home maps are
+                // framed and no slot is emptied) — the base the at-zero destructor composes onto.
+                lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
+                lemma_home_views_frozen_refl(&st0, store);
+            }
             if store.obj_refs(o) == 0 {
                 proof {
                     // census(o) == 0 ⟹ no waiters ⟹ wait_head is None (notif_wf's chain).
@@ -8010,13 +8264,24 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                     // `destroy_notif` frames every view (a model no-op), so `store == st1`.
                     lemma_dead_tcb_frozen_refl(&st1, store);
                     lemma_dead_tcb_frozen_trans(&st0, &st1, store);
+                    // §6e: model no-op — free + home refl, composed onto `dec_ref`.
+                    lemma_unhomed_frozen_free_from_slot_eq(&st1, store);
+                    lemma_unhomed_frozen_free_trans(&st0, &st1, store);
+                    lemma_home_views_frozen_refl(&st1, store);
+                    lemma_home_views_frozen_trans(&st0, &st1, store);
                 }
             }
         }
         CapKind::Timer(o) => {
             dec_ref(store, o);
             let ghost st1 = *store;
-            proof { lemma_dead_tcb_frozen_dec_ref(&st0, store, o); }
+            proof {
+                lemma_dead_tcb_frozen_dec_ref(&st0, store, o);
+                // §6e: `dec_ref` frames `slot_view` + every object view (so the home maps are
+                // framed and no slot is emptied) — the base the at-zero destructor composes onto.
+                lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
+                lemma_home_views_frozen_refl(&st0, store);
+            }
             if store.obj_refs(o) == 0 {
                 proof {
                     // census(o) == 0 ⟹ armed_timer_refs(o) == 0 ⟹ no armed timer is bound
@@ -8037,7 +8302,14 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                     assert(store.refs_view() == old(store).refs_view().insert(o, 0));
                 }
                 crate::timer::destroy_timer(store, o);
-                proof { lemma_dead_tcb_frozen_trans(&st0, &st1, store); }
+                proof {
+                    lemma_dead_tcb_frozen_trans(&st0, &st1, store);
+                    // §6e: `destroy_timer` frames `slot_view` + every object view — free + home refl.
+                    lemma_unhomed_frozen_free_from_slot_eq(&st1, store);
+                    lemma_unhomed_frozen_free_trans(&st0, &st1, store);
+                    lemma_home_views_frozen_refl(&st1, store);
+                    lemma_home_views_frozen_trans(&st0, &st1, store);
+                }
             }
         }
         CapKind::Aspace(o) => {
@@ -8052,10 +8324,18 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                         assert(x != o);
                     }
                 }
+                // §6e: `unref_aspace` frames `slot_view` + every object view — free + home refl.
+                lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
+                lemma_home_views_frozen_refl(&st0, store);
             }
         }
         CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => {
-            proof { lemma_dead_tcb_frozen_refl(&st0, store); }
+            proof {
+                lemma_dead_tcb_frozen_refl(&st0, store);
+                // §6e: a no-op (store untouched) — free + home refl.
+                lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
+                lemma_home_views_frozen_refl(&st0, store);
+            }
         }
     }
 }
@@ -8097,6 +8377,12 @@ pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId)
         // set), and `destroy_cspace` carries it. `destroy_tcb`'s cspace release reads it off to
         // preserve its own halted subject.
         dead_tcb_frozen(old(store), final(store)),
+        // The home maps are framed (plan §6e): `dec_ref` frames them whole, `destroy_cspace`
+        // carries them. `destroy_tcb`'s cspace release reads it off.
+        home_views_frozen(old(store), final(store)),
+        // §6e provenance: `dec_ref` frames `slot_view` and `destroy_cspace` empties only homed
+        // residents — so every un-homed slot keeps its cap. `destroy_tcb` reads it off.
+        unhomed_frozen_free(old(store), final(store)),
     // SCC measure (plan §6d-final-thread-body-2): once `destroy_tcb` is a proven body the cycle
     // `destroy_tcb → unref_cspace → destroy_cspace → delete → obj_unref → destroy_tcb` is visible,
     // so `unref_cspace` joins the SCC and needs the shared lexicographic measure. Height 2 (above
@@ -8110,11 +8396,17 @@ pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId)
     proof {
         // `dec_ref` froze `tcb` whole and only dropped `refs[cs]` (cs ∉ dead set: `refs[cs] > 0`).
         lemma_dead_tcb_frozen_dec_ref(&st0, store, cs);
+        // §6e base: `dec_ref` frames `slot_view` + every object view (free + home refl).
+        lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
+        lemma_home_views_frozen_refl(&st0, store);
     }
     if store.obj_refs(cs) == 0 {
         destroy_cspace(store, cs);
         proof {
             lemma_dead_tcb_frozen_trans(&st0, &st1, store);
+            // §6e: `destroy_cspace` exports the free + home frames; compose with `dec_ref`.
+            lemma_unhomed_frozen_free_trans(&st0, &st1, store);
+            lemma_home_views_frozen_trans(&st0, &st1, store);
         }
     }
 }
@@ -8478,6 +8770,14 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         // `destroy_tcb` reads off to preserve its halted subject's `report`/`state`/`qnext`
         // across the recursive `unref_cspace`/`destroy_cspace`.
         dead_tcb_frozen(old(store), final(store)),
+        // The home maps are framed (plan §6e) — residency immutable, channel skeleton fixed, TCB
+        // domain + every `bind_slots` preserved across the teardown.
+        home_views_frozen(old(store), final(store)),
+        // §6e provenance frame: `delete` empties its own `slot` plus the homed slots `obj_unref`'s
+        // destructors clear (and their recursive closure), so every **un-homed** slot other than
+        // `slot` keeps its cap. This is the frame `revoke` reads off for root-survival, and the
+        // recursive destructors compose to their own target-free frame.
+        unhomed_frozen(old(store), final(store), slot),
         // Conditional-on-notification frame (plan §4d): deleting a **notification**
         // cap is robustly clean — `delete_prepare` frames every object view, the
         // `Channel`/mapped-`Frame` teardown branches don't fire, and `obj_unref`'s
@@ -8647,6 +8947,24 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         // dead_tcb_frozen: compose the pre-`obj_unref` segments (`st0 → st_frame`) with
         // `obj_unref`'s own frame (`st_frame → final`). Plan §6d-final-thread-body.
         lemma_dead_tcb_frozen_trans(&st0, &st_frame, store);
+        // §6e provenance + home frame. Up to `obj_unref` only `slot` changed in the arena
+        // (`delete_prepare` cleared it; `endpoint_cap_dropped`/`aspace_unmap`/`unref_aspace`
+        // frame `slot_view`), and the home maps are framed (`cspace_view`/`chan_struct_frame`/the
+        // TCB domain + `bind_slots`). `obj_unref` exports the target-free frame, composed onto `slot`.
+        assert(home_views_frozen(&st0, &st_frame)) by {
+            assert(st_frame.cspace_view() == st0.cspace_view());
+            assert(chan_struct_frame(st0.chan_view(), st_frame.chan_view()));
+            assert(st_frame.tcb_view().dom() == st0.tcb_view().dom());
+            assert forall|k: ObjId| #[trigger] st_frame.tcb_view()[k].bind_slots
+                == st0.tcb_view()[k].bind_slots by {}
+        }
+        assert(unhomed_frozen(&st0, &st_frame, slot)) by {
+            assert forall|x: SlotId|
+                st_frame.slot_view().dom().contains(x) && x != slot && !is_homed(&st0, x)
+                implies #[trigger] st_frame.slot_view()[x].cap == st0.slot_view()[x].cap by {}
+        }
+        lemma_unhomed_frozen_compose(&st0, &st_frame, store, slot);
+        lemma_home_views_frozen_trans(&st0, &st_frame, store);
     }
 }
 
@@ -8698,19 +9016,32 @@ pub fn descend_to_leaf<S: Store>(store: &S, start: SlotId) -> (leaf: SlotId)
 /// Kani's `debug_assert` — proven here for all shapes, modulo `delete`'s assumed
 /// teardown contract (above).
 ///
-/// **NOT yet proven — `slot`'s cap survives (§2.2).** The postcondition does not
-/// assert `slot` stays non-empty. Adding that clause fails against `delete`'s
-/// current contract, which frames only the deleted slot's cap: a cross-object
-/// teardown (deleting the last cap to a cspace that contains `slot` as a
-/// resident) can empty `slot` itself, and the proof would still pass vacuously
-/// (an empty slot has `first_child == None`). Closing this needs `delete` to
-/// frame *which* slots it may empty (the deleted slot's CDT subtree only) — the
-/// reachability strengthening tracked with the looping-op proofs (doc/results/21
-/// §9). Until then revoke's root-survival is a documented gap, not a theorem.
+/// **Root-survival — the conditional non-zombie theorem (plan §6e, doc 23 §4 closed).**
+/// `revoke` deletes only descendants of `slot`, never `slot` itself, so the *only* way
+/// `slot`'s cap can be emptied is the **cross-object** teardown: deleting the last cap to
+/// some object that **homes** `slot` (a cspace whose resident is `slot`, a channel whose
+/// ring cap is `slot`, a TCB whose bind slot is `slot`) fires that object's destructor,
+/// which clears `slot`. This is the seL4-zombie (`revoke_can_empty_its_own_root_zombie`,
+/// doc 23 §4): `slot` is a resident of a cspace whose last live cap lies in `slot`'s own
+/// subtree, so revoking the subtree destroys the cspace and empties `slot`.
 ///
-/// pre:  the cspace is well-formed (and finite); `slot` is live and non-empty.
-/// post: `slot` has no children (its subtree is gone); the cspace stays
-///       well-formed.
+/// The provenance frame `unhomed_frozen` (plan §6e) makes the contrapositive a theorem:
+/// a teardown clears a non-target slot only if it is **homed**, so under the precondition
+/// `!is_homed(slot)` — `slot` is no object's internal home handle (a top-level / root-cspace
+/// cap) — no cross-object teardown can reach it, and `slot` survives. The non-zombie
+/// precondition `!is_homed` *rejects* the zombie shape (its `slot` is a cspace resident,
+/// hence homed) and *accepts* a top-level revoke target (where survival genuinely holds);
+/// host-checked both ways (`check_revoke_root_survives` / the zombie negative witness).
+///
+/// **Residue (the resident-with-external-reference case).** A `slot` that *is* a cspace
+/// resident but whose homing cspace keeps a live reference outside `slot`'s subtree also
+/// survives, but proving *that* needs the stronger "emptied ⟹ a homing object was
+/// destroyed" frame (refs-monotone, the §3 cascade), recorded as the explicit follow-on in
+/// `doc/results/55`. `unhomed_frozen` (this PR) is its foundation.
+///
+/// pre:  the cspace is well-formed (and finite); `slot` is live, non-empty, and **un-homed**.
+/// post: `slot` has no children (its subtree is gone), its cap **survives**, and the cspace
+///       stays well-formed.
 pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
     requires
         cspace_wf(old(store).slot_view()),
@@ -8721,10 +9052,15 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
         caps_consistent(old(store)),
         end_caps_sound(old(store)),
         census_dom_complete(old(store)),
+        // The non-zombie precondition (plan §6e): `slot` is no object's home handle, so the
+        // cross-object teardown the revoke walk triggers cannot reach it.
+        !is_homed(old(store), slot),
     ensures
         cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom().contains(slot),
         final(store).slot_view()[slot].first_child is None,
+        // Root-survival: the revoked cap is still live (the §6e headline).
+        !is_empty_cap(final(store).slot_view()[slot].cap),
 {
     // `refcount_sound`, `caps_consistent`, the endpoint-cap census, and refs-domain
     // completeness ride the loop as `delete`'s preconditions (§6a/§6d): each `delete`
@@ -8738,18 +9074,33 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
             caps_consistent(store),
             end_caps_sound(store),
             census_dom_complete(store),
+            // `slot`'s home status is immutable across teardown (`home_views_frozen`), so the
+            // precondition `!is_homed` rides the loop, and `slot`'s cap stays live (plan §6e).
+            !is_homed(store, slot),
+            !is_empty_cap(store.slot_view()[slot].cap),
         decreases count_nonempty(store.slot_view()),
     {
-        // The first child is live (it names `slot` as parent, so it is not an
-        // empty/detached slot) — so we descend from a non-empty node even if
-        // `slot` itself were emptied by an earlier delete.
+        // The first child is live (it names `slot` as parent), so we descend from a
+        // non-empty node; the leaf we reach is a strict descendant of `slot`.
         let first = store.slot(slot).first_child.unwrap();
         proof {
             assert(store.slot_view()[first].parent == Some(slot));
             assert(!is_empty_cap(store.slot_view()[first].cap));
         }
         let leaf = descend_to_leaf(store, first);
+        let ghost pre = *store;
         delete(store, leaf);
+        proof {
+            // `slot != leaf`: `slot` has a child (the loop guard) while `descend_to_leaf`
+            // returns a childless `leaf` — so `slot` is never the deleted target.
+            assert(pre.slot_view()[slot].first_child is Some);
+            assert(pre.slot_view()[leaf].first_child is None);
+            assert(slot != leaf);
+            // `delete` frames the home maps, so `slot` stays un-homed; and its `unhomed_frozen`
+            // frame (target `leaf != slot`, `slot` un-homed) keeps `slot`'s cap unchanged.
+            lemma_is_homed_stable(&pre, store, slot);
+            assert(store.slot_view()[slot].cap == pre.slot_view()[slot].cap);
+        }
     }
 }
 
