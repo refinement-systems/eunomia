@@ -2395,6 +2395,11 @@ pub proof fn lemma_seq_remove_no_dup<A>(s: Seq<A>, k: int)
     }
 }
 
+// `spinoff_prover`: the canonical victim of the `cap_consistent`-strengthening batch
+// contamination (doc 51 §3; commit b091924 gave it a `no_duplicates` offload). Phase
+// §6d-final-thread strengthens `cap_consistent` *further* (two clauses), so its prior headroom
+// is at elevated risk on a different CI Z3 seed; isolate it alongside its `push_head` sibling.
+#[verifier::spinoff_prover]
 pub proof fn lemma_timer_remove_chain(
     tmv0: Map<ObjId, TimerView>,
     head0: Option<ObjId>,
@@ -2507,6 +2512,18 @@ proof fn lemma_push_head_nodup(ts0: Seq<ObjId>, t: ObjId, pts: Seq<ObjId>)
 // `pts` (the head-push of `ts0`, i.e. `[t] ++ ts0`). `ts0` is the post-`disarm` chain —
 // `t` is not on it (it was just unarmed), and `arm` touches only `t`'s fields and the
 // head scalar, so every prior node is intact. The lighter analog of `wait`'s tail-push.
+//
+// **`spinoff_prover` (cross-platform headroom, plan §6d-final-thread).** This borderline
+// `Seq`/chain proof flakes the rlimit on CI's Linux Z3 (resource counting varies
+// Linux↔macOS — the doc-2376 note) once `cap_consistent` is strengthened: Verus batches a
+// module's goals in a shared SMT context, so the new clauses' axioms shift Z3's resource
+// accounting for *unrelated* functions — exactly the "strengthening `cap_consistent`
+// destabilized an unrelated timer proof's rlimit" effect doc 51 §3 recorded (and commit
+// b091924 patched for `lemma_timer_remove_chain` by offloading its `no_duplicates`). Its
+// own `no_duplicates` is already offloaded (`lemma_push_head_nodup`), so the remaining
+// headroom comes from isolating it into a dedicated Z3 instance, immune to the batch
+// contamination — the standard Verus flakiness fix.
+#[verifier::spinoff_prover]
 pub proof fn lemma_timer_push_head_chain(
     tmv0: Map<ObjId, TimerView>,
     head0: Option<ObjId>,
