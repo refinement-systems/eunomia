@@ -383,6 +383,17 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
             if cspace::caps_consistent(old(store)) {
                 assert forall|k: ObjId| #[trigger] tvf[k].bind_slots
                     == old(store).tcb_view()[k].bind_slots by {}
+                // The bound cspace of every TCB is framed across the wake — `signal` moves only
+                // the woken head's queue/wait/retval fields, never any cspace (plan
+                // §6d-final-thread, the strengthened `cap_consistent(Thread)` clause).
+                assert forall|k: ObjId| #[trigger] tvf[k].cspace
+                    == old(store).tcb_view()[k].cspace by {}
+                // The only changed TCB is the woken head — `signal` sets it `Runnable`, so it is
+                // not blocked in the post-state (waiter-coherence frame, plan §6d-final-thread;
+                // a changed-and-still-blocked thread would have to be blocked on `n`).
+                assert forall|k: ObjId| #[trigger] tvf[k] != old(store).tcb_view()[k]
+                    && tvf[k].state == crate::thread::ThreadState::BlockedNotif
+                    ==> (tvf[k].wait_notif matches Some(wn) ==> wn == n) by {}
                 cspace::lemma_caps_consistent_frame(old(store), store, n);
             }
         }
@@ -1278,8 +1289,13 @@ fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
                         assert(cvf[ch].depth == cv_b[ch].depth);
                         assert(cvf[ch].msg_len == cv_b[ch].msg_len);
                         assert(cvf[ch].end_caps == cv_b[ch].end_caps);
+                        assert(cvf[ch].head == cv_b[ch].head);
+                        assert(cvf[ch].count == cv_b[ch].count);
                         assert(cvf[ch].bindings.dom() =~= cv_b[ch].bindings.dom());
-                        assert(cspace::chan_wf(store.chan_view(), store.slot_view(), ch));
+                        // `chan_wf` lift via the dedicated frame lemma — proving it inline blew
+                        // the trigger context after the `cap_consistent` strengthening widened it
+                        // (doc 51 §2 hazard); the lemma isolates a clean context (plan §6d-final).
+                        cspace::lemma_chan_wf_frame(cv_b, store.chan_view(), store.slot_view(), ch);
                         assert(cspace::binding_notif_wf(
                             store.chan_view(), store.notif_view(), store.tcb_view(), ch)) by {
                             assert forall|e2: int, v2: int| #![trigger cvf[ch].bindings[(e2, v2)]]

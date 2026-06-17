@@ -976,7 +976,7 @@ pub trait ExStore {
     // off every kcore queue once Runnable — `signal` sets `qnext = None` before
     // calling this), so modeling it as "state → Runnable, all else fixed" is
     // faithful; host-test-checked against `ArrayStore`. `unqueue_ready`'s contract
-    // waits for 4e.
+    // lands with the §6d-final-thread `destroy_tcb` body (below).
     fn make_runnable(&mut self, t: ObjId)
         requires old(self).tcb_view().dom().contains(t),
         ensures
@@ -986,6 +986,25 @@ pub trait ExStore {
             final(self).refs_view() == old(self).refs_view(),
             final(self).chan_view() == old(self).chan_view(),
             final(self).notif_view() == old(self).notif_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
+
+    // `unqueue_ready` — the `destroy_tcb` teardown counterpart of `make_runnable` (plan
+    // §6d-final-thread). The ready queue is scheduler state *below* the abstract `tcb_view`:
+    // a thread is Runnable both before and after the unqueue (the kcore model tracks only
+    // `state`, which `destroy_tcb` itself sets to `Halted` *afterwards*), so the faithful
+    // model is a **total no-op on every object view**. Host-test-checked against `ArrayStore`'s
+    // empty body via `check_destroy_tcb` (the `make_runnable` precedent). This retires the
+    // `thread.rs` note that `unqueue_ready` "needs no Verus contract" — the proven body needs
+    // the frame.
+    fn unqueue_ready(&mut self, t: ObjId)
+        ensures
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).cspace_view() == old(self).cspace_view();
@@ -1346,6 +1365,34 @@ pub open spec fn chan_wf(cv: Map<ObjId, ChanView>, sv: Map<SlotId, CapSlot>, ch:
             (0 <= r < 2 && 0 <= i < cv[ch].depth) ==> #[trigger] cv[ch].msg_len.dom().contains((r, i))
     &&& forall|e: int, v: int|
             (0 <= e < 2 && 0 <= v < 3) ==> #[trigger] cv[ch].bindings.dom().contains((e, v))
+}
+
+// `chan_wf` reads only `ch`'s `depth`/`end_caps`/`head`/`count`/`ring_cap`/`msg_len`/
+// `bindings.dom()` (never a binding *value*) and the slot arena. So a channel edit that
+// touches only a binding's value — `endpoint_cap_dropped`'s `end_caps` is *not* a binding,
+// but `set_chan_binding`'s release in `release_binding` is — carries `chan_wf` unchanged.
+// Quarantined into its own lemma (doc 25 §2): proving the `chan_wf` lift inline blew the
+// trigger context once the strengthened `cap_consistent(Thread)` clause widened it (the
+// doc 51 §2 trigger-perturbation hazard), pulling in unrelated census/timer triggers.
+pub proof fn lemma_chan_wf_frame(
+    cv0: Map<ObjId, ChanView>,
+    cv1: Map<ObjId, ChanView>,
+    sv: Map<SlotId, CapSlot>,
+    ch: ObjId,
+)
+    requires
+        chan_wf(cv0, sv, ch),
+        cv1.dom().contains(ch),
+        cv1[ch].depth == cv0[ch].depth,
+        cv1[ch].end_caps == cv0[ch].end_caps,
+        cv1[ch].head == cv0[ch].head,
+        cv1[ch].count == cv0[ch].count,
+        cv1[ch].ring_cap == cv0[ch].ring_cap,
+        cv1[ch].msg_len == cv0[ch].msg_len,
+        cv1[ch].bindings.dom() == cv0[ch].bindings.dom(),
+    ensures
+        chan_wf(cv1, sv, ch),
+{
 }
 
 // ── The FIFO Seq model (the §4.3 centerpiece; plan §3d) ──────────────────────
@@ -1753,6 +1800,310 @@ pub proof fn lemma_waiter_refs_frame_nv(
                 let w = choose|ws: Seq<ObjId>| waiter_chain(nvf, tv, o, ws);
                 assert(waiter_chain(nv0, tv, o, w));
             }
+        }
+    }
+}
+
+// `waiter_chain` (clause 6) forces every chain node to be **both** `BlockedNotif` *and*
+// `wait_notif == Some(o)`. So a thread that is provably **off every chain** — `wait_notif is
+// None` OR `state != BlockedNotif` — is in no `o`'s chain, and editing it cannot perturb any
+// `waiter_chain`. This is the frame `destroy_tcb` needs that `lemma_waiter_refs_frame` (keyed
+// on `wait_notif != Some(o)`) cannot give: a **Runnable thread with a stale `wait_notif`**
+// (`unqueue_ready` leaves `wait_notif` untouched) violates that key yet is off-chain by state;
+// a thread `remove_waiter` just spliced out is off-chain by its cleared `wait_notif`. The
+// off-chain witness on the *changed* threads, set-shaped to cover both the chain in `atv` and
+// the back-transport — the `lemma_chain_frame_set` analog keyed on off-chain-ness (plan
+// §6d-final-thread, doc 51 §3).
+proof fn lemma_chain_frame_offchain(
+    anv: Map<ObjId, NotifView>,
+    atv: Map<ObjId, TcbView>,
+    bnv: Map<ObjId, NotifView>,
+    btv: Map<ObjId, TcbView>,
+    o: ObjId,
+    ws: Seq<ObjId>,
+)
+    requires
+        waiter_chain(anv, atv, o, ws),
+        bnv[o] == anv[o],
+        btv.dom() == atv.dom(),
+        forall|k: ObjId| #[trigger] btv[k] != atv[k]
+            ==> (atv[k].wait_notif is None || atv[k].state != ThreadState::BlockedNotif),
+    ensures
+        waiter_chain(bnv, btv, o, ws),
+{
+    assert forall|i: int| #![trigger ws[i]] 0 <= i < ws.len() implies
+        btv[ws[i]] == atv[ws[i]] by {
+        // `ws[i]` is on `o`'s chain (clause 6), so it is `BlockedNotif` *and* names `o` —
+        // hence not in the changed set (which is off-chain on both counts).
+        assert(atv[ws[i]].wait_notif == Some(o));
+        assert(atv[ws[i]].state == ThreadState::BlockedNotif);
+        if btv[ws[i]] != atv[ws[i]] {
+            assert(false);
+        }
+    }
+}
+
+// `waiter_refs(o)` is unchanged by an edit that holds the notification view fixed and changes
+// only threads that are **off every chain in both states** — exactly `destroy_tcb`'s
+// `set_tcb_qnext`/`set_tcb_state` step (the woken/unqueued/spliced thread moves
+// off-chain → off-chain). Transport the `tv0` chain forward and the `tvf` chain back through
+// `lemma_chain_frame_offchain`, then `lemma_waiter_chain_unique` equates the chosen seqs; the
+// no-chain case stays at 0 in both (a `tvf` chain would transport back to a `tv0` chain).
+pub proof fn lemma_waiter_refs_frame_offchain(
+    nv: Map<ObjId, NotifView>,
+    tv0: Map<ObjId, TcbView>,
+    tvf: Map<ObjId, TcbView>,
+    o: ObjId,
+)
+    requires
+        tvf.dom() == tv0.dom(),
+        forall|k: ObjId| #[trigger] tvf[k] != tv0[k] ==> {
+            &&& (tv0[k].wait_notif is None || tv0[k].state != ThreadState::BlockedNotif)
+            &&& (tvf[k].wait_notif is None || tvf[k].state != ThreadState::BlockedNotif)
+        },
+    ensures
+        waiter_refs(nv, tvf, o) == waiter_refs(nv, tv0, o),
+{
+    if exists|ws: Seq<ObjId>| waiter_chain(nv, tv0, o, ws) {
+        let a = waiter_seq(nv, tv0, o);
+        assert(waiter_chain(nv, tv0, o, a));
+        lemma_chain_frame_offchain(nv, tv0, nv, tvf, o, a);
+        let b = waiter_seq(nv, tvf, o);
+        assert(waiter_chain(nv, tvf, o, b));
+        lemma_chain_frame_offchain(nv, tvf, nv, tv0, o, b);
+        lemma_waiter_chain_unique(nv, tv0, o, a, b);
+    } else {
+        assert(!exists|ws: Seq<ObjId>| waiter_chain(nv, tvf, o, ws)) by {
+            if exists|ws: Seq<ObjId>| waiter_chain(nv, tvf, o, ws) {
+                let wf = choose|ws: Seq<ObjId>| waiter_chain(nv, tvf, o, ws);
+                lemma_chain_frame_offchain(nv, tvf, nv, tv0, o, wf);
+            }
+        }
+    }
+}
+
+// `waiter_refs(o)` is unchanged by an edit that changes only thread `t`, when `t` lies on
+// `o`'s chain in NEITHER state. This is what `remove_waiter`'s *absent* path needs that the
+// state/wait predicate cannot give: `destroy_tcb` clears a stale `wait_notif == Some(o)` on a
+// thread that was provably never queued (`!waiter_seq(o).contains(t)`), and must frame
+// `waiter_refs(o)` across that single-thread edit (plan §6d-final-thread).
+pub proof fn lemma_waiter_refs_frame_dequeued(
+    nv: Map<ObjId, NotifView>,
+    tv0: Map<ObjId, TcbView>,
+    tvf: Map<ObjId, TcbView>,
+    t: ObjId,
+    o: ObjId,
+)
+    requires
+        tvf.dom() == tv0.dom(),
+        forall|k: ObjId| k != t ==> #[trigger] tvf[k] == tv0[k],
+        forall|ws: Seq<ObjId>| waiter_chain(nv, tv0, o, ws) ==> !ws.contains(t),
+        forall|ws: Seq<ObjId>| waiter_chain(nv, tvf, o, ws) ==> !ws.contains(t),
+    ensures
+        waiter_refs(nv, tvf, o) == waiter_refs(nv, tv0, o),
+{
+    if exists|ws: Seq<ObjId>| waiter_chain(nv, tv0, o, ws) {
+        let a = waiter_seq(nv, tv0, o);
+        assert(waiter_chain(nv, tv0, o, a));
+        assert(!a.contains(t));
+        assert(waiter_chain(nv, tvf, o, a)) by {
+            assert forall|i: int| #![trigger a[i]] 0 <= i < a.len() implies
+                tvf[a[i]] == tv0[a[i]] by {
+                assert(a.contains(a[i]));
+            }
+        }
+        let b = waiter_seq(nv, tvf, o);
+        assert(waiter_chain(nv, tvf, o, b));
+        lemma_waiter_chain_unique(nv, tvf, o, a, b);
+    } else {
+        assert(!exists|ws: Seq<ObjId>| waiter_chain(nv, tvf, o, ws)) by {
+            if exists|ws: Seq<ObjId>| waiter_chain(nv, tvf, o, ws) {
+                let w = choose|ws: Seq<ObjId>| waiter_chain(nv, tvf, o, ws);
+                assert(!w.contains(t));
+                assert(waiter_chain(nv, tv0, o, w)) by {
+                    assert forall|i: int| #![trigger w[i]] 0 <= i < w.len() implies
+                        tv0[w[i]] == tvf[w[i]] by {
+                        assert(w.contains(w[i]));
+                    }
+                }
+            }
+        }
+    }
+}
+
+// `caps_consistent` is preserved by an edit that holds the slot/chan/timer/notif/cspace views
+// fixed and changes only threads that are **off every chain in both states** (keeping each TCB's
+// `bind_slots`/`cspace`). This is `destroy_tcb`'s `set_tcb_qnext`/`set_tcb_state` step (the
+// halted thread moves off-chain → off-chain): no notification's chain — hence `notif_wf` —
+// moves, and the strengthened Thread clause carries (a thread still BlockedNotif-on-`wn` in `s1`
+// was unchanged, so its `notif_wf(wn)` is the one from `s0`). The notif-frozen, off-chain
+// analog of `lemma_caps_consistent_frame` (plan §6d-final-thread).
+pub proof fn lemma_caps_consistent_frame_thread_offchain<S: Store>(s0: &S, s1: &S)
+    requires
+        caps_consistent(s0),
+        s1.slot_view() == s0.slot_view(),
+        s1.chan_view() == s0.chan_view(),
+        s1.timer_view() == s0.timer_view(),
+        s1.timer_head_view() == s0.timer_head_view(),
+        s1.cspace_view() == s0.cspace_view(),
+        s1.notif_view() == s0.notif_view(),
+        s1.tcb_view().dom() == s0.tcb_view().dom(),
+        forall|k: ObjId| #[trigger] s1.tcb_view()[k].bind_slots == s0.tcb_view()[k].bind_slots,
+        forall|k: ObjId| #[trigger] s1.tcb_view()[k].cspace == s0.tcb_view()[k].cspace,
+        forall|k: ObjId| #[trigger] s1.tcb_view()[k] != s0.tcb_view()[k] ==> {
+            &&& (s0.tcb_view()[k].wait_notif is None
+                    || s0.tcb_view()[k].state != ThreadState::BlockedNotif)
+            &&& (s1.tcb_view()[k].wait_notif is None
+                    || s1.tcb_view()[k].state != ThreadState::BlockedNotif)
+        },
+    ensures
+        caps_consistent(s1),
+{
+    // `notif_wf` carries for every notification: its chain nodes are on-chain (BlockedNotif and
+    // naming it), so they are *unchanged* (the off-chain hypothesis), so the chain is preserved.
+    assert forall|m: ObjId| #[trigger] s0.notif_view().dom().contains(m)
+        && notif_wf(s0.notif_view(), s0.tcb_view(), m) implies
+        notif_wf(s1.notif_view(), s1.tcb_view(), m) by {
+        let ws = waiter_seq(s0.notif_view(), s0.tcb_view(), m);
+        assert(waiter_chain(s0.notif_view(), s0.tcb_view(), m, ws));
+        lemma_chain_frame_offchain(s0.notif_view(), s0.tcb_view(), s1.notif_view(),
+            s1.tcb_view(), m, ws);
+    }
+    assert forall|s: SlotId| #![trigger s1.slot_view()[s]]
+        s1.slot_view().dom().contains(s) && !is_empty_cap(s1.slot_view()[s].cap)
+        implies cap_consistent(s1, s1.slot_view()[s].cap) by {
+        let c = s1.slot_view()[s].cap;
+        assert(c == s0.slot_view()[s].cap);
+        assert(cap_consistent(s0, c));
+        match c.kind {
+            CapKind::Notification(m) => {
+                assert(s0.notif_view().dom().contains(m));
+                assert(notif_wf(s0.notif_view(), s0.tcb_view(), m));
+            }
+            CapKind::Thread(m) => {
+                if let Some(cs) = s1.tcb_view()[m].cspace {
+                    assert(s0.tcb_view()[m].cspace == Some(cs));
+                    assert(cspace_resident_wf(s0, cs));
+                    assert(cspace_resident_wf(s1, cs));
+                }
+                if s1.tcb_view()[m].state == ThreadState::BlockedNotif {
+                    if let Some(wn) = s1.tcb_view()[m].wait_notif {
+                        // A changed thread is off-chain in `s1`, so `m` (BlockedNotif-on-`wn`)
+                        // is unchanged; `notif_wf(s0, wn)` (from `cap_consistent(s0)`) carries.
+                        assert(s1.tcb_view()[m] == s0.tcb_view()[m]);
+                        assert(s0.notif_view().dom().contains(wn));
+                        assert(notif_wf(s0.notif_view(), s0.tcb_view(), wn));
+                    }
+                }
+            }
+            CapKind::Channel(co, _) => {
+                assert forall|e: int, v: int|
+                    (0 <= e < 2 && 0 <= v < 3
+                        && #[trigger] s1.chan_view()[co].bindings[(e, v)].notif is Some) implies {
+                        let m = s1.chan_view()[co].bindings[(e, v)].notif->Some_0;
+                        s1.notif_view().dom().contains(m)
+                            && notif_wf(s1.notif_view(), s1.tcb_view(), m)
+                    } by {
+                    let m = s1.chan_view()[co].bindings[(e, v)].notif->Some_0;
+                    assert(s0.chan_view()[co].bindings[(e, v)].notif == Some(m));
+                    assert(s0.notif_view().dom().contains(m));
+                    assert(notif_wf(s0.notif_view(), s0.tcb_view(), m));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+// `caps_consistent` is preserved by clearing a single thread `t`'s wait link — the
+// membership analog of `lemma_caps_consistent_frame_thread_offchain` for `destroy_tcb`'s
+// absent-`remove_waiter` case: `t` is BlockedNotif with a *stale* `wait_notif` (provably on no
+// chain), so the predicate cannot see it off-chain, but membership can. The edit clears `t`'s
+// wait link (leaving it off-chain by predicate in `s1`), holds every other view fixed, and `t`
+// is on no chain in either state — so no notification's `notif_wf` moves (plan §6d-final-thread).
+pub proof fn lemma_caps_consistent_frame_thread_dequeued<S: Store>(s0: &S, s1: &S, t: ObjId)
+    requires
+        caps_consistent(s0),
+        s1.slot_view() == s0.slot_view(),
+        s1.chan_view() == s0.chan_view(),
+        s1.timer_view() == s0.timer_view(),
+        s1.timer_head_view() == s0.timer_head_view(),
+        s1.cspace_view() == s0.cspace_view(),
+        s1.notif_view() == s0.notif_view(),
+        s1.tcb_view().dom() == s0.tcb_view().dom(),
+        forall|k: ObjId| k != t ==> #[trigger] s1.tcb_view()[k] == s0.tcb_view()[k],
+        forall|k: ObjId| #[trigger] s1.tcb_view()[k].bind_slots == s0.tcb_view()[k].bind_slots,
+        forall|k: ObjId| #[trigger] s1.tcb_view()[k].cspace == s0.tcb_view()[k].cspace,
+        // `t` after the edit is off-chain by predicate (its `wait_notif` was cleared), so its
+        // own Thread-cap coherence clause is vacuous.
+        s1.tcb_view()[t].wait_notif is None
+            || s1.tcb_view()[t].state != ThreadState::BlockedNotif,
+        // `t` is a node of no waiter chain in either state.
+        forall|o: ObjId, ws: Seq<ObjId>|
+            waiter_chain(s0.notif_view(), s0.tcb_view(), o, ws) ==> !ws.contains(t),
+        forall|o: ObjId, ws: Seq<ObjId>|
+            waiter_chain(s1.notif_view(), s1.tcb_view(), o, ws) ==> !ws.contains(t),
+    ensures
+        caps_consistent(s1),
+{
+    // `notif_wf(m)` carries: `m`'s chain nodes name `m` and `t` is on no chain, so every node
+    // differs from `t`, hence is unchanged — the chain is preserved.
+    assert forall|m: ObjId| #[trigger] s0.notif_view().dom().contains(m)
+        && notif_wf(s0.notif_view(), s0.tcb_view(), m) implies
+        notif_wf(s1.notif_view(), s1.tcb_view(), m) by {
+        let ws = waiter_seq(s0.notif_view(), s0.tcb_view(), m);
+        assert(waiter_chain(s0.notif_view(), s0.tcb_view(), m, ws));
+        assert(!ws.contains(t));
+        assert(waiter_chain(s1.notif_view(), s1.tcb_view(), m, ws)) by {
+            assert forall|i: int| #![trigger ws[i]] 0 <= i < ws.len() implies
+                s1.tcb_view()[ws[i]] == s0.tcb_view()[ws[i]] by {
+                assert(ws.contains(ws[i]));
+            }
+        }
+    }
+    assert forall|s: SlotId| #![trigger s1.slot_view()[s]]
+        s1.slot_view().dom().contains(s) && !is_empty_cap(s1.slot_view()[s].cap)
+        implies cap_consistent(s1, s1.slot_view()[s].cap) by {
+        let c = s1.slot_view()[s].cap;
+        assert(c == s0.slot_view()[s].cap);
+        assert(cap_consistent(s0, c));
+        match c.kind {
+            CapKind::Notification(m) => {
+                assert(s0.notif_view().dom().contains(m));
+                assert(notif_wf(s0.notif_view(), s0.tcb_view(), m));
+            }
+            CapKind::Thread(m) => {
+                if let Some(cs) = s1.tcb_view()[m].cspace {
+                    assert(s0.tcb_view()[m].cspace == Some(cs));
+                    assert(cspace_resident_wf(s0, cs));
+                    assert(cspace_resident_wf(s1, cs));
+                }
+                if s1.tcb_view()[m].state == ThreadState::BlockedNotif {
+                    if let Some(wn) = s1.tcb_view()[m].wait_notif {
+                        // `m == t` is excluded (`t` is off-chain by predicate in `s1`), so `m`
+                        // is unchanged and `notif_wf(s0, wn)` carries.
+                        assert(m != t);
+                        assert(s1.tcb_view()[m] == s0.tcb_view()[m]);
+                        assert(s0.notif_view().dom().contains(wn));
+                        assert(notif_wf(s0.notif_view(), s0.tcb_view(), wn));
+                    }
+                }
+            }
+            CapKind::Channel(co, _) => {
+                assert forall|e: int, v: int|
+                    (0 <= e < 2 && 0 <= v < 3
+                        && #[trigger] s1.chan_view()[co].bindings[(e, v)].notif is Some) implies {
+                        let m = s1.chan_view()[co].bindings[(e, v)].notif->Some_0;
+                        s1.notif_view().dom().contains(m)
+                            && notif_wf(s1.notif_view(), s1.tcb_view(), m)
+                    } by {
+                    let m = s1.chan_view()[co].bindings[(e, v)].notif->Some_0;
+                    assert(s0.chan_view()[co].bindings[(e, v)].notif == Some(m));
+                    assert(s0.notif_view().dom().contains(m));
+                    assert(notif_wf(s0.notif_view(), s0.tcb_view(), m));
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -2957,6 +3308,25 @@ pub open spec fn cap_consistent<S: Store>(store: &S, c: Cap) -> bool {
             &&& store.tcb_view()[o].bind_slots.len() == 2
             &&& store.slot_view().dom().contains(store.tcb_view()[o].bind_slots[0])
             &&& store.slot_view().dom().contains(store.tcb_view()[o].bind_slots[1])
+            // The bound cspace is resident-wf (plan §6d-final-thread, doc 51 §3 — the fifth
+            // system invariant). `destroy_tcb`'s `unref_cspace` needs `cspace_resident_wf(cs)`
+            // to drive the at-zero `destroy_cspace`, but by the time the destructor runs the
+            // TCB's own cap is gone — so only the *live* Thread cap can witness it, supplied
+            // through `delete` from this clause. Refs-free like every other arm:
+            // `cspace_resident_wf` reads only `cspace_view` + `slot_view` dom + `tcb_view`, all
+            // framed through teardown, so the `dec_ref` `-1` preserves it.
+            &&& (store.tcb_view()[o].cspace matches Some(cs) ==> cspace_resident_wf(store, cs))
+            // Waiter-coherence (plan §6d-final-thread, the sixth system invariant): a
+            // BlockedNotif thread's `wait_notif` names a `notif_wf` notification — exactly the
+            // precondition `destroy_tcb`'s `remove_waiter(wn, t)` needs (the refs side-condition
+            // it then wants rides `refcount_sound`). The `notif_wf`-only form (no chain
+            // membership) is what makes it framable: `destroy_notif` is a model view no-op, so a
+            // notification never leaves `notif_view`, and a signal-shaped edit moves only
+            // off-chain threads (`signal` wakes to `Runnable`, `remove_waiter` clears
+            // `wait_notif`), neither of which can break a surviving blocked thread's `notif_wf`.
+            &&& (store.tcb_view()[o].state == ThreadState::BlockedNotif ==>
+                    (store.tcb_view()[o].wait_notif matches Some(wn) ==>
+                        notif_wf(store.notif_view(), store.tcb_view(), wn)))
         }
         CapKind::Notification(o) => notif_wf(store.notif_view(), store.tcb_view(), o),
         CapKind::Timer(o) => {
@@ -3012,6 +3382,22 @@ pub proof fn lemma_caps_consistent_frame<S: Store>(s0: &S, s1: &S, n: ObjId)
         forall|k: ObjId| #[trigger] s0.tcb_view()[k].wait_notif != Some(n)
             ==> s1.tcb_view()[k] == s0.tcb_view()[k],
         forall|k: ObjId| #[trigger] s1.tcb_view()[k].bind_slots == s0.tcb_view()[k].bind_slots,
+        // Every TCB's bound cspace is framed too (plan §6d-final-thread): the strengthened
+        // `cap_consistent(Thread)` clause carries `cspace_resident_wf` of the bound cspace, and
+        // a signal-shaped edit moves a waiter's queue/wait/retval fields but never its cspace —
+        // so which `cs` a Thread cap's TCB names is unchanged, and `cspace_resident_wf(cs)`
+        // (refs-free, over the framed `cspace_view` + `slot_view` dom) carries from `s0`.
+        forall|k: ObjId| #[trigger] s1.tcb_view()[k].cspace == s0.tcb_view()[k].cspace,
+        // A TCB the edit *changes* that is still blocked in `s1` is blocked on `n` — `signal`
+        // wakes its head to `Runnable` (not blocked), `remove_waiter` either clears the spliced
+        // thread's `wait_notif` (→ `None`) or only re-threads a predecessor still blocked on `n`.
+        // This carries the waiter-coherence clause (plan §6d-final-thread): a thread still
+        // BlockedNotif-on-`wn` in `s1` was either *unchanged* (so BlockedNotif-on-`wn` in `s0`,
+        // where `caps_consistent(s0)` gave `notif_wf(wn)`) or changed with `wn == n` (where
+        // `notif_wf(s1, n)` is a hypothesis); either way `notif_wf(s1, wn)` holds.
+        forall|k: ObjId| #[trigger] s1.tcb_view()[k] != s0.tcb_view()[k]
+            && s1.tcb_view()[k].state == ThreadState::BlockedNotif
+            ==> (s1.tcb_view()[k].wait_notif matches Some(wn) ==> wn == n),
     ensures
         caps_consistent(s1),
 {
@@ -3034,6 +3420,34 @@ pub proof fn lemma_caps_consistent_frame<S: Store>(s0: &S, s1: &S, n: ObjId)
             CapKind::Notification(m) => {
                 assert(s0.notif_view().dom().contains(m));
                 assert(notif_wf(s0.notif_view(), s0.tcb_view(), m));
+            }
+            CapKind::Thread(m) => {
+                // The strengthened Thread clause: re-derive `cspace_resident_wf(s1, cs)` from
+                // `s0`. The bound cspace is framed (`s1.tcb[m].cspace == s0.tcb[m].cspace`), and
+                // `cspace_resident_wf` reads only the framed `cspace_view` + `slot_view` dom.
+                if let Some(cs) = s1.tcb_view()[m].cspace {
+                    assert(s0.tcb_view()[m].cspace == Some(cs));
+                    assert(cspace_resident_wf(s0, cs));
+                    assert(cspace_resident_wf(s1, cs));
+                }
+                // Waiter-coherence: `m` BlockedNotif-on-`wn` in `s1` ⟹ `notif_wf(s1, wn)`.
+                // Either `m` is unchanged (so BlockedNotif-on-`wn` in `s0`, giving
+                // `notif_wf(s0, wn)`, carried to `s1` — at `n` by hypothesis, at `wn != n` by
+                // `lemma_notif_wf_frame`), or `m` changed (then the off-chain hypothesis forces
+                // `wn == n`, where `notif_wf(s1, n)` is a direct hypothesis).
+                if s1.tcb_view()[m].state == ThreadState::BlockedNotif {
+                    if let Some(wn) = s1.tcb_view()[m].wait_notif {
+                        if s1.tcb_view()[m] == s0.tcb_view()[m] {
+                            assert(notif_wf(s0.notif_view(), s0.tcb_view(), wn));
+                            if wn != n {
+                                lemma_notif_wf_frame(s0.notif_view(), s0.tcb_view(),
+                                    s1.notif_view(), s1.tcb_view(), wn);
+                            }
+                        } else {
+                            assert(wn == n);
+                        }
+                    }
+                }
             }
             CapKind::Channel(co, _) => {
                 assert forall|e: int, v: int|
@@ -6807,6 +7221,17 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             &&& old(store).tcb_view()[o].bind_slots.len() == 2
             &&& old(store).slot_view().dom().contains(old(store).tcb_view()[o].bind_slots[0])
             &&& old(store).slot_view().dom().contains(old(store).tcb_view()[o].bind_slots[1])
+            // The bound cspace is resident-wf — `destroy_tcb`'s `unref_cspace` needs it to drive
+            // the at-zero `destroy_cspace`, and by then the TCB's own cap is gone. `delete`
+            // supplies it from `caps_consistent`'s strengthened Thread clause (plan
+            // §6d-final-thread).
+            &&& (old(store).tcb_view()[o].cspace matches Some(cs) ==>
+                    cspace_resident_wf(old(store), cs))
+            // Waiter-coherence — `destroy_tcb`'s BlockedNotif branch `remove_waiter` needs
+            // `notif_wf(wn)`; same provenance (plan §6d-final-thread).
+            &&& (old(store).tcb_view()[o].state == ThreadState::BlockedNotif ==>
+                    (old(store).tcb_view()[o].wait_notif matches Some(wn) ==>
+                        notif_wf(old(store).notif_view(), old(store).tcb_view(), wn)))
         },
         cap.kind matches CapKind::Notification(o) ==>
             notif_wf(old(store).notif_view(), old(store).tcb_view(), o),
@@ -7410,6 +7835,38 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
     }
     let ghost cv_pre_unref = store.chan_view();
     proof {
+        // Discharge `obj_unref`'s Thread arm's bound-cspace-resident precondition from
+        // `caps_consistent` (plan §6d-final-thread). The deleted cap is the live Thread cap, so
+        // `caps_consistent(old)` ⟹ `cap_consistent(old, cap)` ⟹ the bound cspace is
+        // resident-wf. `cspace_resident_wf` reads only `cspace_view` + `slot_view` dom (both
+        // framed by `delete_prepare`) and `tcb_view[o].cspace` (framed), and no Thread-cap
+        // teardown branch ran above, so it survives unchanged to the `obj_unref` call.
+        if let CapKind::Thread(o) = cap.kind {
+            assert(cap_consistent(old(store), cap));
+            if let Some(cs) = store.tcb_view()[o].cspace {
+                assert(old(store).tcb_view()[o].cspace == Some(cs));
+                assert(cspace_resident_wf(old(store), cs));
+                assert(cspace_resident_wf(store, cs));
+            }
+            // Waiter-coherence rides through identically (`delete_prepare` frames `notif_view`
+            // and `tcb_view`, no Thread-cap teardown branch ran): if `o` is blocked, its
+            // `wait_notif` names a `notif_wf` notification — `obj_unref`'s Thread arm needs it
+            // to discharge `destroy_tcb`'s BlockedNotif-branch `remove_waiter` (plan
+            // §6d-final-thread).
+            if store.tcb_view()[o].state == ThreadState::BlockedNotif {
+                if let Some(wn) = store.tcb_view()[o].wait_notif {
+                    assert(notif_wf(old(store).notif_view(), old(store).tcb_view(), wn));
+                    assert(notif_wf(store.notif_view(), store.tcb_view(), wn));
+                }
+            }
+        }
+        // Re-establish `obj_unref`'s Channel-arm `chan_wf` precondition explicitly: the Thread
+        // case-split above shifts auto-trigger selection and otherwise un-fires the auto-derived
+        // `chan_wf` (the doc 51 §2 hazard — expose the fact rather than re-derive by case-split).
+        // `endpoint_cap_dropped` preserves `chan_wf` (it touches `end_caps`, not the layout).
+        if let CapKind::Channel(o, _) = cap.kind {
+            assert(chan_wf(store.chan_view(), store.slot_view(), o));
+        }
         // Discharge `obj_unref`'s Timer armed-notif-live precondition from the census.
         if let CapKind::Timer(o) = cap.kind {
             if store.timer_view()[o].armed {

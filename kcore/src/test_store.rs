@@ -678,6 +678,22 @@ fn cap_consistent_exec(st: &ArrayStore, cap: Cap) -> bool {
             st.tcbs.contains_key(&o.0)
                 && (st.tcbs[&o.0].bind_slots[0].0 as usize) < st.n()
                 && (st.tcbs[&o.0].bind_slots[1].0 as usize) < st.n()
+                // The bound cspace is resident-wf (plan §6d-final-thread) — mirrors the CSpace
+                // arm's residents-live check for the TCB's `cspace`, when bound.
+                && match st.tcbs[&o.0].cspace {
+                    Some(cs) => {
+                        st.cspaces.contains_key(&cs.0)
+                            && st.cspaces[&cs.0].iter().all(|sid| (sid.0 as usize) < st.n())
+                    }
+                    None => true,
+                }
+                // Waiter-coherence (plan §6d-final-thread): a BlockedNotif thread's wait_notif
+                // names a notif_wf notification (the precondition `destroy_tcb`'s `remove_waiter`
+                // needs).
+                && match (st.tcbs[&o.0].state, st.tcbs[&o.0].wait_notif) {
+                    (ThreadState::BlockedNotif, Some(wn)) => notif_wf_exec(st, wn),
+                    _ => true,
+                }
         }
         CapKind::Notification(o) => notif_wf_exec(st, o),
         CapKind::Timer(o) => st.timers.contains_key(&o.0) && timer_wf_exec(st),

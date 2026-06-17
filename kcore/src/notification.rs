@@ -123,6 +123,12 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
             // queue/wait/retval fields. The frame `caps_consistent` preservation needs (a
             // Thread cap for `t` reads its `bind_slots`; plan §6d body PR).
             &&& final(store).tcb_view()[t].bind_slots == old(store).tcb_view()[t].bind_slots
+            // …and its bound cspace/aspace are untouched too — the strengthened
+            // `cap_consistent(Thread)` clause reads `tcb[t].cspace` (its `cspace_resident_wf`),
+            // so `lemma_caps_consistent_frame` needs the cspace frame across the wake; the
+            // aspace half rides the same proof (`thread_hold_refs`). Plan §6d-final-thread.
+            &&& final(store).tcb_view()[t].cspace == old(store).tcb_view()[t].cspace
+            &&& final(store).tcb_view()[t].aspace == old(store).tcb_view()[t].aspace
             &&& final(store).notif_view()[n].word == 0
             &&& final(store).refs_view()
                     == old(store).refs_view().insert(n, (old(store).refs_view()[n] - 1) as nat)
@@ -459,6 +465,20 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
         // Unconditional — `destroy_tcb` turns it into `refcount_sound` via
         // `lemma_refcount_sound_from_frozen` (it calls `remove_waiter` where the census is sound).
         cspace::census_delta_frozen(old(store), final(store)),
+        // Residency is untouched (the splice writes notif head/tail + tcb queue links + `refs`,
+        // never `cspace_view`); `destroy_tcb` carries it to its own `cspace_view` ensures (plan
+        // §6d-final-thread).
+        final(store).cspace_view() == old(store).cspace_view(),
+        // The teardown system invariants survive the splice (the `signal`→`fire` precedent):
+        // it is a signal-shaped edit (only `n`'s notif view + `n`'s waiter TCBs move, every
+        // TCB's `bind_slots`/`cspace` fixed), so `lemma_caps_consistent_frame` applies; the
+        // §3.3 endpoint census reads only the framed chan/slot views; and the census only
+        // drops while the refs domain is fixed. Conditional + `requires`-free, so the phase-4
+        // callers keep no obligation; `destroy_tcb` (the only kcore caller) consumes them for
+        // its bind-slot `delete`s (plan §6d-final-thread).
+        cspace::caps_consistent(old(store)) ==> cspace::caps_consistent(final(store)),
+        cspace::end_caps_sound(old(store)) ==> cspace::end_caps_sound(final(store)),
+        cspace::census_dom_complete(old(store)) ==> cspace::census_dom_complete(final(store)),
         ({
             let ws0 = cspace::waiter_seq(old(store).notif_view(), old(store).tcb_view(), n);
             // Absent: `t` not on `n`'s queue ⇒ the store is unchanged.
@@ -498,6 +518,9 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
             store.tcb_view() == tv0,
             store.timer_view() == old(store).timer_view(),
             store.timer_head_view() == old(store).timer_head_view(),
+            // residency too (plan §6d-final-thread): the walk never touches `cspace_view`, so
+            // the absent-path post-state can frame it, and `destroy_tcb` carries it forward.
+            store.cspace_view() == old(store).cspace_view(),
             // pin the pre-loop ghosts to the function entry state — a loop body only
             // assumes the invariant, so without this the `nv0 == old(store)...` links
             // (needed for the dom/contract postconditions at the in-loop return) are lost.
@@ -625,6 +648,63 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
                         cspace::lemma_waiter_refs_frame(nv0, tv0, nvf, tvf, n, x);
                     }
                 }
+                // ── Teardown system invariants survive the splice (plan §6d-final-thread,
+                //    the `signal`→`fire` precedent). The splice is signal-shaped: only `n`'s
+                //    notif head/tail moved, only `n`'s waiters (`t` + its predecessor) moved,
+                //    and every TCB's `bind_slots`/`cspace` is fixed (the setters struct-update). ──
+                assert(store.slot_view() == old(store).slot_view());
+                assert(store.chan_view() == old(store).chan_view());
+                assert(store.cspace_view() == old(store).cspace_view());
+                assert(nvf =~= nv0.insert(n, nvf[n]));
+                assert forall|kk: ObjId| old(store).tcb_view()[kk].wait_notif != Some(n)
+                    implies #[trigger] tvf[kk] == tv0[kk] by {
+                    if tvf[kk] != tv0[kk] { assert(tv0[kk].wait_notif == Some(n)); }
+                }
+                assert forall|kk: ObjId| #[trigger] tvf[kk].bind_slots == tv0[kk].bind_slots by {}
+                assert forall|kk: ObjId| #[trigger] tvf[kk].cspace == tv0[kk].cspace by {}
+                // A changed TCB still blocked in the post-state is blocked on `n` (the
+                // waiter-coherence frame, plan §6d-final-thread): the only changed TCBs are `t`
+                // (its `wait_notif` cleared to `None`, so not `Some(wn)`) and `t`'s predecessor
+                // (only its `qnext` moved — still `wait_notif == Some(n)`, so `wn == n`).
+                assert forall|kk: ObjId| #[trigger] tvf[kk] != tv0[kk]
+                    && tvf[kk].state == ThreadState::BlockedNotif
+                    ==> (tvf[kk].wait_notif matches Some(wn) ==> wn == n) by {
+                    if tvf[kk] != tv0[kk] && kk != t {
+                        // Only `t`'s predecessor `p` is otherwise touched, and it kept
+                        // `wait_notif == Some(n)` (the splice re-threads its `qnext` only).
+                        assert(tv0[kk].wait_notif == Some(n));
+                    }
+                }
+                if cspace::caps_consistent(old(store)) {
+                    cspace::lemma_caps_consistent_frame(old(store), store, n);
+                }
+                if cspace::end_caps_sound(old(store)) {
+                    assert(cspace::end_caps_sound(store));
+                }
+                if cspace::census_dom_complete(old(store)) {
+                    // Every census term is framed for `o != n`; `n`'s waiter term dropped one.
+                    // So `census(store,o) <= census(old,o)` everywhere, and the refs domain is
+                    // unchanged (line above), so the coverage carries.
+                    assert forall|o: ObjId| o != n implies #[trigger] cspace::obj_census(store, o)
+                        == cspace::obj_census(old(store), o) by {
+                        cspace::lemma_thread_hold_frame(tv0, tvf, o);
+                        assert forall|kk: ObjId| #[trigger] tvf[kk] != tv0[kk]
+                            ==> tv0[kk].wait_notif != Some(o) && tvf[kk].wait_notif != Some(o) by {
+                            if tvf[kk] != tv0[kk] { assert(tv0[kk].wait_notif == Some(n)); }
+                        }
+                        cspace::lemma_waiter_refs_frame(nv0, tv0, nvf, tvf, n, o);
+                    }
+                    assert(cspace::obj_census(store, n) + 1 == cspace::obj_census(old(store), n)) by {
+                        cspace::lemma_thread_hold_frame(tv0, tvf, n);
+                    }
+                    assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o) >= 1
+                        implies store.refs_view().dom().contains(o) by {
+                        if o != n {
+                            assert(cspace::obj_census(old(store), o) == cspace::obj_census(store, o));
+                        }
+                        cspace::lemma_in_refs_from_census(old(store), o);
+                    }
+                }
             }
             return;
         }
@@ -644,8 +724,14 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
         assert(store.notif_view() == old(store).notif_view());
         assert(store.tcb_view() == old(store).tcb_view());
         assert(store.refs_view() == old(store).refs_view());
+        assert(store.cspace_view() == old(store).cspace_view());
         assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o)
             == cspace::obj_census(old(store), o) by {}
+        // The store is unchanged, so the teardown system invariants carry trivially (plan
+        // §6d-final-thread).
+        assert(cspace::caps_consistent(old(store)) ==> cspace::caps_consistent(store));
+        assert(cspace::end_caps_sound(old(store)) ==> cspace::end_caps_sound(store));
+        assert(cspace::census_dom_complete(old(store)) ==> cspace::census_dom_complete(store));
     }
 }
 
