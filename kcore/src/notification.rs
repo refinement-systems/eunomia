@@ -489,6 +489,11 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
         final(store).timer_head_view() == old(store).timer_head_view(),
         final(store).notif_view().dom() == old(store).notif_view().dom(),
         final(store).tcb_view().dom() == old(store).tcb_view().dom(),
+        // Every TCB's immutable `bind_slots` survive the splice (plan §6e): a signal-shaped edit
+        // writes only queue/wait links, never `bind_slots`. `destroy_tcb` reads it off for the
+        // `home_views_frozen` stability across its BlockedNotif detach.
+        forall|k: ObjId| #[trigger] final(store).tcb_view()[k].bind_slots
+            == old(store).tcb_view()[k].bind_slots,
         cspace::notif_wf(final(store).notif_view(), final(store).tcb_view(), n),
         // The refcount census moves in lockstep (plan §6d body PR, doc 45 §3): the splice
         // drops `refs[n]` and `waiter_seq(n)` (losing `t`) together; absent, nothing moves.

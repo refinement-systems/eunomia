@@ -2788,6 +2788,10 @@ fn revoke_can_empty_its_own_root_zombie() {
     st.refs.insert(10, 1); // slot 1 is the one (and last) cap to cspace 10
     st.cspaces.insert(10, vec![SlotId(0)]); // cspace 10 contains slot 0 as a resident
     assert!(cspace_wf_exec(&st), "the zombie shape is well-formed");
+    // §6e negative witness: `slot 0` IS homed (a resident of cspace 10), so it fails the
+    // non-zombie precondition `!is_homed` that `check_revoke_root_survives` relies on — exactly
+    // the shape `revoke`'s conditional root-survival theorem excludes.
+    assert!(is_homed_exec(&st, SlotId(0)), "the zombie root is homed (precondition violated)");
 
     revoke(&mut st, SlotId(0));
 
@@ -2796,6 +2800,53 @@ fn revoke_can_empty_its_own_root_zombie() {
     // The headline: the revoked root itself was emptied by the cross-object
     // teardown — the documented gap, here a concrete witness.
     assert!(st.at(SlotId(0)).cap.is_empty(), "revoke emptied its own root (zombie)");
+}
+
+// `is_homed`'s executable mirror (plan §6e): `x` is some object's internal home handle — a
+// cspace resident, a channel ring cap, or a TCB bind slot. Host-checks `revoke`'s non-zombie
+// precondition both ways (the zombie root is homed; the survivor root is not).
+fn is_homed_exec(st: &ArrayStore, x: SlotId) -> bool {
+    st.cspaces.values().any(|slots| slots.contains(&x))
+        || st.chans.values().any(|c| c.ring_cap.values().any(|&s| s == x))
+        || st.tcbs.values().any(|t| t.bind_slots.contains(&x))
+}
+
+#[test]
+fn check_revoke_root_survives() {
+    // Non-zombie shape (plan §6e): the revoked root `slot 0` is **un-homed** — no cspace
+    // resident, ring cap, or bind slot — so the cross-object teardown the revoke walk fires
+    // cannot reach it. slot 0 (Frame) ── child ──▶ slot 1 = CSpace(10) (its last cap); cspace
+    // 10's resident is slot 2 (NOT slot 0). revoke(slot 0) deletes slot 1 → destroy_cspace(10)
+    // empties slot 2 — a genuine cross-object teardown — yet the un-homed slot 0 survives.
+    let mut st = ArrayStore::new(3);
+    st.slots[0] = CapSlot {
+        cap: frame_cap(0),
+        parent: None,
+        first_child: Some(SlotId(1)),
+        next_sib: None,
+        prev_sib: None,
+    };
+    st.slots[1] = CapSlot {
+        cap: cspace_cap(10),
+        parent: Some(SlotId(0)),
+        first_child: None,
+        next_sib: None,
+        prev_sib: None,
+    };
+    st.slots[2] = detached(frame_cap(2));
+    st.refs.insert(10, 1); // slot 1 is the one (and last) cap to cspace 10
+    st.cspaces.insert(10, vec![SlotId(2)]); // cspace 10's resident is slot 2, NOT slot 0
+    assert!(cspace_wf_exec(&st), "the non-zombie shape is well-formed");
+    assert!(!is_homed_exec(&st, SlotId(0)), "the revoke root is un-homed (the §6e precondition)");
+
+    revoke(&mut st, SlotId(0));
+
+    assert!(cspace_wf_exec(&st), "revoke preserves cspace_wf");
+    assert!(st.at(SlotId(0)).first_child.is_none(), "revoke: subtree empty");
+    // The §6e headline: the un-homed revoked root survives the cross-object teardown.
+    assert!(!st.at(SlotId(0)).cap.is_empty(), "revoke: the un-homed root SURVIVES");
+    // …and the teardown genuinely crossed objects (cspace 10's resident was emptied).
+    assert!(st.at(SlotId(2)).cap.is_empty(), "the cross-object teardown fired (resident emptied)");
 }
 
 // ── Channel send/recv (plan §3d): the FIFO core, host-differential ──────────

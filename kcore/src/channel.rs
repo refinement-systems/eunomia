@@ -230,6 +230,12 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
         // frames `tcb`/`refs` whole, and the peer-closed `fire` is signal-shaped (its own
         // `dead_tcb_frozen`). `delete`'s Channel branch reads it off.
         cspace::dead_tcb_frozen(old(store), final(store)),
+        // The TCB domain + every immutable `bind_slots` ride through (plan §6e): `set_chan_end_caps`
+        // frames `tcb`, `fire` keeps both — the `home_views_frozen` stability `delete`'s Channel
+        // branch threads for the §6e provenance frame.
+        final(store).tcb_view().dom() == old(store).tcb_view().dom(),
+        forall|k: ObjId| #[trigger] final(store).tcb_view()[k].bind_slots
+            == old(store).tcb_view()[k].bind_slots,
 {
     let e = end_idx(end);
     store.set_chan_end_caps(ch, e, store.chan_end_caps(ch, e) - 1);
@@ -319,6 +325,10 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
             cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), &st_mid, ch);
         }
         cspace::lemma_dead_tcb_frozen_trans(old(store), &st_mid, store);
+        // §6e: TCB domain + `bind_slots` ride through (`set_chan_end_caps` froze `tcb`; `fire`
+        // keeps both, or the unfired branch leaves the store at `st_mid`).
+        assert forall|k: ObjId| #[trigger] store.tcb_view()[k].bind_slots
+            == old(store).tcb_view()[k].bind_slots by {}
     }
 }
 
@@ -373,6 +383,12 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
         // mutated before it); the unbound branch is a no-op. `endpoint_cap_dropped`/`delete`
         // carry it up the teardown chain.
         cspace::dead_tcb_frozen(old(store), final(store)),
+        // The TCB domain + every immutable `bind_slots` ride the fire (plan §6e): `signal` keeps
+        // both (the bound branch) and the unbound branch is a no-op — the `home_views_frozen`
+        // stability `endpoint_cap_dropped`/`delete` thread for the §6e provenance frame.
+        final(store).tcb_view().dom() == old(store).tcb_view().dom(),
+        forall|k: ObjId| #[trigger] final(store).tcb_view()[k].bind_slots
+            == old(store).tcb_view()[k].bind_slots,
 {
     let b = store.chan_binding(ch, end, event);
     if let Some(n) = b.notif {
@@ -434,6 +450,10 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
         // census_dom_complete: the bound branch rides `signal`'s own conditional (its `old` is
         // this `old`); the unbound branch leaves the store untouched.
         assert(cspace::census_dom_complete(old(store)) ==> cspace::census_dom_complete(store));
+        // §6e: TCB domain + `bind_slots` ride the fire (signal's own ensures in the bound branch;
+        // store untouched in the unbound one).
+        assert forall|k: ObjId| #[trigger] store.tcb_view()[k].bind_slots
+            == old(store).tcb_view()[k].bind_slots by {}
     }
 }
 
@@ -1253,6 +1273,9 @@ fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
         // frames `tcb` whole and drops `refs` only at the binding's notification (which had a
         // binding ref, so `refs > 0`). `destroy_channel`'s binding-release loop reads it off.
         cspace::dead_tcb_frozen(old(store), final(store)),
+        // The home maps are framed (plan §6e): `release_binding` frames `tcb` whole and the
+        // bindings-only chan edit keeps the skeleton — `destroy_channel` threads it.
+        cspace::home_views_frozen(old(store), final(store)),
 {
     let b = store.chan_binding(ch, end, ev);
     if let Some(n) = b.notif {
@@ -1377,6 +1400,13 @@ fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
             cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, ch);
         }
     }
+    // §6e: the home maps are framed — `tcb` is framed whole in both branches, `cspace_view` too,
+    // and the chan edit (if any) is the skeleton-preserving binding clear.
+    proof {
+        assert(store.tcb_view() == old(store).tcb_view());
+        assert forall|k: ObjId| #[trigger] store.tcb_view()[k].bind_slots
+            == old(store).tcb_view()[k].bind_slots by {}
+    }
 }
 
 /// Tear a channel down once its last endpoint cap is gone (`refs == 0`): delete
@@ -1431,6 +1461,12 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
         // each ring-cap `delete` and binding `release_binding` carries `dead_tcb_frozen`, threaded
         // through the loops by `lemma_dead_tcb_frozen_trans`. `obj_unref`'s Channel arm reads it.
         cspace::dead_tcb_frozen(old(store), final(store)),
+        // The home maps are framed (plan §6e): residency immutable, channel skeleton fixed, TCB
+        // domain + every `bind_slots` preserved across the ring-cap deletes + binding releases.
+        cspace::home_views_frozen(old(store), final(store)),
+        // §6e provenance: this destructor empties only its ring caps (each homed in `ch`) and
+        // their recursive closure, so every un-homed slot keeps its cap. `obj_unref` reads it off.
+        cspace::unhomed_frozen_free(old(store), final(store)),
     // SCC measure (plan §6d-final): height 3 — above `delete` (0), below `obj_unref` (4); its
     // ring-cap `delete`s are count-flat on the first iteration, so the height drops.
     decreases cspace::count_nonempty(old(store).slot_view()), 3int
@@ -1458,6 +1494,8 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
             store.cspace_view() == old(store).cspace_view(),
             cspace::chan_struct_frame(old(store).chan_view(), store.chan_view()),
             cspace::dead_tcb_frozen(old(store), store),
+            cspace::home_views_frozen(old(store), store),
+            cspace::unhomed_frozen_free(old(store), store),
             store.chan_view().dom().contains(ch),
             store.chan_view()[ch].ring_cap == rc,
             forall|r: int, i: int, c: int|
@@ -1485,6 +1523,8 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                 store.cspace_view() == old(store).cspace_view(),
                 cspace::chan_struct_frame(old(store).chan_view(), store.chan_view()),
                 cspace::dead_tcb_frozen(old(store), store),
+                cspace::home_views_frozen(old(store), store),
+                cspace::unhomed_frozen_free(old(store), store),
                 store.chan_view().dom().contains(ch),
                 store.chan_view()[ch].ring_cap == rc,
                 forall|r: int, ii: int, c: int|
@@ -1517,6 +1557,8 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                     store.cspace_view() == old(store).cspace_view(),
                     cspace::chan_struct_frame(old(store).chan_view(), store.chan_view()),
                     cspace::dead_tcb_frozen(old(store), store),
+                    cspace::home_views_frozen(old(store), store),
+                    cspace::unhomed_frozen_free(old(store), store),
                     store.chan_view().dom().contains(ch),
                     store.chan_view()[ch].ring_cap == rc,
                     forall|r: int, ii: int, cc: int|
@@ -1549,6 +1591,19 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                         cspace::lemma_chan_struct_frame_trans(
                             old(store).chan_view(), cv_before, store.chan_view());
                         cspace::lemma_dead_tcb_frozen_trans(old(store), &st_before, store);
+                        // §6e: `cs` is a ring cap of `ch` (homed), so `delete`'s target-aware frame
+                        // is already target-free — composing the provenance frame across the loop.
+                        assert(cspace::homed_in_chan(&st_before, cs)) by {
+                            // `cs` is `ch`'s ring cap at `(ring, i, c)` — the getter pinned the
+                            // value, and the loop pins `ch`'s ring_cap map to `rc`.
+                            assert(st_before.chan_view().dom().contains(ch));
+                            assert(st_before.chan_view()[ch].ring_cap == rc);
+                            assert(st_before.chan_view()[ch].ring_cap[(ring as int, i as int,
+                                c as int)] == cs);
+                        }
+                        cspace::lemma_unhomed_frozen_free_from_homed(&st_before, store, cs);
+                        cspace::lemma_unhomed_frozen_free_trans(old(store), &st_before, store);
+                        cspace::lemma_home_views_frozen_trans(old(store), &st_before, store);
                     }
                 }
                 // Re-establish the empty prefix: prior empties stay empty (`only_empties` from
@@ -1592,6 +1647,8 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
             store.cspace_view() == old(store).cspace_view(),
             cspace::chan_struct_frame(old(store).chan_view(), store.chan_view()),
             cspace::dead_tcb_frozen(old(store), store),
+            cspace::home_views_frozen(old(store), store),
+            cspace::unhomed_frozen_free(old(store), store),
             store.chan_view().dom().contains(ch),
             forall|r: int, i: int, c: int|
                 (0 <= r < 2 && 0 <= i < depth0 && 0 <= c < 4)
@@ -1614,6 +1671,8 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                 store.cspace_view() == old(store).cspace_view(),
                 cspace::chan_struct_frame(old(store).chan_view(), store.chan_view()),
                 cspace::dead_tcb_frozen(old(store), store),
+                cspace::home_views_frozen(old(store), store),
+                cspace::unhomed_frozen_free(old(store), store),
                 store.chan_view().dom().contains(ch),
                 forall|r: int, i: int, c: int|
                     (0 <= r < 2 && 0 <= i < depth0 && 0 <= c < 4)
@@ -1626,6 +1685,11 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                 cspace::lemma_chan_struct_frame_trans(
                     old(store).chan_view(), cv_before, store.chan_view());
                 cspace::lemma_dead_tcb_frozen_trans(old(store), &st_before, store);
+                // §6e: `release_binding` frames `slot_view` (only bindings/refs move), so no slot
+                // is emptied — the free + home frames compose across the binding-release loop.
+                cspace::lemma_unhomed_frozen_free_from_slot_eq(&st_before, store);
+                cspace::lemma_unhomed_frozen_free_trans(old(store), &st_before, store);
+                cspace::lemma_home_views_frozen_trans(old(store), &st_before, store);
             }
         }
     }

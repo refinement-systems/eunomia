@@ -406,6 +406,14 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         // composes this with `dec_ref` to carry the base `dead_tcb_frozen` up the recursion.
         forall|x: ObjId|
             x != t ==> #[trigger] cspace::dead_tcb_frozen_at(old(store), final(store), x),
+        // The home maps are framed (plan §6e): residency immutable, channel skeleton fixed, and
+        // the TCB domain + every `bind_slots` survive (the detach/halt/clear edits keep both, the
+        // deletes + `unref_cspace` carry them). `obj_unref`'s Thread arm reads it off.
+        cspace::home_views_frozen(old(store), final(store)),
+        // §6e provenance: this destructor empties only `t`'s two bind slots (each homed in `t`)
+        // and the homed slots `unref_cspace`'s `destroy_cspace` clears — so every un-homed slot
+        // keeps its cap. `obj_unref`'s Thread arm reads it off.
+        cspace::unhomed_frozen_free(old(store), final(store)),
     decreases cspace::count_nonempty(old(store).slot_view()), 3int
 {
     let ghost st0 = *store;
@@ -490,6 +498,12 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         assert forall|o: ObjId, ws: Seq<ObjId>|
             cspace::waiter_chain(st_detach.notif_view(), st_detach.tcb_view(), o, ws)
             implies !ws.contains(t) by {}
+        // §6e base: the detach frames `slot_view` (free) and the home maps (home) — `unqueue_ready`
+        // frames every view; `remove_waiter` keeps `slot_view`/`cspace_view`/the channel skeleton
+        // and the TCB domain + `bind_slots`.
+        assert(store.slot_view() == st0.slot_view());
+        cspace::lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
+        assert(cspace::home_views_frozen(&st0, store));
     }
 
     // ── 2. Halt: clear `t`'s queue/wait links and mark it Halted (report untouched — §5.1).
@@ -528,6 +542,13 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         // and the detach's except-`t` frame (full ⇒ except-`t`), composed to `st0 → st_halt`.
         cspace::lemma_dead_tcb_frozen_to_except(&st0, &st_detach, t);
         cspace::lemma_dead_tcb_frozen_except_trans(&st0, &st_detach, store, t);
+        // §6e: the halt frames `slot_view` (free) and the home maps (the `set_tcb_*` setters keep
+        // `cspace_view`/`chan_view` and the TCB domain + `bind_slots`); compose onto `st0`.
+        assert(store.slot_view() == st_detach.slot_view());
+        cspace::lemma_unhomed_frozen_free_from_slot_eq(&st_detach, store);
+        assert(cspace::home_views_frozen(&st_detach, store));
+        cspace::lemma_unhomed_frozen_free_trans(&st0, &st_detach, store);
+        cspace::lemma_home_views_frozen_trans(&st0, &st_detach, store);
     }
 
     // ── 3. Delete the two binding caps (they die with the TCB by ordinary CDT cleanup, exactly
@@ -539,11 +560,26 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
     let s0 = store.tcb_bind_slot(t, 0);
     if !cspace::cap_is_empty(store.slot(s0).cap) {
         crate::cspace::delete(store, s0);
+        proof {
+            // §6e: `s0` is `t`'s bind slot 0 (homed), so `delete`'s target-aware frame is already
+            // target-free; `delete` exports `home_views_frozen`.
+            assert(cspace::homed_in_tcb(&st_halt, s0)) by {
+                assert(st_halt.tcb_view()[t].bind_slots[0] == s0);
+            }
+            cspace::lemma_unhomed_frozen_free_from_homed(&st_halt, store, s0);
+        }
     } else {
-        proof { cspace::lemma_dead_tcb_frozen_refl(&st_halt, store); }
+        proof {
+            cspace::lemma_dead_tcb_frozen_refl(&st_halt, store);
+            cspace::lemma_unhomed_frozen_free_from_slot_eq(&st_halt, store);
+            cspace::lemma_home_views_frozen_refl(&st_halt, store);
+        }
     }
     let ghost st_d0 = *store;
     proof {
+        // §6e: compose the bind-slot-0 delete onto the running `st0` frame.
+        cspace::lemma_unhomed_frozen_free_trans(&st0, &st_halt, &st_d0);
+        cspace::lemma_home_views_frozen_trans(&st0, &st_halt, &st_d0);
         assert(cspace::dead_tcb_frozen(&st_halt, &st_d0));
         // `t` (dead + detached at `st_halt`) is frozen across the first delete, so it is still in
         // `tcb.dom()` with its `bind_slots` intact; `bs1` is still a live slot (delete preserves
@@ -556,10 +592,24 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
     let s1 = store.tcb_bind_slot(t, 1);
     if !cspace::cap_is_empty(store.slot(s1).cap) {
         crate::cspace::delete(store, s1);
+        proof {
+            // §6e: `s1` is `t`'s bind slot 1 (homed) — same homed-lift as bind slot 0.
+            assert(cspace::homed_in_tcb(&st_d0, s1)) by {
+                assert(st_d0.tcb_view()[t].bind_slots[1] == s1);
+            }
+            cspace::lemma_unhomed_frozen_free_from_homed(&st_d0, store, s1);
+        }
     } else {
-        proof { cspace::lemma_dead_tcb_frozen_refl(&st_d0, store); }
+        proof {
+            cspace::lemma_dead_tcb_frozen_refl(&st_d0, store);
+            cspace::lemma_unhomed_frozen_free_from_slot_eq(&st_d0, store);
+            cspace::lemma_home_views_frozen_refl(&st_d0, store);
+        }
     }
     proof {
+        // §6e: compose the bind-slot-1 delete onto the running `st0` frame.
+        cspace::lemma_unhomed_frozen_free_trans(&st0, &st_d0, store);
+        cspace::lemma_home_views_frozen_trans(&st0, &st_d0, store);
         cspace::lemma_dead_tcb_frozen_trans(&st_halt, &st_d0, store);
         // `t` survived both deletes (dead + detached at `st_halt` ⇒ `dead_tcb_frozen_at` fixes it),
         // and both bind slots ended empty (each delete empties, `only_empties` keeps the other).
@@ -613,6 +663,12 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
             assert(store.tcb_view()[t].qnext is None);
             assert(store.tcb_view()[t].report == report0);
             assert(store.refs_view()[t] == 0);
+            // §6e: the cspace-field clear frames `slot_view` (free) and the home maps; compose.
+            assert(store.slot_view() == st_pre_cs.slot_view());
+            cspace::lemma_unhomed_frozen_free_from_slot_eq(&st_pre_cs, store);
+            assert(cspace::home_views_frozen(&st_pre_cs, store));
+            cspace::lemma_unhomed_frozen_free_trans(&st0, &st_pre_cs, store);
+            cspace::lemma_home_views_frozen_trans(&st0, &st_pre_cs, store);
         }
         crate::cspace::unref_cspace(store, cs);
         proof {
@@ -620,6 +676,9 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
             assert(cspace::dead_tcb_frozen_at(&st_csclear, store, t));
             cspace::lemma_dead_tcb_frozen_to_except(&st_csclear, store, t);
             cspace::lemma_dead_tcb_frozen_except_trans(&st0, &st_csclear, store, t);
+            // §6e: `unref_cspace` exports the free + home frames; compose onto `st0`.
+            cspace::lemma_unhomed_frozen_free_trans(&st0, &st_csclear, store);
+            cspace::lemma_home_views_frozen_trans(&st0, &st_csclear, store);
         }
     }
     proof {
@@ -648,12 +707,23 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
             assert(store.tcb_view()[t].qnext is None);
             assert(store.tcb_view()[t].report == report0);
             assert(store.refs_view()[t] == 0);
+            // §6e: the aspace-field clear frames `slot_view` (free) and the home maps; compose.
+            assert(store.slot_view() == st_pre_as.slot_view());
+            cspace::lemma_unhomed_frozen_free_from_slot_eq(&st_pre_as, store);
+            assert(cspace::home_views_frozen(&st_pre_as, store));
+            cspace::lemma_unhomed_frozen_free_trans(&st0, &st_pre_as, store);
+            cspace::lemma_home_views_frozen_trans(&st0, &st_pre_as, store);
         }
         crate::cspace::unref_aspace(store, a);
         proof {
             assert(cspace::dead_tcb_frozen_at(&st_asclear, store, t));
             cspace::lemma_dead_tcb_frozen_to_except(&st_asclear, store, t);
             cspace::lemma_dead_tcb_frozen_except_trans(&st0, &st_asclear, store, t);
+            // §6e: `unref_aspace` frames `slot_view` + every object view — free + home refl; compose.
+            cspace::lemma_unhomed_frozen_free_from_slot_eq(&st_asclear, store);
+            cspace::lemma_home_views_frozen_refl(&st_asclear, store);
+            cspace::lemma_unhomed_frozen_free_trans(&st0, &st_asclear, store);
+            cspace::lemma_home_views_frozen_trans(&st0, &st_asclear, store);
         }
     }
 }
