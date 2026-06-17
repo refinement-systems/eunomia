@@ -1468,6 +1468,7 @@ fn check_destroy_tcb(st: &mut ArrayStore, t: ObjId) {
     let end_caps0 = end_caps_sound_exec(st);
     let empty0 = st.slots.clone();
     let resid0 = st.cspaces.clone();
+    let chans0 = st.chans.clone();
 
     destroy_tcb(st, t);
 
@@ -1475,6 +1476,11 @@ fn check_destroy_tcb(st: &mut ArrayStore, t: ObjId) {
     assert!(cspace_wf_exec(st), "destroy_tcb post: cspace_wf preserved");
     // §6d: residency is immutable across teardown (the frame obj_unref's Thread arm reads).
     assert!(st.cspaces == resid0, "destroy_tcb post: cspace residency unchanged");
+    // §6d-final: the channel skeleton is immutable — `destroy_tcb` touches no channel layout
+    // (it deletes notification bind caps and unrefs cspace/aspace), so `chan_struct_frame`
+    // (its assumed `external_body` ensures, the Thread-arm `obj_unref` reads) holds. The real
+    // body leaves `chans` wholly unchanged, which implies it.
+    assert!(st.chans == chans0, "destroy_tcb post: channel state (skeleton) unchanged");
     assert_eq!(st.n(), n, "destroy_tcb: arena extent unchanged");
     assert_eq!(st.tcbs[&t.0].state, ThreadState::Halted, "destroy_tcb: t halted");
     assert!(st.tcbs[&t.0].qnext.is_none(), "destroy_tcb: queue link cleared");
@@ -3017,6 +3023,31 @@ fn destroy_channel_deletes_caps_and_releases_bindings() {
 
     assert_eq!(st.refs[&100], 2, "peer-closed binding's notif released");
     assert_eq!(st.refs[&101], 2, "readable binding's notif released");
+    // §6d-final: the now-proven body **clears** each binding so `binding_refs` falls in
+    // lockstep with the `refs -= 1` (the census's answer to the old "no clean closed form").
+    assert!(st.chan(ch).bindings[&(0, EV_PEER_CLOSED)].notif.is_none(), "peer-closed binding cleared");
+    assert!(st.chan(ch).bindings[&(1, EV_READABLE)].notif.is_none(), "readable binding cleared");
+}
+
+#[test]
+fn destroy_channel_bound_preserves_refcount_sound() {
+    // A genuinely `refcount_sound` bound channel (§6d-final): one binding to a live
+    // notification whose only reference is that binding, empty rings, no endpoint caps. The
+    // now-proven `destroy_channel` clears the binding and drops `refs[n]` in lockstep, so
+    // `check_destroy_channel`'s `refcount_sound` assertion (skipped when the fixture is
+    // unsound) actually fires here — the differential check of the proven census contract.
+    let (mut st, ch, _) = chan_fixture(1, 0);
+    st.chan_mut(ch).end_caps = [0, 0]; // no `Channel(ch,_)` caps ⇒ `end_caps_sound` with empty slots
+    let n = ObjId(100);
+    st.refs.insert(100, 1); // census(n) == 1: the single binding below
+    st.chan_mut(ch).bindings.insert((0, EV_READABLE), Binding { notif: Some(n), bits: 0b1 });
+    assert!(refcount_sound_exec(&st), "fixture is refcount_sound (so the post-check fires)");
+    assert!(end_caps_sound_exec(&st), "fixture is end_caps_sound");
+
+    check_destroy_channel(&mut st, ch); // asserts refcount_sound preserved (sound0 is true here)
+
+    assert_eq!(st.refs[&100], 0, "the binding's notif ref released");
+    assert!(st.chan(ch).bindings[&(0, EV_READABLE)].notif.is_none(), "binding cleared in lockstep");
 }
 
 // ── Timer (plan §4e) ────────────────────────────────────────────────────────

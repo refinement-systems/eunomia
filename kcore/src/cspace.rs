@@ -2629,6 +2629,53 @@ pub proof fn lemma_binding_refs_frame(cv0: Map<ObjId, ChanView>, cvf: Map<ObjId,
     ));
 }
 
+// The immutable structural skeleton of every channel — `ring_cap` (the arena handles
+// of each ring slot) and `depth` are fixed at channel construction and changed by *no*
+// op (teardown clears bindings and `end_caps`, `send`/`recv` move head/count, but the
+// layout never moves). `chan_struct_frame` is the teardown-wide frame that says exactly
+// this survives: it is what lets `destroy_channel`'s ring-cap loop read
+// `old.chan_view()[ch].ring_cap` across the recursive `delete`s (the channel `ch` is not
+// re-homed, its slot handles do not move) and conclude every *old* ring slot ends empty.
+// Threaded through the SCC members (`delete`/`obj_unref`/`destroy_cspace`/`unref_cspace`/
+// `destroy_channel`/`destroy_tcb`); the non-recursive callees (`endpoint_cap_dropped`,
+// `set_chan_binding`, `destroy_notif`/`destroy_timer`'s full `chan_view` frame) supply it
+// for free (plan §6d body PR).
+pub open spec fn chan_struct_frame(cv0: Map<ObjId, ChanView>, cvf: Map<ObjId, ChanView>) -> bool {
+    &&& cvf.dom() == cv0.dom()
+    &&& forall|ch: ObjId| #[trigger] cv0.dom().contains(ch)
+            ==> cvf[ch].ring_cap == cv0[ch].ring_cap && cvf[ch].depth == cv0[ch].depth
+}
+
+// `chan_struct_frame` is reflexive and transitive — the loop/recursion composition the
+// teardown bodies need (each `delete` preserves the skeleton; the whole loop does too).
+pub proof fn lemma_chan_struct_frame_trans(
+    cv0: Map<ObjId, ChanView>,
+    cv1: Map<ObjId, ChanView>,
+    cv2: Map<ObjId, ChanView>,
+)
+    requires
+        chan_struct_frame(cv0, cv1),
+        chan_struct_frame(cv1, cv2),
+    ensures
+        chan_struct_frame(cv0, cv2),
+{
+}
+
+// Updating a single channel `ch` to a view that keeps its `ring_cap`/`depth` preserves the
+// skeleton. The exact shape `endpoint_cap_dropped` (`end_caps`-only, `..old[ch]`) and
+// `set_chan_binding` (`bindings`-only, `..old[ch]`) land, so `delete`/`destroy_channel` read
+// `chan_struct_frame` off their ensures with this one lemma (plan §6d body PR).
+pub proof fn lemma_chan_field_update_struct_frame(cv: Map<ObjId, ChanView>, ch: ObjId, v: ChanView)
+    requires
+        cv.dom().contains(ch),
+        v.ring_cap == cv[ch].ring_cap,
+        v.depth == cv[ch].depth,
+    ensures
+        chan_struct_frame(cv, cv.insert(ch, v)),
+{
+    assert(cv.insert(ch, v).dom() =~= cv.dom());
+}
+
 // Blocked waiters on `o`: the length of `o`'s FIFO waiter chain — each blocked TCB
 // holds one queued ref (the phase-4 waiter term, plan §4b/§4c). **Robust** when no
 // waiter chain exists (`o` is not a well-formed notification): then the term is 0, not
@@ -3883,6 +3930,35 @@ pub(crate) proof fn lemma_binding_drop(
             }
         }
         assert(g2 =~= g1);
+    }
+}
+
+// A binding naming `o` witnesses a positive binding census — `destroy_channel`'s release
+// loop uses it (with `lemma_in_refs_from_census` + `refcount_sound`) to show the bound
+// notification is live (`refs[o] >= 1`) before the `-1`, the underflow gate. The
+// `lemma_slot_refs_positive` analog over the triple set.
+pub proof fn lemma_binding_refs_pos(cv: Map<ObjId, ChanView>, ch: ObjId, e: int, v: int, o: ObjId)
+    requires
+        cv.dom().finite(),
+        cv.dom().contains(ch),
+        0 <= e < 2,
+        0 <= v < 3,
+        cv[ch].bindings[(e, v)].notif == Some(o),
+    ensures
+        binding_refs(cv, o) >= 1,
+{
+    let s = Set::new(
+        |t: (ObjId, int, int)|
+            cv.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3
+                && cv[t.0].bindings[(t.1, t.2)].notif == Some(o),
+    );
+    let univ = Set::new(|t: (ObjId, int, int)| cv.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3);
+    lemma_binding_triples_finite(cv.dom());
+    assert(s.subset_of(univ));
+    vstd::set_lib::lemma_set_subset_finite(univ, s);
+    assert(s.contains((ch, e, v)));
+    if s.len() == 0 {
+        assert(s =~= Set::empty());
     }
 }
 
@@ -6645,6 +6721,8 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
         // Residency is immutable: the resident `delete`s frame `cspace_view`, and emptying a
         // resident never re-homes it, so the residency map rides through (plan §6d body PR).
         final(store).cspace_view() == old(store).cspace_view(),
+        // The channel skeleton rides through every resident `delete` (plan §6d body PR).
+        chan_struct_frame(old(store).chan_view(), final(store).chan_view()),
     // SCC measure (plan §6d, doc 44 §3): `destroy_cspace` sits above `delete` (1 > 0); its
     // resident-loop `delete` calls are count-flat on the first iteration, so the height drops.
     decreases count_nonempty(old(store).slot_view()), 1int
@@ -6672,14 +6750,20 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
             // Residency is immutable — `delete` frames `cspace_view`, and dom is preserved,
             // so `cs`'s residents stay live and the getters stay in-bounds across the loop.
             store.cspace_view() == old(store).cspace_view(),
+            // The channel skeleton composes across the resident deletes (plan §6d body PR).
+            chan_struct_frame(old(store).chan_view(), store.chan_view()),
             cspace_resident_wf(store, cs),
         decreases n - i,
     {
         let sid = store.cspace_slot(cs, i);
         if !cap_is_empty(store.slot(sid).cap) {
             let ghost sv_before = store.slot_view();
+            let ghost cv_before = store.chan_view();
             delete(store, sid);
-            proof { lemma_only_empties_trans(old(store).slot_view(), sv_before, store.slot_view()); }
+            proof {
+                lemma_only_empties_trans(old(store).slot_view(), sv_before, store.slot_view());
+                lemma_chan_struct_frame_trans(old(store).chan_view(), cv_before, store.chan_view());
+            }
         }
         i += 1;
     }
@@ -6765,6 +6849,10 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
         // its residency map). `delete` reads it off to discharge its own residency frame
         // (plan §6d body PR).
         final(store).cspace_view() == old(store).cspace_view(),
+        // The channel skeleton survives every arm (each destructor preserves it — the
+        // recursive ones carry it, `destroy_notif`/`destroy_timer` frame `chan_view` whole);
+        // `delete` reads it off (plan §6d body PR).
+        chan_struct_frame(old(store).chan_view(), final(store).chan_view()),
         // Non-designating caps: the store is untouched (the frame `delete` reads off for a
         // Frame cap — its frame-mapping release rode the frame-unmap branch, not here).
         cap_obj(cap) is None ==> {
@@ -6887,6 +6975,9 @@ pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId)
         // Residency is immutable: `dec_ref` and `destroy_cspace` both frame `cspace_view`, so
         // `destroy_tcb`'s cspace release carries it (plan §6d body PR).
         final(store).cspace_view() == old(store).cspace_view(),
+        // The channel skeleton rides through (`dec_ref` frames `chan_view`; `destroy_cspace`
+        // carries the skeleton) — `destroy_tcb`'s cspace release reads it (plan §6d body PR).
+        chan_struct_frame(old(store).chan_view(), final(store).chan_view()),
 {
     dec_ref(store, cs);
     if store.obj_refs(cs) == 0 {
@@ -7239,6 +7330,12 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         // arm); `destroy_cspace`'s resident loop (6c) reads `cspace_view[cs]` across its
         // `delete` calls, so the frame is load-bearing there.
         final(store).cspace_view() == old(store).cspace_view(),
+        // The channel skeleton (`ring_cap`/`depth`/dom) is immutable across teardown: the
+        // recursive `obj_unref` only clears bindings / drops `end_caps` / deletes ring caps,
+        // never re-homing a channel or moving its slot handles. This is the frame
+        // `destroy_channel`'s ring-cap loop reads off to keep `old.ring_cap[ch]` valid across
+        // its `delete`s (plan §6d body PR).
+        chan_struct_frame(old(store).chan_view(), final(store).chan_view()),
         // Conditional-on-notification frame (plan §4d): deleting a **notification**
         // cap is robustly clean — `delete_prepare` frames every object view, the
         // `Channel`/mapped-`Frame` teardown branches don't fire, and `obj_unref`'s
@@ -7261,6 +7358,7 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
     // edge that drops `count_nonempty` (it empties its slot before recursing into `obj_unref`).
     decreases count_nonempty(old(store).slot_view()), 0int
 {
+    let ghost cv0 = store.chan_view();
     // `cdt_unlink` + clear the slot, leaving the off-by-one census/`end_caps` window the
     // teardown branches consume (its proof is isolated in `delete_prepare`, doc 25 §2).
     let cap = delete_prepare(store, slot);
@@ -7304,6 +7402,14 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         unref_aspace(store, asp);
     }
     proof {
+        // The channel skeleton is preserved up to here: `delete_prepare` framed `chan_view`;
+        // a Channel cap's `endpoint_cap_dropped` carries `chan_struct_frame` (its own ensures);
+        // a mapped Frame's `aspace_unmap`/`unref_aspace` framed `chan_view`; any other cap left
+        // it equal to `cv0`.
+        assert(chan_struct_frame(cv0, store.chan_view()));
+    }
+    let ghost cv_pre_unref = store.chan_view();
+    proof {
         // Discharge `obj_unref`'s Timer armed-notif-live precondition from the census.
         if let CapKind::Timer(o) = cap.kind {
             if store.timer_view()[o].armed {
@@ -7319,6 +7425,10 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         }
     }
     obj_unref(store, cap);
+    proof {
+        // `obj_unref` preserves the skeleton; compose with the pre-unref preservation.
+        lemma_chan_struct_frame_trans(cv0, cv_pre_unref, store.chan_view());
+    }
 }
 
 /// Descend from `start` to a leaf of its subtree (the inner walk of `revoke`).
