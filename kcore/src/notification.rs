@@ -79,6 +79,11 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
         // `report_terminal`/`check_expired` and the construction-op callers of `fire`
         // (`send`/`recv`) are undisturbed; `delete` consumes it across the off-by-one window.
         cspace::census_delta_frozen(old(store), final(store)),
+        // `refcount_sound` as a *system* invariant (plan §6f): a sound census in, a sound
+        // census out. Conditional, so census-agnostic callers (`check_expired`'s
+        // `signal`-in-a-loop, `report_terminal`) stay undisturbed; it is the frozen delta
+        // (above) bridged by `lemma_refcount_sound_from_frozen`.
+        cspace::refcount_sound(old(store)) ==> cspace::refcount_sound(final(store)),
         // A census off by one at any `z` survives the wake (it is the frozen delta applied to
         // that shape) — `delete`'s Channel branch reads this off the fire chain to carry the
         // deleted-slot off-by-one across the peer-closed fire. The trigger keeps it out of
@@ -175,6 +180,10 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
                 }
             }
             assert(cspace::census_delta_frozen(old(store), store));
+            // refcount_sound (conditional, plan §6f): the frozen delta bridges it.
+            if cspace::refcount_sound(old(store)) {
+                cspace::lemma_refcount_sound_from_frozen(old(store), store);
+            }
             assert forall|z: ObjId| cspace::census_off_by_one(old(store), z) implies
                 #[trigger] cspace::census_off_by_one(store, z) by {
                 cspace::lemma_off_by_one_frozen(old(store), store, z);
@@ -276,6 +285,10 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
             }
         }
         assert(cspace::census_delta_frozen(old(store), store));
+        // refcount_sound (conditional, plan §6f): the frozen delta bridges it.
+        if cspace::refcount_sound(old(store)) {
+            cspace::lemma_refcount_sound_from_frozen(old(store), store);
+        }
         assert forall|z: ObjId| cspace::census_off_by_one(old(store), z) implies
             #[trigger] cspace::census_off_by_one(store, z) by {
             cspace::lemma_off_by_one_frozen(old(store), store, z);
@@ -500,6 +513,10 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
         // Unconditional — `destroy_tcb` turns it into `refcount_sound` via
         // `lemma_refcount_sound_from_frozen` (it calls `remove_waiter` where the census is sound).
         cspace::census_delta_frozen(old(store), final(store)),
+        // `refcount_sound` as a system invariant (plan §6f): the frozen delta bridges a sound
+        // census in to a sound census out. Conditional + `requires`-free, so the phase-4 callers
+        // keep no obligation; `destroy_tcb` already consumes the frozen delta directly.
+        cspace::refcount_sound(old(store)) ==> cspace::refcount_sound(final(store)),
         // Residency is untouched (the splice writes notif head/tail + tcb queue links + `refs`,
         // never `cspace_view`); `destroy_tcb` carries it to its own `cspace_view` ensures (plan
         // §6d-final-thread).
@@ -702,6 +719,12 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
                         cspace::lemma_waiter_refs_frame(nv0, tv0, nvf, tvf, n, x);
                     }
                 }
+                // refcount_sound (conditional, plan §6f): the frozen delta just established
+                // bridges it.
+                assert(cspace::census_delta_frozen(old(store), store));
+                if cspace::refcount_sound(old(store)) {
+                    cspace::lemma_refcount_sound_from_frozen(old(store), store);
+                }
                 // ── Teardown system invariants survive the splice (plan §6d-final-thread,
                 //    the `signal`→`fire` precedent). The splice is signal-shaped: only `n`'s
                 //    notif head/tail moved, only `n`'s waiters (`t` + its predecessor) moved,
@@ -805,6 +828,11 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
         assert(store.cspace_view() == old(store).cspace_view());
         assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o)
             == cspace::obj_census(old(store), o) by {}
+        // refcount_sound (conditional, plan §6f): the store is unchanged, so it carries.
+        assert(cspace::census_delta_frozen(old(store), store));
+        if cspace::refcount_sound(old(store)) {
+            cspace::lemma_refcount_sound_from_frozen(old(store), store);
+        }
         // The store is unchanged, so the teardown system invariants carry trivially (plan
         // §6d-final-thread).
         assert(cspace::caps_consistent(old(store)) ==> cspace::caps_consistent(store));
