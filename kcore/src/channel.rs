@@ -223,6 +223,9 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
         // …and refs-domain completeness survives (`set_chan_end_caps` is census/dom-neutral,
         // the fire only drops a census term and keeps the domain). `delete` carries it to `obj_unref`.
         cspace::census_dom_complete(old(store)) ==> cspace::census_dom_complete(final(store)),
+        // The channel skeleton rides through the `end_caps`-only update (`fire` frames
+        // `chan_view`): `delete`'s Channel branch composes it to `obj_unref` (plan §6d-final).
+        cspace::chan_struct_frame(old(store).chan_view(), final(store).chan_view()),
 {
     let e = end_idx(end);
     store.set_chan_end_caps(ch, e, store.chan_end_caps(ch, e) - 1);
@@ -293,6 +296,11 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
         }
         // census_dom_complete: `set_chan_end_caps` is census/dom-neutral and `fire` carries it.
         assert(cspace::census_dom_complete(old(store)) ==> cspace::census_dom_complete(store));
+        // The skeleton: `chan_view` ends an `end_caps`-only update of `ch` (`..old[ch]` keeps
+        // `ring_cap`/`depth`); `fire` framed `chan_view`.
+        let v = store.chan_view()[ch];
+        assert(store.chan_view() =~= old(store).chan_view().insert(ch, v));
+        cspace::lemma_chan_field_update_struct_frame(old(store).chan_view(), ch, v);
     }
 }
 
@@ -1183,38 +1191,148 @@ pub fn recv<S: Store>(
 
 verus! {
 
+/// Release one event binding's notification reference: drop `refs[n]` and **clear the
+/// binding** (`notif: None`) so `binding_refs(n)` falls in lockstep — the census's
+/// answer to the "no clean closed form" the §6a contract left for `destroy_channel`
+/// (plan §6d-final). Quarantined from `destroy_channel`'s loop (doc 25 §2) so its census
+/// recount is one context-light SMT query; non-recursive (no `delete`), so not an SCC
+/// member.
+fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
+    requires
+        cspace::refcount_sound(old(store)),
+        cspace::caps_consistent(old(store)),
+        cspace::end_caps_sound(old(store)),
+        cspace::census_dom_complete(old(store)),
+        old(store).chan_view().dom().contains(ch),
+        end < 2,
+        ev < 3,
+    ensures
+        cspace::refcount_sound(final(store)),
+        cspace::caps_consistent(final(store)),
+        cspace::end_caps_sound(final(store)),
+        cspace::census_dom_complete(final(store)),
+        final(store).slot_view() == old(store).slot_view(),
+        final(store).cspace_view() == old(store).cspace_view(),
+        final(store).chan_view().dom() == old(store).chan_view().dom(),
+        cspace::chan_struct_frame(old(store).chan_view(), final(store).chan_view()),
+{
+    let b = store.chan_binding(ch, end, ev);
+    if let Some(n) = b.notif {
+        let ghost s_b = *store;
+        proof {
+            // The binding names `n`, so `binding_refs(n) >= 1`; refs-domain completeness +
+            // `refcount_sound` make `refs[n] == census(n) >= 1` — the underflow gate.
+            assert(s_b.chan_view()[ch].bindings[(end as int, ev as int)].notif == Some(n));
+            cspace::lemma_binding_refs_pos(s_b.chan_view(), ch, end as int, ev as int, n);
+            assert(cspace::obj_census(&s_b, n) >= 1);
+            cspace::lemma_in_refs_from_census(&s_b, n);
+        }
+        let r = store.obj_refs(n);
+        store.set_obj_refs(n, r - 1);
+        store.set_chan_binding(ch, end, ev, Binding { notif: None, bits: b.bits });
+        proof {
+            let cvf = store.chan_view();
+            let cv_b = s_b.chan_view();
+            let nb = Binding { notif: None, bits: b.bits };
+            // Framing: the two setters touch only `refs` (at `n`) and `ch`'s bindings.
+            assert(store.slot_view() == s_b.slot_view());
+            assert(store.notif_view() == s_b.notif_view());
+            assert(store.tcb_view() == s_b.tcb_view());
+            assert(store.timer_view() == s_b.timer_view());
+            assert(store.cspace_view() == s_b.cspace_view());
+            assert(store.refs_view() =~= s_b.refs_view().insert(n, (r - 1) as nat));
+            assert(cvf =~= cv_b.insert(
+                ch, ChanView { bindings: cv_b[ch].bindings.insert((end as int, ev as int), nb), ..cv_b[ch] }));
+            // The cleared binding lowers `binding_refs(n)` by one and frames every other object.
+            cspace::lemma_binding_drop(cv_b, ch, end as int, ev as int, nb, n);
+            // Census drops by one at `n` only (additive — no `nat` underflow); the other five
+            // terms read the framed views.
+            assert forall|x: ObjId| #[trigger] cspace::obj_census(&s_b, x)
+                == cspace::obj_census(store, x) + (if x == n { 1nat } else { 0nat }) by {}
+            // refcount_sound: `n`'s term moved with the `-1`; every other object's refs and
+            // census are both untouched.
+            assert forall|x: ObjId| store.refs_view().dom().contains(x)
+                implies #[trigger] store.refs_view()[x] == cspace::obj_census(store, x) by {
+                assert(s_b.refs_view()[x] == cspace::obj_census(&s_b, x));
+            }
+            // census_dom_complete: every census only dropped; domain unchanged.
+            assert forall|x: ObjId| #[trigger] cspace::obj_census(store, x) >= 1
+                implies store.refs_view().dom().contains(x) by {
+                assert(cspace::obj_census(&s_b, x) >= 1);
+            }
+            // caps_consistent: slot view unchanged; the only chan edit cleared `ch`'s binding
+            // to `None`, which keeps `binding_notif_wf(ch)` (vacuous antecedent) and leaves
+            // `chan_wf`/`end_caps` (the other `cap_consistent` clauses) framed.
+            assert forall|s: SlotId| #![trigger store.slot_view()[s]]
+                store.slot_view().dom().contains(s) && !cspace::is_empty_cap(store.slot_view()[s].cap)
+                implies cspace::cap_consistent(store, store.slot_view()[s].cap) by {
+                let c = store.slot_view()[s].cap;
+                assert(c == s_b.slot_view()[s].cap);
+                assert(cspace::cap_consistent(&s_b, c));
+                if let cspace::CapKind::Channel(ch2, _) = c.kind {
+                    if ch2 == ch {
+                        // `chan_view[ch]` changed only in one binding's value: `chan_wf` (reads
+                        // dom/ring_cap/depth/msg_len) and `end_caps` carry, `binding_notif_wf`
+                        // survives the clear-to-`None` (vacuous antecedent).
+                        assert(cvf[ch].ring_cap == cv_b[ch].ring_cap);
+                        assert(cvf[ch].depth == cv_b[ch].depth);
+                        assert(cvf[ch].msg_len == cv_b[ch].msg_len);
+                        assert(cvf[ch].end_caps == cv_b[ch].end_caps);
+                        assert(cvf[ch].bindings.dom() =~= cv_b[ch].bindings.dom());
+                        assert(cspace::chan_wf(store.chan_view(), store.slot_view(), ch));
+                        assert(cspace::binding_notif_wf(
+                            store.chan_view(), store.notif_view(), store.tcb_view(), ch)) by {
+                            assert forall|e2: int, v2: int| #![trigger cvf[ch].bindings[(e2, v2)]]
+                                (0 <= e2 < 2 && 0 <= v2 < 3 && cvf[ch].bindings[(e2, v2)].notif is Some)
+                                implies {
+                                    &&& store.notif_view().dom().contains(cvf[ch].bindings[(e2, v2)].notif->Some_0)
+                                    &&& cspace::notif_wf(store.notif_view(), store.tcb_view(),
+                                            cvf[ch].bindings[(e2, v2)].notif->Some_0)
+                                } by {
+                                if (e2, v2) != (end as int, ev as int) {
+                                    assert(cvf[ch].bindings[(e2, v2)] == cv_b[ch].bindings[(e2, v2)]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // end_caps_sound: `end_caps` and the slot arena are both unchanged.
+            assert forall|ch2: ObjId, e2: int|
+                store.chan_view().dom().contains(ch2) && store.chan_view()[ch2].end_caps.len() == 2
+                    && 0 <= e2 < 2 implies #[trigger] store.chan_view()[ch2].end_caps[e2]
+                    == cspace::end_cap_count(store.slot_view(), ch2, e2) by {
+                assert(store.chan_view()[ch2].end_caps == s_b.chan_view()[ch2].end_caps);
+            }
+            // The skeleton rides through the bindings-only update.
+            cspace::lemma_chan_field_update_struct_frame(cv_b, ch, cvf[ch]);
+        }
+    }
+}
+
 /// Tear a channel down once its last endpoint cap is gone (`refs == 0`): delete
 /// every queued cap with ordinary CDT cleanup — cashing a shredded envelope
 /// (§3.4) — and release every event binding's notification ref.
 ///
-/// **Assumed, host-test-checked (plan §3e — the declared scope-out, §1.3).** The
-/// body recurses through the still-`external_body` `cspace::delete` (the
-/// cross-object teardown) and releases binding refs whose soundness needs the
-/// full `refcount_sound` census — both of which land in phases 4–5. So like
-/// `delete` and `signal`, it carries an `external_body` contract checked against
-/// its real body in `test_store.rs` (`check_destroy_channel`), not a Verus body
-/// proof. The contract states the robustly-true, checkable core — `cspace_wf`
-/// preserved, the arena unchanged in extent, and **every ring-cap slot emptied**.
-///
-/// **Refcount census (plan §6a).** The contract now also requires and preserves
-/// `refcount_sound` and states the `count_nonempty` non-increase 6d's measure
-/// needs. The per-binding ref release that had "no clean closed form here" is the
-/// census's job: each `-1` is matched by the corresponding `binding_refs` drop
-/// (6d closes the body proof). Stated now (still `external_body`, host-checked via
-/// `check_destroy_channel`) so `obj_unref` (6c) verifies against the final contract.
-#[verifier::external_body]
+/// **Proven body (plan §6d-final).** The `external_body` is gone — the real
+/// teardown verifies against the full contract, closing the channel arm of the
+/// cross-object SCC `obj_unref → destroy_channel → delete → obj_unref` under the
+/// shared lexicographic `decreases (count_nonempty(slot_view), height)` with
+/// `destroy_channel` at height 3. The ring-cap delete loop reads `old.ring_cap[ch]`
+/// across the recursive `delete`s via `chan_struct_frame` (the channel skeleton is
+/// immutable), and the per-binding release matches each `refs -= 1` with a
+/// `binding_refs` drop — by **clearing the binding** (`set_chan_binding(.., None)`,
+/// `lemma_binding_drop`), the "no clean closed form" the §6a contract anticipated.
 pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
     requires
         cspace::cspace_wf(old(store).slot_view()),
         cspace::chan_wf(old(store).chan_view(), old(store).slot_view(), ch),
         cspace::refcount_sound(old(store)),
         // Cap→object consistency (plan §6d foundation): the body deletes ring caps of
-        // arbitrary kind, so it needs each one's object well-formed. Assumed here
-        // (`external_body`), discharged by the body PR; host-checked (`check_destroy_channel`).
+        // arbitrary kind, so it needs each one's object well-formed.
         cspace::caps_consistent(old(store)),
         // The §3.3 endpoint-cap census (plan §6d body-removal gate): ring caps may be
-        // channel caps, so the body's `delete`s thread it. Assumed here, discharged by the
-        // body PR; host-checked (`check_destroy_channel`).
+        // channel caps, so the body's `delete`s thread it.
         cspace::end_caps_sound(old(store)),
         // Refs-domain completeness (plan §6d body-removal): the body's `delete`s thread it.
         cspace::census_dom_complete(old(store)),
@@ -1231,31 +1349,210 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
         // Residency is immutable: the ring-cap `delete`s and `set_obj_refs` all frame
         // `cspace_view`, so `obj_unref`'s Channel arm carries it (plan §6d body PR).
         final(store).cspace_view() == old(store).cspace_view(),
+        // The channel skeleton (`ring_cap`/`depth`/dom) is immutable: the body deletes ring
+        // caps (slots, not the layout) and clears bindings, never re-homing a channel
+        // (plan §6d body PR). `obj_unref`'s Channel arm reads it off.
+        cspace::chan_struct_frame(old(store).chan_view(), final(store).chan_view()),
         forall|r: int, i: int, c: int|
             (0 <= r < 2 && 0 <= i < old(store).chan_view()[ch].depth && 0 <= c < 4)
                 ==> cspace::is_empty_cap(
                     final(store).slot_view()[
                         #[trigger] old(store).chan_view()[ch].ring_cap[(r, i, c)]].cap),
+    // SCC measure (plan §6d-final): height 3 — above `delete` (0), below `obj_unref` (4); its
+    // ring-cap `delete`s are count-flat on the first iteration, so the height drops.
+    decreases cspace::count_nonempty(old(store).slot_view()), 3int
 {
+    let ghost rc = old(store).chan_view()[ch].ring_cap;
+    let ghost depth0 = old(store).chan_view()[ch].depth;
     let depth = store.chan_depth(ch);
-    for ring in 0..2 {
-        for i in 0..depth {
-            for c in 0..MSG_CAPS {
+    // The ring-cap slots are live (chan_wf, about the immutable old state).
+    assert forall|r: int, i: int, c: int|
+        (0 <= r < 2 && 0 <= i < depth0 && 0 <= c < 4)
+            implies #[trigger] old(store).slot_view().dom().contains(rc[(r, i, c)]) by {}
+    for ring in 0..2usize
+        invariant
+            depth as nat == depth0,
+            cspace::cspace_wf(store.slot_view()),
+            store.slot_view().dom() == old(store).slot_view().dom(),
+            store.slot_view().dom().finite(),
+            cspace::count_nonempty(store.slot_view())
+                <= cspace::count_nonempty(old(store).slot_view()),
+            cspace::refcount_sound(store),
+            cspace::caps_consistent(store),
+            cspace::end_caps_sound(store),
+            cspace::census_dom_complete(store),
+            cspace::only_empties(old(store).slot_view(), store.slot_view()),
+            store.cspace_view() == old(store).cspace_view(),
+            cspace::chan_struct_frame(old(store).chan_view(), store.chan_view()),
+            store.chan_view().dom().contains(ch),
+            store.chan_view()[ch].ring_cap == rc,
+            forall|r: int, i: int, c: int|
+                (0 <= r < 2 && 0 <= i < depth0 && 0 <= c < 4)
+                    ==> #[trigger] old(store).slot_view().dom().contains(rc[(r, i, c)]),
+            // Completed rings are fully empty.
+            forall|r: int, i: int, c: int|
+                (0 <= r < ring && 0 <= i < depth0 && 0 <= c < 4)
+                    ==> cspace::is_empty_cap(#[trigger] store.slot_view()[rc[(r, i, c)]].cap),
+    {
+        for i in 0..depth
+            invariant
+                depth as nat == depth0,
+                0 <= ring < 2,
+                cspace::cspace_wf(store.slot_view()),
+                store.slot_view().dom() == old(store).slot_view().dom(),
+                store.slot_view().dom().finite(),
+                cspace::count_nonempty(store.slot_view())
+                    <= cspace::count_nonempty(old(store).slot_view()),
+                cspace::refcount_sound(store),
+                cspace::caps_consistent(store),
+                cspace::end_caps_sound(store),
+                cspace::census_dom_complete(store),
+                cspace::only_empties(old(store).slot_view(), store.slot_view()),
+                store.cspace_view() == old(store).cspace_view(),
+                cspace::chan_struct_frame(old(store).chan_view(), store.chan_view()),
+                store.chan_view().dom().contains(ch),
+                store.chan_view()[ch].ring_cap == rc,
+                forall|r: int, ii: int, c: int|
+                    (0 <= r < 2 && 0 <= ii < depth0 && 0 <= c < 4)
+                        ==> #[trigger] old(store).slot_view().dom().contains(rc[(r, ii, c)]),
+                forall|r: int, ii: int, c: int|
+                    (0 <= r < ring && 0 <= ii < depth0 && 0 <= c < 4)
+                        ==> cspace::is_empty_cap(#[trigger] store.slot_view()[rc[(r, ii, c)]].cap),
+                // Completed rows in the current ring are empty.
+                forall|ii: int, c: int|
+                    (0 <= ii < i && 0 <= c < 4)
+                        ==> cspace::is_empty_cap(
+                            #[trigger] store.slot_view()[rc[(ring as int, ii, c)]].cap),
+        {
+            for c in 0..MSG_CAPS
+                invariant
+                    depth as nat == depth0,
+                    0 <= ring < 2,
+                    0 <= i < depth,
+                    cspace::cspace_wf(store.slot_view()),
+                    store.slot_view().dom() == old(store).slot_view().dom(),
+                    store.slot_view().dom().finite(),
+                    cspace::count_nonempty(store.slot_view())
+                        <= cspace::count_nonempty(old(store).slot_view()),
+                    cspace::refcount_sound(store),
+                    cspace::caps_consistent(store),
+                    cspace::end_caps_sound(store),
+                    cspace::census_dom_complete(store),
+                    cspace::only_empties(old(store).slot_view(), store.slot_view()),
+                    store.cspace_view() == old(store).cspace_view(),
+                    cspace::chan_struct_frame(old(store).chan_view(), store.chan_view()),
+                    store.chan_view().dom().contains(ch),
+                    store.chan_view()[ch].ring_cap == rc,
+                    forall|r: int, ii: int, cc: int|
+                        (0 <= r < 2 && 0 <= ii < depth0 && 0 <= cc < 4)
+                            ==> #[trigger] old(store).slot_view().dom().contains(rc[(r, ii, cc)]),
+                    forall|r: int, ii: int, cc: int|
+                        (0 <= r < ring && 0 <= ii < depth0 && 0 <= cc < 4)
+                            ==> cspace::is_empty_cap(#[trigger] store.slot_view()[rc[(r, ii, cc)]].cap),
+                    forall|ii: int, cc: int|
+                        (0 <= ii < i && 0 <= cc < 4)
+                            ==> cspace::is_empty_cap(
+                                #[trigger] store.slot_view()[rc[(ring as int, ii, cc)]].cap),
+                    // Completed positions in the current row are empty.
+                    forall|cc: int|
+                        (0 <= cc < c)
+                            ==> cspace::is_empty_cap(
+                                #[trigger] store.slot_view()[rc[(ring as int, i as int, cc)]].cap),
+            {
                 let cs = store.chan_ring_cap(ch, ring, i, c);
-                if !store.slot(cs).cap.is_empty() {
+                assert(cs == rc[(ring as int, i as int, c as int)]);
+                assert(old(store).slot_view().dom().contains(cs));
+                let ghost sv_before = store.slot_view();
+                let ghost cv_before = store.chan_view();
+                if !cspace::cap_is_empty(store.slot(cs).cap) {
                     cspace::delete(store, cs);
+                    proof {
+                        cspace::lemma_only_empties_trans(
+                            old(store).slot_view(), sv_before, store.slot_view());
+                        cspace::lemma_chan_struct_frame_trans(
+                            old(store).chan_view(), cv_before, store.chan_view());
+                    }
                 }
+                // Re-establish the empty prefix: prior empties stay empty (`only_empties` from
+                // this step), the just-handled position `cs` is now empty (guard or `delete`).
+                assert forall|r: int, ii: int, cc: int|
+                    (0 <= r < ring && 0 <= ii < depth0 && 0 <= cc < 4)
+                        implies cspace::is_empty_cap(#[trigger] store.slot_view()[rc[(r, ii, cc)]].cap)
+                    by {}
+                assert forall|ii: int, cc: int|
+                    (0 <= ii < i && 0 <= cc < 4)
+                        implies cspace::is_empty_cap(
+                            #[trigger] store.slot_view()[rc[(ring as int, ii, cc)]].cap)
+                    by {}
+                assert forall|cc: int|
+                    (0 <= cc < c + 1)
+                        implies cspace::is_empty_cap(
+                            #[trigger] store.slot_view()[rc[(ring as int, i as int, cc)]].cap)
+                    by {
+                        if cc == c as int {
+                            assert(rc[(ring as int, i as int, cc)] == cs);
+                        }
+                    }
             }
         }
     }
-    for end in 0..2 {
-        for ev in 0..3 {
-            let b = store.chan_binding(ch, end, ev);
-            if let Some(n) = b.notif {
-                store.set_obj_refs(n, store.obj_refs(n) - 1);
+    // Release every event binding's notification ref — clearing the binding so the
+    // `binding_refs` census drops in lockstep with the `refs -= 1` (plan §6d-final).
+    for end in 0..2usize
+        invariant
+            depth as nat == depth0,
+            cspace::cspace_wf(store.slot_view()),
+            store.slot_view().dom() == old(store).slot_view().dom(),
+            store.slot_view().dom().finite(),
+            cspace::count_nonempty(store.slot_view())
+                <= cspace::count_nonempty(old(store).slot_view()),
+            cspace::refcount_sound(store),
+            cspace::caps_consistent(store),
+            cspace::end_caps_sound(store),
+            cspace::census_dom_complete(store),
+            cspace::only_empties(old(store).slot_view(), store.slot_view()),
+            store.cspace_view() == old(store).cspace_view(),
+            cspace::chan_struct_frame(old(store).chan_view(), store.chan_view()),
+            store.chan_view().dom().contains(ch),
+            forall|r: int, i: int, c: int|
+                (0 <= r < 2 && 0 <= i < depth0 && 0 <= c < 4)
+                    ==> cspace::is_empty_cap(#[trigger] store.slot_view()[rc[(r, i, c)]].cap),
+    {
+        for ev in 0..3usize
+            invariant
+                depth as nat == depth0,
+                0 <= end < 2,
+                cspace::cspace_wf(store.slot_view()),
+                store.slot_view().dom() == old(store).slot_view().dom(),
+                store.slot_view().dom().finite(),
+                cspace::count_nonempty(store.slot_view())
+                    <= cspace::count_nonempty(old(store).slot_view()),
+                cspace::refcount_sound(store),
+                cspace::caps_consistent(store),
+                cspace::end_caps_sound(store),
+                cspace::census_dom_complete(store),
+                cspace::only_empties(old(store).slot_view(), store.slot_view()),
+                store.cspace_view() == old(store).cspace_view(),
+                cspace::chan_struct_frame(old(store).chan_view(), store.chan_view()),
+                store.chan_view().dom().contains(ch),
+                forall|r: int, i: int, c: int|
+                    (0 <= r < 2 && 0 <= i < depth0 && 0 <= c < 4)
+                        ==> cspace::is_empty_cap(#[trigger] store.slot_view()[rc[(r, i, c)]].cap),
+        {
+            let ghost cv_before = store.chan_view();
+            release_binding(store, ch, end, ev);
+            proof {
+                cspace::lemma_chan_struct_frame_trans(
+                    old(store).chan_view(), cv_before, store.chan_view());
             }
         }
     }
+    // The ring-cap-empty ensures (over `old.ring_cap`) is exactly the carried invariant.
+    assert forall|r: int, i: int, c: int|
+        (0 <= r < 2 && 0 <= i < old(store).chan_view()[ch].depth && 0 <= c < 4)
+            implies cspace::is_empty_cap(
+                store.slot_view()[#[trigger] old(store).chan_view()[ch].ring_cap[(r, i, c)]].cap)
+        by {}
 }
 
 } // verus!

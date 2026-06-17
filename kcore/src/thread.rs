@@ -360,6 +360,9 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         // its resident caps are emptied, not re-homed), so `obj_unref`'s Thread arm carries
         // it (plan §6d body PR).
         final(store).cspace_view() == old(store).cspace_view(),
+        // The channel skeleton (`ring_cap`/`depth`/dom) is immutable: the body deletes bind
+        // caps and unrefs cspace/aspace, never touching channel layout (plan §6d body PR).
+        cspace::chan_struct_frame(old(store).chan_view(), final(store).chan_view()),
         final(store).tcb_view().dom().contains(t),
         final(store).tcb_view()[t].state == ThreadState::Halted,
         final(store).tcb_view()[t].qnext is None,
