@@ -50,7 +50,11 @@ use shuttle::hint::spin_loop;
 #[cfg(all(not(loom), not(shuttle)))]
 use core::hint::spin_loop;
 
-const NANOS_PER_SEC: u64 = 1_000_000_000;
+// Verus (plan doc/plans/3_verus-rewrite.md phase 7d): the `verus!{}` macro +
+// ghost vocabulary for the §4.7 host-chokepoint proof of the tick→ns conversion
+// (`Sample::utc_ns_at`, below). Erases under every ordinary build, like slots.rs.
+#[allow(unused_imports)]
+use vstd::prelude::*;
 
 /// Byte length of the populated page prefix (the four u64-wide fields).
 pub const PAGE_PREFIX_BYTES: usize = 32;
@@ -76,6 +80,10 @@ const _: () = {
     assert!(core::mem::offset_of!(TimePage, cntfrq) == 24);
 };
 
+verus! {
+
+const NANOS_PER_SEC: u64 = 1_000_000_000;
+
 /// One internally-consistent reading of the page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sample {
@@ -83,6 +91,191 @@ pub struct Sample {
     pub cntvct_base: u64,
     pub cntfrq: u64,
 }
+
+/// Clamp a ghost ns value into the `i64` range — the saturation the conversion
+/// applies (unreachable in practice, but never wrap silently). Monotone.
+spec fn clamp_i64(v: int) -> int {
+    if v > i64::MAX as int {
+        i64::MAX as int
+    } else if v < i64::MIN as int {
+        i64::MIN as int
+    } else {
+        v
+    }
+}
+
+impl Sample {
+    /// The denominator the conversion divides by: `cntfrq` floored to 1, so a
+    /// corrupt zero-frequency page never divides by zero. Always `>= 1`.
+    pub open spec fn freq(self) -> int {
+        if self.cntfrq == 0 {
+            1
+        } else {
+            self.cntfrq as int
+        }
+    }
+
+    /// The saturating counter delta as a ghost int: an earlier counter than the
+    /// boot baseline saturates to 0 (the exec `saturating_sub`).
+    pub open spec fn delta_spec(self, cntvct: u64) -> int {
+        if cntvct >= self.cntvct_base {
+            cntvct as int - self.cntvct_base as int
+        } else {
+            0
+        }
+    }
+
+    /// The unclamped ideal value: `wall_base + delta·10⁹ / f`, one mathematical
+    /// division. The exec code computes this via an overflow-safe secs/frac
+    /// decomposition, proven equal by [`lemma_decompose`]. `closed` because the
+    /// body names the private `NANOS_PER_SEC` (a `pub open` body may only name
+    /// public items); transparent to in-module proofs, opaque to callers.
+    pub closed spec fn ideal_ns(self, cntvct: u64) -> int {
+        self.wall_base_ns as int + (self.delta_spec(cntvct) * NANOS_PER_SEC as int) / self.freq()
+    }
+
+    /// The functional spec of [`Sample::utc_ns_at`]: the ideal value clamped to
+    /// the `i64` range. `closed` (it calls the closed [`Sample::ideal_ns`]).
+    pub closed spec fn result_spec(self, cntvct: u64) -> int {
+        clamp_i64(self.ideal_ns(cntvct))
+    }
+
+    /// UTC nanoseconds at counter value `cntvct`.
+    ///
+    /// `(cntvct − base) · 10⁹` overflows u64 once the delta passes
+    /// ~1.8×10¹⁰ ticks — about five minutes of uptime at QEMU virt's
+    /// 62.5 MHz — so decompose: whole seconds scale safely for ~292 years
+    /// of uptime, and the sub-second remainder is `< cntfrq`, kept exact
+    /// by one u128 multiply-divide.
+    ///
+    /// **Verified by Verus** (plan §7d): `r == result_spec(cntvct)` — totality
+    /// (no overflow/panic ∀ page contents and counter, the proof Kani's
+    /// `check_time_conversion_total` gave bounded) *and* the functional value,
+    /// from which [`Sample::lemma_utc_ns_at_monotone`] makes monotonicity a
+    /// theorem (what Kani could not prove — two u128 divisions — and proptest
+    /// only sampled).
+    pub fn utc_ns_at(&self, cntvct: u64) -> (r: i64)
+        ensures
+            r as int == self.result_spec(cntvct),
+    {
+        // cntfrq floored to 1 (corrupt page must not divide by zero). The old
+        // `.max(1)` / `.saturating_sub(..)` are spelled as explicit branches so
+        // Verus reasons about them (the std combinators are unspecced); the
+        // exec behaviour is identical and the proptests below witness it.
+        let f: u64 = if self.cntfrq == 0 { 1 } else { self.cntfrq };
+        // The counter is monotone and cntvct_base was sampled at boot, so an
+        // earlier cntvct is a caller bug; saturate to "boot time" rather than
+        // wrapping into year ~2500.
+        let delta: u64 = if cntvct >= self.cntvct_base { cntvct - self.cntvct_base } else { 0 };
+
+        assert(f >= 1);
+        let secs: u64 = delta / f;
+        let m: u64 = delta % f;
+
+        // secs·10⁹ ≤ u64::MAX·10⁹ ≪ i128::MAX, and m·10⁹ ≤ u64::MAX·10⁹ < u128::MAX
+        // — the bounds that make the overflow-safe split's casts non-overflowing.
+        proof {
+            lemma_u128_frac_fits(m, f);
+            lemma_secs_term_fits(secs);
+        }
+
+        let frac_ns: u128 = m as u128 * NANOS_PER_SEC as u128 / f as u128;
+
+        // secs·10⁹ + frac_ns == (delta·10⁹)/f, so `total` is exactly ideal_ns.
+        proof {
+            lemma_decompose(delta, f);
+        }
+
+        let total: i128 = self.wall_base_ns as i128
+            + secs as i128 * NANOS_PER_SEC as i128
+            + frac_ns as i128;
+
+        // Saturation is ~year 2262 + centuries of uptime — unreachable with the
+        // boot-time RTC sanity check, but never wrap silently.
+        if total > i64::MAX as i128 {
+            i64::MAX
+        } else if total < i64::MIN as i128 {
+            i64::MIN
+        } else {
+            total as i64
+        }
+    }
+
+    /// Monotone in the counter: `c1 ≤ c2 ⇒ utc_ns_at(c1) ≤ utc_ns_at(c2)`. A
+    /// clock that ran backwards between two reads would re-disorder everything
+    /// the §4.7 snapshot-timestamp clamp protects. Stated over [`Sample::result_spec`]
+    /// (the value [`Sample::utc_ns_at`] returns), so the exec ordering follows.
+    pub proof fn lemma_utc_ns_at_monotone(self, c1: u64, c2: u64)
+        requires
+            c1 <= c2,
+        ensures
+            self.result_spec(c1) <= self.result_spec(c2),
+    {
+        let n = NANOS_PER_SEC as int;
+        let f = self.freq();
+        // delta is monotone in the counter (both branches), so delta·10⁹ is too
+        // (×n ≥ 0), and dividing by f > 0 preserves order — ideal_ns is monotone.
+        assert(self.delta_spec(c1) <= self.delta_spec(c2));
+        vstd::arithmetic::mul::lemma_mul_inequality(self.delta_spec(c1), self.delta_spec(c2), n);
+        vstd::arithmetic::div_mod::lemma_div_is_ordered(
+            self.delta_spec(c1) * n,
+            self.delta_spec(c2) * n,
+            f,
+        );
+        // ideal_ns(c1) ≤ ideal_ns(c2); clamp preserves order.
+    }
+}
+
+/// The overflow-safe decomposition is exact: `secs·10⁹ + (m·10⁹)/f == (delta·10⁹)/f`
+/// where `secs = delta/f`, `m = delta%f`. The crux — it relates two divisions, the
+/// step Kani could not take (`doc/results/8` SOLVER note). Reduces to
+/// `lemma_hoist_over_denominator` once `delta` is split by `lemma_fundamental_div_mod`.
+proof fn lemma_decompose(delta: u64, f: u64)
+    requires
+        1 <= f,
+    ensures
+        (delta / f) as int * NANOS_PER_SEC as int
+            + ((delta % f) as int * NANOS_PER_SEC as int) / (f as int)
+            == (delta as int * NANOS_PER_SEC as int) / (f as int),
+{
+    let n = NANOS_PER_SEC as int;
+    let d = delta as int;
+    let ff = f as int;
+    let q = d / ff;
+    let r = d % ff;
+    // d == q·ff + r.
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod(d, ff);
+    // d·n == r·n + (q·n)·ff, so (d·n)/ff hoists q·n out of the denominator.
+    assert(d * n == r * n + (q * n) * ff) by (nonlinear_arith)
+        requires d == q * ff + r;
+    vstd::arithmetic::div_mod::lemma_hoist_over_denominator(r * n, q * n, f as nat);
+}
+
+/// `m·10⁹` fits u128 (so the exec multiply does not overflow) for `m < f`.
+proof fn lemma_u128_frac_fits(m: u64, f: u64)
+    requires
+        1 <= f,
+    ensures
+        m as u128 * NANOS_PER_SEC as u128 <= u128::MAX,
+{
+    assert(m as int <= u64::MAX as int);
+    assert((u64::MAX as int) * (NANOS_PER_SEC as int) <= u128::MAX as int) by (compute);
+    vstd::arithmetic::mul::lemma_mul_inequality(m as int, u64::MAX as int, NANOS_PER_SEC as int);
+}
+
+/// `secs·10⁹` is non-negative and bounded by `u64::MAX·10⁹` (≈1.8e28), which
+/// fits i128 with vast headroom — so the exec i128 multiply and the `total` adds
+/// never overflow (the clamp, not an overflow, handles the i64 saturation).
+proof fn lemma_secs_term_fits(secs: u64)
+    ensures
+        0 <= secs as int * NANOS_PER_SEC as int,
+        secs as int * NANOS_PER_SEC as int <= u64::MAX as int * NANOS_PER_SEC as int,
+{
+    vstd::arithmetic::mul::lemma_mul_nonnegative(secs as int, NANOS_PER_SEC as int);
+    vstd::arithmetic::mul::lemma_mul_inequality(secs as int, u64::MAX as int, NANOS_PER_SEC as int);
+}
+
+} // verus!
 
 impl TimePage {
     // loom's / shuttle's `Atomic*::new` is not `const`, so a model build drops
@@ -131,39 +324,6 @@ impl TimePage {
             if self.seq.load(Ordering::Relaxed) == s1 {
                 return Sample { wall_base_ns, cntvct_base, cntfrq };
             }
-        }
-    }
-}
-
-impl Sample {
-    /// UTC nanoseconds at counter value `cntvct`.
-    ///
-    /// `(cntvct − base) · 10⁹` overflows u64 once the delta passes
-    /// ~1.8×10¹⁰ ticks — about five minutes of uptime at QEMU virt's
-    /// 62.5 MHz — so decompose: whole seconds scale safely for ~292 years
-    /// of uptime, and the sub-second remainder is `< cntfrq`, kept exact
-    /// by one u128 multiply-divide.
-    pub fn utc_ns_at(&self, cntvct: u64) -> i64 {
-        // Init validates cntfrq at boot; the guard keeps a corrupt page
-        // from panicking every reader in the system.
-        let f = self.cntfrq.max(1);
-        // The counter is monotone and cntvct_base was sampled at boot, so
-        // an earlier cntvct is a caller bug; saturate to "boot time"
-        // rather than wrapping into year ~2500.
-        let delta = cntvct.saturating_sub(self.cntvct_base);
-        let secs = delta / f;
-        let frac_ns = (delta % f) as u128 * NANOS_PER_SEC as u128 / f as u128;
-        let total = self.wall_base_ns as i128
-            + secs as i128 * NANOS_PER_SEC as i128
-            + frac_ns as i128;
-        // Saturation is ~year 2262 + centuries of uptime — unreachable
-        // with the boot-time RTC sanity check, but never wrap silently.
-        if total > i64::MAX as i128 {
-            i64::MAX
-        } else if total < i64::MIN as i128 {
-            i64::MIN
-        } else {
-            total as i64
         }
     }
 }

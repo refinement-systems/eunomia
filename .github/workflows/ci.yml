@@ -134,16 +134,16 @@ jobs:
         # deep-Kani machinery it subsumed). `cargo kani -p kcore` is no longer
         # run. The remaining host-side §4.7 targets keep their Kani harnesses and
         # gate here until their own Verus ports land (plan phase 7). `ipc` is fully
-        # migrated — phase 7a (`ipc::header`) + phase 7b (`ipc::session`) — so it
-        # has dropped off this job entirely (its proofs.rs is deleted). `urt`'s
-        # `slots` free-list migrated in phase 7c, but `urt` STAYS here: its
-        # `time` tick→ns harness (`check_time_conversion_total`) is phase 7d, so
-        # urt/src/proofs.rs is trimmed (the 3 `check_slots_*` deleted), not removed.
+        # migrated — phase 7a (`ipc::header`) + phase 7b (`ipc::session`) — and so
+        # is `urt`: phase 7c ported `slots` and phase 7d ported `time` (the tick→ns
+        # conversion's totality + monotonicity), so urt/src/proofs.rs is deleted and
+        # `-p urt` has dropped off this job entirely. What remains here is
+        # `dma-pool` (phase 7e) and `cas` (phase 7f) — the last two §4.7 holdouts.
         run: |
           set -o pipefail
           # §4.7 host-side targets. cas's superblock-decode harness stubs the
           # blake3 hash, so cas runs with -Z stubbing (harmless for the rest).
-          cargo kani -p urt -p dma-pool 2>&1 | tee kani-host.log
+          cargo kani -p dma-pool 2>&1 | tee kani-host.log
           cargo kani -p cas -Z stubbing 2>&1 | tee kani-cas.log
           # rec #3 vacuity guard (doc/results/11_kani-findings-9.md): kani::cover!
           # is *informational* — an unreachable cover does NOT fail the run, it
@@ -280,6 +280,7 @@ jobs:
           cargo verus verify -p kcore
           # §4.7 host chokepoints, one -p per landing PR (phase 7a: ipc::header;
           # phase 7b: ipc::session codecs + the Admission never-over-grant quota;
-          # phase 7c: urt::slots — the bitmap free-list ∀ cap/WORDS).
+          # phase 7c: urt::slots — the bitmap free-list ∀ cap/WORDS; phase 7d:
+          # urt::time — the tick→ns conversion's totality + monotonicity ∀).
           cargo verus verify -p ipc
           cargo verus verify -p urt
