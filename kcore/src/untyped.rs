@@ -222,15 +222,20 @@ impl ObjType {
     }
 }
 
-// Trusted boundary (plan doc/plans/3_verus-rewrite.md, phase 0): the per-object
-// size helpers are not yet ported, so `carve` trusts only that they return a
-// `usize` — their own overflow/positivity proofs land when cspace/channel/aspace
-// port (phases 2–5). The single fact `carve`'s geometry needs from them,
-// `0 < bytes`, is taken as an explicit `assume` at the trusted boundary below,
-// not from these (deliberately empty) specs.
-pub assume_specification [ CSpaceObj::bytes_for ](n: u32) -> usize;
-pub assume_specification [ crate::channel::Channel::bytes_for ](n: u32) -> usize;
-pub assume_specification [ crate::aspace::AspaceObj::bytes_for ](n: u64) -> usize;
+// Trusted boundary (plan doc/plans/3_verus-rewrite.md, phase 0; closeout phase
+// 9a, doc/results/68): the per-object size helpers live in plain Rust (shared
+// with the kernel shell); `carve`'s geometry needs the single fact that each
+// returns a *positive* byte count (every helper adds a non-zero struct base to
+// `n` items — `size_of::<CSpaceObj>()` etc.). That fact is now a named
+// `ensures r > 0` **contract** on the helper signature, host-checked in
+// `bytes_for_positive` below — replacing the bare `assume(bytes > 0)` the
+// caller used to carry (9a: a bare in-proof `assume` should not survive
+// closeout; a tested boundary contract is the justified form). The `size_of`
+// arms (Thread/Notification/Timer) and the page-rounded Untyped arm need no
+// contract — Verus discharges their positivity directly.
+pub assume_specification [ CSpaceObj::bytes_for ](n: u32) -> (r: usize) ensures r > 0;
+pub assume_specification [ crate::channel::Channel::bytes_for ](n: u32) -> (r: usize) ensures r > 0;
+pub assume_specification [ crate::aspace::AspaceObj::bytes_for ](n: u64) -> (r: usize) ensures r > 0;
 
 // The fixed-size object arms take `core::mem::size_of::<T>()` of these kcore
 // types, which live outside `verus!{}` (their own ports come in phases 2–5);
@@ -256,6 +261,29 @@ pub assume_specification [ usize::checked_next_multiple_of ](
     a: usize,
     b: usize,
 ) -> Option<usize>;
+
+// Trusted boundary (closeout phase 9a, doc/results/68): the fixed-size kernel
+// object structs (`Tcb`/`NotifObj`/`TimerObj`) each carry at least an
+// `ObjHeader`, so their `size_of` is positive — but Verus treats them as opaque
+// (the `Ex*` `external_type_specification` registrations above) and cannot see
+// the fields, so it cannot derive `size_of::<Tcb>() > 0` on its own. This helper
+// names that fact as an `ensures r > 0` **contract**, host-checked in
+// `object_size_positive` — the justified replacement for the bare
+// `assume(bytes > 0)` `carve` used to carry. Only the three fixed-size `ObjType`
+// arms call it; the `_` arm returns 1 only to keep the helper total (it is
+// unreachable, so the contract holds trivially there).
+#[verifier::external_body]
+fn fixed_object_bytes(ty: ObjType) -> (r: u64)
+    ensures
+        r > 0,
+{
+    match ty {
+        ObjType::Thread => core::mem::size_of::<crate::thread::Tcb>() as u64,
+        ObjType::Notification => core::mem::size_of::<crate::notification::NotifObj>() as u64,
+        ObjType::Timer => core::mem::size_of::<crate::timer::TimerObj>() as u64,
+        _ => 1,
+    }
+}
 
 /// The pure placement core: round `base + watermark` up to `align`, place
 /// `bytes` there, and bounds-check against `[base, base + size)`. All `u64`
@@ -369,15 +397,15 @@ pub fn carve(
             }
             CSpaceObj::bytes_for(param as u32) as u64
         }
-        ObjType::Thread => core::mem::size_of::<crate::thread::Tcb>() as u64,
+        ObjType::Thread => fixed_object_bytes(ty),
         ObjType::Channel => {
             if param == 0 || param > 256 {
                 return Err(RetypeError::BadArg);
             }
             crate::channel::Channel::bytes_for(param as u32) as u64
         }
-        ObjType::Notification => core::mem::size_of::<crate::notification::NotifObj>() as u64,
-        ObjType::Timer => core::mem::size_of::<crate::timer::TimerObj>() as u64,
+        ObjType::Notification => fixed_object_bytes(ty),
+        ObjType::Timer => fixed_object_bytes(ty),
         ObjType::Frame => {
             if param == 0 || param > 65536 {
                 return Err(RetypeError::BadArg);
@@ -399,14 +427,20 @@ pub fn carve(
                 return Err(RetypeError::BadArg);
             }
             match (param as usize).checked_next_multiple_of(4096) {
-                Some(b) => b as u64,
+                Some(b) => {
+                    // `b == 0` is unreachable on the kernel's 64-bit `usize` (param != 0,
+                    // so the round-up is >= 4096); the guard discharges `bytes > 0` for a
+                    // hypothetical 32-bit `usize` where `param as usize` could truncate to
+                    // a zero-rounding value — so positivity needs no trusted assumption.
+                    if b == 0 {
+                        return Err(RetypeError::BadArg);
+                    }
+                    b as u64
+                }
                 None => return Err(RetypeError::BadArg),
             }
         }
     };
-    // Trusted boundary (see the assume_specification note above): every size
-    // helper returns a positive byte count. Carve's geometry needs only this.
-    assume(bytes > 0);
     carve_place(base, size, watermark, ty.align(), bytes)
 }
 
@@ -699,3 +733,39 @@ pub fn reset<S: Store>(store: &mut S, ut_slot: SlotId) -> (result: Result<(), Re
 }
 
 } // verus!
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Host witness of the `bytes_for` `ensures r > 0` contracts (closeout 9a,
+    // doc/results/68): each size helper adds a non-zero struct base to its item
+    // count, so the byte count is positive for every slot/depth/page-pool count —
+    // including 0 items. This is the runtime check of the contract `carve`'s
+    // geometry trusts, replacing the deleted bare `assume(bytes > 0)`.
+    #[test]
+    fn bytes_for_positive() {
+        for n in [0u32, 1, 256, 1024] {
+            assert!(CSpaceObj::bytes_for(n) > 0);
+        }
+        for d in [0u32, 1, 128, 256] {
+            assert!(crate::channel::Channel::bytes_for(d) > 0);
+        }
+        for p in [0u64, 1, 128, 256] {
+            assert!(crate::aspace::AspaceObj::bytes_for(p) > 0);
+        }
+    }
+
+    // Host witness of the `fixed_object_bytes` `ensures r > 0` contract: the three
+    // fixed-size object structs are non-ZST (each carries at least an `ObjHeader`),
+    // so both `size_of` and the helper are positive for every fixed-size kind.
+    #[test]
+    fn object_size_positive() {
+        assert!(core::mem::size_of::<crate::thread::Tcb>() > 0);
+        assert!(core::mem::size_of::<crate::notification::NotifObj>() > 0);
+        assert!(core::mem::size_of::<crate::timer::TimerObj>() > 0);
+        assert!(fixed_object_bytes(ObjType::Thread) > 0);
+        assert!(fixed_object_bytes(ObjType::Notification) > 0);
+        assert!(fixed_object_bytes(ObjType::Timer) > 0);
+    }
+}

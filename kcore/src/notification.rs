@@ -3,6 +3,9 @@
 //! accumulated word, which clears. Event delivery never allocates — the
 //! waiter queue is intrusive through the TCBs.
 
+// `cspace::`/`NotifView` are referenced only from `verus!{}` spec/proof code,
+// which erases under a normal build — hence the allow (the lib.rs precedent).
+#[allow(unused_imports)]
 use crate::cspace::{self, NotifView, ObjHeader};
 use crate::id::ObjId;
 use crate::store::Store;
@@ -276,7 +279,7 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
             cspace::lemma_thread_hold_frame(tv0, tvf, o);
             if o != n {
                 assert forall|k: ObjId| #[trigger] tvf[k] != tv0[k]
-                    ==> tv0[k].wait_notif != Some(o) && tvf[k].wait_notif != Some(o) by {
+                    implies tv0[k].wait_notif != Some(o) && tvf[k].wait_notif != Some(o) by {
                     if tvf[k] != tv0[k] {
                         assert(k == t);
                     }
@@ -475,6 +478,7 @@ pub fn destroy_notif<S: Store>(store: &mut S, n: ObjId)
         cspace::census_dom_complete(final(store)),
 {
     let _ = n;
+    let _ = store;
 }
 
 /// Unlink waiter `t` from notification `n`'s queue (the thread-teardown path).
@@ -698,7 +702,7 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
                 assert(cspace::waiter_refs(nv0, tv0, n) == ws0.len());
                 assert(cspace::waiter_refs(nvf, tvf, n) == ws0.remove(k).len());
                 assert forall|kk: ObjId| #[trigger] tvf[kk] != tv0[kk]
-                    ==> tv0[kk].wait_notif == Some(n) by {
+                    implies tv0[kk].wait_notif == Some(n) by {
                     if tvf[kk] != tv0[kk] {
                         assert(tvf[kk].qnext != tv0[kk].qnext || tvf[kk].wait_notif != tv0[kk].wait_notif);
                     }
@@ -710,7 +714,7 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
                     cspace::lemma_thread_hold_frame(tv0, tvf, x);
                     if x != n {
                         assert forall|kk: ObjId| #[trigger] tvf[kk] != tv0[kk]
-                            ==> tv0[kk].wait_notif != Some(x)
+                            implies tv0[kk].wait_notif != Some(x)
                                 && tvf[kk].wait_notif != Some(x) by {
                             if tvf[kk] != tv0[kk] {
                                 assert(tv0[kk].wait_notif == Some(n));
@@ -754,7 +758,7 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
                 // (only its `qnext` moved — still `wait_notif == Some(n)`, so `wn == n`).
                 assert forall|kk: ObjId| #[trigger] tvf[kk] != tv0[kk]
                     && tvf[kk].state == ThreadState::BlockedNotif
-                    ==> (tvf[kk].wait_notif matches Some(wn) ==> wn == n) by {
+                    implies (tvf[kk].wait_notif matches Some(wn) ==> wn == n) by {
                     if tvf[kk] != tv0[kk] && kk != t {
                         // Only `t`'s predecessor `p` is otherwise touched, and it kept
                         // `wait_notif == Some(n)` (the splice re-threads its `qnext` only).
@@ -775,7 +779,7 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
                         == cspace::obj_census(old(store), o) by {
                         cspace::lemma_thread_hold_frame(tv0, tvf, o);
                         assert forall|kk: ObjId| #[trigger] tvf[kk] != tv0[kk]
-                            ==> tv0[kk].wait_notif != Some(o) && tvf[kk].wait_notif != Some(o) by {
+                            implies tv0[kk].wait_notif != Some(o) && tvf[kk].wait_notif != Some(o) by {
                             if tvf[kk] != tv0[kk] { assert(tv0[kk].wait_notif == Some(n)); }
                         }
                         cspace::lemma_waiter_refs_frame(nv0, tv0, nvf, tvf, n, o);

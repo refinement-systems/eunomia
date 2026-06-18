@@ -16,6 +16,10 @@
 //! kernel wait-set object when that lands (spec §3.6).
 
 #![cfg_attr(not(feature = "std"), no_std)]
+// Clippy is not a CI gate (closeout 9a): this fires in `verus!{}` verified exec
+// code where the explicit `x = x + y` form is what Verus reasons about — fixing
+// it would refactor verified code for cosmetic gain.
+#![allow(clippy::assign_op_pattern)]
 
 // Verus (plan doc/plans/3_verus-rewrite.md phase 7a): the deductive-proof tier
 // for the §4.7 host chokepoints. `vstd::prelude` supplies the `verus!{}` macro +

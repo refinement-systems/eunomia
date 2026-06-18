@@ -6,6 +6,9 @@
 //! `kernel` crate (`kernel/src/timer.rs`). Expiry is checked on the periodic
 //! tick, so deadline resolution is one tick at MVP.
 
+// `cspace::` is referenced only from `verus!{}` spec/proof code, erased under a
+// normal build — hence the allow (the lib.rs precedent).
+#[allow(unused_imports)]
 use crate::cspace::{self, ObjHeader};
 use crate::id::ObjId;
 use crate::notification;

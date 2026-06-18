@@ -5541,12 +5541,12 @@ pub(crate) proof fn lemma_local_cap_edit_preserves_cspace_wf(
     }
     // empty_slots_detached: a slot empty in m1 is empty in m0 (k by hypothesis,
     // others unchanged), hence detached there, hence detached here (links agree).
-    assert forall|j: SlotId| #[trigger] m1.dom().contains(j) implies (is_empty_cap(m1[j].cap) ==> {
+    assert forall|j: SlotId| #[trigger] m1.dom().contains(j) && is_empty_cap(m1[j].cap) implies {
         &&& m1[j].parent == None
         &&& m1[j].first_child == None
         &&& m1[j].next_sib == None
         &&& m1[j].prev_sib == None
-    }) by {
+    } by {
         if j != k {
             assert(m1[j] == m0[j]);
         }
@@ -5602,12 +5602,12 @@ pub(crate) proof fn lemma_clear_detached_preserves_cspace_wf(
     }
     // empty_slots_detached: `k`'s new cap is empty and detached; every other slot is
     // unchanged (its emptiness ⟹ detachment carried from m0).
-    assert forall|j: SlotId| #[trigger] m1.dom().contains(j) implies (is_empty_cap(m1[j].cap) ==> {
+    assert forall|j: SlotId| #[trigger] m1.dom().contains(j) && is_empty_cap(m1[j].cap) implies {
         &&& m1[j].parent == None
         &&& m1[j].first_child == None
         &&& m1[j].next_sib == None
         &&& m1[j].prev_sib == None
-    }) by {
+    } by {
         if j != k {
             assert(m1[j] == m0[j]);
         }
@@ -5760,13 +5760,12 @@ proof fn lemma_transpose_empty(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId
 {
     let mf = relabeled(m, src, dst);
     assert(mf.dom() =~= m.dom());
-    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies
-        (is_empty_cap(mf[k].cap) ==> {
+    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) && is_empty_cap(mf[k].cap) implies {
             &&& mf[k].parent == None
             &&& mf[k].first_child == None
             &&& mf[k].next_sib == None
             &&& mf[k].prev_sib == None
-        }) by {
+        } by {
         // mf[k].cap == m[swap(k)].cap; if empty, m[swap(k)] is detached, so each
         // link is None and ren(None) == None.
         assert(m.dom().contains(swap_id(k, src, dst)));
@@ -6579,13 +6578,12 @@ proof fn lemma_unlink_empty(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<
 {
     let mf = unlinked(m, slot, last);
     assert(mf.dom() =~= m.dom());
-    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies
-        (is_empty_cap(mf[k].cap) ==> {
+    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) && is_empty_cap(mf[k].cap) implies {
             &&& mf[k].parent == None
             &&& mf[k].first_child == None
             &&& mf[k].next_sib == None
             &&& mf[k].prev_sib == None
-        }) by {
+        } by {
         if is_empty_cap(mf[k].cap) {
             // cap is framed: mf[k].cap == m[k].cap, so m[k] is empty ⟹ detached.
             assert(m[k].cap == mf[k].cap);
