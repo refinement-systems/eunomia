@@ -107,7 +107,10 @@ pub enum CapKind {
     },
     Aspace(crate::id::ObjId),
     CSpace(crate::id::ObjId),
-    Thread(crate::id::ObjId),
+    // The `u8` is the §5.4 maximum-controlled-priority ceiling — a value on the
+    // cap (§2.3), attenuated monotonically by `derive` like rights. spawn gates a
+    // thread's priority on it (`prio <= max_prio`).
+    Thread(crate::id::ObjId, u8),
     Channel(crate::id::ObjId, ChanEnd),
     Notification(crate::id::ObjId),
     Timer(crate::id::ObjId),
@@ -1108,10 +1111,37 @@ pub open spec fn cap_obj(c: Cap) -> Option<ObjId> {
         CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => None,
         CapKind::Aspace(o) => Some(o),
         CapKind::CSpace(o) => Some(o),
-        CapKind::Thread(o) => Some(o),
+        CapKind::Thread(o, _) => Some(o),
         CapKind::Channel(o, _) => Some(o),
         CapKind::Notification(o) => Some(o),
         CapKind::Timer(o) => Some(o),
+    }
+}
+
+// True iff `c` is a thread cap designating `t`, *ignoring* the priority ceiling —
+// the field-shape-stable form of the old `c.kind == CapKind::Thread(t)`. The
+// dead-object lemmas (`lemma_no_live_thread_cap_from_dead` et al.) reason about
+// "is this a thread cap for `t`?" independent of the ceiling `Thread` now carries.
+//
+// `closed` (D-B1 cross-platform headroom): the body unfolds inside `cspace`
+// (where the two dead-object lemmas prove/consume it), but stays opaque to
+// `thread::destroy_tcb`, which only *carries* this predicate from one lemma's
+// `ensures` into the next's `requires` (a syntactic match) and never needs its
+// body. Measured: with `open`, `destroy_tcb` flakes the rlimit at 8; with
+// `closed` it passes at 8 — hiding the unneeded unfold there is what restores the
+// cross-platform headroom (resource counting varies Linux↔macOS; see the
+// `spinoff_prover` note on `destroy_tcb`).
+pub closed spec fn is_thread_cap_for(c: Cap, t: ObjId) -> bool {
+    c.kind matches CapKind::Thread(o, _) && o == t
+}
+
+// The §5.4 maximum-controlled-priority ceiling a cap carries, if it is a thread
+// cap (else `None`). Priority attenuates monotonically through `derive` exactly
+// like rights (§2.3) — see `derive`'s ceiling `ensures`.
+pub open spec fn cap_max_prio(c: Cap) -> Option<u8> {
+    match c.kind {
+        CapKind::Thread(_, mp) => Some(mp),
+        _ => None,
     }
 }
 
@@ -1991,7 +2021,7 @@ pub proof fn lemma_caps_consistent_frame_thread_offchain<S: Store>(s0: &S, s1: &
                 assert(s0.notif_view().dom().contains(m));
                 assert(notif_wf(s0.notif_view(), s0.tcb_view(), m));
             }
-            CapKind::Thread(m) => {
+            CapKind::Thread(m, _) => {
                 if let Some(cs) = s1.tcb_view()[m].cspace {
                     assert(s0.tcb_view()[m].cspace == Some(cs));
                     assert(cspace_resident_wf(s0, cs));
@@ -2083,7 +2113,7 @@ pub proof fn lemma_caps_consistent_frame_thread_dequeued<S: Store>(s0: &S, s1: &
                 assert(s0.notif_view().dom().contains(m));
                 assert(notif_wf(s0.notif_view(), s0.tcb_view(), m));
             }
-            CapKind::Thread(m) => {
+            CapKind::Thread(m, _) => {
                 if let Some(cs) = s1.tcb_view()[m].cspace {
                     assert(s0.tcb_view()[m].cspace == Some(cs));
                     assert(cspace_resident_wf(s0, cs));
@@ -2140,7 +2170,7 @@ pub proof fn lemma_caps_consistent_frame_thread_halt_clear<S: Store>(s0: &S, s1:
         // `t` is designated by no live cap (sourced from `refs[t] == 0` at the call site).
         forall|s: SlotId| #[trigger] s0.slot_view().dom().contains(s)
             && !is_empty_cap(s0.slot_view()[s].cap)
-            ==> s0.slot_view()[s].cap.kind != CapKind::Thread(t),
+            ==> !is_thread_cap_for(s0.slot_view()[s].cap, t),
         // `t` is a node of no waiter chain in either state.
         forall|o: ObjId, ws: Seq<ObjId>|
             waiter_chain(s0.notif_view(), s0.tcb_view(), o, ws) ==> !ws.contains(t),
@@ -2171,13 +2201,13 @@ pub proof fn lemma_caps_consistent_frame_thread_halt_clear<S: Store>(s0: &S, s1:
         assert(c == s0.slot_view()[s].cap);
         assert(cap_consistent(s0, c));
         // No live cap is `Thread(t)`.
-        assert(s0.slot_view()[s].cap.kind != CapKind::Thread(t));
+        assert(!is_thread_cap_for(s0.slot_view()[s].cap, t));
         match c.kind {
             CapKind::Notification(m) => {
                 assert(s0.notif_view().dom().contains(m));
                 assert(notif_wf(s0.notif_view(), s0.tcb_view(), m));
             }
-            CapKind::Thread(m) => {
+            CapKind::Thread(m, _) => {
                 // `c` is a live `Thread(m)` cap, and no live cap is `Thread(t)`, so `m != t`;
                 // hence `tcb[m]` is unchanged and its coherence clauses carry.
                 assert(m != t);
@@ -2978,13 +3008,13 @@ pub proof fn lemma_no_live_thread_cap_from_dead<S: Store>(s: &S, t: ObjId)
     ensures
         forall|sl: SlotId| #[trigger] s.slot_view().dom().contains(sl)
             && !is_empty_cap(s.slot_view()[sl].cap)
-            ==> s.slot_view()[sl].cap.kind != CapKind::Thread(t),
+            ==> !is_thread_cap_for(s.slot_view()[sl].cap, t),
 {
     assert(s.refs_view()[t] == obj_census(s, t));
     assert forall|sl: SlotId| #[trigger] s.slot_view().dom().contains(sl)
         && !is_empty_cap(s.slot_view()[sl].cap)
-        implies s.slot_view()[sl].cap.kind != CapKind::Thread(t) by {
-        if s.slot_view()[sl].cap.kind == CapKind::Thread(t) {
+        implies !is_thread_cap_for(s.slot_view()[sl].cap, t) by {
+        if is_thread_cap_for(s.slot_view()[sl].cap, t) {
             assert(cap_obj(s.slot_view()[sl].cap) == Some(t));
             lemma_slot_refs_positive(s.slot_view(), sl, t);
         }
@@ -3893,7 +3923,7 @@ pub open spec fn cap_consistent<S: Store>(store: &S, c: Cap) -> bool {
             &&& binding_notif_wf(store.chan_view(), store.notif_view(), store.tcb_view(), o)
         }
         CapKind::CSpace(o) => cspace_resident_wf(store, o),
-        CapKind::Thread(o) => {
+        CapKind::Thread(o, _) => {
             &&& store.tcb_view().dom().contains(o)
             &&& store.tcb_view()[o].bind_slots.len() == 2
             &&& store.slot_view().dom().contains(store.tcb_view()[o].bind_slots[0])
@@ -4011,7 +4041,7 @@ pub proof fn lemma_caps_consistent_frame<S: Store>(s0: &S, s1: &S, n: ObjId)
                 assert(s0.notif_view().dom().contains(m));
                 assert(notif_wf(s0.notif_view(), s0.tcb_view(), m));
             }
-            CapKind::Thread(m) => {
+            CapKind::Thread(m, _) => {
                 // The strengthened Thread clause: re-derive `cspace_resident_wf(s1, cs)` from
                 // `s0`. The bound cspace is framed (`s1.tcb[m].cspace == s0.tcb[m].cspace`), and
                 // `cspace_resident_wf` reads only the framed `cspace_view` + `slot_view` dom.
@@ -7051,7 +7081,7 @@ pub fn obj_ref<S: Store>(store: &mut S, cap: Cap)
     match cap.kind {
         CapKind::Aspace(o)
         | CapKind::CSpace(o)
-        | CapKind::Thread(o)
+        | CapKind::Thread(o, _)
         | CapKind::Channel(o, _)
         | CapKind::Notification(o)
         | CapKind::Timer(o) => {
@@ -7186,7 +7216,11 @@ pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
 ///       designated object (a fresh Frame copy starts unmapped, §2.5) — with
 ///       rights ∩ `mask`, so its rights are a **subset** of `src`'s for every
 ///       `mask` (the load-bearing monotone-derivation theorem, proven ∀ rather
-///       than sampled); `dst` is `src`'s first child; the object's refcount and
+///       than sampled). For a thread cap the §5.4 maximum-controlled-priority
+///       ceiling rides along and so attenuates monotonically too (`child.max_prio
+///       <= parent.max_prio`, §2.3) — the priority axis of the lattice, here
+///       realized as ceiling-preservation (a strictly-reducing parameter is the
+///       doc-70 follow-on). `dst` is `src`'s first child; the object's refcount and
 ///       slot census both rise by exactly one; the cspace stays well-formed
 ///       **and acyclic** (`cspace_wf` — `dst` is seated as a fresh leaf).
 ///       On `Err` (empty/Untyped src, occupied dst, or a refcount already at
@@ -7215,6 +7249,15 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (r
             &&& (final(store).slot_view()[dst].cap.rights.0
                   & old(store).slot_view()[src].cap.rights.0)
                   == final(store).slot_view()[dst].cap.rights.0
+            // §5.4/§2.3 monotone priority ceiling: a derived thread cap's
+            // maximum-controlled-priority ceiling never exceeds its parent's — the
+            // priority axis of the derivation lattice. Discharged from the
+            // `derived_kind` equality above (the ceiling rides the kind, so `==`,
+            // hence `<=`); a strictly-reducing ceiling parameter is the doc-70
+            // follow-on.
+            &&& (cap_max_prio(old(store).slot_view()[src].cap) matches Some(p_mp) ==>
+                  cap_max_prio(final(store).slot_view()[dst].cap) matches Some(c_mp)
+                    && c_mp <= p_mp)
             &&& cspace_wf(final(store).slot_view())
             &&& final(store).slot_view()[src].first_child == Some(dst)
             &&& (cap_obj(old(store).slot_view()[src].cap) matches Some(o) ==>
@@ -7273,7 +7316,7 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (r
     let obj_opt = match cap.kind {
         CapKind::Aspace(o)
         | CapKind::CSpace(o)
-        | CapKind::Thread(o)
+        | CapKind::Thread(o, _)
         | CapKind::Channel(o, _)
         | CapKind::Notification(o)
         | CapKind::Timer(o) => Some(o),
@@ -8307,7 +8350,7 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
         },
         cap.kind matches CapKind::Channel(o, _) ==>
             chan_wf(old(store).chan_view(), old(store).slot_view(), o),
-        cap.kind matches CapKind::Thread(o) ==> {
+        cap.kind matches CapKind::Thread(o, _) ==> {
             &&& old(store).slot_view().dom().finite()
             &&& old(store).tcb_view().dom().contains(o)
             &&& old(store).tcb_view()[o].bind_slots.len() == 2
@@ -8432,7 +8475,7 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                 }
             }
         }
-        CapKind::Thread(o) => {
+        CapKind::Thread(o, _) => {
             dec_ref(store, o);
             let ghost st1 = *store;
             proof {
@@ -9137,7 +9180,7 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         // resident-wf. `cspace_resident_wf` reads only `cspace_view` + `slot_view` dom (both
         // framed by `delete_prepare`) and `tcb_view[o].cspace` (framed), and no Thread-cap
         // teardown branch ran above, so it survives unchanged to the `obj_unref` call.
-        if let CapKind::Thread(o) = cap.kind {
+        if let CapKind::Thread(o, _) = cap.kind {
             assert(cap_consistent(old(store), cap));
             if let Some(cs) = store.tcb_view()[o].cspace {
                 assert(old(store).tcb_view()[o].cspace == Some(cs));

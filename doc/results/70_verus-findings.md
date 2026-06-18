@@ -1,4 +1,8 @@
-# 70 — D-A1 closed: `revoke`'s contract split (vacuous → reachable descendant-deletion)
+# 70 — Follow-on-fix ledger: D-A1 (revoke split) · D-B1 (priority ceiling)
+
+> A *change* ledger accreting the post-doc-69 follow-on fixes, one top-level entry per
+> finding (newest last). **D-A1** — `revoke`'s contract split — is first; **D-B1** — the
+> §5.4 priority ceiling — is appended at the end of the file.
 
 ## Provenance
 
@@ -10,6 +14,10 @@ spec (`doc/spec/2_spec_rev2.md` §2.2) and the verified source; the disposition 
 the one doc 69 recorded for D-A1 ("split the contract so `first_child is None` + `cspace_wf`
 are proven **without** `!is_homed`, keeping the extra `!is_empty_cap` root-survival under
 `!is_homed`").
+
+*(The **D-B1** entry — the §5.4 maximum-controlled-priority ceiling, now a cap-carried `u8`
+with Verus-verified monotone attenuation — is the second major section at the bottom of this
+file.)*
 
 **Headline:** `kcore::cspace::revoke`'s verified contract was *vacuous over every real
 syscall input* because its `requires !is_homed(old(store), slot)` is false for the
@@ -158,3 +166,127 @@ pass unchanged — runtime behaviour is identical; only the contracts moved.
   about unreachability — the descendant-deletion guarantee is now reachable from the real call
   path. The D-A2 (un-homed-only survival, zombie admissible) and D-A3 (queue-reaching inferred,
   not yet a named obligation) sub-notes remain valid 9e inputs.
+
+---
+
+# D-B1 closed — the thread cap gains a verified, monotone priority ceiling
+
+## Provenance
+
+This second entry records the resolution of **D-B1** (doc 69, Class D1, severity high): spec
+§2.3 (line 71) says "the §5.4 maximum-controlled-priority ceiling is a **value on the cap** …
+attenuates the same monotone way," and §5.4 (line 360) says spawn bounds a thread's priority
+by "a maximum carried in the spawner's own thread cap … monotone like every other derivation."
+The verified core proved **nothing** about priority: `CapKind::Thread(ObjId)` carried no
+ceiling, `derive` attenuated `rights & mask` only, and the only enforcement was an *unverified*
+shell gate on the caller's live run-priority.
+
+**Disposition followed (chosen scope):** the doc-69 disposition's first clause — add a
+`max_prio` field, prove `derive` attenuates it monotonically, gate spawn on the cap's ceiling.
+The fuller end-to-end-verified variant ("Option 2") is recorded as a **recommended follow-on**
+at the foot of this entry rather than built now.
+
+**Headline:** the §5.4 ceiling is now a `u8` on `CapKind::Thread`; `kcore::cspace::derive`
+proves `child.max_prio ≤ parent.max_prio` for **all** derivations (∀, not sampled), exactly
+like the rights mask; and both spawn syscalls gate `prio ≤ cap.max_prio`. Verified: **316
+verified, 0 errors** (unchanged count — **no new lemma** was needed), **86** `kcore` host tests
+(+1 ceiling witness), the AArch64 shell builds, and the kernel boots in QEMU with init's two
+children (storaged @5, shell @4) both spawning under the stamped ceiling (16). **Runtime
+behaviour is preserved** on the real boot path — this is a verification-faithfulness fix that
+also tightens enforcement to the spec's cap-carried model.
+
+## The change
+
+| Layer | Edit |
+|---|---|
+| Cap model (`kcore/src/cspace.rs`) | `CapKind::Thread(ObjId)` → `CapKind::Thread(ObjId, u8)`; new `spec fn`s `cap_max_prio` and `is_thread_cap_for`. |
+| `derive` (cspace.rs) | explicit monotone-ceiling `ensures` (`cap_max_prio(src) = Some(p) ⟹ cap_max_prio(dst) = Some(c) ∧ c ≤ p`), discharged from the pre-existing `derived_kind` equality. |
+| Dead-object lemmas | the `!= CapKind::Thread(t)` equality sites re-expressed via `is_thread_cap_for` (field-shape-stable). |
+| Shell (`kernel/`) | retype stamps `max_prio = (*current()).priority` (untyped.rs); both spawn gates become `prio > max_prio` (syscall.rs); init's boot cap ceiling = init's priority (main.rs). |
+| Tests (`test_store.rs`) | cap-shape fixes; structural `cap_kind_eq` now compares the ceiling; new `derive_preserves_thread_priority_ceiling` witness. |
+
+## Findings
+
+### F-70-6 — The cap↔TCB seam is the exact residual boundary (novel)
+
+Priority lives in the **verified** `kcore` `Tcb` struct (`thread.rs:75`) yet **outside** the
+verified Store view: `tcb_view()` / the host `TcbState` carry no `priority` field, and the
+shell writes `(*tp).priority = prio` through a raw pointer. So the model→TCB write is the
+*single* unverified hop. The cap-carried ceiling and its monotone derivation are now verified;
+what remains a trusted seam is precisely this one write — which is why Option 2's first move is
+to thread priority into the Store seam. This is a *satisfiable*, normal trusted-base seam (like
+D-C1/C3/F1 — the shell carries it correctly), not a vacuous one (contrast D-A1's `!is_homed`).
+
+### F-70-7 — Behaviour preservation is exact on the real boot path, by construction
+
+Stamping the fresh thread cap's ceiling = the **retyper's live priority** reproduces the old
+`prio > current().priority` gate for the common carve-then-start path: the retyper and the
+starter are the same thread with stable priority in every init/loader spawn, so the new gate
+`prio > cap.max_prio` and the old gate coincide. The QEMU boot witnesses this — storaged (prio
+5) and shell (prio 4) both start under ceiling 16 with no spurious `ERR_PERM`. The two gates
+**diverge** only when the cap is carved by A and started by B, or the retyper's priority
+changes between carve and start — and there the cap-carried reading is *more* faithful to §5.4
+("a maximum carried in the spawner's own thread cap"), authority travelling with the cap rather
+than with whoever happens to call `thread_start`.
+
+### F-70-8 — Monotonicity was a missing *statement*, not a missing *proof* (novel, mirrors D-A1)
+
+`derived_kind`'s catch-all `_ => k` arm already preserves the **whole** kind, so the new
+ceiling field rides along untouched and the monotone `ensures` (`==`, hence `≤`) discharges
+directly from the pre-existing `final[dst].kind == derived_kind(old[src].kind)` clause — **316
+verified, 0 errors, no new lemma**. Doc 69's "monotonicity entirely unverified" was therefore
+accurate about the *contract* but understated the *code*: the lattice property was latent in
+`derived_kind` and merely never surfaced as an `ensures`. This is the same shape as the D-A1
+fix (surface a property that was already structurally present) — the recurring lesson of this
+ledger: the gap is usually an unstated obligation, not an unsound body.
+
+### F-70-9 — The axis is realized as ceiling-*preservation*, not strict reduction (honest scope)
+
+`derive` carries no priority parameter (unlike the rights `mask`), so a derived thread cap
+keeps its parent's ceiling exactly. That proves monotonicity (`≤`) and is sufficient for the
+spawn-monotonicity the runtime needs, but it does **not** yet let a supervisor hand out a
+*strictly lower* ceiling ("attenuated as desired", §2.3). Ceiling reduction currently happens
+only at retype (a fresh child capped at its creator's priority). Strict per-copy attenuation is
+the Option-2 `derive` parameter below — narrower today than the full §2.3 supervision-grant
+story, and flagged so the gap is budgeted, not silent.
+
+## Verification evidence
+
+| Gate | Command | Result |
+|---|---|---|
+| Proof (primary) | `cargo verus verify -p kcore` | **316 verified, 0 errors** (no new lemma) |
+| Witnesses | `cargo test -p kcore` | **86 passed, 0 failed** (incl. `derive_preserves_thread_priority_ceiling`) |
+| Shell build | `cd kernel && cargo build` | clean (AArch64 bare-metal) |
+| Boot/spawn smoke | QEMU (`virt`, gic v3) ~16 s | `[init] system up`; storaged + shell both spawn; `eunomia>` prompt; no panic, no spurious `ERR_PERM` |
+
+## Recommended follow-on — Option 2 (full end-to-end verified enforcement)
+
+Per the chosen scope, the fuller fix is recorded here for a subsequent task. It closes the
+F-70-6 seam and the F-70-9 reduction gap:
+
+1. **Priority into the Store seam.** Add a `priority` field to `tcb_view()` (and the host
+   `TcbState`), with `tcb_priority` getter + `set_tcb_priority` setter on the `Store` trait —
+   the analogue of `set_tcb_report` / `set_tcb_bind_bits`.
+2. **A verified `thread::set_priority(store, t, prio, ceiling)`** with `requires prio ≤ ceiling`
+   and `ensures tcb_view()[t].priority == prio` (hence `≤ ceiling`). Route the shell's
+   `(*tp).priority = prio` through it; the spawn site discharges `requires` from the cap's
+   `max_prio`. This delivers the disposition's `ensures child.priority ≤ ceiling`
+   **end-to-end**, eliminating the one unverified hop (F-70-6).
+3. **Optional — a reducing `prio_ceiling: u8` parameter on `derive`** (symmetric with `mask`),
+   setting `child.max_prio = min(parent.max_prio, prio_ceiling)` with `ensures ≤`, so a
+   supervisor can strictly attenuate a handed-out thread cap (closes F-70-9, the §2.3
+   supervision-grant story). **ABI note:** the `Thread`-cap layout already changed in this fix;
+   a `derive` ceiling parameter would additionally change the `CapCopy` syscall ABI.
+
+Size/risk: medium-large (Store trait + `test_store` + new proofs). The spawn-gate semantics are
+already in place from this fix, so Option 2 is purely about moving the priority *write* under a
+verified contract — no further runtime-behaviour change.
+
+## Disposition feed-forward
+
+- **D-B1:** closed (this change) at the cap-model + monotone-derivation level; the
+  model→TCB-write seam (F-70-6) and strict per-copy attenuation (F-70-9) are the Option-2
+  follow-on above.
+- The doc-69 "Inputs to 9e" **item 3** is superseded: §2.3/§5.4 no longer carry an "entirely
+  unverified" note — the cap-carried ceiling and its monotone `derive` attenuation are now
+  Verus-verified. The spec text was updated in place with the honest residual-seam note.

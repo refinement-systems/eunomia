@@ -137,7 +137,11 @@ pub extern "C" fn kernel_main() -> ! {
         (*init).state = ThreadState::Running;
         let slot1 = CSpaceObj::slot(root, 1);
         (*slot1).cap = Cap {
-            kind: CapKind::Thread(ObjId(init as u64)),
+            // §5.4 ceiling = init's own priority: init is the root of the
+            // priority lattice; every retyped descendant cap is capped at its
+            // retyper's priority (kernel/src/untyped.rs), so the lattice is
+            // rooted here.
+            kind: CapKind::Thread(ObjId(init as u64), (*init).priority),
             rights: Rights::THREAD_ALL,
         };
 
