@@ -15,25 +15,28 @@ fuzzing = []
 [dependencies]
 blake3 = { version = "1", default-features = false, features = ["pure"] }
 
-# vstd is the *Verus* dependency (plan doc/plans/3_verus-rewrite.md phase 7f):
-# the `verus!{}` macro + ghost vocabulary for the §4.7 host-chokepoint proof of
+# vstd is the *Verus* dependency (plan doc/plans/3_verus-rewrite.md phase 7f/7g):
+# the `verus!{}` macro + ghost vocabulary for the §4.7 host-chokepoint proofs —
 # the on-disk superblock chokepoint (`validate_geometry`/`decode_checked` in
-# disk.rs — geometry totality + region-within-device ∀, and decode totality ∀
-# with blake3 the assumed-total seam). `default-features = false` ⇒ no_std, no
-# alloc, so it rides into the one user binary that pulls cas (storaged)
-# unchanged — and storaged already carries vstd transitively via its ipc/urt
-# path-deps (vstd since 7a), so this edge adds no new binary and the userspace
-# cross-build risk 7a cleared does not recur. In an ordinary build (host
-# `cargo test` *and* the aarch64 userspace cross-build via kernel/build.rs) the
+# disk.rs, 7f) and the §4.9 directory-entry TLV codec (`decode_raw`/`encode_raw`
+# in prolly.rs, 7g — full exec-level canonical-form round-trip + decode totality).
+# The `alloc` feature (added in 7g) enables vstd's `Vec` specs, which the
+# `Vec`-building TLV encoder needs (7f's fixed-size superblock was Vec-free). It
+# stays `no_std` (no `std` feature), so it rides into the one user binary that
+# pulls cas (storaged) unchanged — storaged already carries vstd transitively via
+# its ipc/urt path-deps (vstd since 7a) and is itself no_std+alloc, so this edge
+# adds no new binary and vstd-with-alloc was re-confirmed to erase under the
+# aarch64 cross-build (the chief phase-7 risk). In an ordinary build (host `cargo
+# test` *and* the aarch64 userspace cross-build via kernel/build.rs) the
 # `verus!{}` macro erases to plain Rust and vstd compiles to nothing
 # load-bearing. Pinned (=version) in lockstep with kcore/ipc/urt/dma-pool: an
-# upgrade is a deliberate PR. Same recipe as dma-pool/Cargo.toml.
-vstd = { version = "=0.0.0-2026-05-31-0205", default-features = false }
+# upgrade is a deliberate PR.
+vstd = { version = "=0.0.0-2026-05-31-0205", default-features = false, features = ["alloc"] }
 
 # `cargo verus verify -p cas --no-default-features` targets this crate. cas is
-# std-on-host / Vec/BTreeMap-heavy, but the verified superblock fns are
-# feature-agnostic fixed-size byte parsing, so the no_std+alloc variant is the
-# one verified (the plan §7f feature-pin).
+# std-on-host / Vec/BTreeMap-heavy, but the verified chokepoint fns (superblock
+# byte parsing in disk.rs, the TLV codec in prolly.rs) are feature-agnostic, so
+# the no_std+alloc variant is the one verified (the plan §7f/§7g feature-pin).
 [package.metadata.verus]
 verify = true
 
