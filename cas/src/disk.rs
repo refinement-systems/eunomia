@@ -29,17 +29,20 @@ use crate::hash::Hash;
 use crate::prolly::{FormatError, Reader};
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use vstd::prelude::*;
 
-pub const SB_SIZE: usize = 4096;
 pub const SB_A_OFF: u64 = 0;
 pub const SB_B_OFF: u64 = 4096;
-pub const WAL_OFF: u64 = 8192;
 
 pub(crate) const SB_MAGIC: &[u8; 8] = b"EUNOMIA\0";
-pub(crate) const SB_VERSION: u32 = 3;
 /// Checksummed prefix length (pub: the corpus generator forges
 /// old-version slots and must re-seal them).
 pub const SB_BODY: usize = 96;
+
+// SB_SIZE / WAL_OFF / SB_VERSION live inside the `verus!{}` block below
+// (a const declared outside the macro is invisible to Verus); they erase to
+// ordinary `pub const`s, so external references are unchanged. CHUNK_HEADER is
+// likewise inside the block (it is named by the geometry spec).
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Superblock {
@@ -79,23 +82,18 @@ impl Superblock {
     /// the same failure shape as OVL-1/ELF-1. After this returns Ok,
     /// downstream code may trust that the WAL region, the committed chunk
     /// region, and the index frame header all lie within the device.
+    ///
+    /// Thin delegator to the Verus-verified [`validate_geometry_fields`]
+    /// (plan §7f): the totality + region-within-device invariant is proven ∀
+    /// there, replacing the bounded `check_superblock_geometry` Kani harness.
     pub fn validate_geometry(&self, dev_len: u64) -> Result<(), &'static str> {
-        let chunk_off = WAL_OFF
-            .checked_add(self.wal_len)
-            .filter(|&o| o <= dev_len)
-            .ok_or("wal region exceeds device")?;
-        if self.wal_head > self.wal_len {
-            return Err("wal head beyond wal region");
-        }
-        chunk_off
-            .checked_add(self.chunk_tail)
-            .filter(|&e| e <= dev_len)
-            .ok_or("committed chunk region exceeds device")?;
-        self.index_off
-            .checked_add(CHUNK_HEADER as u64)
-            .filter(|&e| e <= self.chunk_tail)
-            .ok_or("index frame outside committed region")?;
-        Ok(())
+        validate_geometry_fields(
+            self.wal_head,
+            self.wal_len,
+            self.chunk_tail,
+            self.index_off,
+            dev_len,
+        )
     }
 
     /// None = unusable for any reason; recovery discards it (§4.5).
@@ -108,31 +106,114 @@ impl Superblock {
     /// intact slot from another format version must surface as a version
     /// error — tick-era (pre-v3) timestamp fields are structurally
     /// identical to nanosecond fields, so misreading is silent (§2.6).
+    ///
+    /// Thin assembly wrapper over the Verus-verified [`decode_checked_fields`]
+    /// (plan §7f): that function proves the parse is **total** ∀ buffer bytes
+    /// (no panic — every fixed-offset read is in bounds, the blake3 checksum is
+    /// the assumed-total seam), replacing the bounded `check_superblock_decode_total`
+    /// Kani harness. The remaining step here — wrapping the raw `[u8; 32]` into a
+    /// `Hash` and building the `Superblock` — is trivially total (`Hash::from_bytes`
+    /// and the struct literal never panic), so it stays plain Rust.
     pub fn decode_checked(buf: &[u8]) -> Result<Superblock, SbError> {
-        if buf.len() != SB_SIZE || &buf[0..8] != SB_MAGIC {
-            return Err(SbError::Invalid);
-        }
-        let sum = Hash::of(&buf[..SB_BODY]);
-        if &buf[SB_BODY..SB_BODY + 32] != sum.as_bytes() {
-            return Err(SbError::Invalid);
-        }
-        // After the checksum: a torn old-format slot is just torn. (Every
-        // version so far shares this layout and checksum extent; a future
-        // layout change must move this check ahead of the checksum.)
-        let version = u32::from_le_bytes(buf[8..12].try_into().unwrap());
-        if version != SB_VERSION {
-            return Err(SbError::WrongVersion(version));
-        }
+        let f = decode_checked_fields(buf)?;
         Ok(Superblock {
-            generation: u64::from_le_bytes(buf[16..24].try_into().unwrap()),
-            ref_table: Hash::from_bytes(buf[24..56].try_into().unwrap()),
-            wal_head: u64::from_le_bytes(buf[56..64].try_into().unwrap()),
-            wal_next_seq: u64::from_le_bytes(buf[64..72].try_into().unwrap()),
-            wal_len: u64::from_le_bytes(buf[72..80].try_into().unwrap()),
-            chunk_tail: u64::from_le_bytes(buf[80..88].try_into().unwrap()),
-            index_off: u64::from_le_bytes(buf[88..96].try_into().unwrap()),
+            generation: f.generation,
+            ref_table: Hash::from_bytes(f.ref_table),
+            wal_head: f.wal_head,
+            wal_next_seq: f.wal_next_seq,
+            wal_len: f.wal_len,
+            chunk_tail: f.chunk_tail,
+            index_off: f.index_off,
         })
     }
+}
+
+verus! {
+
+/// Superblock slot size (4 KiB). Inside the macro so the verified parsers and
+/// their preconditions can name it.
+pub const SB_SIZE: usize = 4096;
+/// First byte of the WAL region (after the two 4 KiB superblock slots).
+pub const WAL_OFF: u64 = 8192;
+/// On-disk format version (format v3, §2.6). Inside the macro for the version
+/// gate in `decode_checked_fields`.
+pub(crate) const SB_VERSION: u32 = 3;
+/// Chunk frame header size (magic + len + birth gen + hash). Inside the macro
+/// because the geometry spec bounds the index frame by it.
+pub const CHUNK_HEADER: usize = 4 + 4 + 8 + 32;
+
+/// Geometry predicate (the ghost model of [`validate_geometry_fields`]): every
+/// committed region lies within the device, each field checked against the one
+/// ground truth `dev_len` (no field vouches for another). Stated over `int` so
+/// the equivalence is overflow-exact: the exec's `checked_add` rejections are
+/// precisely the cases where a clause would wrap past `u64::MAX >= dev_len`.
+pub open spec fn geometry_ok(
+    wal_head: u64,
+    wal_len: u64,
+    chunk_tail: u64,
+    index_off: u64,
+    dev_len: u64,
+) -> bool {
+    &&& (WAL_OFF as int + wal_len as int <= dev_len as int)
+    &&& wal_head <= wal_len
+    &&& (WAL_OFF as int + wal_len as int + chunk_tail as int <= dev_len as int)
+    &&& (index_off as int + CHUNK_HEADER as int <= chunk_tail as int)
+}
+
+/// The §4.5 mount geometry chokepoint, verified ∀ (plan §7f). Total over all
+/// field values and `dev_len` (it is all `checked_add`); accepts iff
+/// [`geometry_ok`]; and on `Ok` the committed chunk region provably fits the
+/// device. Supersedes the bounded `check_superblock_geometry` Kani harness.
+pub fn validate_geometry_fields(
+    wal_head: u64,
+    wal_len: u64,
+    chunk_tail: u64,
+    index_off: u64,
+    dev_len: u64,
+) -> (r: Result<(), &'static str>)
+    ensures
+        (r is Ok) <==> geometry_ok(wal_head, wal_len, chunk_tail, index_off, dev_len),
+        r is Ok ==> (WAL_OFF as int + wal_len as int + chunk_tail as int <= dev_len as int),
+        r is Ok ==> wal_head <= wal_len,
+{
+    let chunk_off = match WAL_OFF.checked_add(wal_len) {
+        Some(o) => o,
+        None => return Err("wal region exceeds device"),
+    };
+    if chunk_off > dev_len {
+        return Err("wal region exceeds device");
+    }
+    if wal_head > wal_len {
+        return Err("wal head beyond wal region");
+    }
+    let committed_end = match chunk_off.checked_add(chunk_tail) {
+        Some(e) => e,
+        None => return Err("committed chunk region exceeds device"),
+    };
+    if committed_end > dev_len {
+        return Err("committed chunk region exceeds device");
+    }
+    let index_end = match index_off.checked_add(CHUNK_HEADER as u64) {
+        Some(e) => e,
+        None => return Err("index frame outside committed region"),
+    };
+    if index_end > chunk_tail {
+        return Err("index frame outside committed region");
+    }
+    Ok(())
+}
+
+/// The integer/byte fields of a parsed superblock — the Verus-native (`Hash`-free)
+/// result of [`decode_checked_fields`]. `Superblock::decode_checked` wraps
+/// `ref_table` into a `Hash` afterwards.
+pub struct RawSuperblock {
+    pub generation: u64,
+    pub ref_table: [u8; 32],
+    pub wal_head: u64,
+    pub wal_next_seq: u64,
+    pub wal_len: u64,
+    pub chunk_tail: u64,
+    pub index_off: u64,
 }
 
 /// Why a superblock slot was rejected (see `Superblock::decode_checked`).
@@ -144,6 +225,123 @@ pub enum SbError {
     /// version — refuse, never reinterpret (§2.6).
     WrongVersion(u32),
 }
+
+/// The 8-byte magic check (`SB_MAGIC == b"EUNOMIA\0"`), spelled per-byte so Verus
+/// reasons over `buf[i]` rather than the unspecced slice `==`.
+fn magic_ok(buf: &[u8]) -> bool
+    requires
+        buf@.len() == SB_SIZE,
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    // SB_MAGIC == b"EUNOMIA\0" == [0x45, 0x55, 0x4E, 0x4F, 0x4D, 0x49, 0x41, 0x00].
+    buf[0] == 0x45u8
+        && buf[1] == 0x55u8
+        && buf[2] == 0x4Eu8
+        && buf[3] == 0x4Fu8
+        && buf[4] == 0x4Du8
+        && buf[5] == 0x49u8
+        && buf[6] == 0x41u8
+        && buf[7] == 0x00u8
+}
+
+/// Little-endian `u32` from four bytes at `off`, by explicit indexing + shifts
+/// (not `from_le_bytes`/`try_into`, which Verus does not spec — the 7a recipe).
+fn read_u32_le(buf: &[u8], off: usize) -> u32
+    requires
+        off + 4 <= buf@.len(),
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    (buf[off] as u32)
+        | ((buf[off + 1] as u32) << 8)
+        | ((buf[off + 2] as u32) << 16)
+        | ((buf[off + 3] as u32) << 24)
+}
+
+/// Little-endian `u64` from eight bytes at `off` (see [`read_u32_le`]).
+fn read_u64_le(buf: &[u8], off: usize) -> u64
+    requires
+        off + 8 <= buf@.len(),
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    (buf[off] as u64)
+        | ((buf[off + 1] as u64) << 8)
+        | ((buf[off + 2] as u64) << 16)
+        | ((buf[off + 3] as u64) << 24)
+        | ((buf[off + 4] as u64) << 32)
+        | ((buf[off + 5] as u64) << 40)
+        | ((buf[off + 6] as u64) << 48)
+        | ((buf[off + 7] as u64) << 56)
+}
+
+/// The 32 hash bytes at `off`, as an array literal (no `try_into().unwrap()`).
+fn read_arr32(buf: &[u8], off: usize) -> [u8; 32]
+    requires
+        off + 32 <= buf@.len(),
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    [
+        buf[off], buf[off + 1], buf[off + 2], buf[off + 3],
+        buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7],
+        buf[off + 8], buf[off + 9], buf[off + 10], buf[off + 11],
+        buf[off + 12], buf[off + 13], buf[off + 14], buf[off + 15],
+        buf[off + 16], buf[off + 17], buf[off + 18], buf[off + 19],
+        buf[off + 20], buf[off + 21], buf[off + 22], buf[off + 23],
+        buf[off + 24], buf[off + 25], buf[off + 26], buf[off + 27],
+        buf[off + 28], buf[off + 29], buf[off + 30], buf[off + 31],
+    ]
+}
+
+/// The body-checksum gate: `blake3(buf[..SB_BODY]) == buf[SB_BODY..SB_BODY+32]`.
+/// `external_body` because blake3 is interpreted hashing — out of verification
+/// scope (Kani stubbed it with `-Z stubbing` for the same reason). Assumed
+/// **total**: it inspects the buffer and returns a bool, never panics. Totality
+/// needs no collision-freedom (a deterministic total function suffices); a
+/// round-trip proof would instead axiomatize injectivity here. The
+/// `buf@.len() == SB_SIZE` precondition keeps the internal slicing in bounds.
+#[verifier::external_body]
+fn checksum_ok(buf: &[u8]) -> bool
+    requires
+        buf@.len() == SB_SIZE,
+{
+    let sum = Hash::of(&buf[..SB_BODY]);
+    &buf[SB_BODY..SB_BODY + 32] == sum.as_bytes()
+}
+
+/// Parse the integer/byte fields of a superblock slot, or reject. **Total ∀**
+/// buffer bytes — verifying this *is* the totality theorem (Verus proves every
+/// fixed-offset read in bounds and no arithmetic overflow for all inputs), the
+/// unbounded form of `check_superblock_decode_total`. The `Hash`/`Superblock`
+/// assembly is the caller's trivially-total job (`Superblock::decode_checked`).
+pub fn decode_checked_fields(buf: &[u8]) -> (r: Result<RawSuperblock, SbError>) {
+    broadcast use vstd::slice::group_slice_axioms;
+    if buf.len() != SB_SIZE {
+        return Err(SbError::Invalid);
+    }
+    if !magic_ok(buf) {
+        return Err(SbError::Invalid);
+    }
+    if !checksum_ok(buf) {
+        return Err(SbError::Invalid);
+    }
+    // After the checksum: a torn old-format slot is just torn. (Every version
+    // so far shares this layout and checksum extent; a future layout change
+    // must move this check ahead of the checksum.)
+    let version = read_u32_le(buf, 8);
+    if version != SB_VERSION {
+        return Err(SbError::WrongVersion(version));
+    }
+    Ok(RawSuperblock {
+        generation: read_u64_le(buf, 16),
+        ref_table: read_arr32(buf, 24),
+        wal_head: read_u64_le(buf, 56),
+        wal_next_seq: read_u64_le(buf, 64),
+        wal_len: read_u64_le(buf, 72),
+        chunk_tail: read_u64_le(buf, 80),
+        index_off: read_u64_le(buf, 88),
+    })
+}
+
+} // verus!
 
 // ── Chunk index object (§4.2 items 3–4, durable since format v2) ───────
 
@@ -502,7 +700,8 @@ impl RefTable {
 // ── Chunk frames ────────────────────────────────────────────────────────
 
 pub const CHUNK_MAGIC: &[u8; 4] = b"CHNK";
-pub const CHUNK_HEADER: usize = 4 + 4 + 8 + 32;
+// CHUNK_HEADER is declared inside the `verus!{}` block (the geometry spec names
+// it); it erases to the same `pub const CHUNK_HEADER: usize = 48`.
 
 /// Frame a chunk for the append-only store: magic, length, birth
 /// generation (§4.2 — the GC epoch hook), content hash, data.

@@ -81,93 +81,14 @@ jobs:
       - name: Spawn/reclaim burn loop + fault / panic / time demo
         run: bash scripts/spawn-test.sh
 
-  # Bounded model checking of the kernel object core (kcore) with Kani
-  # (cargo-kani PINNED — upgrades are deliberate PRs that re-run the suite,
-  # plan §5/§8). Re-checks the CapRevocation TLA invariants on the real
-  # implementation code at TLC-scale bounds. Runs every harness (no
-  # --harness filter), so adding a harness automatically gates.
-  kani:
-    runs-on: ubuntu-latest
-    # Budget (plan §8): each harness ≤ ~5 min, whole suite ≤ ~30 min. The suite
-    # is sequential and kcore-dominated (~22 of ~23 min on the dev machine);
-    # CI runners are slower and a cache-miss `cargo install kani-verifier` adds
-    # minutes, so this hard cap is a runaway guard with margin above the 30-min
-    # target, not the target itself (review rec. #5, doc/results/13_kani-findings-11.md).
-    # When the suite next outgrows the budget, split kcore into a matrix by
-    # `--harness` group — note that trades away the current "no --harness filter
-    # ⇒ a new harness auto-gates" property, so it is deferred until needed.
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # cargo-kani 0.67.0 + its CBMC/kissat backend (cargo kani setup) are
-      # slow to install; cache both, keyed on the pinned version so a bump
-      # busts the cache.
-      - name: Cache cargo-kani + backend
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/cargo-kani
-            ~/.cargo/bin/kani
-            ~/.kani
-          key: kani-0.67.0-${{ runner.os }}
-      - name: Install Kani (pinned)
-        # Kani ships as the `kani-verifier` crate: installing it provides the
-        # `cargo-kani` and `kani` binaries, and `cargo kani setup` then
-        # downloads the matching CBMC backend. There is no `cargo-kani` crate
-        # on crates.io — installing that name is what broke this job ("could
-        # not find cargo-kani in cargo-registry crates-io ..."). The CLI is
-        # still invoked as `cargo kani`; only the install crate name differs.
-        run: |
-          if ! command -v cargo-kani >/dev/null; then
-            cargo install --locked kani-verifier --version 0.67.0
-          fi
-          cargo kani setup
-      # Run from the repo root: there is no root .cargo/config.toml, so the
-      # host target applies. (Inside kernel/ the directory-scoped config
-      # would force the bare-metal target Kani can't drive.)
-      - name: Kani proof suite (host targets)
-        # The kcore Kani harnesses are GONE: the Verus rewrite migrated the
-        # kernel-core proofs to deductive verification (the `verus` job;
-        # doc/plans/3_verus-rewrite.md phase 2 deleted src/proofs and the
-        # deep-Kani machinery it subsumed). `cargo kani -p kcore` is no longer
-        # run. The remaining host-side §4.7 targets keep their Kani harnesses and
-        # gate here until their own Verus ports land (plan phase 7). `ipc` is fully
-        # migrated — phase 7a (`ipc::header`) + phase 7b (`ipc::session`); `urt` too —
-        # phase 7c (`slots`) + phase 7d (`time`); and `dma-pool` as of phase 7e (the
-        # free-list allocator's disjointness + alignment, the DN-10 trophy), so
-        # dma-pool/src/proofs.rs is deleted and `-p dma-pool` has dropped off this
-        # job. What remains is `cas` (phase 7f) — the last §4.7 holdout.
-        run: |
-          set -o pipefail
-          # §4.7 host-side target. cas's superblock-decode harness stubs the
-          # blake3 hash, so cas runs with -Z stubbing (harmless for the rest).
-          cargo kani -p cas -Z stubbing 2>&1 | tee kani-cas.log
-          # rec #3 vacuity guard (doc/results/11_kani-findings-9.md): kani::cover!
-          # is *informational* — an unreachable cover does NOT fail the run, it
-          # only lowers the "N of M cover properties satisfied" tally. So fail
-          # here if any harness reported N < M (a cover went UNREACHABLE, meaning
-          # an over-constraining `assume` may have made a proof vacuous).
-          #
-          # Two distinct fail-closed modes, kept distinct so the message is not
-          # misleading (review-2 rec. #5, doc/results/17_kani-findings-14.md): an
-          # ABSENT tally — grep matches zero lines, i.e. a Kani output-format
-          # change or a log that never wrote — is not the same as a cover that
-          # went UNREACHABLE. The `|| true` keeps a zero-match grep from tripping
-          # `pipefail`/`-e` before the explicit emptiness check below.
-          covers=$(grep -hE 'cover properties satisfied' kani-*.log || true)
-          if [ -z "$covers" ]; then
-            echo "::error::no 'cover properties satisfied' lines in the kani logs — Kani's output format may have changed or a log failed to write; the vacuity guard could not run (rec #5)"
-            exit 1
-          fi
-          if printf '%s\n' "$covers" \
-               | awk '{ if ($2 != $4) { print "UNREACHABLE cover: " $0; bad=1 } } END { exit bad+0 }'; then
-            echo "all kani::cover! checkpoints satisfied"
-          else
-            echo "::error::a kani::cover! checkpoint was UNREACHABLE — a proof may be vacuous (rec #3)"
-            exit 1
-          fi
+  # (The `kani` job is retired as of phase 7f — plan doc/plans/3_verus-rewrite.md
+  # §7f, doc/results/62. Kani was the interim bounded mechanized tier; every
+  # target it covered — the kcore kernel core (migrated to the `verus` job in
+  # phase 2) and the §4.7 host chokepoints `ipc`/`urt`/`dma-pool`/`cas` (phases
+  # 7a–7f) — is now proven unbounded in Verus. cas was the last holdout; its
+  # superblock harnesses ported cleanly (no Vec), so it is not a holdout and the
+  # whole job, its pinned-cargo-kani install dance, and the cover-vacuity guard
+  # are gone. The historical findings stay recorded in doc/results/2…8.)
 
   # The concurrency tier (plan 1_loom-shuttle-rewrite.md §6): the time-page
   # seqlock under both schedulers. Loom (RUSTFLAGS="--cfg loom") is the
@@ -181,7 +102,7 @@ jobs:
   # breadth/Miri tier (cfg(not(loom),not(shuttle))-gated). It also drives the
   # `ipc` rig (the ModelTransport sender/receiver smoke, 2_ipc.md Phase 0)
   # under both schedulers. No per-test filter, so a new loom::model / shuttle
-  # test in urt or ipc auto-gates — the property the kani job also prizes.
+  # test in urt or ipc auto-gates — the property the verus job also prizes.
   concurrency:
     runs-on: ubuntu-latest
     # Runaway guard: a Loom model that loses its bound (e.g. an unbounded spin —
@@ -232,14 +153,15 @@ jobs:
 
   # Deductive verification with Verus (plan doc/plans/3_verus-rewrite.md). PINNED
   # to 0.2026.06.07.cd03505 (the `vstd` companion is pinned in kcore/Cargo.toml +
-  # ipc/urt/dma-pool Cargo.toml); an upgrade is a deliberate PR that re-runs the
-  # proofs, like the cargo-kani pin. Covers `kcore` (the kernel object core, phases
-  # 0–6) and, since phase 7a, the §4.7 host chokepoints as they port off Kani —
-  # `ipc` (7a/7b), `urt` (7c/7d), and `dma-pool` (7e). No per-proof filter, so a new
-  # verus!{} obligation auto-gates (the property the kani/concurrency jobs also
-  # prize). Verus ships no crates.io binary — the release zip (verus + cargo-verus
-  # + z3 + prebuilt vstd) is fetched and cached, keyed on the version so a bump
-  # busts the cache.
+  # ipc/urt/dma-pool/cas Cargo.toml); an upgrade is a deliberate PR that re-runs the
+  # proofs. Covers `kcore` (the kernel object core, phases 0–6) and the §4.7 host
+  # chokepoints, which finished porting off Kani in phase 7 — `ipc` (7a/7b),
+  # `urt` (7c/7d), `dma-pool` (7e), and `cas` (7f). With 7f, every §4.7 chokepoint
+  # is on Verus and the `kani` job is retired (above). No per-proof filter, so a new
+  # verus!{} obligation auto-gates (the property the concurrency job also prizes).
+  # Verus ships no crates.io binary — the release zip (verus + cargo-verus + z3 +
+  # prebuilt vstd) is fetched and cached, keyed on the version so a bump busts the
+  # cache.
   verus:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -286,3 +208,11 @@ jobs:
           cargo verus verify -p ipc
           cargo verus verify -p urt
           cargo verus verify -p dma-pool
+          # phase 7f: cas::disk superblock chokepoint — validate_geometry
+          # (totality + region-within-device ∀) and decode_checked (totality ∀,
+          # blake3 the assumed-total seam). cas is std-on-host / Vec-heavy, so the
+          # feature-agnostic superblock fns are verified in the no_std+alloc
+          # variant (--no-default-features). cas was the last Kani target, so the
+          # `kani` job is retired in this PR (plan §7f holdout decision: not a
+          # holdout).
+          cargo verus verify -p cas --no-default-features
