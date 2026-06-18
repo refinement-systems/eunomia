@@ -41,6 +41,10 @@
 //! OOM'd Kani).
 
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
+// Clippy is not a CI gate (closeout 9a): the `DmaBacking` seam is a device-size
+// trait where `is_empty` is meaningless, and its `unsafe` methods are documented
+// with prose contracts rather than a `# Safety` heading. Suppressed, not applied.
+#![allow(clippy::len_without_is_empty, clippy::missing_safety_doc)]
 
 use vstd::prelude::*;
 

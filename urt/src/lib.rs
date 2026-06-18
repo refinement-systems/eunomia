@@ -10,6 +10,11 @@
 //!   static HEAP: urt::Heap<{ 2 * 1024 * 1024 }> = urt::Heap::new();
 
 #![no_std]
+// Clippy is not a CI gate (closeout 9a): both fire in `verus!{}` verified exec
+// code where the explicit forms are deliberate — `x = x + y` and the explicit
+// saturating-subtract branch (the §7d restructure of `.saturating_sub`, which
+// Verus has no model for). Fixing them would refactor verified code cosmetically.
+#![allow(clippy::assign_op_pattern, clippy::implicit_saturating_sub)]
 
 // Verus (plan doc/plans/3_verus-rewrite.md phase 7c): the deductive-proof tier
 // for the §4.7 host chokepoints. `vstd::prelude` supplies the `verus!{}` macro +

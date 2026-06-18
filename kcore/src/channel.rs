@@ -461,7 +461,7 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
                 // a changed-and-still-blocked thread would have to be blocked on `n`).
                 assert forall|k: ObjId| #[trigger] tvf[k] != old(store).tcb_view()[k]
                     && tvf[k].state == crate::thread::ThreadState::BlockedNotif
-                    ==> (tvf[k].wait_notif matches Some(wn) ==> wn == n) by {}
+                    implies (tvf[k].wait_notif matches Some(wn) ==> wn == n) by {}
                 cspace::lemma_caps_consistent_frame(old(store), store, n);
             }
         }

@@ -15,6 +15,17 @@
 //! QEMU note: modern MMIO needs `-global virtio-mmio.force-legacy=false`.
 
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
+// Clippy is not a CI gate (closeout 9a): these are device-driver cosmetics — a
+// block-device size trait where `is_empty` is meaningless, MMIO `unsafe` methods
+// documented with prose contracts rather than a `# Safety` heading, an explicit
+// alignment check, and a cohesive descriptor type. Suppressed, not applied.
+#![allow(
+    clippy::assign_op_pattern,
+    clippy::len_without_is_empty,
+    clippy::manual_is_multiple_of,
+    clippy::missing_safety_doc,
+    clippy::type_complexity
+)]
 
 use dma_pool::{DmaBacking, DmaBuf, DmaPool};
 

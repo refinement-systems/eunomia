@@ -105,8 +105,8 @@ pub struct AspaceObj {
 }
 
 impl AspaceObj {
-    /// Object footprint: header (padded to a page so the L1 is page-aligned)
-    /// + L1 table + pool pages. Retype aligns the whole object to 4 KiB.
+    /// Object footprint: the page-padded header (so the L1 is page-aligned),
+    /// the L1 table, and the pool pages. Retype aligns the whole object to 4 KiB.
     /// Pure — moves with the struct so both crates and the harnesses agree
     /// on the size.
     pub const fn bytes_for(pool_pages: u64) -> usize {
@@ -534,6 +534,7 @@ fn pa_of_table(pool_base: u64, pool_len: usize, idx: usize) -> (r: u64)
     ensures
         r as int == pool_base as int + (idx as int) * (PAGE as int),
 {
+    let _ = pool_len; // spec-only (geometry `requires`/the proof `assert`); erased build sees it unused
     assert((idx as int) * (PAGE as int) <= (pool_len as int) * (PAGE as int)) by (nonlinear_arith)
         requires idx < pool_len;
     pool_base + (idx as u64) * PAGE

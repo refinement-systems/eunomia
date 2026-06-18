@@ -18,6 +18,15 @@
 //!   - `gc`       — the mark walk (reachability over the tree, §4.6)
 
 #![cfg_attr(not(feature = "std"), no_std)]
+// Clippy is not a CI gate (closeout 9a): `assign_op_pattern` fires in `verus!{}`
+// verified exec code (`x = x + y` is the form Verus reasons about), `BlockDev` is
+// a device-size trait where `is_empty` is meaningless, and the flagged type is a
+// cohesive store-internal alias. Refactoring for them would be cosmetic churn.
+#![allow(
+    clippy::assign_op_pattern,
+    clippy::len_without_is_empty,
+    clippy::type_complexity
+)]
 
 extern crate alloc;
 

@@ -21,6 +21,26 @@
 //! whoever runs kernel code has exclusive access to all kernel objects; the
 //! operations here read as pure functions over the abstract indexed store.
 #![cfg_attr(not(test), no_std)]
+// Clippy is not a CI gate for this project (closeout phase 9a,
+// doc/plans/3_verus-rewrite_closeout-detail.md). These lints fire inside
+// `verus!{}` verified exec code, where the flagged forms are deliberate —
+// explicit arithmetic and control-flow that Verus reasons about directly
+// (`x = x + y`, an explicit `match` rather than `?`, `a % n == 0` rather than
+// `is_multiple_of`, explicit range bounds), wide-but-cohesive verified
+// signatures, and raw-pointer object accessors documented with prose pre/post
+// comments rather than a `# Safety` heading. Refactoring verified code to
+// satisfy them would be cosmetic churn against the closeout anti-churn rule, so
+// they are suppressed, not applied.
+#![allow(
+    clippy::assign_op_pattern,
+    clippy::collapsible_match,
+    clippy::manual_is_multiple_of,
+    clippy::manual_range_contains,
+    clippy::missing_safety_doc,
+    clippy::question_mark,
+    clippy::result_unit_err,
+    clippy::too_many_arguments
+)]
 
 // Verus (plan doc/plans/3_verus-rewrite.md): the deductive-proof tier for kcore.
 // `vstd::prelude` supplies the `verus!{}` macro + ghost vocabulary the proofs use
