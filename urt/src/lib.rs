@@ -22,10 +22,6 @@ use vstd::prelude::*;
 pub mod slots;
 pub mod time;
 
-/// Kani harnesses (plan §4.7), compiled only under `cargo kani`.
-#[cfg(kani)]
-mod proofs;
-
 // The spawn-lifecycle helper issues syscalls, so it only exists on the
 // bare-metal target; `slots` is pure bookkeeping and host-tested.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
