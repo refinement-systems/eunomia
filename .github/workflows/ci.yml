@@ -134,16 +134,15 @@ jobs:
         # deep-Kani machinery it subsumed). `cargo kani -p kcore` is no longer
         # run. The remaining host-side §4.7 targets keep their Kani harnesses and
         # gate here until their own Verus ports land (plan phase 7). `ipc` is fully
-        # migrated — phase 7a (`ipc::header`) + phase 7b (`ipc::session`) — and so
-        # is `urt`: phase 7c ported `slots` and phase 7d ported `time` (the tick→ns
-        # conversion's totality + monotonicity), so urt/src/proofs.rs is deleted and
-        # `-p urt` has dropped off this job entirely. What remains here is
-        # `dma-pool` (phase 7e) and `cas` (phase 7f) — the last two §4.7 holdouts.
+        # migrated — phase 7a (`ipc::header`) + phase 7b (`ipc::session`); `urt` too —
+        # phase 7c (`slots`) + phase 7d (`time`); and `dma-pool` as of phase 7e (the
+        # free-list allocator's disjointness + alignment, the DN-10 trophy), so
+        # dma-pool/src/proofs.rs is deleted and `-p dma-pool` has dropped off this
+        # job. What remains is `cas` (phase 7f) — the last §4.7 holdout.
         run: |
           set -o pipefail
-          # §4.7 host-side targets. cas's superblock-decode harness stubs the
+          # §4.7 host-side target. cas's superblock-decode harness stubs the
           # blake3 hash, so cas runs with -Z stubbing (harmless for the rest).
-          cargo kani -p dma-pool 2>&1 | tee kani-host.log
           cargo kani -p cas -Z stubbing 2>&1 | tee kani-cas.log
           # rec #3 vacuity guard (doc/results/11_kani-findings-9.md): kani::cover!
           # is *informational* — an unreachable cover does NOT fail the run, it
@@ -233,10 +232,10 @@ jobs:
 
   # Deductive verification with Verus (plan doc/plans/3_verus-rewrite.md). PINNED
   # to 0.2026.06.07.cd03505 (the `vstd` companion is pinned in kcore/Cargo.toml +
-  # ipc/Cargo.toml); an upgrade is a deliberate PR that re-runs the proofs, like
-  # the cargo-kani pin. Covers `kcore` (the kernel object core, phases 0–6) and,
-  # since phase 7a, the §4.7 host chokepoints as they port off Kani — `ipc` first
-  # (the §3.7 message header in `ipc::header`). No per-proof filter, so a new
+  # ipc/urt/dma-pool Cargo.toml); an upgrade is a deliberate PR that re-runs the
+  # proofs, like the cargo-kani pin. Covers `kcore` (the kernel object core, phases
+  # 0–6) and, since phase 7a, the §4.7 host chokepoints as they port off Kani —
+  # `ipc` (7a/7b), `urt` (7c/7d), and `dma-pool` (7e). No per-proof filter, so a new
   # verus!{} obligation auto-gates (the property the kani/concurrency jobs also
   # prize). Verus ships no crates.io binary — the release zip (verus + cargo-verus
   # + z3 + prebuilt vstd) is fetched and cached, keyed on the version so a bump
@@ -281,6 +280,9 @@ jobs:
           # §4.7 host chokepoints, one -p per landing PR (phase 7a: ipc::header;
           # phase 7b: ipc::session codecs + the Admission never-over-grant quota;
           # phase 7c: urt::slots — the bitmap free-list ∀ cap/WORDS; phase 7d:
-          # urt::time — the tick→ns conversion's totality + monotonicity ∀).
+          # urt::time — the tick→ns conversion's totality + monotonicity ∀; phase 7e:
+          # dma-pool — the free-list allocator's two-buffer disjointness + alignment ∀,
+          # the DN-10 trophy Kani OOM'd on).
           cargo verus verify -p ipc
           cargo verus verify -p urt
+          cargo verus verify -p dma-pool
