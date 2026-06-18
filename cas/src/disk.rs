@@ -251,12 +251,38 @@ fn magic_ok(buf: &[u8]) -> bool
         && buf[7] == 0x00u8
 }
 
+/// Ghost value of [`read_u32_le`] — the little-endian `u32` at `off`. Same
+/// shift form as the exec reader, so the reader's `ensures` is definitional (no
+/// `by (bit_vector)` bridge). Phase 8d's recovery-core spec (`store.rs`'s
+/// `frame_at`/`run_len`) names the decoded `seq`/`len` through this.
+pub(crate) open spec fn spec_u32_le(b: Seq<u8>, off: int) -> u32 {
+    (b[off] as u32)
+        | ((b[off + 1] as u32) << 8)
+        | ((b[off + 2] as u32) << 16)
+        | ((b[off + 3] as u32) << 24)
+}
+
+/// Ghost value of [`read_u64_le`] (see [`spec_u32_le`]).
+pub(crate) open spec fn spec_u64_le(b: Seq<u8>, off: int) -> u64 {
+    (b[off] as u64)
+        | ((b[off + 1] as u64) << 8)
+        | ((b[off + 2] as u64) << 16)
+        | ((b[off + 3] as u64) << 24)
+        | ((b[off + 4] as u64) << 32)
+        | ((b[off + 5] as u64) << 40)
+        | ((b[off + 6] as u64) << 48)
+        | ((b[off + 7] as u64) << 56)
+}
+
 /// Little-endian `u32` from four bytes at `off`, by explicit indexing + shifts
 /// (not `from_le_bytes`/`try_into`, which Verus does not spec — the 7a recipe).
-/// `pub(crate)` since 8c so `store.rs`'s `decode_frame` reuses it.
-pub(crate) fn read_u32_le(buf: &[u8], off: usize) -> u32
+/// `pub(crate)` since 8c so `store.rs`'s `decode_frame` reuses it; the `ensures`
+/// tying it to [`spec_u32_le`] is what lets 8d's `frame_at` mirror the framing.
+pub(crate) fn read_u32_le(buf: &[u8], off: usize) -> (r: u32)
     requires
         off + 4 <= buf@.len(),
+    ensures
+        r == spec_u32_le(buf@, off as int),
 {
     broadcast use vstd::slice::group_slice_axioms;
     (buf[off] as u32)
@@ -267,9 +293,11 @@ pub(crate) fn read_u32_le(buf: &[u8], off: usize) -> u32
 
 /// Little-endian `u64` from eight bytes at `off` (see [`read_u32_le`]).
 /// `pub(crate)` since 8c so `store.rs`'s `decode_frame` reuses it.
-pub(crate) fn read_u64_le(buf: &[u8], off: usize) -> u64
+pub(crate) fn read_u64_le(buf: &[u8], off: usize) -> (r: u64)
     requires
         off + 8 <= buf@.len(),
+    ensures
+        r == spec_u64_le(buf@, off as int),
 {
     broadcast use vstd::slice::group_slice_axioms;
     (buf[off] as u64)
