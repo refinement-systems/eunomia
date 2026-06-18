@@ -142,6 +142,13 @@ pub(crate) const SB_VERSION: u32 = 3;
 /// because the geometry spec bounds the index frame by it.
 pub const CHUNK_HEADER: usize = 4 + 4 + 8 + 32;
 
+/// WAL record header size (magic + seq + payload len + payload checksum). Inside
+/// the macro (since 8c) so `store.rs`'s verified `decode_frame`/`replay_bound`
+/// can name its concrete value — a `const` declared outside `verus!{}` is opaque
+/// to it (the 7f rule). Erases to the same `pub const`, so external refs (the
+/// plain-Rust `encode_record`/`decode_record` below) are unchanged.
+pub const WAL_HEADER: usize = 4 + 8 + 4 + 32;
+
 /// Geometry predicate (the ghost model of [`validate_geometry_fields`]): every
 /// committed region lies within the device, each field checked against the one
 /// ground truth `dev_len` (no field vouches for another). Stated over `int` so
@@ -246,7 +253,8 @@ fn magic_ok(buf: &[u8]) -> bool
 
 /// Little-endian `u32` from four bytes at `off`, by explicit indexing + shifts
 /// (not `from_le_bytes`/`try_into`, which Verus does not spec — the 7a recipe).
-fn read_u32_le(buf: &[u8], off: usize) -> u32
+/// `pub(crate)` since 8c so `store.rs`'s `decode_frame` reuses it.
+pub(crate) fn read_u32_le(buf: &[u8], off: usize) -> u32
     requires
         off + 4 <= buf@.len(),
 {
@@ -258,7 +266,8 @@ fn read_u32_le(buf: &[u8], off: usize) -> u32
 }
 
 /// Little-endian `u64` from eight bytes at `off` (see [`read_u32_le`]).
-fn read_u64_le(buf: &[u8], off: usize) -> u64
+/// `pub(crate)` since 8c so `store.rs`'s `decode_frame` reuses it.
+pub(crate) fn read_u64_le(buf: &[u8], off: usize) -> u64
     requires
         off + 8 <= buf@.len(),
 {
@@ -431,7 +440,9 @@ pub fn decode_index(
 // ── WAL records ─────────────────────────────────────────────────────────
 
 pub(crate) const WAL_MAGIC: &[u8; 4] = b"WREC";
-pub const WAL_HEADER: usize = 4 + 8 + 4 + 32;
+// WAL_HEADER is declared inside the `verus!{}` block above (8c: the verified
+// `decode_frame`/`replay_bound` in store.rs name its concrete value); it erases
+// to the same `pub const WAL_HEADER: usize = 48`.
 
 /// A logged mutation. Replay must be deterministic, so server-assigned
 /// values (mtime) are captured in the record.

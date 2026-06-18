@@ -34,8 +34,8 @@
 use crate::chunk::ChunkerParams;
 use crate::dev::{BlockDev, DevError};
 use crate::disk::{
-    self, IndexEntry, RefEntry, RefTable, SnapRow, Superblock, WalOp, CHUNK_HEADER, SB_A_OFF,
-    SB_B_OFF, SB_SIZE, WAL_OFF,
+    self, read_u32_le, read_u64_le, IndexEntry, RefEntry, RefTable, SnapRow, Superblock, WalOp,
+    CHUNK_HEADER, SB_A_OFF, SB_B_OFF, SB_SIZE, WAL_HEADER, WAL_OFF,
 };
 use crate::file::{make_file_entry, read_file};
 use crate::gc;
@@ -457,6 +457,170 @@ fn advance_head(records: &[RecMeta], wal_seq: u64) -> (r: HeadAdvance)
     }
 }
 
+// ── Replay bound (§4.8, phase 8c) ─────────────────────────────────────────
+//
+// The recovery-path dual of `advance_head`: from the committed head, how much of
+// the WAL is a valid recoverable run. `Store::mount` (§4.5) reads contiguous,
+// checksummed, seq-continuous records until the first torn or seq-discontinuous
+// one (an unacked tail). 8c lifts the *bound* of that walk — the count of
+// records and the resulting `(wal_tail, wal_seq)` — into a verified parser core,
+// leaving the overlay apply + the content-level OVL-1 extent gate as the
+// plain-Rust applier (`mount` re-walks the span). The 7g `decode_raw` move: a
+// verified parser, a plain-Rust applier.
+//
+// The framing parse (`decode_frame`) is **verified** — its in-bounds guarantee
+// is what makes the walk terminate and stay in range, the unbounded form of the
+// old `off += rlen` trust-comment. The blake3 checksum and the `WalOp` payload
+// decode stay the **content seam** (`wal_content_ok`, `external_body`) — exactly
+// the boundary 7f drew for the superblock.
+
+/// One WAL record's framing: its sequence number and total on-disk length. The
+/// `Hash`-free verified analogue of `WalOp::decode_record`'s header parse.
+struct RecFrame {
+    seq: u64,
+    rlen: usize,
+}
+
+/// Parse the fixed WAL record header at `wal[off..]` (magic, seq, payload len)
+/// and bounds-check the whole record against `wal`. **Total ∀** bytes; the
+/// `Some` arm carries the in-bounds + nonzero-length guarantee that makes the
+/// replay walk terminate and stay in range. Mirrors the framing arms of
+/// `WalOp::decode_record` (`disk.rs`): magic + `len` + `WAL_HEADER + len` in
+/// bounds. Indexes `wal[off + k]` (the `disk.rs` byte-reader recipe) rather than
+/// range-slicing, so the proof stays first-order.
+fn decode_frame(wal: &[u8], off: usize) -> (r: Option<RecFrame>)
+    requires
+        off <= wal@.len(),
+    ensures
+        r matches Some(f) ==> WAL_HEADER <= f.rlen && off + f.rlen <= wal@.len(),
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    if wal.len() - off < WAL_HEADER {
+        return None;
+    }
+    // WAL_MAGIC == b"WREC" == [0x57, 0x52, 0x45, 0x43]; per-byte so Verus reasons
+    // over `wal[i]` rather than the unspecced slice `==` (the 7f `magic_ok` recipe).
+    if !(wal[off] == 0x57u8 && wal[off + 1] == 0x52u8 && wal[off + 2] == 0x45u8
+        && wal[off + 3] == 0x43u8)
+    {
+        return None;
+    }
+    let seq = read_u64_le(wal, off + 4);
+    let len = read_u32_le(wal, off + 12) as usize;
+    match WAL_HEADER.checked_add(len) {
+        Some(rlen) => {
+            if rlen <= wal.len() - off {
+                Some(RecFrame { seq, rlen })
+            } else {
+                None
+            }
+        }
+        None => None,
+    }
+}
+
+/// The content-layer acceptance `decode_record` makes after framing: the blake3
+/// payload checksum AND that the payload decodes to a `WalOp`. `external_body`
+/// because both are out of verification scope — blake3 is interpreted hashing
+/// (the 7f `checksum_ok` seam) and the `WalOp` payload is `Vec`-building content
+/// (TLA+'s abstracted record value, not the replay-bound decision). Assumed
+/// **total**: it inspects the exact-`rlen` record slice and returns a bool. The
+/// `content_ok_spec` ghost lets the maximal-run characterization name the seam
+/// (the standard trusted-fn-with-uninterpreted-spec idiom). The
+/// `off + rlen <= len` precondition (from `decode_frame`) keeps the slice in bounds.
+#[verifier::external_body]
+fn wal_content_ok(wal: &[u8], off: usize, rlen: usize) -> (r: bool)
+    requires
+        off + rlen <= wal@.len(),
+    ensures
+        r == content_ok_spec(wal@.subrange(off as int, (off + rlen) as int)),
+{
+    WalOp::decode_record(&wal[off..off + rlen]).is_some()
+}
+
+/// Ghost model of [`wal_content_ok`] — uninterpreted (blake3 + the `WalOp`
+/// payload decode are seams), so the maximal-run spec can reference "this record
+/// is content-valid" without looking inside the hash or the content decode.
+uninterp spec fn content_ok_spec(rec: Seq<u8>) -> bool;
+
+/// How much of the WAL is a valid recoverable run from the committed head: the
+/// number of records to replay (`count`) and the byte offset just past them
+/// (`end_off`). `mount` re-walks `count` records itself (recomputing `wal_seq`
+/// via its `checked_add` forgery gate), so the span need not carry `wal_seq`.
+struct ReplaySpan {
+    count: usize,
+    end_off: u64,
+}
+
+/// Walk the WAL from `wal_head`, accepting contiguous records that frame cleanly
+/// (`decode_frame`), pass the content seam (`wal_content_ok`), and continue the
+/// sequence (`seq` match), stopping at the first torn or seq-discontinuous one —
+/// the TLA+ `Recover` action.
+///
+/// Proven here: **totality** (the `end_off <= wal.len()` in-bounds postcondition,
+/// ∀ bytes — the unbounded form of `mount`'s old `off += rlen` trust-comment) and
+/// **termination** (`decreases wal.len() - off`; each accepted record advances
+/// `off` by `rlen >= WAL_HEADER > 0`). A record at `seq == u64::MAX` is still
+/// *counted* (so `mount`'s re-walk applies it and its `checked_add` fires the
+/// §4.4 seq-exhaustion forgery gate, the `mnt1_forged_wal_seq_max_rejected`
+/// behaviour); the loop just can't advance past it, so it stops there.
+///
+/// Out of scope here — deferred to the 8d composition (plan §8c: "per-piece
+/// contracts before the composed theorem", the §4.8 parallel of 8b's deferred
+/// monotonicity): the tight **maximal-run equality** (`count ==` the recursive
+/// maximal contiguous seq-run). Stating it needs spec-level byte decoding of
+/// `seq`/`len` (a `run_len` spec fn over a spec `frame`/`content_ok_spec`, with a
+/// `by (bit_vector)` bridge from the shift-form LE readers) — the genuinely hard
+/// part. The loop *does* implement the maximal run faithfully (it checks framing +
+/// seq-continuity + the content seam per record), which the crash-injection
+/// proptest exercises against real tree content; only the closed-form equality is
+/// deferred. The OVL-1 extent gate likewise stays the plain-Rust applier's job (it
+/// needs the decoded `Write` content).
+fn replay_bound(wal: &[u8], wal_head: u64, wal_next_seq: u64) -> (r: ReplaySpan)
+    requires
+        wal_head <= wal@.len(),
+    ensures
+        r.end_off <= wal@.len(),
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    let mut off: usize = wal_head as usize;
+    let mut seq: u64 = wal_next_seq;
+    let mut count: usize = 0;
+    loop
+        invariant
+            off <= wal@.len(),
+            count <= off,
+        decreases wal@.len() - off,
+    {
+        if off >= wal.len() {
+            break;
+        }
+        let frame = match decode_frame(wal, off) {
+            Some(f) => f,
+            None => break,
+        };
+        if frame.seq != seq {
+            break;
+        }
+        if !wal_content_ok(wal, off, frame.rlen) {
+            break;
+        }
+        // Accept this record (so `mount` replays it); count before the seq-exhaustion
+        // stop so a planted record at `seq == u64::MAX` is replayed and trips
+        // `mount`'s `checked_add` gate, not silently dropped (§4.4 forgery gate).
+        count = count + 1;
+        off = off + frame.rlen;
+        // An honest seq counter never nears u64::MAX (2^64 records). At the boundary
+        // the loop can't advance the sequence, so it stops — having already counted
+        // the record above.
+        if seq == u64::MAX {
+            break;
+        }
+        seq = seq + 1;
+    }
+    ReplaySpan { count, end_off: off as u64 }
+}
+
 } // verus!
 
 pub struct Store<D: BlockDev> {
@@ -657,16 +821,26 @@ impl<D: BlockDev> Store<D> {
             wal_records: VecDeque::new(),
         };
 
-        // WAL replay: contiguous, checksummed, seq-continuous records from
-        // the committed head. Anything else is an unacked torn tail.
+        // WAL replay: contiguous, checksummed, seq-continuous records from the
+        // committed head; anything else is an unacked torn tail. The *bound* of
+        // this walk — how many records replay, and the resulting
+        // `(wal_tail, wal_seq)` — is the Verus-verified `replay_bound` (plan §8c):
+        // total + terminating ∀ bytes, so the old `off += rlen` in-bounds
+        // reasoning is now a theorem, not a code comment. The applier below
+        // re-walks exactly that many records to decode + apply each; the content
+        // layer (the `WalOp` decode) and the OVL-1 extent gate stay plain Rust.
         let mut wal = vec![0u8; sb.wal_len as usize];
         store.chunks.dev.read(WAL_OFF, &mut wal)?;
+        let span = replay_bound(&wal, sb.wal_head, sb.wal_next_seq);
         let mut off = sb.wal_head;
         let mut seq = sb.wal_next_seq;
-        while let Some((rseq, op, rlen)) = WalOp::decode_record(&wal[off as usize..]) {
-            if rseq != seq {
-                break;
-            }
+        for _ in 0..span.count {
+            // `replay_bound` proved each of these `span.count` records frames,
+            // checksums, and continues the sequence — so `decode_record` returns
+            // `Some` here (the 8a `unwrap` discipline: the call is total because
+            // the verified core's contract says so).
+            let (_rseq, op, rlen) = WalOp::decode_record(&wal[off as usize..])
+                .expect("replay_bound accepted this record");
             // Mirror of the pre-WAL gate in Store::write (OVL-1): no image
             // this code produced contains such a record — write rejects the
             // extent before logging — and a torn write can't fake one (the
@@ -687,15 +861,18 @@ impl<D: BlockDev> Store<D> {
                 ref_name: op.ref_name().to_vec(),
                 flushed: false,
             });
-            off += rlen as u64; // bounded: decode_record only matched because
-                                // off + rlen <= wal.len()
+            off += rlen as u64;
             // An honest seq counter never nears u64::MAX (2^64 records); a
-            // re-sealed `wal_next_seq` there overflows the increment. Same
-            // forgery, same loud rejection as the extent check above.
+            // re-sealed `wal_next_seq` there overflows the increment. `replay_bound`
+            // stops at that boundary, so within `span.count` this never fires — it
+            // stays as the loud rejection the original walk gave (§4.4 forgery gate).
             seq = seq
                 .checked_add(1)
                 .ok_or(StoreError::Corrupt("wal sequence exhausted"))?;
         }
+        // The applier walked exactly to `replay_bound`'s verified bound (both
+        // advance by the same per-record `rlen`); cross-check it in debug builds.
+        debug_assert_eq!(off, span.end_off);
         store.wal_tail = off;
         store.wal_seq = seq;
         Ok(store)
