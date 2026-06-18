@@ -224,14 +224,22 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
                 Err(RetypeError::BadArg) => ERR_ARG,
             })
         }
-        // cap_copy — derive, monotone (§2.3)
-        Sys::CapCopy { src, dst, mask } => {
+        // cap_copy — derive, monotone (§2.3). `prio_ceiling` attenuates a thread-cap
+        // copy's §5.4 ceiling to `min(parent, prio_ceiling)` (the supervision grant);
+        // `NO_PRIO_CEILING` (0xFF) from the default `cap_copy` leaves it unchanged.
+        Sys::CapCopy { src, dst, mask, prio_ceiling } => {
             let src = cur_slot(src);
             let dst = cur_slot(dst);
             if src.is_null() || dst.is_null() {
                 return Some(ERR_BADSLOT);
             }
-            Some(match cspace::derive(&mut KernelStore, SlotId(src as u64), SlotId(dst as u64), mask as u8) {
+            Some(match cspace::derive(
+                &mut KernelStore,
+                SlotId(src as u64),
+                SlotId(dst as u64),
+                mask as u8,
+                prio_ceiling as u8,
+            ) {
                 Ok(()) => 0,
                 Err(()) => ERR_NOSLOT,
             })
@@ -419,7 +427,10 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             }
             (*csp).hdr.refs += 1;
             (*tp).cspace = Some(cs);
-            (*tp).priority = prio;
+            // §5.4: the gated priority is written through the verified
+            // `kcore::thread::set_priority` (`prio <= max_prio` discharged by the
+            // gate above), not a raw store — closing the F-70-6 seam (doc 71).
+            thread::set_priority(tp, prio, max_prio);
             (*tp).frame = TrapFrame::zeroed();
             (*tp).frame.elr = entry;
             (*tp).frame.sp_el0 = sp;
@@ -557,7 +568,8 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             (*asp_ptr).hdr.refs += 1;
             (*tp).cspace = Some(cs);
             (*tp).aspace = Some(asp);
-            (*tp).priority = prio;
+            // §5.4: gated priority via the verified setter (see ThreadStart).
+            thread::set_priority(tp, prio, max_prio);
             (*tp).frame = TrapFrame::zeroed();
             (*tp).frame.elr = entry;
             (*tp).frame.sp_el0 = sp;

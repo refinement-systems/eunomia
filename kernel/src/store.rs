@@ -176,6 +176,12 @@ impl Store for KernelStore {
     fn set_tcb_report(&mut self, t: ObjId, r: Report) {
         unsafe { (*obj_ptr::<Tcb>(t)).report = r }
     }
+    fn tcb_priority(&self, t: ObjId) -> u8 {
+        unsafe { (*obj_ptr::<Tcb>(t)).priority }
+    }
+    fn set_tcb_priority(&mut self, t: ObjId, p: u8) {
+        unsafe { (*obj_ptr::<Tcb>(t)).priority = p }
+    }
     fn tcb_bind_slot(&self, t: ObjId, which: usize) -> SlotId {
         unsafe { SlotId(ptr::addr_of_mut!((*obj_ptr::<Tcb>(t)).bind_slots[which]) as u64) }
     }

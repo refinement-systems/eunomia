@@ -47,6 +47,14 @@ pub unsafe fn bind(t: *mut Tcb, which: usize, notif_src: *mut CapSlot, bits: u64
     kcore::thread::bind(&mut KernelStore, ObjId(t as u64), which, src, bits);
 }
 
+/// See [`kcore::thread::set_priority`]. Routes spawn's priority write through the
+/// verified setter: the §5.4 ceiling-bounded `prio` lands in the TCB under a
+/// machine-checked `priority == prio (<= ceiling)` instead of a raw `(*tp).priority`
+/// store (D-B1 Option 2, doc/results/71). The caller gates `prio <= ceiling`.
+pub unsafe fn set_priority(t: *mut Tcb, prio: u8, ceiling: u8) {
+    kcore::thread::set_priority(&mut KernelStore, ObjId(t as u64), prio, ceiling);
+}
+
 struct Queue {
     head: *mut Tcb,
     tail: *mut Tcb,

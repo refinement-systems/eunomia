@@ -90,6 +90,10 @@ pub trait Store {
     fn set_tcb_wait_notif(&mut self, t: ObjId, n: Option<ObjId>);
     fn tcb_report(&self, t: ObjId) -> Report;
     fn set_tcb_report(&mut self, t: ObjId, r: Report);
+    /// The thread's §5.4 run priority — bounded by the spawner's cap ceiling and
+    /// written through the verified [`crate::thread::set_priority`] (D-B1 Option 2).
+    fn tcb_priority(&self, t: ObjId) -> u8;
+    fn set_tcb_priority(&mut self, t: ObjId, p: u8);
     fn tcb_bind_slot(&self, t: ObjId, which: usize) -> SlotId;
     fn tcb_bind_bits(&self, t: ObjId, which: usize) -> u64;
     fn set_tcb_bind_bits(&mut self, t: ObjId, which: usize, b: u64);
