@@ -33,10 +33,6 @@ pub mod store;
 pub mod tlv;
 pub mod tree;
 
-/// Kani harnesses (plan §4.7), compiled only under `cargo kani`.
-#[cfg(kani)]
-mod proofs;
-
 /// Fuzz-only buffer mutators (checksum/chain re-sealing). Compiled only
 /// under the `fuzzing` feature so the forgery helpers never reach a real
 /// build (spec §6: decoders are cargo-fuzz targets on the host).

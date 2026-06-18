@@ -15,9 +15,35 @@ fuzzing = []
 [dependencies]
 blake3 = { version = "1", default-features = false, features = ["pure"] }
 
+# vstd is the *Verus* dependency (plan doc/plans/3_verus-rewrite.md phase 7f):
+# the `verus!{}` macro + ghost vocabulary for the §4.7 host-chokepoint proof of
+# the on-disk superblock chokepoint (`validate_geometry`/`decode_checked` in
+# disk.rs — geometry totality + region-within-device ∀, and decode totality ∀
+# with blake3 the assumed-total seam). `default-features = false` ⇒ no_std, no
+# alloc, so it rides into the one user binary that pulls cas (storaged)
+# unchanged — and storaged already carries vstd transitively via its ipc/urt
+# path-deps (vstd since 7a), so this edge adds no new binary and the userspace
+# cross-build risk 7a cleared does not recur. In an ordinary build (host
+# `cargo test` *and* the aarch64 userspace cross-build via kernel/build.rs) the
+# `verus!{}` macro erases to plain Rust and vstd compiles to nothing
+# load-bearing. Pinned (=version) in lockstep with kcore/ipc/urt/dma-pool: an
+# upgrade is a deliberate PR. Same recipe as dma-pool/Cargo.toml.
+vstd = { version = "=0.0.0-2026-05-31-0205", default-features = false }
+
+# `cargo verus verify -p cas --no-default-features` targets this crate. cas is
+# std-on-host / Vec/BTreeMap-heavy, but the verified superblock fns are
+# feature-agnostic fixed-size byte parsing, so the no_std+alloc variant is the
+# one verified (the plan §7f feature-pin).
+[package.metadata.verus]
+verify = true
+
 [dev-dependencies]
 proptest = "1"
 
-# cfg(kani) is injected by cargo-kani; teach plain cargo it's expected.
+# cfg(verus_keep_ghost)/cfg(verus_only) are set by Verus during `cargo verus
+# verify` (plan 3_verus-rewrite §7f); teach plain cargo they're expected (same
+# handling as ipc/urt/dma-pool/kcore). cfg(kani) is gone: `cas` is off Kani
+# after 7f (proofs.rs deleted — the superblock harnesses were the last in the
+# project), so nothing injects it.
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(verus_keep_ghost)", "cfg(verus_only)"] }
