@@ -94,17 +94,16 @@ proofs to deductive verification (see **Verus** below), deleting
 `kcore/src/proofs` and the off-CI deep-Kani machinery (`scripts/deep-verify.sh`,
 `kani-deep.yml`, the `kani_deep`/`kani_contracts` features) it subsumed; `cargo
 kani -p kcore` is no longer run. Kani is retained for the host-side §4.7
-chokepoints (`cas` and `dma-pool`), which keep their own `#[cfg(kani)]`
-harnesses until their Verus ports land (plan phase 7). `ipc` has fully ported
-(7a/7b, `proofs.rs` deleted) and so has `urt` — `slots` in 7c, `time` in 7d, so
-`urt/src/proofs.rs` is deleted and `urt` is off the `kani` job entirely. Only
-`dma-pool` (phase 7e) and `cas` (phase 7f) remain on Kani. The historical kcore
+chokepoint `cas`, which keeps its own `#[cfg(kani)]` harnesses until its Verus
+port lands (plan phase 7f). `ipc` has fully ported (7a/7b, `proofs.rs` deleted),
+so has `urt` (`slots` in 7c, `time` in 7d), and so has `dma-pool` (the free-list
+allocator in 7e), so each crate's `proofs.rs` is deleted and they are off the
+`kani` job entirely. Only `cas` (phase 7f) remains on Kani. The historical kcore
 findings/bounds remain recorded across
 `doc/results/2_kani-findings.md` … `8_kani-findings-7.md`.
 
 ```sh
-cargo kani -p dma-pool                               # dma-pool (urt + ipc fully on Verus)
-cargo kani -p cas -Z stubbing                        # cas superblock (blake3 stubbed)
+cargo kani -p cas -Z stubbing                        # cas superblock (blake3 stubbed; ipc/urt/dma-pool on Verus)
 cargo test -p kcore                                  # kcore host unit tests
 ```
 
@@ -271,12 +270,29 @@ it; monotonicity is then `lemma_mul_inequality` + `lemma_div_is_ordered` over th
 7a/7c precedent); the model is `closed` because the spec bodies name the private `NANOS_PER_SEC` (a
 `pub open` body may name only public items). `urt/src/proofs.rs` is **deleted** (`check_time_conversion_total`
 was the last harness), so `urt` is **fully off Kani** — `-p urt` drops from the `kani` job; only `dma-pool`
-(7e) + `cas` (7f) remain there.
+(7e) + `cas` (7f) remained there.
+
+**Phase 7e (`doc/results/61`):** the first-fit DMA free-list allocator `dma-pool` — **trophy #2**, the
+**DN-10** two-buffer disjointness + alignment round-up Kani could only check at one concrete pair
+(symbolic, it OOM'd CaDiCaL). The free-list arithmetic is extracted into a self-contained `FreeList<const N>`
+verified inside `verus!{}` (`new`/`alloc`/`free` against a sorted-disjoint-extent `wf` + a `covers` free-set
+model); the `DmaPool<B: DmaBacking>` wrapper that touches the trusted PA seam (raw-pointer slices, device
+addresses) stays plain Rust — the honest split, since dma-pool *is* "the single place PAs are visible".
+`alloc` is proven ∀ size/alignment (in-pool, aligned, the carved region free→used, coverage elsewhere
+framed), so **two live buffers are disjoint ∀** is the corollary `lemma_two_allocs_disjoint`; `free`'s
+two-sided merge restores coverage. Two exec restructures dodge the named risks: `copy_within` (no Verus
+model) → the verified shift helpers `remove_at`/`insert_at` (the `cdt_unlink`/`slot_move` array-splice
+reasoning), and the bit-mask round-up `(off+align-1)&!(align-1)` (the OOM term) → the modular
+`off + (align-off%align)%align`, so `start%align==0` is pure `vstd::arithmetic` — **no `by (bit_vector)`**.
+The heavy splice/merge frame proofs are decomposed into `spinoff_prover` halves (doc 25 §2). `dma-pool/src/proofs.rs`
+is **deleted** (its two harnesses were the last), so `dma-pool` is **fully off Kani** — `-p dma-pool` drops from
+the `kani` job, leaving only `cas` (7f).
 
 ```sh
 cargo verus verify -p kcore        # the kcore proofs (CI-gated)
 cargo verus verify -p ipc          # §4.7 host chokepoints — phase 7a ipc::header + 7b ipc::session (CI-gated)
 cargo verus verify -p urt          # §4.7 host chokepoints — 7c urt::slots free-list + 7d urt::time conversion (CI-gated)
+cargo verus verify -p dma-pool     # §4.7 host chokepoints — 7e dma-pool free-list allocator (CI-gated)
 cargo verus verify -p scratchpad   # the spec fn min smoke example
 ```
 
@@ -586,8 +602,8 @@ non-`#[inline(always)]` helpers in user.rs.
 | Tool | Scope | When |
 |------|-------|------|
 | TLA+ / TLC | commit protocol, cap revocation | Before respective milestone |
-| Kani | host chokepoints (`cas`, `dma-pool`); `ipc` (7a/7b) + `urt` (7c `slots` + 7d `time`) migrated to Verus, and the `kcore` kernel-core harnesses too (plan `doc/plans/3_verus-rewrite.md` phase 2) | During kernel development |
-| Verus | **mechanized implementation tier for `kcore`** (plan `doc/plans/3_verus-rewrite.md`): unbounded/functional proofs on the real handle/`Store` code — `untyped::carve` (phase 0); the non-recursive cspace/CDT ops `derive`/`cdt_insert_child`/`obj_ref`, now preserving full `cspace_wf` (parent+sibling acyclicity composition, phase 2c); `revoke`/`descend_to_leaf` termination (phase 2b); `slot_move` and `cdt_unlink` in full (body proofs — `slot_move`'s transposition lands the renaming, `doc/results/24`; `cdt_unlink`'s sibling-list merge lands `unlinked`, parent-rank witness reused / sibling-rank rescaled, `doc/results/25`); **phase 3** the untyped remainder `retype_check`/`retype_install`/`reset` (the §2.5 sub-`Untyped`-never-`PHYS` rights theorem) + the channel ops `send`/`recv`/`endpoint_cap_added`/`endpoint_cap_dropped`/`bind`/`fire` against `chan_wf` + the FIFO `Seq` model (`doc/results/26`…`30`); **phase 4** the notification ops `signal`/`wait`/`remove_waiter`/`destroy_notif` (the `waiter_seq` FIFO model — wake order = block order; `signal` graduates `external_body` → proven), the thread ops `report_terminal` (ReportMonotone + FireSafe) / `bind`, and the timer ops `arm`/`disarm`/`check_expired`/`destroy_timer` (the head-only armed-list `timer_wf`; the waiter + armed-timer `refcount_sound` terms) (`doc/results/31`…`35`); **phase 5** the sysabi `decode`/`decode_prio` + `ObjType::from_u64` and the aspace walker `pte_encode` (the §2.5/§4.5 isolation theorem) / `pte_output_pa` / `va_range_ok` / `range_mapped_in` / `map_in` / `unmap_in` against the `pt_wf` page-table tree model + the TLBI effect-ordering log (`doc/results/36`…`40`) — the first Verus reasoning over concrete Rust slices, **no `external_body`**; **phase 6** the cross-object teardown cluster `delete`/`obj_unref`/`destroy_cspace`/`unref_cspace`/`unref_aspace`/`channel::destroy_channel`/`thread::destroy_tcb` — **all `external_body` removed**, the cross-module recursion closed under the seL4-zombie `(count_nonempty(slot_view), height)` measure — plus `revoke` conditional non-zombie root-survival and the full `refcount_sound` census (a system invariant on the teardown family + the construction ops `derive`/`channel::bind`/`endpoint_cap_added`/`signal`/`remove_waiter`/`endpoint_cap_dropped`; the remaining construction ops keep their landed per-op delta with the system clause a recorded follow-on) (`doc/results/41`…`56`) — **kcore's object operations now carry zero `external_body` and zero plain-Rust**, the trusted base reduced to the `Store` hardware/scheduler seam; **phase 7** the §4.7 host chokepoints port off Kani per target (7a: the `ipc::header` §3.7 message-header bijection, `doc/results/57`; 7b: the §4.6 `ipc::session` codecs + the `Admission` never-over-grant quota ∀ sequences, `doc/results/58` — `ipc` now fully off Kani; 7c: the `urt::slots` bitmap free-list ∀ `cap`/`WORDS` — alloc distinctness/exact-exhaustion, `alloc_range` contiguity, the double-free precondition, via loop restructuring + `by (bit_vector)` frame lemmas, `doc/results/59`; 7d: the `urt::time` tick→ns conversion `utc_ns_at` — totality + **monotonicity** ∀ (the decomposition `secs·10⁹+frac == (delta·10⁹)/f` via `lemma_hoist_over_denominator`; what Kani could not prove), `doc/results/60` — `urt` now fully off Kani, leaving `dma-pool` (7e) + `cas` (7f)). + `scratchpad` smoke | CI `verus` job (`cargo verus verify -p kcore -p ipc -p urt`); during the Verus rewrite |
+| Kani | host chokepoint `cas`; `ipc` (7a/7b) + `urt` (7c `slots` + 7d `time`) + `dma-pool` (7e free-list) migrated to Verus, and the `kcore` kernel-core harnesses too (plan `doc/plans/3_verus-rewrite.md` phase 2) | During kernel development |
+| Verus | **mechanized implementation tier for `kcore`** (plan `doc/plans/3_verus-rewrite.md`): unbounded/functional proofs on the real handle/`Store` code — `untyped::carve` (phase 0); the non-recursive cspace/CDT ops `derive`/`cdt_insert_child`/`obj_ref`, now preserving full `cspace_wf` (parent+sibling acyclicity composition, phase 2c); `revoke`/`descend_to_leaf` termination (phase 2b); `slot_move` and `cdt_unlink` in full (body proofs — `slot_move`'s transposition lands the renaming, `doc/results/24`; `cdt_unlink`'s sibling-list merge lands `unlinked`, parent-rank witness reused / sibling-rank rescaled, `doc/results/25`); **phase 3** the untyped remainder `retype_check`/`retype_install`/`reset` (the §2.5 sub-`Untyped`-never-`PHYS` rights theorem) + the channel ops `send`/`recv`/`endpoint_cap_added`/`endpoint_cap_dropped`/`bind`/`fire` against `chan_wf` + the FIFO `Seq` model (`doc/results/26`…`30`); **phase 4** the notification ops `signal`/`wait`/`remove_waiter`/`destroy_notif` (the `waiter_seq` FIFO model — wake order = block order; `signal` graduates `external_body` → proven), the thread ops `report_terminal` (ReportMonotone + FireSafe) / `bind`, and the timer ops `arm`/`disarm`/`check_expired`/`destroy_timer` (the head-only armed-list `timer_wf`; the waiter + armed-timer `refcount_sound` terms) (`doc/results/31`…`35`); **phase 5** the sysabi `decode`/`decode_prio` + `ObjType::from_u64` and the aspace walker `pte_encode` (the §2.5/§4.5 isolation theorem) / `pte_output_pa` / `va_range_ok` / `range_mapped_in` / `map_in` / `unmap_in` against the `pt_wf` page-table tree model + the TLBI effect-ordering log (`doc/results/36`…`40`) — the first Verus reasoning over concrete Rust slices, **no `external_body`**; **phase 6** the cross-object teardown cluster `delete`/`obj_unref`/`destroy_cspace`/`unref_cspace`/`unref_aspace`/`channel::destroy_channel`/`thread::destroy_tcb` — **all `external_body` removed**, the cross-module recursion closed under the seL4-zombie `(count_nonempty(slot_view), height)` measure — plus `revoke` conditional non-zombie root-survival and the full `refcount_sound` census (a system invariant on the teardown family + the construction ops `derive`/`channel::bind`/`endpoint_cap_added`/`signal`/`remove_waiter`/`endpoint_cap_dropped`; the remaining construction ops keep their landed per-op delta with the system clause a recorded follow-on) (`doc/results/41`…`56`) — **kcore's object operations now carry zero `external_body` and zero plain-Rust**, the trusted base reduced to the `Store` hardware/scheduler seam; **phase 7** the §4.7 host chokepoints port off Kani per target (7a: the `ipc::header` §3.7 message-header bijection, `doc/results/57`; 7b: the §4.6 `ipc::session` codecs + the `Admission` never-over-grant quota ∀ sequences, `doc/results/58` — `ipc` now fully off Kani; 7c: the `urt::slots` bitmap free-list ∀ `cap`/`WORDS` — alloc distinctness/exact-exhaustion, `alloc_range` contiguity, the double-free precondition, via loop restructuring + `by (bit_vector)` frame lemmas, `doc/results/59`; 7d: the `urt::time` tick→ns conversion `utc_ns_at` — totality + **monotonicity** ∀ (the decomposition `secs·10⁹+frac == (delta·10⁹)/f` via `lemma_hoist_over_denominator`; what Kani could not prove), `doc/results/60` — `urt` now fully off Kani; 7e: the `dma-pool` first-fit free-list allocator — two-buffer disjointness + alignment ∀ (the **DN-10** trophy Kani OOM'd on), a `FreeList` extracted to `verus!{}` (the PA seam stays trusted plain Rust), `alloc`/`free` against a sorted-disjoint-extent `wf` + `covers` model, `copy_within`→`remove_at`/`insert_at` shift helpers + modular round-up (no `by (bit_vector)`), `doc/results/61` — `dma-pool` now fully off Kani, leaving only `cas` (7f)). + `scratchpad` smoke | CI `verus` job (`cargo verus verify -p kcore -p ipc -p urt -p dma-pool`); during the Verus rewrite |
 | Loom / Shuttle | IPC crate, userspace servers | During M1+ development |
 | Miri + proptest | everything; chunker + prolly tree esp. | Continuous |
 | cargo-fuzz | IPC decoder, postcard payloads | From M1 |
@@ -629,17 +645,19 @@ deleted. The historical findings/bounds remain recorded:
   (`scripts/spawn-test.sh`: the 100× burn loop, status propagation, the
   wild-pointer fault demo + re-spawn, the panic path, the time grant) plus
   the M1 cap-mechanism EL0 test (`scripts/m1-test.sh`).
-- **kani** — `cargo kani -p dma-pool` and `-p cas -Z stubbing`
-  (pinned cargo-kani 0.67.0, cached with its CBMC backend): the remaining §4.7 host
-  chokepoints. The `kcore` kernel-core leg was migrated to Verus (the `verus`
+- **kani** — `cargo kani -p cas -Z stubbing`
+  (pinned cargo-kani 0.67.0, cached with its CBMC backend): the last §4.7 host
+  chokepoint. The `kcore` kernel-core leg was migrated to Verus (the `verus`
   job; plan phase 2); `ipc` migrated wholesale too — header (phase 7a) and the §4.6
   session codecs + `Admission` quota (phase 7b) — so `ipc/src/proofs.rs` is deleted
   and `-p ipc` has dropped from this job entirely. `urt` migrated wholesale as well —
   `slots` (phase 7c) then `time` (phase 7d, the tick→ns conversion's totality +
-  monotonicity) — so `urt/src/proofs.rs` is deleted and `-p urt` has dropped too; only
-  `dma-pool` (7e) and `cas` (7f) remain. No `--harness` filter, so a new harness gates
+  monotonicity) — so `urt/src/proofs.rs` is deleted and `-p urt` has dropped too; and
+  `dma-pool` migrated in phase 7e (the free-list allocator's disjointness + alignment,
+  the DN-10 trophy) — so `dma-pool/src/proofs.rs` is deleted and `-p dma-pool` has dropped.
+  Only `cas` (7f) remains. No `--harness` filter, so a new harness gates
   automatically.
-- **verus** — `cargo verus verify -p kcore -p ipc -p urt` (pinned Verus `0.2026.06.07.cd03505`,
+- **verus** — `cargo verus verify -p kcore -p ipc -p urt -p dma-pool` (pinned Verus `0.2026.06.07.cd03505`,
   release zip cached): the deductive kernel-core proofs (`untyped::carve`; the
   non-recursive cspace/CDT ops `derive`/`cdt_insert_child`/`obj_ref` preserving
   full `cspace_wf`; `revoke`/`descend_to_leaf` termination; the full body proofs of
@@ -654,7 +672,10 @@ deleted. The historical findings/bounds remain recorded:
   `urt::slots` (7c — the bitmap free-list ∀ `cap`/`WORDS`: alloc distinctness +
   exact exhaustion, `alloc_range` contiguity, the double-free precondition), and
   `urt::time` (7d — the tick→ns conversion `utc_ns_at`: totality + monotonicity ∀,
-  the decomposition `secs·10⁹+frac == (delta·10⁹)/f` via `lemma_hoist_over_denominator`).
+  the decomposition `secs·10⁹+frac == (delta·10⁹)/f` via `lemma_hoist_over_denominator`), and
+  `dma-pool` (7e — the first-fit free-list allocator's `FreeList`: `alloc`/`free` against a
+  sorted-disjoint-extent `wf` + `covers` model, two-buffer disjointness + alignment ∀, the
+  DN-10 trophy; `copy_within`→shift-helper + modular round-up restructures, no `by (bit_vector)`).
   No per-proof filter, so a new `verus!{}` obligation gates automatically.
   The `host-tests` job's `kcore` leg now also runs `test_store` — `check_delete`/
   `check_destroy_channel`/`check_destroy_tcb` were the executable check of those ops'

@@ -9,6 +9,27 @@ std = []
 
 [dependencies]
 
-# cfg(kani) is injected by cargo-kani; teach plain cargo it's expected.
+# vstd is the *Verus* dependency (plan doc/plans/3_verus-rewrite.md phase 7e):
+# the `verus!{}` macro + ghost vocabulary for the §4.7 host-chokepoint proof of
+# the first-fit free-list allocator (`FreeList` in lib.rs — handed-out buffers
+# pairwise disjoint + in-pool + aligned, ∀, the DN-10 trophy Kani OOM'd on).
+# `default-features = false` ⇒ no_std, no alloc, so it rides into the one
+# alloc-free user binary that pulls dma-pool (storaged) unchanged — and storaged
+# already carries vstd transitively via its ipc/urt path-deps (vstd since 7a), so
+# this edge adds no new binary and the userspace cross-build risk 7a cleared does
+# not recur. In an ordinary build (host `cargo test` *and* the aarch64 userspace
+# cross-build via kernel/build.rs) the `verus!{}` macro erases to plain Rust and
+# vstd compiles to nothing load-bearing. Pinned (=version) in lockstep with
+# kcore/ipc/urt: an upgrade is a deliberate PR. Same recipe as urt/Cargo.toml.
+vstd = { version = "=0.0.0-2026-05-31-0205", default-features = false }
+
+# `cargo verus verify -p dma-pool` targets this crate (the flag kcore/ipc/urt use).
+[package.metadata.verus]
+verify = true
+
+# cfg(verus_keep_ghost)/cfg(verus_only) are set by Verus during `cargo verus
+# verify` (plan 3_verus-rewrite §7e); teach plain cargo they're expected (same
+# handling as ipc/urt/kcore). cfg(kani) is gone: `dma-pool` is off Kani after 7e
+# (proofs.rs deleted — the alloc/free harnesses were the last), so nothing injects it.
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(verus_keep_ghost)", "cfg(verus_only)"] }

@@ -159,6 +159,9 @@ dependencies = [
 [[package]]
 name = "dma-pool"
 version = "0.1.0"
+dependencies = [
+ "vstd",
+]
 
 [[package]]
 name = "embedded-io"
