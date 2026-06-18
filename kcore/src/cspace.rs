@@ -1122,7 +1122,16 @@ pub open spec fn cap_obj(c: Cap) -> Option<ObjId> {
 // the field-shape-stable form of the old `c.kind == CapKind::Thread(t)`. The
 // dead-object lemmas (`lemma_no_live_thread_cap_from_dead` et al.) reason about
 // "is this a thread cap for `t`?" independent of the ceiling `Thread` now carries.
-pub open spec fn is_thread_cap_for(c: Cap, t: ObjId) -> bool {
+//
+// `closed` (D-B1 cross-platform headroom): the body unfolds inside `cspace`
+// (where the two dead-object lemmas prove/consume it), but stays opaque to
+// `thread::destroy_tcb`, which only *carries* this predicate from one lemma's
+// `ensures` into the next's `requires` (a syntactic match) and never needs its
+// body. Measured: with `open`, `destroy_tcb` flakes the rlimit at 8; with
+// `closed` it passes at 8 — hiding the unneeded unfold there is what restores the
+// cross-platform headroom (resource counting varies Linux↔macOS; see the
+// `spinoff_prover` note on `destroy_tcb`).
+pub closed spec fn is_thread_cap_for(c: Cap, t: ObjId) -> bool {
     c.kind matches CapKind::Thread(o, _) && o == t
 }
 

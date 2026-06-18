@@ -333,6 +333,13 @@ verus! {
 // `dead_tcb_frozen` frame fixes its TCB; the census rides the **clear-before-unref** discipline
 // (`lemma_census_after_hold_clear` opens the off-by-one window `unref_cspace`/`unref_aspace`
 // consume). The last `external_body` object op in `kcore` — phase 6d is now complete.
+// `spinoff_prover` (cross-platform headroom, D-B1): giving `CapKind::Thread` its §5.4
+// `max_prio` ceiling adds a datatype field + the `is_thread_cap_for`/`cap_max_prio` axioms to
+// this module's shared SMT batch, shifting Z3's resource accounting for this borderline body —
+// the "new clauses destabilize an unrelated proof's rlimit" effect doc 51 §3 records (resource
+// counting varies Linux<->macOS, so it flaked only in CI). Isolating `destroy_tcb` into its
+// own Z3 instance is the standard Verus headroom fix.
+#[verifier::spinoff_prover]
 pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
     requires
         cspace::cspace_wf(old(store).slot_view()),
