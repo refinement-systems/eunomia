@@ -481,18 +481,51 @@ struct RecFrame {
     rlen: usize,
 }
 
+/// Spec mirror of [`decode_frame`]: the framing parse of the WAL record at `off`
+/// as a ghost `Option<(seq, rlen)>`, the unbounded handle the recovery-core spec
+/// reasons through. `decode_frame`'s `ensures` proves the exec parse agrees with
+/// it ∀ bytes; `run_len` (and 8d's composition) build on it. `None` = no
+/// in-bounds well-framed record here (short buffer, bad magic, or a length that
+/// runs past the buffer — including the 32-bit `usize` overflow of `WAL_HEADER +
+/// len`, which `decode_frame`'s `checked_add` rejects: such an `rlen` exceeds any
+/// real `wal.len() <= usize::MAX`, so this clause already excludes it).
+spec fn frame_at(wal: Seq<u8>, off: int) -> Option<(u64, nat)> {
+    if off < 0 || wal.len() < off + WAL_HEADER {
+        None
+    } else if !(wal[off] == 0x57u8 && wal[off + 1] == 0x52u8 && wal[off + 2] == 0x45u8
+        && wal[off + 3] == 0x43u8)
+    {
+        None
+    } else {
+        // `disk::spec_*_le` by path (not `use`d): a `spec fn` import would dangle
+        // in the macro-erased plain build, but this reference erases with `frame_at`.
+        let len = disk::spec_u32_le(wal, off + 12) as nat;
+        if off + WAL_HEADER + len <= wal.len() {
+            Some((disk::spec_u64_le(wal, off + 4), (WAL_HEADER + len) as nat))
+        } else {
+            None
+        }
+    }
+}
+
 /// Parse the fixed WAL record header at `wal[off..]` (magic, seq, payload len)
 /// and bounds-check the whole record against `wal`. **Total ∀** bytes; the
 /// `Some` arm carries the in-bounds + nonzero-length guarantee that makes the
 /// replay walk terminate and stay in range. Mirrors the framing arms of
 /// `WalOp::decode_record` (`disk.rs`): magic + `len` + `WAL_HEADER + len` in
 /// bounds. Indexes `wal[off + k]` (the `disk.rs` byte-reader recipe) rather than
-/// range-slicing, so the proof stays first-order.
+/// range-slicing, so the proof stays first-order. The second `ensures` ties the
+/// exec parse to the ghost [`frame_at`] ∀ bytes (8d), so `run_len` and the
+/// composition can reason over the framing without re-deriving the byte reads.
 fn decode_frame(wal: &[u8], off: usize) -> (r: Option<RecFrame>)
     requires
         off <= wal@.len(),
     ensures
         r matches Some(f) ==> WAL_HEADER <= f.rlen && off + f.rlen <= wal@.len(),
+        match r {
+            Some(f) => frame_at(wal@, off as int) == Some((f.seq, f.rlen as nat)),
+            None => frame_at(wal@, off as int) is None,
+        },
 {
     broadcast use vstd::slice::group_slice_axioms;
     if wal.len() - off < WAL_HEADER {
@@ -515,7 +548,13 @@ fn decode_frame(wal: &[u8], off: usize) -> (r: Option<RecFrame>)
                 None
             }
         }
-        None => None,
+        None => {
+            // 32-bit `usize` overflow of `WAL_HEADER + len`: an `rlen` that big
+            // exceeds any real `wal.len() <= usize::MAX`, so `frame_at`'s
+            // in-bounds clause already rejects it (the two agree, ∀ arch).
+            assert(wal@.len() <= usize::MAX);
+            None
+        }
     }
 }
 
@@ -543,6 +582,39 @@ fn wal_content_ok(wal: &[u8], off: usize, rlen: usize) -> (r: bool)
 /// is content-valid" without looking inside the hash or the content decode.
 uninterp spec fn content_ok_spec(rec: Seq<u8>) -> bool;
 
+/// The length of the maximal contiguous recoverable run from `off` at sequence
+/// `seq`: each record must frame ([`frame_at`]), continue the sequence, and pass
+/// the content seam (`content_ok_spec`); the run ends at the first that does not.
+/// The record at `seq == u64::MAX` is *counted* but ends the run (the sequence
+/// can't advance) — matching `replay_bound`/`mount`'s §4.4 seq-exhaustion gate
+/// (the `mnt1_forged_wal_seq_max_rejected` corner). This is the closed form
+/// `replay_bound.count` is proven equal to (8d, the maximal-run equality 8c
+/// deferred) and the quantity 8d's composition reasons about. **Terminating**
+/// (`decreases wal.len() - off`; each accepted record's `rlen >= WAL_HEADER > 0`,
+/// from `frame_at`'s `Some` arm, strictly shrinks the remaining buffer).
+spec fn run_len(wal: Seq<u8>, off: int, seq: u64) -> nat
+    decreases wal.len() - off,
+{
+    if off < 0 || wal.len() <= off {
+        0
+    } else {
+        match frame_at(wal, off) {
+            None => 0,
+            Some((s, rlen)) => {
+                if s != seq {
+                    0
+                } else if !content_ok_spec(wal.subrange(off, off + rlen)) {
+                    0
+                } else if seq == u64::MAX {
+                    1
+                } else {
+                    (1 + run_len(wal, off + rlen, (seq + 1) as u64)) as nat
+                }
+            }
+        }
+    }
+}
+
 /// How much of the WAL is a valid recoverable run from the committed head: the
 /// number of records to replay (`count`) and the byte offset just past them
 /// (`end_off`). `mount` re-walks `count` records itself (recomputing `wal_seq`
@@ -558,53 +630,88 @@ struct ReplaySpan {
 /// the TLA+ `Recover` action.
 ///
 /// Proven here: **totality** (the `end_off <= wal.len()` in-bounds postcondition,
-/// ∀ bytes — the unbounded form of `mount`'s old `off += rlen` trust-comment) and
+/// ∀ bytes — the unbounded form of `mount`'s old `off += rlen` trust-comment),
 /// **termination** (`decreases wal.len() - off`; each accepted record advances
-/// `off` by `rlen >= WAL_HEADER > 0`). A record at `seq == u64::MAX` is still
-/// *counted* (so `mount`'s re-walk applies it and its `checked_add` fires the
-/// §4.4 seq-exhaustion forgery gate, the `mnt1_forged_wal_seq_max_rejected`
-/// behaviour); the loop just can't advance past it, so it stops there.
+/// `off` by `rlen >= WAL_HEADER > 0`), and — since 8d — the tight **maximal-run
+/// equality** `count == run_len(wal@, wal_head, wal_next_seq)`: the walk accepts
+/// *exactly* the maximal contiguous seq-run (the closed-form characterization 8c
+/// deferred, the quantity 8d's composition reasons about). A record at `seq ==
+/// u64::MAX` is still *counted* (so `mount`'s re-walk applies it and its
+/// `checked_add` fires the §4.4 seq-exhaustion forgery gate, the
+/// `mnt1_forged_wal_seq_max_rejected` behaviour); the loop just can't advance past
+/// it, so it stops there — `run_len` counts it the same way.
 ///
-/// Out of scope here — deferred to the 8d composition (plan §8c: "per-piece
-/// contracts before the composed theorem", the §4.8 parallel of 8b's deferred
-/// monotonicity): the tight **maximal-run equality** (`count ==` the recursive
-/// maximal contiguous seq-run). Stating it needs spec-level byte decoding of
-/// `seq`/`len` (a `run_len` spec fn over a spec `frame`/`content_ok_spec`, with a
-/// `by (bit_vector)` bridge from the shift-form LE readers) — the genuinely hard
-/// part. The loop *does* implement the maximal run faithfully (it checks framing +
-/// seq-continuity + the content seam per record), which the crash-injection
-/// proptest exercises against real tree content; only the closed-form equality is
-/// deferred. The OVL-1 extent gate likewise stays the plain-Rust applier's job (it
-/// needs the decoded `Write` content).
+/// The proof is the accumulator invariant `count + run_len(wal@, off, seq) ==
+/// run_len(wal@, wal_head, wal_next_seq)`: each accepted record unfolds `run_len`
+/// once (`1 + run_len` at the next offset/seq), and each stop point leaves
+/// `run_len(wal@, off, seq) == 0` — so `count` equals the total at every exit.
+/// The OVL-1 extent gate stays the plain-Rust applier's job (it needs the decoded
+/// `Write` content); `run_len` models the per-record acceptance through the
+/// `content_ok_spec` seam, not the extent check.
 fn replay_bound(wal: &[u8], wal_head: u64, wal_next_seq: u64) -> (r: ReplaySpan)
     requires
         wal_head <= wal@.len(),
     ensures
         r.end_off <= wal@.len(),
+        r.count == run_len(wal@, wal_head as int, wal_next_seq),
 {
     broadcast use vstd::slice::group_slice_axioms;
+    let ghost total = run_len(wal@, wal_head as int, wal_next_seq);
+    // Materializes `wal@.len() <= usize::MAX` (a real slice length fits usize), so
+    // `wal_head <= wal.len()` makes the cast below value-preserving.
+    let wlen = wal.len();
     let mut off: usize = wal_head as usize;
     let mut seq: u64 = wal_next_seq;
     let mut count: usize = 0;
+    assert(off as int == wal_head as int);
     loop
+        // The accumulator: what's counted plus what `run_len` still sees from the
+        // current cursor equals the total run. Holds at every iteration top, but
+        // *not* at the seq-exhaustion break (`count` is bumped past a record whose
+        // `run_len` tail is not yet zero), so it is `invariant_except_break`; the
+        // loop `ensures` states what does hold at every exit.
+        invariant_except_break
+            count + run_len(wal@, off as int, seq) == total,
         invariant
+            wlen == wal@.len(),
             off <= wal@.len(),
             count <= off,
+        ensures
+            off <= wal@.len(),
+            count == total,
         decreases wal@.len() - off,
     {
-        if off >= wal.len() {
+        if off >= wlen {
+            // off == wal.len() (with off <= len), so the run from here is empty.
+            assert(wal@.len() <= off as int);
+            assert(run_len(wal@, off as int, seq) == 0);
             break;
         }
         let frame = match decode_frame(wal, off) {
             Some(f) => f,
-            None => break,
+            None => {
+                // decode_frame: None ==> frame_at None ==> run_len here is 0.
+                assert(run_len(wal@, off as int, seq) == 0);
+                break;
+            }
         };
+        // decode_frame: frame_at(wal@, off) == Some((frame.seq, frame.rlen)).
         if frame.seq != seq {
+            assert(run_len(wal@, off as int, seq) == 0);
             break;
         }
         if !wal_content_ok(wal, off, frame.rlen) {
+            // wal_content_ok: !r ==> !content_ok_spec(subrange) ==> run_len is 0.
+            assert(run_len(wal@, off as int, seq) == 0);
             break;
         }
+        // Record accepted. Unfold run_len once at this (off, seq): the two
+        // consequences carry the accumulator across the step (non-MAX) or pin
+        // count == total at the seq-exhaustion stop (MAX). Captured here (pre-bump)
+        // so the facts persist for the old (off, seq) after the mutations below.
+        assert(seq == u64::MAX ==> run_len(wal@, off as int, seq) == 1);
+        assert(seq != u64::MAX ==> run_len(wal@, off as int, seq)
+            == 1 + run_len(wal@, (off + frame.rlen) as int, (seq + 1) as u64));
         // Accept this record (so `mount` replays it); count before the seq-exhaustion
         // stop so a planted record at `seq == u64::MAX` is replayed and trips
         // `mount`'s `checked_add` gate, not silently dropped (§4.4 forgery gate).
@@ -612,13 +719,163 @@ fn replay_bound(wal: &[u8], wal_head: u64, wal_next_seq: u64) -> (r: ReplaySpan)
         off = off + frame.rlen;
         // An honest seq counter never nears u64::MAX (2^64 records). At the boundary
         // the loop can't advance the sequence, so it stops — having already counted
-        // the record above.
+        // the record above. The accumulator at this iteration's top gave count_top +
+        // 1 == total (run_len of a counted MAX record is 1), so count == total here.
         if seq == u64::MAX {
+            assert(count == total);
             break;
         }
         seq = seq + 1;
     }
     ReplaySpan { count, end_off: off as u64 }
+}
+
+} // verus!
+
+// ── The gap-freedom composition (§4.8, phase 8d) ──────────────────────────
+//
+// `advance_head` (write path) and `replay_bound` (recovery path) operate on
+// different views — a `&[RecMeta]` queue vs. the raw WAL bytes. The composition
+// theorem relates them through `laid_out`, the linking invariant that the byte
+// region from a record's `off` *is* the record the queue describes (frames at
+// `off` with that `seq`, content-valid, contiguous, seq-continuous). Under it the
+// **gap-freedom lemma** holds: `advance_head`'s head sits at the first non-flushed
+// record, and replay from that head covers the whole suffix — so every
+// acked-but-uncommitted (unflushed) record is replayed. This is the code-level
+// shadow of the TLA+ `AckedWritesRecoverable` (WAL-replay half); the
+// content-coverage half — "flushed ⇒ effects already in the committed root" —
+// stays the `CommitProtocol` design gate, deliberately out of scope here.
+//
+// `laid_out` is a documented invariant, not enforced at one site Verus sees
+// (mount *builds* `records` by replaying; commit *consumes* the live queue), so
+// `lemma_gap_freedom` takes `advance_head`/`replay_bound`'s `ensures` as
+// hypotheses — they hold exactly when commit/mount call the two in sequence. This
+// is the §4.8 "per-piece contracts compose into the theorem" shape (the phase-6
+// system-clause parallel): the pieces are proven; the lemma joins them.
+
+verus! {
+
+/// The linking invariant for the record suffix from index `k`: the WAL byte
+/// region at each record's `off` frames as exactly that record (`frame_at` Some
+/// with the record's `seq`), is content-valid (`content_ok_spec`), has a sequence
+/// below `u64::MAX` (an honest log never wraps the 64-bit counter), and is laid
+/// out contiguously and seq-continuously into the next record. Recursive over the
+/// suffix so the coverage induction is structural.
+spec fn laid_out(wal: Seq<u8>, records: Seq<RecMeta>, k: int) -> bool
+    decreases records.len() - k,
+{
+    if k < 0 || records.len() <= k {
+        true
+    } else {
+        match frame_at(wal, records[k].off as int) {
+            None => false,
+            Some((s, rlen)) => {
+                &&& s == records[k].seq
+                &&& records[k].seq < u64::MAX
+                &&& content_ok_spec(wal.subrange(records[k].off as int, records[k].off as int + rlen))
+                &&& (k + 1 < records.len() ==> records[k + 1].off as int == records[k].off as int + rlen)
+                &&& (k + 1 < records.len() ==> records[k + 1].seq == (records[k].seq + 1) as u64)
+                &&& laid_out(wal, records, k + 1)
+            }
+        }
+    }
+}
+
+/// `laid_out` from `k` carries to any later index `m` (the suffix of a laid-out
+/// suffix is laid out — each unfold exposes `laid_out` at the next index).
+proof fn lemma_laid_out_mono(wal: Seq<u8>, records: Seq<RecMeta>, k: int, m: int)
+    requires
+        0 <= k <= m <= records.len(),
+        laid_out(wal, records, k),
+    ensures
+        laid_out(wal, records, m),
+    decreases m - k,
+{
+    if k < m {
+        lemma_laid_out_mono(wal, records, k + 1, m);
+    }
+}
+
+/// **Coverage**: from a laid-out record `k`, `run_len` accepts at least the whole
+/// remaining suffix — `>= records.len() - k`. Induction on the suffix: each record
+/// frames, matches its sequence, passes the content seam, and has `seq < u64::MAX`
+/// (so `run_len` takes its `1 + …` step rather than the seq-exhaustion stop),
+/// chaining contiguously into the next via `laid_out`. The bound is a lower bound
+/// (not equality) because the WAL may hold further valid records past the queue —
+/// replay covering *more* never drops an acked record, which is all gap-freedom needs.
+proof fn lemma_run_len_covers(wal: Seq<u8>, records: Seq<RecMeta>, k: int)
+    requires
+        0 <= k < records.len(),
+        laid_out(wal, records, k),
+    ensures
+        run_len(wal, records[k].off as int, records[k].seq) >= records.len() - k,
+    decreases records.len() - k,
+{
+    let off = records[k].off as int;
+    let seq = records[k].seq;
+    // Unfold laid_out(.,k): frame_at Some, sequence match, content ok, seq < MAX.
+    let rlen = match frame_at(wal, off) {
+        Some(p) => p.1,
+        None => 0nat,
+    };
+    assert(frame_at(wal, off) == Some((seq, rlen)));
+    assert(content_ok_spec(wal.subrange(off, off + rlen)));
+    assert(seq < u64::MAX);
+    // Unfold run_len once: the accepted record contributes 1 + the tail.
+    assert(run_len(wal, off, seq) == 1 + run_len(wal, off + rlen, (seq + 1) as u64));
+    if k + 1 < records.len() {
+        // Contiguous + seq-continuous into record k+1, which is itself laid out.
+        assert(records[k + 1].off as int == off + rlen);
+        assert(records[k + 1].seq == (seq + 1) as u64);
+        lemma_run_len_covers(wal, records, k + 1);
+    }
+}
+
+/// The gap-freedom theorem: composing `advance_head` (`n_flushed`/`head`/`next_seq`)
+/// with `replay_bound` (`count`). The four `requires` after `laid_out` are exactly
+/// the two functions' `ensures` — so this fires whenever commit/mount call them in
+/// sequence over a laid-out queue. Conclusion: **every unflushed record lies in the
+/// replayed span** `[n_flushed, n_flushed + count)`. With `advance_head` placing
+/// `head` at the first non-flushed record (everything below it flushed) and
+/// `replay_bound.count == run_len >= len - n_flushed` (coverage), no
+/// acked-but-uncommitted write is left behind — the code-level shadow of
+/// `AckedWritesRecoverable`'s WAL-replay half.
+proof fn lemma_gap_freedom(
+    wal: Seq<u8>,
+    records: Seq<RecMeta>,
+    n_flushed: int,
+    head: u64,
+    next_seq: u64,
+    count: int,
+)
+    requires
+        laid_out(wal, records, 0),
+        // advance_head's ensures (the flushed-prefix structure):
+        0 <= n_flushed <= records.len(),
+        forall|j: int| 0 <= j < n_flushed ==> (#[trigger] records[j]).flushed,
+        n_flushed < records.len() ==> head == records[n_flushed].off
+            && next_seq == records[n_flushed].seq,
+        // replay_bound's ensures (Part 1, the maximal-run equality):
+        n_flushed < records.len() ==> count == run_len(wal, head as int, next_seq),
+    ensures
+        forall|i: int|
+            (0 <= i < records.len() && !(#[trigger] records[i]).flushed) ==> (n_flushed <= i
+                && i < n_flushed + count),
+{
+    if n_flushed < records.len() {
+        lemma_laid_out_mono(wal, records, 0, n_flushed);
+        lemma_run_len_covers(wal, records, n_flushed);
+        // count == run_len(head, next_seq) >= records.len() - n_flushed, and an
+        // unflushed record's index is >= n_flushed (else flushed) and < len.
+        assert forall|i: int| #![trigger records[i]] (0 <= i < records.len()
+            && !records[i].flushed) implies (n_flushed <= i && i < n_flushed + count) by {
+            if i < n_flushed {
+                assert(records[i].flushed);
+            }
+        }
+    }
+    // n_flushed == records.len(): all records flushed, so no unflushed record
+    // exists — the conclusion is vacuous (any such i would be flushed by the hyp).
 }
 
 } // verus!
