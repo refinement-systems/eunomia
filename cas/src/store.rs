@@ -46,6 +46,7 @@ use crate::tree;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec;
 use alloc::vec::Vec;
+use vstd::prelude::*;
 
 #[derive(Debug)]
 pub enum StoreError {
@@ -311,6 +312,93 @@ struct RecMeta {
     flushed: bool,
 }
 
+// ── The recovery decision core (§4.8, plan 3_verus-rewrite phase 8a) ──────
+//
+// The pure recovery/commit *decisions* extracted from `mount`/`commit` and
+// proven faithful to the CommitProtocol ∀ inputs — Verus closing the model-to-
+// code gap that TLA+ (design) and the crash-injection proptest (sampled bytes)
+// leave open. Additive: TLA+ stays the design gate, the proptest the
+// differential seam (master plan §4.8). The surrounding I/O (the BlockDev
+// reads/writes, the two fsync barriers, the chunk store, the prolly tree) stays
+// plain Rust outside the proof surface — the 7f/7g split (a Hash-free verified
+// core, thin plain-Rust callers). `Survivor`/`Slot` are in-block enums because
+// an external enum can't be *constructed* inside `verus!{}` (the 7g `TlvErr`
+// trick); `mount`/`commit` map them back to the existing control flow.
+verus! {
+
+/// Which superblock slot won recovery — the verified form of the `match decoded`
+/// arms in `Store::mount` (§4.5), one variant per arm of the original control
+/// flow.
+pub enum Survivor {
+    SlotA,
+    SlotB,
+    Neither,
+}
+
+/// Pick the live superblock slot: the valid slot of higher generation (the TLA+
+/// `LiveSlot` / `OlderIsA`). **Total** ∀ `(gen, valid)`. Faithful to mount's
+/// `a.generation >= b.generation` tie-break (slot A wins a tie). Under distinct
+/// generations — every honest commit bumps `generation` and writes the *other*
+/// slot (the TLA+ `GenerationsDistinct`), so two valid slots never share one —
+/// the `>=` is a strict `>`, making the choice deterministic.
+pub fn pick_survivor(gen_a: u64, valid_a: bool, gen_b: u64, valid_b: bool) -> (r: Survivor)
+    ensures
+        (!valid_a && !valid_b) ==> r is Neither,
+        (valid_a && !valid_b) ==> r is SlotA,
+        (!valid_a && valid_b) ==> r is SlotB,
+        (valid_a && valid_b) ==> ((r is SlotA) <==> gen_a >= gen_b),
+        // A chosen slot is always a valid one — what justifies mount's `unwrap`.
+        (r is SlotA) ==> valid_a,
+        (r is SlotB) ==> valid_b,
+{
+    if valid_a && valid_b {
+        if gen_a >= gen_b {
+            Survivor::SlotA
+        } else {
+            Survivor::SlotB
+        }
+    } else if valid_a {
+        Survivor::SlotA
+    } else if valid_b {
+        Survivor::SlotB
+    } else {
+        Survivor::Neither
+    }
+}
+
+/// Which superblock slot the next commit writes (the A/B alternation, §4.2).
+pub enum Slot {
+    A,
+    B,
+}
+
+/// The currently-live slot (ghost model of `Store::sb_in_b`): B iff `sb_in_b`.
+pub open spec fn live_slot(sb_in_b: bool) -> Slot {
+    if sb_in_b {
+        Slot::B
+    } else {
+        Slot::A
+    }
+}
+
+/// Which slot the next commit writes: always the **non-live** slot, so a crash
+/// mid-write damages only the slot being written and the last committed slot
+/// survives — the code witness of the TLA+ `Crash` three-outcome safety
+/// (`AtLeastOneValidSlot` preserved by construction). **Total**.
+pub fn commit_target(sb_in_b: bool) -> (r: Slot)
+    ensures
+        (r is A) <==> sb_in_b,
+        r != live_slot(sb_in_b),
+{
+    if sb_in_b {
+        Slot::A
+    } else {
+        Slot::B
+    }
+}
+
+} // verus!
+
 pub struct Store<D: BlockDev> {
     chunks: ChunkStore<D>,
     opts: StoreOptions,
@@ -390,27 +478,30 @@ impl<D: BlockDev> Store<D> {
         let mut buf_b = vec![0u8; SB_SIZE];
         dev.read(SB_A_OFF, &mut buf_a)?;
         dev.read(SB_B_OFF, &mut buf_b)?;
-        let decoded = (Superblock::decode_checked(&buf_a), Superblock::decode_checked(&buf_b));
-        let (sb, sb_in_b) = match decoded {
-            (Ok(a), Ok(b)) => {
-                if a.generation >= b.generation {
-                    (a, false)
-                } else {
-                    (b, true)
-                }
-            }
-            (Ok(a), Err(_)) => (a, false),
-            (Err(_), Ok(b)) => (b, true),
+        let (ra, rb) = (Superblock::decode_checked(&buf_a), Superblock::decode_checked(&buf_b));
+        // The survivor decision is the Verus-verified `pick_survivor` (plan §8a):
+        // the valid slot of higher generation, the TLA+ `LiveSlot`. The version-
+        // error distinction below stays plain Rust — it only shapes the refusal,
+        // not the choice.
+        let valid_a = ra.is_ok();
+        let valid_b = rb.is_ok();
+        let gen_a = ra.as_ref().map(|s| s.generation).unwrap_or(0);
+        let gen_b = rb.as_ref().map(|s| s.generation).unwrap_or(0);
+        let (sb, sb_in_b) = match pick_survivor(gen_a, valid_a, gen_b, valid_b) {
+            // `pick_survivor` ensures `SlotA ==> valid_a` / `SlotB ==> valid_b`,
+            // so these unwraps cannot panic.
+            Survivor::SlotA => (ra.unwrap(), false),
+            Survivor::SlotB => (rb.unwrap(), true),
             // No usable slot. An intact other-version slot is a refusal,
             // not a recovery case: tick-era timestamp fields are byte-
             // compatible with nanoseconds, so falling through to
             // "no superblock" (or worse, mounting) would misread, and the
             // §2.6 stance — pre-v3 images are re-created with mkfs — is
             // only real if the user is told that's what happened.
-            (Err(ea), Err(eb)) => {
+            Survivor::Neither => {
                 use crate::disk::SbError;
-                return Err(match (ea, eb) {
-                    (SbError::WrongVersion(v), _) | (_, SbError::WrongVersion(v)) => {
+                return Err(match (ra, rb) {
+                    (Err(SbError::WrongVersion(v)), _) | (_, Err(SbError::WrongVersion(v))) => {
                         StoreError::UnsupportedVersion(v)
                     }
                     _ => StoreError::NoSuperblock,
@@ -1011,8 +1102,13 @@ impl<D: BlockDev> Store<D> {
             chunk_tail: self.chunks.tail,
             index_off: new_index_extent.0,
         };
-        // Always alternate; never overwrite the current latest commit.
-        let target = if self.sb_in_b { SB_A_OFF } else { SB_B_OFF };
+        // Always alternate; never overwrite the current latest commit. The
+        // target is the Verus-verified `commit_target` (plan §8a): the non-live
+        // slot, so a torn write here damages only the slot being written.
+        let target = match commit_target(self.sb_in_b) {
+            Slot::A => SB_A_OFF,
+            Slot::B => SB_B_OFF,
+        };
         self.chunks.dev.write(target, &new_sb.encode())?;
         self.chunks.dev.flush()?; // barrier 2: only now is the commit real
         self.sb = new_sb;
