@@ -305,14 +305,7 @@ impl<D: BlockDev> NodeStore for ChunkStore<D> {
 
 // ── The engine ──────────────────────────────────────────────────────────
 
-struct RecMeta {
-    seq: u64,
-    off: u64,
-    ref_name: Vec<u8>,
-    flushed: bool,
-}
-
-// ── The recovery decision core (§4.8, plan 3_verus-rewrite phase 8a) ──────
+// ── The recovery decision core (§4.8, plan 3_verus-rewrite phase 8a/8b) ───
 //
 // The pure recovery/commit *decisions* extracted from `mount`/`commit` and
 // proven faithful to the CommitProtocol ∀ inputs — Verus closing the model-to-
@@ -394,6 +387,73 @@ pub fn commit_target(sb_in_b: bool) -> (r: Slot)
         Slot::A
     } else {
         Slot::B
+    }
+}
+
+/// One WAL record's commit-relevant metadata: its sequence number, its byte
+/// offset in the WAL region, and whether its effects have been flushed into
+/// immutable tree (so the commit head may advance past it). `ref_name` is the
+/// owning ref (matched in `flush_ref`); the head-advance never reasons about
+/// it. Lives in the `verus!{}` block (since 8b) so `advance_head` can name its
+/// fields — it erases to a plain struct, so the plain-Rust `wal_records`
+/// machinery is unchanged.
+struct RecMeta {
+    seq: u64,
+    off: u64,
+    ref_name: Vec<u8>,
+    flushed: bool,
+}
+
+/// The head-advance decision: pop `n_flushed` records off the WAL queue front,
+/// then the new superblock `(wal_head, wal_next_seq)` are `head`/`next_seq`.
+struct HeadAdvance {
+    n_flushed: usize,
+    head: u64,
+    next_seq: u64,
+}
+
+/// Advance the commit head past the contiguous flushed prefix of the WAL record
+/// queue (the TLA+ `CommitPrepare.newHead` — "longest contiguous prefix of
+/// records whose effects are flushed"). The new head/seq is read off the first
+/// non-flushed record, or the linear-WAL reset sentinel `(0, wal_seq)` when the
+/// log drains (§4.4). **Total** ∀ records, **terminating**. Pure sequence
+/// reasoning — the prefix-scan kcore already did for the channel FIFO head.
+///
+/// Out of scope here (a Store-level invariant, not a property of this pure
+/// function): cross-commit head monotonicity (`new head >= old head`) rests on
+/// WAL offsets strictly increasing by construction in `log_then_apply`, which
+/// the plain-Rust call site can't hand Verus as a precondition. The per-piece
+/// contract below is precondition-free and justifies the extraction; the
+/// monotone fact is left to the 8c/8d composition where the invariant is in
+/// scope (plan §8b: "per-piece contracts before the composed theorem").
+fn advance_head(records: &[RecMeta], wal_seq: u64) -> (r: HeadAdvance)
+    ensures
+        r.n_flushed <= records@.len(),
+        // Everything popped is flushed (the contiguous flushed prefix).
+        forall|j: int| #![trigger records@[j]] 0 <= j < r.n_flushed ==> records@[j].flushed,
+        // The head record, if any, is the first non-flushed one.
+        r.n_flushed < records@.len() ==> !records@[r.n_flushed as int].flushed,
+        // The head/seq is read off that first non-flushed record...
+        r.n_flushed < records@.len() ==>
+            r.head == records@[r.n_flushed as int].off
+            && r.next_seq == records@[r.n_flushed as int].seq,
+        // ...or the linear-WAL reset sentinel when all flushed.
+        r.n_flushed == records@.len() ==> r.head == 0 && r.next_seq == wal_seq,
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    let mut i: usize = 0;
+    while i < records.len() && records[i].flushed
+        invariant
+            i <= records@.len(),
+            forall|j: int| #![trigger records@[j]] 0 <= j < i ==> records@[j].flushed,
+        decreases records@.len() - i,
+    {
+        i += 1;
+    }
+    if i < records.len() {
+        HeadAdvance { n_flushed: i, head: records[i].off, next_seq: records[i].seq }
+    } else {
+        HeadAdvance { n_flushed: i, head: 0, next_seq: wal_seq }
     }
 }
 
@@ -1076,22 +1136,22 @@ impl<D: BlockDev> Store<D> {
         let (new_index_extent, new_free) = self.chunks.write_index_frame()?;
         self.chunks.dev.flush()?; // barrier 1: no SB may reference non-durable chunks
 
-        while let Some(rec) = self.wal_records.front() {
-            if rec.flushed {
-                self.wal_records.pop_front();
-            } else {
-                break;
-            }
+        // Pop the contiguous flushed prefix; the new head/seq is the first
+        // non-flushed record (or the linear-WAL reset when all flushed). The
+        // decision is the Verus-verified `advance_head` (plan §8b): everything
+        // popped is flushed, the head record (if any) is not — the TLA+
+        // `CommitPrepare.newHead`.
+        let wal_seq = self.wal_seq;
+        let adv = advance_head(self.wal_records.make_contiguous(), wal_seq);
+        for _ in 0..adv.n_flushed {
+            self.wal_records.pop_front();
         }
-        let (wal_head, wal_next_seq) = match self.wal_records.front() {
-            Some(rec) => (rec.off, rec.seq),
-            None => {
-                // Empty log: reclaim the region. Stale bytes beyond the
-                // head are rejected on replay by the seq check.
-                self.wal_tail = 0;
-                (0, self.wal_seq)
-            }
-        };
+        let (wal_head, wal_next_seq) = (adv.head, adv.next_seq);
+        if self.wal_records.is_empty() {
+            // Empty log: reclaim the region. Stale bytes beyond the head are
+            // rejected on replay by the seq check.
+            self.wal_tail = 0;
+        }
 
         let new_sb = Superblock {
             generation: self.sb.generation + 1,
