@@ -9262,22 +9262,31 @@ pub fn descend_to_leaf<S: Store>(store: &S, start: SlotId) -> (leaf: SlotId)
 /// Kani's `debug_assert` — proven here for all shapes, modulo `delete`'s assumed
 /// teardown contract (above).
 ///
-/// **Root-survival — the conditional non-zombie theorem (plan §6e, doc 23 §4 closed).**
-/// `revoke` deletes only descendants of `slot`, never `slot` itself, so the *only* way
-/// `slot`'s cap can be emptied is the **cross-object** teardown: deleting the last cap to
-/// some object that **homes** `slot` (a cspace whose resident is `slot`, a channel whose
-/// ring cap is `slot`, a TCB whose bind slot is `slot`) fires that object's destructor,
-/// which clears `slot`. This is the seL4-zombie (`revoke_can_empty_its_own_root_zombie`,
-/// doc 23 §4): `slot` is a resident of a cspace whose last live cap lies in `slot`'s own
-/// subtree, so revoking the subtree destroys the cspace and empties `slot`.
+/// **Descendant-deletion is unconditional — and reachable from the real call path (doc 70,
+/// D-A1).** The `ensures` `first_child is None` + `cspace_wf` hold for *any* live `slot`,
+/// with **no homing precondition**: they ride `delete`'s unconditional teardown contract and
+/// the loop `decreases`, independent of whether `slot` is some object's home handle. This is
+/// the §2.2 spec guarantee ("deletes all descendants … unconditional"), and it is now
+/// provable for the `homed_in_cspace` target every `Sys::CapRevoke` actually supplies
+/// (`cur_slot` is a cell of the caller's cspace) — *not* only for the un-homed inputs the
+/// kernel never sends. Earlier this whole contract sat behind a `requires !is_homed`, which is
+/// **false for every real syscall target**, so the proven guarantee was vacuous over the
+/// implementation's actual inputs (doc 69, D-A1); the precondition is now dropped.
 ///
-/// The provenance frame `unhomed_frozen` (plan §6e) makes the contrapositive a theorem:
-/// a teardown clears a non-target slot only if it is **homed**, so under the precondition
-/// `!is_homed(slot)` — `slot` is no object's internal home handle (a top-level / root-cspace
-/// cap) — no cross-object teardown can reach it, and `slot` survives. The non-zombie
-/// precondition `!is_homed` *rejects* the zombie shape (its `slot` is a cspace resident,
-/// hence homed) and *accepts* a top-level revoke target (where survival genuinely holds);
-/// host-checked both ways (`check_revoke_root_survives` / the zombie negative witness).
+/// **Root-survival is conditional (the §6e theorem, demoted to an implication).** `revoke`
+/// deletes only descendants of `slot`, never `slot` itself, so the *only* way `slot`'s cap can
+/// be emptied is the **cross-object** teardown: deleting the last cap to some object that
+/// **homes** `slot` (a cspace whose resident is `slot`, a channel whose ring cap is `slot`, a
+/// TCB whose bind slot is `slot`) fires that object's destructor, which clears `slot`. The
+/// provenance frame `unhomed_frozen` (plan §6e) makes the contrapositive a theorem: a teardown
+/// clears a non-target slot only if it is **homed**, so when `slot` is un-homed (a top-level /
+/// donated-untyped cap) no cross-object teardown can reach it and `slot` survives — exported as
+/// the `ensures !is_homed(old(store), slot) ==> !is_empty_cap(final …[slot].cap)`. A **homed**
+/// root is the seL4-zombie (`revoke_can_empty_its_own_root_zombie`): `slot` is a resident of a
+/// cspace whose last live cap lies in `slot`'s own subtree, so revoking the subtree destroys
+/// the cspace and empties `slot` — the implication's antecedent is false there, so the contract
+/// admissibly says nothing (doc 70, D-A2). Host-checked both ways
+/// (`check_revoke_root_survives` / the zombie negative witness).
 ///
 /// **Residue (the resident-with-external-reference case).** A `slot` that *is* a cspace
 /// resident but whose homing cspace keeps a live reference outside `slot`'s subtree also
@@ -9285,9 +9294,9 @@ pub fn descend_to_leaf<S: Store>(store: &S, start: SlotId) -> (leaf: SlotId)
 /// destroyed" frame (refs-monotone, the §3 cascade), recorded as the explicit follow-on in
 /// `doc/results/55`. `unhomed_frozen` (this PR) is its foundation.
 ///
-/// pre:  the cspace is well-formed (and finite); `slot` is live, non-empty, and **un-homed**.
-/// post: `slot` has no children (its subtree is gone), its cap **survives**, and the cspace
-///       stays well-formed.
+/// pre:  the cspace is well-formed (and finite); `slot` is live and non-empty.
+/// post: `slot` has no children (its subtree is gone) and the cspace stays well-formed
+///       (unconditional); its cap **survives** when `slot` started **un-homed** (conditional).
 pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
     requires
         cspace_wf(old(store).slot_view()),
@@ -9298,15 +9307,19 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
         caps_consistent(old(store)),
         end_caps_sound(old(store)),
         census_dom_complete(old(store)),
-        // The non-zombie precondition (plan §6e): `slot` is no object's home handle, so the
-        // cross-object teardown the revoke walk triggers cannot reach it.
-        !is_homed(old(store), slot),
     ensures
+        // Descendant-deletion and well-formedness are **unconditional** (doc 70, D-A1): they
+        // hold for *any* target, including the `homed_in_cspace` slot every `Sys::CapRevoke`
+        // supplies — so the spec-mandated guarantee (§2.2) is reachable from the real call path.
         cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom().contains(slot),
         final(store).slot_view()[slot].first_child is None,
-        // Root-survival: the revoked cap is still live (the §6e headline).
-        !is_empty_cap(final(store).slot_view()[slot].cap),
+        // Root-survival is **conditional** on the target being un-homed (the §6e headline,
+        // demoted from a whole-function precondition to this implication — doc 70, D-A1/D-A2):
+        // an un-homed (e.g. donated-untyped) root survives the cross-object teardown, while a
+        // homed root may be self-emptied (the seL4-zombie case), which this `ensures` admissibly
+        // leaves unconstrained.
+        !is_homed(old(store), slot) ==> !is_empty_cap(final(store).slot_view()[slot].cap),
 {
     // `refcount_sound`, `caps_consistent`, the endpoint-cap census, and refs-domain
     // completeness ride the loop as `delete`'s preconditions (§6a/§6d): each `delete`
@@ -9320,10 +9333,12 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
             caps_consistent(store),
             end_caps_sound(store),
             census_dom_complete(store),
-            // `slot`'s home status is immutable across teardown (`home_views_frozen`), so the
-            // precondition `!is_homed` rides the loop, and `slot`'s cap stays live (plan §6e).
-            !is_homed(store, slot),
-            !is_empty_cap(store.slot_view()[slot].cap),
+            // `slot`'s home status is immutable across teardown (`home_views_frozen`, via
+            // `lemma_is_homed_stable`), so the `old` homing carries through the loop unchanged.
+            is_homed(store, slot) == is_homed(old(store), slot),
+            // Conditional root-survival rides the loop only when the target started un-homed; the
+            // homed (seL4-zombie) case is left unconstrained (doc 70, D-A1/D-A2).
+            !is_homed(old(store), slot) ==> !is_empty_cap(store.slot_view()[slot].cap),
         decreases count_nonempty(store.slot_view()),
     {
         // The first child is live (it names `slot` as parent), so we descend from a
@@ -9342,10 +9357,16 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
             assert(pre.slot_view()[slot].first_child is Some);
             assert(pre.slot_view()[leaf].first_child is None);
             assert(slot != leaf);
-            // `delete` frames the home maps, so `slot` stays un-homed; and its `unhomed_frozen`
-            // frame (target `leaf != slot`, `slot` un-homed) keeps `slot`'s cap unchanged.
+            // `delete` frames the home maps, so `slot`'s home status is stable across the step —
+            // this maintains the `is_homed(store, slot) == is_homed(old, slot)` invariant.
             lemma_is_homed_stable(&pre, store, slot);
-            assert(store.slot_view()[slot].cap == pre.slot_view()[slot].cap);
+            // Conditional root-survival: only when the target started un-homed does
+            // `unhomed_frozen` (target `leaf != slot`, `slot` un-homed) keep `slot`'s cap. The
+            // homed case may empty `slot` (the seL4-zombie cross-object teardown), which the
+            // conditional `ensures` admissibly leaves unconstrained.
+            if !is_homed(old(store), slot) {
+                assert(store.slot_view()[slot].cap == pre.slot_view()[slot].cap);
+            }
         }
     }
 }
