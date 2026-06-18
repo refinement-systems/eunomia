@@ -32,14 +32,11 @@ use crate::hash::Hash;
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
+use vstd::prelude::*;
 
 /// Files at or below this size live inline in the directory entry (§4.9).
 /// The rule is a pure function of content, preserving canonical form.
 pub const INLINE_MAX: usize = 512;
-
-/// Hard cap on optional-TLV bytes per entry (§4.9) — keeps directory nodes
-/// directory-shaped regardless of future tags.
-pub const MAX_OPT_BYTES: usize = 4096;
 
 /// Advisory-executable bit in the flags word — a type hint with zero
 /// security semantics (§4.9).
@@ -49,7 +46,11 @@ const SPLIT_BITS: u32 = 5;
 const SPLIT_MASK: u64 = (1 << SPLIT_BITS) - 1;
 const MAX_NODE_ENTRIES: usize = 128;
 
-const OPT_TAG_FLAGS: u8 = 1;
+// MAX_OPT_BYTES / OPT_TAG_FLAGS live inside the `verus!{}` block at the end of
+// this file (a const declared outside the macro is invisible to Verus — the 7f
+// gotcha); they erase to the same `pub const` / `const` so external code is
+// unchanged. The verified TLV core (`decode_raw`/`encode_raw`, plan §7g) names
+// them.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
@@ -177,40 +178,52 @@ fn validate_entry(e: &Entry) -> Result<(), FormatError> {
     Ok(())
 }
 
+// `Entry` ↔ `RawEntry`: the trivially-total `Hash`/`EntryKind` (un)wrap that
+// keeps `Hash` out of the verified core (the round-trip theorem lives on the
+// `[u8; 32]`-carrying `RawEntry`, so it covers all 32 hash bytes).
+fn entry_to_raw(e: &Entry) -> RawEntry {
+    RawEntry {
+        name: e.name.clone(),
+        kind: match e.kind {
+            EntryKind::File => 0,
+            EntryKind::Dir => 1,
+        },
+        flags: e.flags,
+        size: e.size,
+        mtime: e.mtime,
+        content: match &e.content {
+            Content::Inline(bytes) => RawContent::Inline(bytes.clone()),
+            Content::ChunkList(h) => RawContent::ChunkList(*h.as_bytes()),
+            Content::DirRoot(h) => RawContent::DirRoot(*h.as_bytes()),
+        },
+    }
+}
+
+fn raw_to_entry(raw: RawEntry) -> Entry {
+    Entry {
+        // `decode_raw` rejects any kind byte other than 0/1.
+        kind: if raw.kind == 0 { EntryKind::File } else { EntryKind::Dir },
+        flags: raw.flags,
+        size: raw.size,
+        mtime: raw.mtime,
+        content: match raw.content {
+            RawContent::Inline(bytes) => Content::Inline(bytes),
+            RawContent::ChunkList(a) => Content::ChunkList(Hash::from_bytes(a)),
+            RawContent::DirRoot(a) => Content::DirRoot(Hash::from_bytes(a)),
+        },
+        name: raw.name,
+    }
+}
+
+fn tlv_err(e: TlvErr) -> FormatError {
+    match e {
+        TlvErr::Truncated => FormatError::BadNode("truncated"),
+        TlvErr::BadEntry(why) => FormatError::BadEntry(why),
+    }
+}
+
 pub(crate) fn encode_entry(e: &Entry, out: &mut Vec<u8>) {
-    out.push(e.name.len() as u8);
-    out.extend_from_slice(&e.name);
-    out.push(match e.kind {
-        EntryKind::File => 0,
-        EntryKind::Dir => 1,
-    });
-    out.extend_from_slice(&e.size.to_le_bytes());
-    out.extend_from_slice(&e.mtime.to_le_bytes());
-    match &e.content {
-        Content::Inline(bytes) => {
-            out.push(0);
-            out.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
-            out.extend_from_slice(bytes);
-        }
-        Content::ChunkList(h) => {
-            out.push(1);
-            out.extend_from_slice(h.as_bytes());
-        }
-        Content::DirRoot(h) => {
-            out.push(2);
-            out.extend_from_slice(h.as_bytes());
-        }
-    }
-    // Optional TLV section: absent fields contribute zero bytes (§4.9).
-    let mut opt = Vec::new();
-    if e.flags != 0 {
-        opt.push(OPT_TAG_FLAGS);
-        opt.extend_from_slice(&4u16.to_le_bytes());
-        opt.extend_from_slice(&e.flags.to_le_bytes());
-    }
-    debug_assert!(opt.len() <= MAX_OPT_BYTES);
-    out.extend_from_slice(&(opt.len() as u16).to_le_bytes());
-    out.extend_from_slice(&opt);
+    encode_raw(&entry_to_raw(e), out);
 }
 
 pub(crate) struct Reader<'a> {
@@ -256,57 +269,12 @@ impl<'a> Reader<'a> {
 }
 
 pub(crate) fn decode_entry(r: &mut Reader) -> Result<Entry, FormatError> {
-    let name_len = r.u8()? as usize;
-    let name = r.take(name_len)?.to_vec();
-    let kind = match r.u8()? {
-        0 => EntryKind::File,
-        1 => EntryKind::Dir,
-        _ => return Err(FormatError::BadEntry("bad kind")),
-    };
-    let size = r.u64()?;
-    let mtime = r.u64()?;
-    let content = match r.u8()? {
-        0 => {
-            let len = r.u16()? as usize;
-            Content::Inline(r.take(len)?.to_vec())
-        }
-        1 => Content::ChunkList(r.hash()?),
-        2 => Content::DirRoot(r.hash()?),
-        _ => return Err(FormatError::BadEntry("bad content tag")),
-    };
-    let opt_len = r.u16()? as usize;
-    if opt_len > MAX_OPT_BYTES {
-        return Err(FormatError::BadEntry("optional section too large"));
-    }
-    let mut opt = Reader { buf: r.take(opt_len)?, pos: 0 };
-    let mut flags = 0u32;
-    let mut last_tag: i16 = -1;
-    while !opt.done() {
-        let tag = opt.u8()?;
-        if i16::from(tag) <= last_tag {
-            return Err(FormatError::BadEntry("optional tags not strictly ascending"));
-        }
-        last_tag = i16::from(tag);
-        let len = opt.u16()? as usize;
-        let value = opt.take(len)?;
-        match tag {
-            OPT_TAG_FLAGS => {
-                if len != 4 {
-                    return Err(FormatError::BadEntry("bad flags length"));
-                }
-                flags = u32::from_le_bytes(value.try_into().unwrap());
-                if flags == 0 {
-                    // Zero flags must be encoded as absence — canonical form.
-                    return Err(FormatError::BadEntry("zero flags must be absent"));
-                }
-            }
-            // Format version 0 defines exactly one optional tag. Accepting
-            // and dropping unknown tags would silently rewrite newer-format
-            // entries, so reject instead.
-            _ => return Err(FormatError::BadEntry("unknown optional tag")),
-        }
-    }
-    let entry = Entry { name, kind, flags, size, mtime, content };
+    // The verified core (`decode_raw`) parses one entry's structure + optional
+    // section (total ∀ bytes, accepts only canonical encodings); `validate_entry`
+    // adds the entry-level well-formedness that only shrinks the accept set.
+    let (raw, consumed) = decode_raw(&r.buf[r.pos..]).map_err(tlv_err)?;
+    r.pos += consumed;
+    let entry = raw_to_entry(raw);
     validate_entry(&entry)?;
     Ok(entry)
 }
@@ -568,6 +536,596 @@ pub fn diff(
     out.sort();
     Ok(out)
 }
+
+// ── Verified TLV core (plan doc/plans/3_verus-rewrite.md §7g) ────────────
+//
+// The directory-entry TLV codec (§4.9), proven in Verus: `decode_raw` is
+// **total ∀ bytes** (verifying the body *is* the no-panic theorem) and the
+// **canonical-form round-trip is a theorem ∀** — `encode_raw(decode_raw(b)) ==
+// b[..k]` (the property `cas/fuzz/.../tlv_entry.rs` samples). `Hash` is kept
+// out of the proof surface (the 7f `RawSuperblock` discipline): the verified
+// core carries `[u8; 32]` so the 32 hash bytes round-trip *inside* the proof,
+// and `decode_entry`/`encode_entry` are thin `Entry ↔ RawEntry` converters that
+// do the trivially-total `Hash::{from_bytes,as_bytes}` wrap. Entry-level
+// well-formedness (`validate_entry`) stays plain Rust — it only shrinks the
+// accept set and so does not bear on the round-trip; the fuzz oracle covers the
+// full `Entry` path.
+verus! {
+
+/// Hard cap on optional-TLV bytes per entry (§4.9) — keeps directory nodes
+/// directory-shaped regardless of future tags. Inside the macro so the verified
+/// `decode_raw` can name it (a const outside `verus!{}` is invisible to Verus).
+pub const MAX_OPT_BYTES: usize = 4096;
+
+/// The one optional tag defined by format v0 (the advisory flags word).
+const OPT_TAG_FLAGS: u8 = 1;
+
+/// The `Hash`-free image of one decoded entry — `[u8; 32]` in place of `Hash`
+/// so the round-trip proof never touches the external `Hash` type.
+pub struct RawEntry {
+    pub name: Vec<u8>,
+    pub kind: u8,
+    pub flags: u32,
+    pub size: u64,
+    pub mtime: u64,
+    pub content: RawContent,
+}
+
+pub enum RawContent {
+    Inline(Vec<u8>),
+    ChunkList([u8; 32]),
+    DirRoot([u8; 32]),
+}
+
+/// Why `decode_raw` rejected — mapped 1:1 to `FormatError` by `decode_entry`
+/// (an in-block enum because the external `FormatError` cannot be constructed
+/// inside `verus!{}`; its `MissingNode(Hash)` variant would drag in `Hash`).
+pub enum TlvErr {
+    Truncated,
+    BadEntry(&'static str),
+}
+
+// ── Spec: the canonical byte image of an entry ───────────────────────────
+
+pub open spec fn u16_le(x: u16) -> Seq<u8> {
+    seq![x as u8, (x >> 8) as u8]
+}
+
+pub open spec fn u32_le(x: u32) -> Seq<u8> {
+    seq![x as u8, (x >> 8) as u8, (x >> 16) as u8, (x >> 24) as u8]
+}
+
+pub open spec fn u64_le(x: u64) -> Seq<u8> {
+    seq![
+        x as u8, (x >> 8) as u8, (x >> 16) as u8, (x >> 24) as u8,
+        (x >> 32) as u8, (x >> 40) as u8, (x >> 48) as u8, (x >> 56) as u8,
+    ]
+}
+
+pub open spec fn content_bytes(c: RawContent) -> Seq<u8> {
+    match c {
+        RawContent::Inline(b) => seq![0u8] + u16_le(b@.len() as u16) + b@,
+        RawContent::ChunkList(h) => seq![1u8] + h@,
+        RawContent::DirRoot(h) => seq![2u8] + h@,
+    }
+}
+
+/// The optional section's bytes (the `u16` length prefix + the records). The
+/// format is canonical: either absent (`flags == 0`, an empty section) or
+/// exactly the one 7-byte flags record.
+pub open spec fn opt_bytes(flags: u32) -> Seq<u8> {
+    if flags == 0 {
+        u16_le(0)
+    } else {
+        u16_le(7) + seq![1u8] + u16_le(4) + u32_le(flags)
+    }
+}
+
+pub open spec fn canonical_bytes(e: RawEntry) -> Seq<u8> {
+    seq![e.name@.len() as u8] + e.name@ + seq![e.kind] + u64_le(e.size) + u64_le(e.mtime)
+        + content_bytes(e.content) + opt_bytes(e.flags)
+}
+
+// ── Exec byte readers (the 7f recipe: explicit index + shift, not
+//    `from_le_bytes`/`try_into`), each carrying its `*_le` round-trip ───────
+
+fn read_u16_le(buf: &[u8], off: usize) -> (v: u16)
+    requires
+        off + 2 <= buf@.len(),
+    ensures
+        buf@.subrange(off as int, off as int + 2) == u16_le(v),
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    let b0 = buf[off];
+    let b1 = buf[off + 1];
+    let v: u16 = (b0 as u16) | ((b1 as u16) << 8);
+    assert(((b0 as u16) | ((b1 as u16) << 8)) as u8 == b0) by (bit_vector);
+    assert((((b0 as u16) | ((b1 as u16) << 8)) >> 8) as u8 == b1) by (bit_vector);
+    assert(buf@.subrange(off as int, off as int + 2) =~= u16_le(v));
+    v
+}
+
+fn read_u32_le(buf: &[u8], off: usize) -> (v: u32)
+    requires
+        off + 4 <= buf@.len(),
+    ensures
+        buf@.subrange(off as int, off as int + 4) == u32_le(v),
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    let b0 = buf[off];
+    let b1 = buf[off + 1];
+    let b2 = buf[off + 2];
+    let b3 = buf[off + 3];
+    let v: u32 = (b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16) | ((b3 as u32) << 24);
+    assert(((b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16) | ((b3 as u32) << 24)) as u8 == b0)
+        by (bit_vector);
+    assert(((((b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16) | ((b3 as u32) << 24)) >> 8) as u8) == b1)
+        by (bit_vector);
+    assert(((((b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16) | ((b3 as u32) << 24)) >> 16) as u8) == b2)
+        by (bit_vector);
+    assert(((((b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16) | ((b3 as u32) << 24)) >> 24) as u8) == b3)
+        by (bit_vector);
+    assert(buf@.subrange(off as int, off as int + 4) =~= u32_le(v));
+    v
+}
+
+fn read_u64_le(buf: &[u8], off: usize) -> (v: u64)
+    requires
+        off + 8 <= buf@.len(),
+    ensures
+        buf@.subrange(off as int, off as int + 8) == u64_le(v),
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    let b0 = buf[off];
+    let b1 = buf[off + 1];
+    let b2 = buf[off + 2];
+    let b3 = buf[off + 3];
+    let b4 = buf[off + 4];
+    let b5 = buf[off + 5];
+    let b6 = buf[off + 6];
+    let b7 = buf[off + 7];
+    let v: u64 = (b0 as u64) | ((b1 as u64) << 8) | ((b2 as u64) << 16) | ((b3 as u64) << 24)
+        | ((b4 as u64) << 32) | ((b5 as u64) << 40) | ((b6 as u64) << 48) | ((b7 as u64) << 56);
+    assert(v as u8 == b0) by (bit_vector)
+        requires v == (b0 as u64) | ((b1 as u64) << 8) | ((b2 as u64) << 16) | ((b3 as u64) << 24)
+            | ((b4 as u64) << 32) | ((b5 as u64) << 40) | ((b6 as u64) << 48) | ((b7 as u64) << 56);
+    assert((v >> 8) as u8 == b1) by (bit_vector)
+        requires v == (b0 as u64) | ((b1 as u64) << 8) | ((b2 as u64) << 16) | ((b3 as u64) << 24)
+            | ((b4 as u64) << 32) | ((b5 as u64) << 40) | ((b6 as u64) << 48) | ((b7 as u64) << 56);
+    assert((v >> 16) as u8 == b2) by (bit_vector)
+        requires v == (b0 as u64) | ((b1 as u64) << 8) | ((b2 as u64) << 16) | ((b3 as u64) << 24)
+            | ((b4 as u64) << 32) | ((b5 as u64) << 40) | ((b6 as u64) << 48) | ((b7 as u64) << 56);
+    assert((v >> 24) as u8 == b3) by (bit_vector)
+        requires v == (b0 as u64) | ((b1 as u64) << 8) | ((b2 as u64) << 16) | ((b3 as u64) << 24)
+            | ((b4 as u64) << 32) | ((b5 as u64) << 40) | ((b6 as u64) << 48) | ((b7 as u64) << 56);
+    assert((v >> 32) as u8 == b4) by (bit_vector)
+        requires v == (b0 as u64) | ((b1 as u64) << 8) | ((b2 as u64) << 16) | ((b3 as u64) << 24)
+            | ((b4 as u64) << 32) | ((b5 as u64) << 40) | ((b6 as u64) << 48) | ((b7 as u64) << 56);
+    assert((v >> 40) as u8 == b5) by (bit_vector)
+        requires v == (b0 as u64) | ((b1 as u64) << 8) | ((b2 as u64) << 16) | ((b3 as u64) << 24)
+            | ((b4 as u64) << 32) | ((b5 as u64) << 40) | ((b6 as u64) << 48) | ((b7 as u64) << 56);
+    assert((v >> 48) as u8 == b6) by (bit_vector)
+        requires v == (b0 as u64) | ((b1 as u64) << 8) | ((b2 as u64) << 16) | ((b3 as u64) << 24)
+            | ((b4 as u64) << 32) | ((b5 as u64) << 40) | ((b6 as u64) << 48) | ((b7 as u64) << 56);
+    assert((v >> 56) as u8 == b7) by (bit_vector)
+        requires v == (b0 as u64) | ((b1 as u64) << 8) | ((b2 as u64) << 16) | ((b3 as u64) << 24)
+            | ((b4 as u64) << 32) | ((b5 as u64) << 40) | ((b6 as u64) << 48) | ((b7 as u64) << 56);
+    assert(buf@.subrange(off as int, off as int + 8) =~= u64_le(v));
+    v
+}
+
+fn read_arr32(buf: &[u8], off: usize) -> (a: [u8; 32])
+    requires
+        off + 32 <= buf@.len(),
+    ensures
+        a@ == buf@.subrange(off as int, off as int + 32),
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    let a: [u8; 32] = [
+        buf[off], buf[off + 1], buf[off + 2], buf[off + 3],
+        buf[off + 4], buf[off + 5], buf[off + 6], buf[off + 7],
+        buf[off + 8], buf[off + 9], buf[off + 10], buf[off + 11],
+        buf[off + 12], buf[off + 13], buf[off + 14], buf[off + 15],
+        buf[off + 16], buf[off + 17], buf[off + 18], buf[off + 19],
+        buf[off + 20], buf[off + 21], buf[off + 22], buf[off + 23],
+        buf[off + 24], buf[off + 25], buf[off + 26], buf[off + 27],
+        buf[off + 28], buf[off + 29], buf[off + 30], buf[off + 31],
+    ];
+    assert(a@ =~= buf@.subrange(off as int, off as int + 32));
+    a
+}
+
+// ── Exec byte writers (push loops with clean `Seq` concat specs; vstd's
+//    `extend_from_slice` ensures uses `cloned`, awkward for u8 equality) ────
+
+fn extend_bytes(out: &mut Vec<u8>, src: &[u8])
+    ensures
+        final(out)@ == old(out)@ + src@,
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    let mut i: usize = 0;
+    while i < src.len()
+        invariant
+            i <= src@.len(),
+            out@ == old(out)@ + src@.subrange(0, i as int),
+        decreases src@.len() - i,
+    {
+        out.push(src[i]);
+        assert(src@.subrange(0, i as int + 1) =~= src@.subrange(0, i as int).push(src@[i as int]));
+        i += 1;
+    }
+    assert(src@.subrange(0, src@.len() as int) =~= src@);
+}
+
+fn copy_range(buf: &[u8], off: usize, n: usize) -> (v: Vec<u8>)
+    requires
+        off + n <= buf@.len(),
+    ensures
+        v@ == buf@.subrange(off as int, off as int + n),
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    assert(off + n <= buf.len());     // off + n ≤ buf.len() (usize), so no overflow
+    let end = off + n;
+    let mut v: Vec<u8> = Vec::new();
+    let mut i: usize = off;
+    while i < end
+        invariant
+            off <= i <= end,
+            end == off + n,
+            end <= buf@.len(),
+            v@ == buf@.subrange(off as int, i as int),
+        decreases end - i,
+    {
+        v.push(buf[i]);
+        assert(buf@.subrange(off as int, i as int + 1)
+            =~= buf@.subrange(off as int, i as int).push(buf@[i as int]));
+        i += 1;
+    }
+    assert(v@ =~= buf@.subrange(off as int, off as int + n));
+    v
+}
+
+fn push_arr32(out: &mut Vec<u8>, h: &[u8; 32])
+    ensures
+        final(out)@ == old(out)@ + h@,
+{
+    broadcast use vstd::array::group_array_axioms;
+    let mut i: usize = 0;
+    while i < 32
+        invariant
+            i <= 32,
+            h@.len() == 32,
+            out@ == old(out)@ + h@.subrange(0, i as int),
+        decreases 32 - i,
+    {
+        out.push(h[i]);
+        assert(h@.subrange(0, i as int + 1) =~= h@.subrange(0, i as int).push(h@[i as int]));
+        i += 1;
+    }
+    assert(h@.subrange(0, 32) =~= h@);
+}
+
+fn push_u16_le(out: &mut Vec<u8>, x: u16)
+    ensures
+        final(out)@ == old(out)@ + u16_le(x),
+{
+    out.push(x as u8);
+    out.push((x >> 8) as u8);
+    assert(out@ =~= old(out)@ + u16_le(x));
+}
+
+fn push_u32_le(out: &mut Vec<u8>, x: u32)
+    ensures
+        final(out)@ == old(out)@ + u32_le(x),
+{
+    out.push(x as u8);
+    out.push((x >> 8) as u8);
+    out.push((x >> 16) as u8);
+    out.push((x >> 24) as u8);
+    assert(out@ =~= old(out)@ + u32_le(x));
+}
+
+fn push_u64_le(out: &mut Vec<u8>, x: u64)
+    ensures
+        final(out)@ == old(out)@ + u64_le(x),
+{
+    out.push(x as u8);
+    out.push((x >> 8) as u8);
+    out.push((x >> 16) as u8);
+    out.push((x >> 24) as u8);
+    out.push((x >> 32) as u8);
+    out.push((x >> 40) as u8);
+    out.push((x >> 48) as u8);
+    out.push((x >> 56) as u8);
+    assert(out@ =~= old(out)@ + u64_le(x));
+}
+
+/// Serialize one entry to its canonical TLV, appended to `out`. The exec
+/// `Vec`-building encoder, proven to produce exactly `canonical_bytes`.
+pub fn encode_raw(e: &RawEntry, out: &mut Vec<u8>)
+    ensures
+        final(out)@ == old(out)@ + canonical_bytes(*e),
+{
+    out.push(e.name.len() as u8);
+    extend_bytes(out, e.name.as_slice());
+    out.push(e.kind);
+    push_u64_le(out, e.size);
+    push_u64_le(out, e.mtime);
+    match &e.content {
+        RawContent::Inline(b) => {
+            out.push(0u8);
+            push_u16_le(out, b.len() as u16);
+            extend_bytes(out, b.as_slice());
+        }
+        RawContent::ChunkList(h) => {
+            out.push(1u8);
+            push_arr32(out, h);
+        }
+        RawContent::DirRoot(h) => {
+            out.push(2u8);
+            push_arr32(out, h);
+        }
+    }
+    if e.flags != 0 {
+        push_u16_le(out, 7);
+        out.push(OPT_TAG_FLAGS);
+        push_u16_le(out, 4);
+        push_u32_le(out, e.flags);
+    } else {
+        push_u16_le(out, 0);
+    }
+    assert(out@ =~= old(out)@ + canonical_bytes(*e));
+}
+
+// ── Decode: total ∀ bytes, and accepts only canonical encodings ───────────
+
+/// `seq.subrange(a, b) + seq.subrange(b, c) == seq.subrange(a, c)`.
+proof fn lemma_cat(s: Seq<u8>, a: int, b: int, c: int)
+    requires
+        0 <= a <= b <= c <= s.len(),
+    ensures
+        s.subrange(a, b) + s.subrange(b, c) == s.subrange(a, c),
+{
+    assert(s.subrange(a, b) + s.subrange(b, c) =~= s.subrange(a, c));
+}
+
+/// Whether `n` more bytes fit before `end` starting at `pos`, overflow-free.
+fn fits(pos: usize, n: usize, end: usize) -> (b: bool)
+    ensures
+        b <==> pos + n <= end,
+{
+    n <= end && pos <= end - n
+}
+
+/// Parse one entry's `RawEntry` plus the byte count consumed, or reject.
+/// **Total ∀** `buf` (verifying the body *is* the no-panic theorem); and on
+/// `Ok` the consumed prefix equals the entry's `canonical_bytes` — so the
+/// decoder only ever accepts a canonical encoding (the round-trip's hard
+/// direction; the opt-section loop accepts at most one record).
+pub fn decode_raw(buf: &[u8]) -> (r: Result<(RawEntry, usize), TlvErr>)
+    ensures
+        r matches Ok((e, k)) ==> k <= buf@.len() && canonical_bytes(e) == buf@.subrange(0, k as int),
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    let len = buf.len();
+
+    // name_len (u8) + name
+    if !fits(0, 1, len) {
+        return Err(TlvErr::Truncated);
+    }
+    let name_len = buf[0] as usize;
+    if !fits(1, name_len, len) {
+        return Err(TlvErr::Truncated);
+    }
+    let name = copy_range(buf, 1, name_len);
+    let p_kind = 1 + name_len;
+
+    // kind (u8)
+    if !fits(p_kind, 1, len) {
+        return Err(TlvErr::Truncated);
+    }
+    let kind = buf[p_kind];
+    if kind != 0 && kind != 1 {
+        return Err(TlvErr::BadEntry("bad kind"));
+    }
+    let p_size = p_kind + 1;
+
+    // size, mtime (u64 each)
+    if !fits(p_size, 8, len) {
+        return Err(TlvErr::Truncated);
+    }
+    let size = read_u64_le(buf, p_size);
+    let p_mtime = p_size + 8;
+    if !fits(p_mtime, 8, len) {
+        return Err(TlvErr::Truncated);
+    }
+    let mtime = read_u64_le(buf, p_mtime);
+    let p_ctag = p_mtime + 8;
+
+    // content tag (u8) + content
+    if !fits(p_ctag, 1, len) {
+        return Err(TlvErr::Truncated);
+    }
+    let ctag = buf[p_ctag];
+    // content_bytes (the spec image) begins at the tag byte, so the content
+    // segment is buf[p_ctag, p_optlen].
+    let ghost gp_content = p_ctag as int;
+    let p_content = p_ctag + 1;
+    let content: RawContent;
+    let p_optlen: usize;
+    if ctag == 0 {
+        if !fits(p_content, 2, len) {
+            return Err(TlvErr::Truncated);
+        }
+        let ilen_u16 = read_u16_le(buf, p_content);
+        let ilen = ilen_u16 as usize;
+        let p_inline = p_content + 2;
+        if !fits(p_inline, ilen, len) {
+            return Err(TlvErr::Truncated);
+        }
+        let ib = copy_range(buf, p_inline, ilen);
+        let end = p_inline + ilen;
+        content = RawContent::Inline(ib);
+        proof {
+            // [0] + u16_le(ilen) + inline-bytes == buf[p_ctag, end]
+            lemma_cat(buf@, gp_content, gp_content + 1, gp_content + 3);
+            lemma_cat(buf@, gp_content, gp_content + 3, end as int);
+        }
+        assert(buf@.subrange(gp_content, gp_content + 1) =~= seq![0u8]);
+        assert(content_bytes(content) == buf@.subrange(gp_content, end as int));
+        p_optlen = end;
+    } else if ctag == 1 {
+        if !fits(p_content, 32, len) {
+            return Err(TlvErr::Truncated);
+        }
+        let h = read_arr32(buf, p_content);
+        let end = p_content + 32;
+        content = RawContent::ChunkList(h);
+        proof {
+            lemma_cat(buf@, gp_content, gp_content + 1, end as int);
+        }
+        assert(buf@.subrange(gp_content, gp_content + 1) =~= seq![1u8]);
+        assert(content_bytes(content) == buf@.subrange(gp_content, end as int));
+        p_optlen = end;
+    } else if ctag == 2 {
+        if !fits(p_content, 32, len) {
+            return Err(TlvErr::Truncated);
+        }
+        let h = read_arr32(buf, p_content);
+        let end = p_content + 32;
+        content = RawContent::DirRoot(h);
+        proof {
+            lemma_cat(buf@, gp_content, gp_content + 1, end as int);
+        }
+        assert(buf@.subrange(gp_content, gp_content + 1) =~= seq![2u8]);
+        assert(content_bytes(content) == buf@.subrange(gp_content, end as int));
+        p_optlen = end;
+    } else {
+        return Err(TlvErr::BadEntry("bad content tag"));
+    }
+    let ghost gp_optlen = p_optlen as int;
+
+    // opt_len (u16) + optional section
+    if !fits(p_optlen, 2, len) {
+        return Err(TlvErr::Truncated);
+    }
+    let opt_len_u16 = read_u16_le(buf, p_optlen);
+    let opt_len = opt_len_u16 as usize;
+    let opt_start = p_optlen + 2;
+    if opt_len > MAX_OPT_BYTES {
+        return Err(TlvErr::BadEntry("optional section too large"));
+    }
+    if !fits(opt_start, opt_len, len) {
+        return Err(TlvErr::Truncated);
+    }
+    let opt_end = opt_start + opt_len;
+    let ghost g_opt_start = opt_start as int;
+    // buf[p_optlen, opt_start] is the u16 length prefix of opt_bytes.
+    assert(buf@.subrange(gp_optlen, g_opt_start) == u16_le(opt_len_u16));
+
+    let mut flags: u32 = 0;
+    let mut last_tag: i16 = -1;
+    let mut p = opt_start;
+    while p < opt_end
+        invariant
+            opt_start <= p <= opt_end,
+            opt_end <= len,
+            opt_end == opt_start + opt_len,
+            len == buf@.len(),
+            g_opt_start == opt_start as int,
+            last_tag == -1 || last_tag == 1,
+            (last_tag == -1) ==> (flags == 0 && p as int == g_opt_start),
+            (last_tag == 1) ==> (flags != 0 && p as int == g_opt_start + 7
+                && buf@.subrange(g_opt_start, p as int) == seq![1u8] + u16_le(4) + u32_le(flags)),
+        decreases opt_end - p,
+    {
+        let ghost gp = p as int;
+        let tag = buf[p];
+        assert(tag == buf@[gp]);
+        let pt = p + 1;
+        if (tag as i16) <= last_tag {
+            return Err(TlvErr::BadEntry("optional tags not strictly ascending"));
+        }
+        if !fits(pt, 2, opt_end) {
+            return Err(TlvErr::Truncated);
+        }
+        let vlen_u16 = read_u16_le(buf, pt);
+        let vlen = vlen_u16 as usize;
+        let pv = pt + 2;
+        if !fits(pv, vlen, opt_end) {
+            return Err(TlvErr::Truncated);
+        }
+        let val_pos = pv;
+        let pnext = pv + vlen;
+        if tag == OPT_TAG_FLAGS {
+            if vlen != 4 {
+                return Err(TlvErr::BadEntry("bad flags length"));
+            }
+            let f = read_u32_le(buf, val_pos);
+            if f == 0 {
+                return Err(TlvErr::BadEntry("zero flags must be absent"));
+            }
+            // tag == 1 strictly exceeds last_tag ∈ {-1, 1}, so last_tag == -1:
+            // the section's first (and only) record. Positions are relative to
+            // gp == g_opt_start: tag@gp, len@gp+1, value@gp+3, pnext == gp+7.
+            assert(last_tag == -1);
+            assert(gp == g_opt_start);
+            assert(pnext as int == g_opt_start + 7);
+            assert(g_opt_start + 7 <= buf@.len());   // pnext <= opt_end <= len
+            assert(buf@.subrange(g_opt_start, g_opt_start + 1) =~= seq![1u8]);
+            assert(buf@.subrange(g_opt_start + 1, g_opt_start + 3) == u16_le(4));
+            assert(buf@.subrange(g_opt_start + 3, g_opt_start + 7) == u32_le(f));
+            proof {
+                lemma_cat(buf@, g_opt_start + 1, g_opt_start + 3, g_opt_start + 7);
+                lemma_cat(buf@, g_opt_start, g_opt_start + 1, g_opt_start + 7);
+            }
+            assert(buf@.subrange(g_opt_start, pnext as int) == seq![1u8] + u16_le(4) + u32_le(f));
+            flags = f;
+            last_tag = 1;
+            p = pnext;
+        } else {
+            return Err(TlvErr::BadEntry("unknown optional tag"));
+        }
+    }
+
+    // Loop done: p == opt_end. Either no record (flags == 0, empty section) or
+    // exactly the one canonical flags record — so opt_bytes(flags) is exactly
+    // the consumed bytes buf[p_optlen, opt_end].
+    proof {
+        lemma_cat(buf@, gp_optlen, g_opt_start, opt_end as int);
+    }
+    if last_tag == 1 {
+        assert(opt_len_u16 == 7);
+        assert(buf@.subrange(g_opt_start, opt_end as int) == seq![1u8] + u16_le(4) + u32_le(flags));
+        assert(opt_bytes(flags) == buf@.subrange(gp_optlen, opt_end as int));
+    } else {
+        assert(flags == 0);
+        assert(opt_len_u16 == 0);
+        assert(g_opt_start == opt_end as int);
+        assert(opt_bytes(flags) == buf@.subrange(gp_optlen, opt_end as int));
+    }
+
+    let e = RawEntry { name, kind, flags, size, mtime, content };
+
+    // Assemble: canonical_bytes(e) == buf[0, opt_end].
+    assert(seq![e.name@.len() as u8] == buf@.subrange(0, 1));
+    assert(e.name@ == buf@.subrange(1, p_kind as int));
+    assert(seq![e.kind] =~= buf@.subrange(p_kind as int, p_size as int));
+    assert(u64_le(e.size) == buf@.subrange(p_size as int, p_mtime as int));
+    assert(u64_le(e.mtime) == buf@.subrange(p_mtime as int, gp_content));
+    proof {
+        lemma_cat(buf@, 0, 1, p_kind as int);
+        lemma_cat(buf@, 0, p_kind as int, p_size as int);
+        lemma_cat(buf@, 0, p_size as int, p_mtime as int);
+        lemma_cat(buf@, 0, p_mtime as int, gp_content);
+        lemma_cat(buf@, 0, gp_content, gp_optlen);
+        lemma_cat(buf@, 0, gp_optlen, opt_end as int);
+    }
+    assert(canonical_bytes(e) == buf@.subrange(0, opt_end as int));
+    Ok((e, opt_end))
+}
+
+} // verus!
 
 // ── Tests ───────────────────────────────────────────────────────────────
 
