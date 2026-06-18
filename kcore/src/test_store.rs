@@ -435,7 +435,7 @@ fn cap_obj_exec(cap: Cap) -> Option<ObjId> {
     match cap.kind {
         CapKind::Aspace(o)
         | CapKind::CSpace(o)
-        | CapKind::Thread(o)
+        | CapKind::Thread(o, _)
         | CapKind::Channel(o, _)
         | CapKind::Notification(o)
         | CapKind::Timer(o) => Some(o),
@@ -674,7 +674,7 @@ fn cap_consistent_exec(st: &ArrayStore, cap: Cap) -> bool {
             st.cspaces.contains_key(&o.0)
                 && st.cspaces[&o.0].iter().all(|sid| (sid.0 as usize) < st.n())
         }
-        CapKind::Thread(o) => {
+        CapKind::Thread(o, _) => {
             st.tcbs.contains_key(&o.0)
                 && (st.tcbs[&o.0].bind_slots[0].0 as usize) < st.n()
                 && (st.tcbs[&o.0].bind_slots[1].0 as usize) < st.n()
@@ -760,6 +760,9 @@ fn untyped_cap(base: u64, size: u64, watermark: u64) -> Cap {
 }
 fn notif_cap(o: u64) -> Cap {
     Cap { kind: CapKind::Notification(ObjId(o)), rights: Rights(0xff) }
+}
+fn thread_cap(o: u64, max_prio: u8) -> Cap {
+    Cap { kind: CapKind::Thread(ObjId(o), max_prio), rights: Rights(0xff) }
 }
 
 // The exec mirror of the spec `CapKind::Untyped { base, size, watermark }`
@@ -996,7 +999,7 @@ fn cap_kind_eq(a: CapKind, b: CapKind) -> bool {
         ) => b1 == b2 && p1 == p2 && m1 == m2,
         (CapKind::Aspace(o1), CapKind::Aspace(o2)) => o1 == o2,
         (CapKind::CSpace(o1), CapKind::CSpace(o2)) => o1 == o2,
-        (CapKind::Thread(o1), CapKind::Thread(o2)) => o1 == o2,
+        (CapKind::Thread(o1, mp1), CapKind::Thread(o2, mp2)) => o1 == o2 && mp1 == mp2,
         (CapKind::Channel(o1, e1), CapKind::Channel(o2, e2)) => o1 == o2 && e1 == e2,
         (CapKind::Notification(o1), CapKind::Notification(o2)) => o1 == o2,
         (CapKind::Timer(o1), CapKind::Timer(o2)) => o1 == o2,
@@ -1686,6 +1689,26 @@ fn cdt_unlink_middle_sibling() {
 }
 
 #[test]
+fn derive_preserves_thread_priority_ceiling() {
+    // §5.4/§2.3 monotone priority axis (D-B1): a derived thread cap carries the
+    // same — hence `<=` — max-controlled-priority ceiling as its parent. This is
+    // the executable witness of `derive`'s ceiling `ensures` on the real body,
+    // the priority analogue of the rights-subset witnesses.
+    let mut st = ArrayStore::new(4);
+    st.slots[0] = detached(thread_cap(42, 19)); // parent ceiling = 19
+    st.refs.insert(42, 1); // derive bumps the designated TCB's refcount
+    derive(&mut st, SlotId(0), SlotId(1), 0xff).expect("derive thread child");
+    match (st.at(SlotId(0)).cap.kind, st.at(SlotId(1)).cap.kind) {
+        (CapKind::Thread(po, pmp), CapKind::Thread(co, cmp)) => {
+            assert!(co.0 == po.0, "derived thread cap designates the same TCB");
+            assert_eq!(cmp, pmp, "ceiling preserved across derivation");
+            assert!(cmp <= pmp, "§5.4 ceiling attenuates monotonically (child <= parent)");
+        }
+        _ => panic!("derived cap is not a thread cap"),
+    }
+}
+
+#[test]
 fn slot_move_subtree_root() {
     // Move a node that has children — dst must inherit the children (their
     // parent fixed up to dst). Spare slot 5 is the move target.
@@ -1777,7 +1800,7 @@ fn retype_install_arms() {
         &mut st,
         SlotId(0),
         ObjType::Thread,
-        CapKind::Thread(ObjId(50)),
+        CapKind::Thread(ObjId(50), 7),
         0x4000,
         SlotId(1),
         None,
@@ -2142,7 +2165,7 @@ fn refcount_sound_fixture() -> ArrayStore {
     st.slots[2] = detached(notif_cap(3));
     st.slots[3] = detached(Cap { kind: CapKind::Timer(ObjId(4)), rights: Rights(0xff) });
     st.slots[4] = detached(Cap { kind: CapKind::Channel(ObjId(5), ChanEnd::A), rights: Rights(0xff) });
-    st.slots[5] = detached(Cap { kind: CapKind::Thread(ObjId(6)), rights: Rights(0xff) });
+    st.slots[5] = detached(thread_cap(6, 5));
     // A frame mapped into A → frame_map_refs(A) += 1.
     st.slots[6] = detached(Cap {
         kind: CapKind::Frame { base: 0x1000, pages: 1, mapping: Some((ObjId(2), 0x4000)) },
@@ -2241,7 +2264,7 @@ fn caps_consistent_fixture() -> ArrayStore {
     st.slots[2] = detached(Cap { kind: CapKind::Timer(ObjId(30)), rights: Rights(0xff) });
     st.timers.insert(30, TimerState { armed: false, deadline: 0, notif: None, bits: 0, next: None });
     // Thread(40): both bind slots in-bounds.
-    st.slots[3] = detached(Cap { kind: CapKind::Thread(ObjId(40)), rights: Rights(0xff) });
+    st.slots[3] = detached(thread_cap(40, 9));
     st.tcbs.insert(40, TcbState { bind_slots: [SlotId(4), SlotId(5)], ..tcb_state_default() });
     st
 }
@@ -2388,7 +2411,7 @@ fn unref_aspace_last_ref_destroys() {
 fn cap_obj_of(cap: Cap) -> Option<ObjId> {
     match cap.kind {
         CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => None,
-        CapKind::Aspace(o) | CapKind::CSpace(o) | CapKind::Thread(o)
+        CapKind::Aspace(o) | CapKind::CSpace(o) | CapKind::Thread(o, _)
         | CapKind::Channel(o, _) | CapKind::Notification(o) | CapKind::Timer(o) => Some(o),
     }
 }

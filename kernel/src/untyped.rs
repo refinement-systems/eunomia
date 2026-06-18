@@ -52,7 +52,13 @@ pub unsafe fn retype(
         ObjType::Thread => {
             let p = c.start as *mut Tcb;
             Tcb::init(p);
-            CapKind::Thread(ObjId(p as u64))
+            // §5.4 maximum-controlled-priority ceiling: a fresh thread cap is
+            // born capped at the retyper's own priority, so a descendant can
+            // never be started above its creator. This reproduces the old
+            // caller-priority spawn gate exactly while making the ceiling a
+            // cap-carried value that `kcore::cspace::derive` attenuates
+            // monotonically (§2.3).
+            CapKind::Thread(ObjId(p as u64), (*crate::thread::current()).priority)
         }
         ObjType::Channel => {
             let p = c.start as *mut Channel;

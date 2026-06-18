@@ -395,7 +395,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if ts.is_null() || cs_slot.is_null() {
                 return Some(ERR_BADSLOT);
             }
-            let CapKind::Thread(t) = (*ts).cap.kind else {
+            let CapKind::Thread(t, max_prio) = (*ts).cap.kind else {
                 return Some(ERR_TYPE);
             };
             let CapKind::CSpace(cs) = (*cs_slot).cap.kind else {
@@ -409,9 +409,12 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if !user_range_ok(entry, 4) || !user_range_ok(sp, 0) {
                 return Some(ERR_FAULT);
             }
-            // Spawner's priority is the ceiling (§5.4 maximum-controlled
-            // priority): the lattice stays monotone.
-            if prio > (*thread::current()).priority {
+            // §5.4 maximum-controlled-priority: the ceiling is carried on the
+            // thread cap (`max_prio`, stamped at retype = the retyper's
+            // priority), so spawn gates on the cap, not the caller's live
+            // priority — the lattice stays monotone and the ceiling is
+            // cap-attenuated through `kcore::cspace::derive`.
+            if prio > max_prio {
                 return Some(ERR_PERM);
             }
             (*csp).hdr.refs += 1;
@@ -527,7 +530,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if ts.is_null() || cs_slot.is_null() || asp_slot.is_null() {
                 return Some(ERR_BADSLOT);
             }
-            let CapKind::Thread(t) = (*ts).cap.kind else {
+            let CapKind::Thread(t, max_prio) = (*ts).cap.kind else {
                 return Some(ERR_TYPE);
             };
             let CapKind::CSpace(cs) = (*cs_slot).cap.kind else {
@@ -542,7 +545,8 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if (*tp).state != ThreadState::Inactive {
                 return Some(ERR_STATE);
             }
-            if prio > (*thread::current()).priority {
+            // §5.4 ceiling carried on the thread cap (see ThreadStart).
+            if prio > max_prio {
                 return Some(ERR_PERM);
             }
             // Entry/SP live in the child's aspace, not the caller's.
@@ -592,7 +596,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if ts.is_null() {
                 return Some(ERR_BADSLOT);
             }
-            let CapKind::Thread(t) = (*ts).cap.kind else {
+            let CapKind::Thread(t, _) = (*ts).cap.kind else {
                 return Some(ERR_TYPE);
             };
             // bind-reports gates slot configuration (§2.3): a supervisor holds
@@ -626,7 +630,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if ts.is_null() {
                 return Some(ERR_BADSLOT);
             }
-            let CapKind::Thread(t) = (*ts).cap.kind else {
+            let CapKind::Thread(t, _) = (*ts).cap.kind else {
                 return Some(ERR_TYPE);
             };
             // read-report gates the read (§2.3).
