@@ -2982,6 +2982,79 @@ fn check_revoke_root_survives_homed_external_ref() {
     assert_eq!(st.refs[&10], 1, "cspace 10 keeps the external reference (never destroyed)");
 }
 
+#[test]
+fn revoke_sees_through_queued_descendant() {
+    // **Sees through queues (D-A3 / §3.4 / M1).** A cap *queued in an in-flight message* is an
+    // ordinary CDT descendant — its ring slot carries the parent edge that `slot_move` (the op
+    // `send` uses) inherited from the source — so the real `revoke` walk finds and empties it
+    // like any other descendant, with no special case. This drives the **real** `revoke` through
+    // a slot that is *both* a CDT child of the target *and* a registered channel ring cap, the
+    // witness doc 69 found absent (the prior nod only *simulated* an emptied ring slot).
+    //
+    //   slot 0 (Frame, un-homed revoke target) ── child ──▶ slot 1 = ring 0 / idx 0 / cap 0 of
+    //   channel 7, in its live window — a genuine cap queued in an in-flight A→B message.
+    //
+    // The arena holds the channel's 8 ring-cap slots (1..=8); the queued cap lives at slot 1, the
+    // other 7 ring slots are empty (a one-cap message; ring 1 idle). revoke(slot 0) descends to
+    // the queued ring cap and deletes it: the ring slot is left empty — the §3.4 "receivers must
+    // tolerate null cap slots" outcome — while the un-homed target survives.
+    let mut st = ArrayStore::new(9);
+    st.slots[0] = CapSlot {
+        cap: frame_cap(0),
+        parent: None,
+        first_child: Some(SlotId(1)),
+        next_sib: None,
+        prev_sib: None,
+    };
+    // slot 1: the in-flight queued cap — a CDT child of the revoke target AND channel 7's ring cap.
+    st.slots[1] = CapSlot {
+        cap: frame_cap(5),
+        parent: Some(SlotId(0)),
+        first_child: None,
+        next_sib: None,
+        prev_sib: None,
+    };
+    // Register the depth-1 channel's ring caps: ring 0 / idx 0 / cap 0 is the queued slot 1; the
+    // remaining 7 ring slots (2..=8) are empty (a single-cap in-window message, ring 1 idle).
+    let mut ring_cap = BTreeMap::new();
+    let mut slot = 1u64;
+    for ring in 0..2usize {
+        for c in 0..4usize {
+            ring_cap.insert((ring, 0u32, c), SlotId(slot));
+            slot += 1;
+        }
+    }
+    let mut bindings = BTreeMap::new();
+    for e in 0..2usize {
+        for v in 0..3usize {
+            bindings.insert((e, v), Binding::UNBOUND);
+        }
+    }
+    let mut msg_len = BTreeMap::new();
+    msg_len.insert((0usize, 0u32), 5u16); // a queued A→B message
+    msg_len.insert((1usize, 0u32), 0u16);
+    st.chans.insert(
+        7,
+        ChanState { depth: 1, end_caps: [1, 1], head: [0, 0], count: [1, 0], bindings, msg_len, ring_cap },
+    );
+
+    assert!(cspace_wf_exec(&st), "the queued-descendant shape is well-formed");
+    assert!(is_homed_exec(&st, SlotId(1)), "slot 1 is a real channel ring cap (genuinely queued)");
+    assert!(!is_homed_exec(&st, SlotId(0)), "the revoke target is un-homed (so it survives)");
+    assert!(!st.at(SlotId(1)).cap.is_empty(), "the queued cap is live before revoke");
+
+    revoke(&mut st, SlotId(0));
+
+    assert!(cspace_wf_exec(&st), "revoke preserves cspace_wf");
+    assert!(st.at(SlotId(0)).first_child.is_none(), "revoke: subtree empty");
+    // The headline: the real revoke walk reached *through the queue* and destroyed the in-flight cap.
+    assert!(st.at(SlotId(1)).cap.is_empty(), "revoke sees through the queue: the queued cap is destroyed");
+    // The ring_cap handle still points at the now-empty slot — the §3.4 null-cap-slot a receiver tolerates.
+    assert!(st.chan_ring_cap(ObjId(7), 0, 0, 0) == SlotId(1), "the ring handle is unchanged (now null)");
+    // The un-homed target survives (no homing object of slot 0 was destroyed).
+    assert!(!st.at(SlotId(0)).cap.is_empty(), "the un-homed revoke target survives");
+}
+
 // ── Channel send/recv (plan §3d): the FIFO core, host-differential ──────────
 //
 // `send`/`recv` carry full Verus contracts (FIFO `Seq` push/pop, move totality,

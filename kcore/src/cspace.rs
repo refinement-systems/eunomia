@@ -1310,6 +1310,66 @@ pub open spec fn empty_slots_detached(m: Map<SlotId, CapSlot>) -> bool {
     })
 }
 
+// ── CDT descendant reachability (the §3.4 "sees through queues" obligation; D-A3) ────
+//
+// `revoke` deletes the *whole subtree* of its target, in-flight queue caps included
+// (§3.4: queue slots are ordinary `CapSlot`s carrying the parent edge, so a cap queued
+// in a message is a genuine CDT descendant — `slot_move`, what `send` uses, inherits the
+// edge into the ring slot). The structural predicates above pin only the *direct* child
+// relation; these add the transitive closure so `revoke` can export "the subtree is gone"
+// as a named obligation rather than leaving it structurally implied (doc 69, D-A3).
+
+// `path` is a child→parent walk in `m`: every entry is live and each entry's `parent`
+// points at the next. Length ≥ 1.
+pub open spec fn is_parent_path(m: Map<SlotId, CapSlot>, path: Seq<SlotId>) -> bool {
+    &&& path.len() >= 1
+    &&& (forall|i: int| 0 <= i < path.len() ==> m.dom().contains(#[trigger] path[i]))
+    &&& (forall|i: int| 0 <= i < path.len() - 1 ==>
+            m[#[trigger] path[i]].parent == Some(path[i + 1]))
+}
+
+// `d` is a strict CDT descendant of `anc`: a non-trivial parent-walk leads from `d` up to
+// `anc`. A queued in-flight cap derived under `anc` satisfies this (its ring slot's parent
+// edge was inherited from the source by `slot_move`).
+pub open spec fn is_descendant(m: Map<SlotId, CapSlot>, d: SlotId, anc: SlotId) -> bool {
+    exists|path: Seq<SlotId>| #[trigger] is_parent_path(m, path)
+        && path.len() >= 2 && path[0] == d && path.last() == anc
+}
+
+// No live slot (resident *or* in-flight ring cap) is a CDT descendant of `anc` — the
+// "subtree is empty" fact `revoke` exports.
+pub open spec fn no_live_descendant(m: Map<SlotId, CapSlot>, anc: SlotId) -> bool {
+    forall|d: SlotId| #[trigger] m.dom().contains(d) ==> !is_descendant(m, d, anc)
+}
+
+// A childless node has no descendants at all. Non-inductive: any descendant chain's
+// topmost step names `anc` as parent, so `parent_has_first_child` forces `anc` to have a
+// first child — contradicting `first_child is None`. This is the lemma `revoke` reads off
+// at loop exit to turn its `first_child is None` post into the transitive `no_live_descendant`.
+pub proof fn lemma_childless_no_descendant(m: Map<SlotId, CapSlot>, anc: SlotId)
+    requires
+        parent_has_first_child(m),
+        m.dom().contains(anc),
+        m[anc].first_child is None,
+    ensures
+        no_live_descendant(m, anc),
+{
+    assert forall|d: SlotId| m.dom().contains(d) implies !is_descendant(m, d, anc) by {
+        if is_descendant(m, d, anc) {
+            let path = choose|path: Seq<SlotId>| #[trigger] is_parent_path(m, path)
+                && path.len() >= 2 && path[0] == d && path.last() == anc;
+            let n = path.len();
+            // The node just below `anc` on the path: its parent edge points at `anc`.
+            let c = path[n - 2];
+            assert(path[n - 1] == path.last());
+            assert(m[c].parent == Some(path[n - 1]));  // is_parent_path link clause @ i = n-2
+            assert(m.dom().contains(c));               // is_parent_path liveness clause @ i = n-2
+            assert(m[anc].first_child is Some);        // parent_has_first_child @ k = c
+            assert(false);
+        }
+    }
+}
+
 // The **structural** CDT invariant (the structural half of the TLA TypeOK).
 // Acyclicity is layered on top as `cspace_wf` below — kept separate so the
 // non-recursive ops that don't need termination reason about the cheaper
@@ -9832,6 +9892,23 @@ pub fn descend_to_leaf<S: Store>(store: &S, start: SlotId) -> (leaf: SlotId)
 /// destroyed" frame (refs-monotone, the §3 cascade), recorded as the explicit follow-on in
 /// `doc/results/55`. `unhomed_frozen` (this PR) is its foundation.
 ///
+/// **Sees through queues — now a named obligation (D-A3, doc 69/73).** §3.4 / the M1 exit
+/// criterion demand that `revoke` destroy descendants *including a cap queued in an in-flight
+/// message* "like any other descendant, no special case." That subtree-deletion was previously
+/// only *structurally implied* — `first_child is None` (above) pins the **direct** child clause,
+/// and the transitive reach was inferred from `cdt_wf` + `slot_move`'s body with no failing
+/// obligation if either drifted. It is now exported: `ensures no_live_descendant(final, slot)`
+/// (no live slot — resident or in-flight ring cap — is a CDT descendant of `slot` afterward),
+/// discharged at loop exit by `lemma_childless_no_descendant` from `first_child is None` +
+/// `cspace_wf`, paired with `only_empties(old, final)` (the walk destroys, never relabels). A
+/// queued cap is a genuine descendant because `slot_move` (what `send` uses) inherits the parent
+/// edge into the ring slot; the real-op witness that such an in-flight queued cap is *emptied*
+/// by the real `revoke` is `revoke_sees_through_queued_descendant`. The fully ∀-quantified
+/// "every slot that was a descendant in the *initial* state is empty in the final state" is the
+/// remaining follow-on — it is entangled with the cross-object teardown cascade (`delete` is
+/// recursive and exports no per-slot parent-edge frame, so it would need the deliberately-deferred
+/// subtree induction), and is **not** a regression risk given the two facts above.
+///
 /// pre:  the cspace is well-formed (and finite); `slot` is live and non-empty.
 /// post: `slot` has no children (its subtree is gone) and the cspace stays well-formed
 ///       (unconditional); its cap **survives** when `slot` started **un-homed** (conditional).
@@ -9872,6 +9949,18 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
         // subtree predicate, by design); the witness is the initial-state home + its destruction.
         is_empty_cap(final(store).slot_view()[slot].cap)
             ==> exists|o: ObjId| homes(old(store), o, slot) && dead_obj(final(store), o),
+        // **Sees through queues — the §3.4 / M1 subtree-deletion obligation, now named (D-A3,
+        // doc 69/73).** After `revoke`, no live slot anywhere — cspace resident *or* in-flight
+        // channel ring cap — is a CDT descendant of `slot`. The transitive closure (not just the
+        // `first_child is None` direct-child clause above) is what makes "revoke finds and deletes
+        // in-flight caps like any other descendant" a *failing obligation* if a future change to
+        // `cdt_wf`/`slot_move`/`delete` left a queued descendant attached. Read off at loop exit
+        // from `first_child is None` + `cspace_wf` via `lemma_childless_no_descendant`.
+        no_live_descendant(final(store).slot_view(), slot),
+        // `revoke` only ever *empties* slots, never fills one — the teardown-monotonicity frame
+        // composed from each `delete`'s `only_empties`. A queued cap the walk reaches is destroyed,
+        // not relabelled.
+        only_empties(old(store).slot_view(), final(store).slot_view()),
 {
     // `refcount_sound`, `caps_consistent`, the endpoint-cap census, and refs-domain
     // completeness ride the loop as `delete`'s preconditions (§6a/§6d): each `delete`
@@ -9881,6 +9970,11 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
             cspace_wf(store.slot_view()),
             store.slot_view().dom().finite(),
             store.slot_view().dom().contains(slot),
+            // The slot domain is fixed across the walk (`delete` frames it) — the equality
+            // `only_empties`'s transitivity reads off to compose the per-step frame.
+            store.slot_view().dom() == old(store).slot_view().dom(),
+            // Teardown monotonicity so far: every slot empty at entry is still empty (D-A3 / §3.4).
+            only_empties(old(store).slot_view(), store.slot_view()),
             refcount_sound(store),
             caps_consistent(store),
             end_caps_sound(store),
@@ -9933,6 +10027,9 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
             // the loop invariant, `pre → store` from `delete`'s ensures).
             lemma_home_views_frozen_trans(old(store), &pre, store);
             lemma_refs_death_persist_trans(old(store), &pre, store);
+            // D-A3: compose `only_empties` across this `delete` step (`old → pre` from the loop
+            // invariant, `pre → store` from `delete`'s ensures); domains agree (the dom frame).
+            lemma_only_empties_trans(old(store).slot_view(), pre.slot_view(), store.slot_view());
             // §6e-dual root provenance: maintain the slot-specific witness invariant.
             if is_empty_cap(store.slot_view()[slot].cap) {
                 if is_empty_cap(pre.slot_view()[slot].cap) {
@@ -9951,6 +10048,11 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
                 }
             }
         }
+    }
+    // The loop exited with `slot` childless; `cspace_wf` (hence `parent_has_first_child`) holds,
+    // so the whole subtree — in-flight queued caps included — is provably gone (D-A3 / §3.4).
+    proof {
+        lemma_childless_no_descendant(store.slot_view(), slot);
     }
 }
 
