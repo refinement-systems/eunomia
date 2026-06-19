@@ -103,6 +103,10 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
         // not the head (`x != n`) and is untouched. `fire`/`endpoint_cap_dropped`/`delete` carry
         // it up the teardown chain.
         cspace::dead_tcb_frozen(old(store), final(store)),
+        // §6e-dual "dead stays dead" across the wake: the accumulate path frames `refs` whole; the
+        // wake path drops only `refs[n]` (which a waiter held, so `refs[n] > 0`), keeping the
+        // domain — so a dead object stays dead. `fire`/`endpoint_cap_dropped`/`delete` carry it.
+        cspace::refs_death_persist(old(store), final(store)),
         // The timer views are untouched (plan §4d): every setter in the body frames
         // them and `make_runnable` frames them, so `report_terminal` (which fires
         // `signal` and otherwise touches no timer) can frame timers across the wake.
@@ -204,6 +208,8 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
             assert(store.refs_view().dom() =~= old(store).refs_view().dom());
             assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
             cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, n);
+            // §6e-dual: the accumulate path frames `refs` whole, so death is preserved.
+            cspace::lemma_refs_death_persist_from_refs_eq(old(store), store);
         }
         return;
     }
@@ -320,6 +326,8 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
         assert(store.refs_view().dom() =~= old(store).refs_view().dom());
         assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
         cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, n);
+        // §6e-dual: the wake drops only `refs[n]` (positive), keeping the domain — death preserved.
+        cspace::lemma_refs_death_persist_dec_ref(old(store), store, n);
     }
 }
 
@@ -573,6 +581,9 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
         // `wait_notif is None`, `refs == 0` object is untouched. `destroy_tcb` reads it off for
         // its own promise about the *other* dead objects (its subject is excepted separately).
         cspace::dead_tcb_frozen(old(store), final(store)),
+        // §6e-dual "dead stays dead": absent ⟹ `refs` unchanged; present ⟹ only `refs[n]` (positive)
+        // drops, keeping the domain — so a dead object stays dead. `destroy_tcb` composes it.
+        cspace::refs_death_persist(old(store), final(store)),
 {
     let ghost nv0 = old(store).notif_view();
     let ghost tv0 = old(store).tcb_view();
@@ -810,6 +821,8 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
                 assert(store.refs_view().dom() =~= old(store).refs_view().dom());
                 assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
                 cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, n);
+                // §6e-dual: the splice drops only `refs[n]` (positive), keeping the domain.
+                cspace::lemma_refs_death_persist_dec_ref(old(store), store, n);
             }
             return;
         }
@@ -848,6 +861,8 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
         assert(store.refs_view().dom() =~= old(store).refs_view().dom());
         assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
         cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, n);
+        // §6e-dual (absent): the store is unchanged, so death is trivially preserved.
+        cspace::lemma_refs_death_persist_from_refs_eq(old(store), store);
     }
 }
 

@@ -371,6 +371,10 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
         // `tcb` whole and drops `refs` only at the armed binding's notification (which had
         // `refs > 0`), so a dead, detached object is untouched. `obj_unref`'s Timer arm reads it.
         cspace::dead_tcb_frozen(old(store), final(store)),
+        // §6e-dual "dead stays dead": `disarm` keeps the refs domain and only drops the armed
+        // binding's notification ref (which was positive), so a dead object stays dead.
+        // `obj_unref`'s Timer arm composes this for the §6e-dual provenance frame.
+        cspace::refs_death_persist(old(store), final(store)),
 {
     let ghost tmv0 = old(store).timer_view();
     let ghost head0 = old(store).timer_head_view();
@@ -456,6 +460,14 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
         assert(store.refs_view().dom() =~= old(store).refs_view().dom());
         assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
         cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, t);
+        // §6e-dual "dead stays dead": the refs domain is unchanged, and a dead in-domain object
+        // (`refs == 0`) keeps `refs == 0` (the per-branch fact above) — so death is preserved.
+        assert forall|o: ObjId| cspace::dead_obj(old(store), o)
+            implies #[trigger] cspace::dead_obj(store, o) by {
+            if old(store).refs_view().dom().contains(o) && old(store).refs_view()[o] == 0 {
+                assert(store.refs_view()[o] == 0);
+            }
+        }
     }
 }
 
