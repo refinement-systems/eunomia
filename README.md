@@ -20,7 +20,7 @@ kernel knows about untyped memory, address spaces, threads, async IPC
 channels, notifications, and capability spaces with a derivation tree.
 Everything else — the storage server, the virtio-blk driver, the ELF
 loader, the shell — is unprivileged userspace Rust holding capabilities.
-The full design rationale lives in [`doc/spec/0_spec_mvp.md`](doc/spec/0_spec_mvp.md);
+The full design rationale lives in [`doc/spec/3_spec_rev3.md`](doc/spec/3_spec_rev3.md);
 the post-MVP retrospective in [`doc/retrospective/0_mvp.md`](doc/retrospective/0_mvp.md).
 
 All MVP milestones (M0–M5) are complete: boot → capabilities/IPC →

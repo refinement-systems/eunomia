@@ -1,6 +1,6 @@
 # Eunomia OS — Development Guide
 
-Full design specification: `doc/spec/0_spec_mvp.md`. Read the spec before
+Full design specification: `doc/spec/3_spec_rev3.md`. Read the spec before
 touching any component. Section numbers below refer to that document.
 
 ---
