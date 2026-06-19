@@ -28,6 +28,12 @@ verus! {
 /// so the `kernel::thread` re-export and the aarch64 build are unchanged.
 pub const NUM_PRIOS: usize = 32;
 
+/// `cap_copy`'s "no priority-ceiling reduction" sentinel (§2.3/§5.4, D-B1 Option 2):
+/// a thread-cap copy passing this leaves the parent's ceiling unchanged. Any value
+/// `>= NUM_PRIOS - 1` would do (priorities are `< NUM_PRIOS = 32`); `0xFF` is the
+/// canonical one. A lower `prio_ceiling` strictly attenuates (`derived_kind`).
+pub const NO_PRIO_CEILING: u8 = 0xFF;
+
 /// A decoded, shape-validated syscall. Slot indices stay `u64` — the
 /// cspace-size bound is `CSpaceObj::slot`'s job at *use* time (kernel
 /// `cur_slot`), so error codes and ordering for bad slots are unchanged.
@@ -39,7 +45,7 @@ pub enum Sys {
     DebugWrite { ptr: u64, len: u64 },
     Yield,
     Retype { ut: u64, ty: ObjType, param: u64, dst: u64, dst2: u64 },
-    CapCopy { src: u64, dst: u64, mask: u64 },
+    CapCopy { src: u64, dst: u64, mask: u64, prio_ceiling: u64 },
     CapDelete { slot: u64 },
     CapRevoke { slot: u64 },
     CapInstall { cs: u64, src: u64, dst_index: u64 },
@@ -130,7 +136,11 @@ pub fn decode(nr: u64, a: [u64; 6]) -> (result: Result<Sys, SysError>)
                 None => return Err(SysError::BadObjType),
             }
         }
-        4 => Sys::CapCopy { src: a[0], dst: a[1], mask: a[2] },
+        // a[3] is the §5.4 priority-ceiling cap on a thread-cap copy (§2.3
+        // supervision grant); `NO_PRIO_CEILING` (0xFF) means "no reduction". Carried
+        // raw (it only ever *shrinks* an existing ceiling in `derive`, so no decode
+        // validation is needed — see `derived_kind`).
+        4 => Sys::CapCopy { src: a[0], dst: a[1], mask: a[2], prio_ceiling: a[3] },
         5 => Sys::CapDelete { slot: a[0] },
         6 => Sys::CapRevoke { slot: a[0] },
         7 => Sys::CapInstall { cs: a[0], src: a[1], dst_index: a[2] },

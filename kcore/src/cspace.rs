@@ -368,6 +368,11 @@ pub struct TcbView {
     pub retval: u64,
     pub cspace: Option<ObjId>,
     pub aspace: Option<ObjId>,
+    // §5.4 run priority. Bounded by the spawner's cap ceiling (`cap_max_prio`) and
+    // written only through the verified `thread::set_priority` (D-B1 Option 2, doc 71):
+    // surfacing it in the view is what lets `set_priority` carry a machine-checked
+    // `priority == prio (≤ ceiling)` instead of the old unverified raw-pointer write.
+    pub priority: u8,
     pub bind_bits: Seq<u64>,     // len 2
     pub bind_slots: Seq<SlotId>, // len 2 — immutable handles into slot_view
 }
@@ -790,6 +795,23 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
+    fn tcb_priority(&self, t: ObjId) -> (r: u8)
+        requires self.tcb_view().dom().contains(t),
+        ensures r == self.tcb_view()[t].priority;
+
+    fn set_tcb_priority(&mut self, t: ObjId, p: u8)
+        requires old(self).tcb_view().dom().contains(t),
+        ensures
+            final(self).tcb_view() == old(self).tcb_view().insert(
+                t, TcbView { priority: p, ..old(self).tcb_view()[t] }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
+
     fn tcb_bind_slot(&self, t: ObjId, which: usize) -> (r: SlotId)
         requires
             self.tcb_view().dom().contains(t),
@@ -1181,13 +1203,18 @@ pub fn cap_is_empty(c: Cap) -> (r: bool)
     matches!(c.kind, CapKind::Empty)
 }
 
-// The kind a derivation produces from `k`: identical (same object, same channel
-// end), except a Frame copy starts unmapped (§2.5, one mapping per cap copy).
-// This is the "copy" half of monotone derivation — derivation cannot change the
-// designated object or amplify via the kind.
-pub open spec fn derived_kind(k: CapKind) -> CapKind {
+// The kind a derivation produces from `k` under a requested priority ceiling:
+// identical (same object, same channel end), except a Frame copy starts unmapped
+// (§2.5, one mapping per cap copy) and a Thread copy's §5.4 ceiling is reduced to
+// `min(parent, prio_ceiling)`. This is the "copy" half of monotone derivation —
+// derivation cannot change the designated object or amplify via the kind, and the
+// priority ceiling can only shrink (§2.3). `prio_ceiling = 0xFF` (the `cap_copy`
+// no-reduction sentinel; priorities are `< NUM_PRIOS = 32`) preserves the parent
+// ceiling exactly; a lower value is the §2.3 supervision grant (doc/results/71).
+pub open spec fn derived_kind(k: CapKind, prio_ceiling: u8) -> CapKind {
     match k {
         CapKind::Frame { base, pages, mapping: _ } => CapKind::Frame { base, pages, mapping: None },
+        CapKind::Thread(o, mp) => CapKind::Thread(o, if mp <= prio_ceiling { mp } else { prio_ceiling }),
         _ => k,
     }
 }
@@ -7227,7 +7254,7 @@ pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
 ///       `u32::MAX`) the store is unchanged. Refusing at the ceiling makes the
 ///       refcount bump overflow-free for **all** inputs — no unchecked `+ 1`
 ///       wrap-to-zero (a UAF class); the production `CapCopy` path inherits this.
-pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (res: Result<(), ()>)
+pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_ceiling: u8) -> (res: Result<(), ()>)
     requires
         cspace_wf(old(store).slot_view()),
         old(store).slot_view().dom().finite(),
@@ -7241,7 +7268,7 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (r
             // a Frame copy unmapped — derivation cannot change the object or
             // amplify via the kind.
             &&& final(store).slot_view()[dst].cap.kind
-                  == derived_kind(old(store).slot_view()[src].cap.kind)
+                  == derived_kind(old(store).slot_view()[src].cap.kind, prio_ceiling)
             // monotone derivation: dst's rights are src's rights masked, hence a
             // subset for ALL masks — authority only ever shrinks.
             &&& final(store).slot_view()[dst].cap.rights.0
@@ -7249,15 +7276,19 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (r
             &&& (final(store).slot_view()[dst].cap.rights.0
                   & old(store).slot_view()[src].cap.rights.0)
                   == final(store).slot_view()[dst].cap.rights.0
-            // §5.4/§2.3 monotone priority ceiling: a derived thread cap's
-            // maximum-controlled-priority ceiling never exceeds its parent's — the
-            // priority axis of the derivation lattice. Discharged from the
-            // `derived_kind` equality above (the ceiling rides the kind, so `==`,
-            // hence `<=`); a strictly-reducing ceiling parameter is the doc-70
-            // follow-on.
+            // §5.4/§2.3 monotone priority ceiling, now *reducing*: a derived thread
+            // cap's maximum-controlled-priority ceiling is exactly `min(parent,
+            // prio_ceiling)` — never above the parent's (the priority axis of the
+            // derivation lattice, ∀) and never above the requested `prio_ceiling`
+            // (the §2.3 supervision grant, F-70-9). Discharged from the
+            // `derived_kind` equality above (the ceiling rides the kind). With the
+            // `cap_copy` sentinel `prio_ceiling = 0xFF` this collapses to exact
+            // preservation, the pre-Option-2 behaviour.
             &&& (cap_max_prio(old(store).slot_view()[src].cap) matches Some(p_mp) ==>
                   cap_max_prio(final(store).slot_view()[dst].cap) matches Some(c_mp)
-                    && c_mp <= p_mp)
+                    && c_mp == (if p_mp <= prio_ceiling { p_mp } else { prio_ceiling })
+                    && c_mp <= p_mp
+                    && c_mp <= prio_ceiling)
             &&& cspace_wf(final(store).slot_view())
             &&& final(store).slot_view()[src].first_child == Some(dst)
             &&& (cap_obj(old(store).slot_view()[src].cap) matches Some(o) ==>
@@ -7299,13 +7330,15 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (r
     assert(m0[dst].parent is None && m0[dst].first_child is None
         && m0[dst].next_sib is None && m0[dst].prev_sib is None);
 
-    // One mapping per cap copy (§2.5): a fresh frame copy starts unmapped.
+    // One mapping per cap copy (§2.5): a fresh frame copy starts unmapped. A thread
+    // copy's §5.4 ceiling is attenuated to `min(parent, prio_ceiling)` (§2.3).
     let kind = match s.cap.kind {
         CapKind::Frame { base, pages, mapping: _ } => CapKind::Frame { base, pages, mapping: None },
+        CapKind::Thread(o, mp) => CapKind::Thread(o, if mp <= prio_ceiling { mp } else { prio_ceiling }),
         k => k,
     };
     let cap = Cap { kind, rights: s.cap.rights.masked(mask) };
-    assert(kind == derived_kind(s.cap.kind));
+    assert(kind == derived_kind(s.cap.kind, prio_ceiling));
     assert(cap_obj(cap) == cap_obj(s.cap));
     assert(!is_empty_cap(cap));
 
@@ -7380,7 +7413,7 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8) -> (r
         // (child-cap preserved), so it is still the masked copy.
         assert(m1[dst] == d);
         assert(store.slot_view()[dst].cap == cap);
-        assert(store.slot_view()[dst].cap.kind == derived_kind(m0[src].cap.kind));
+        assert(store.slot_view()[dst].cap.kind == derived_kind(m0[src].cap.kind, prio_ceiling));
         let r = m0[src].cap.rights.0;
         // monotone-derivation subset corollary: (r & mask) & r == r & mask.
         assert((r & mask) & r == (r & mask)) by (bit_vector);

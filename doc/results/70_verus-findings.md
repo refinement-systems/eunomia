@@ -261,6 +261,10 @@ story, and flagged so the gap is budgeted, not silent.
 
 ## Recommended follow-on — Option 2 (full end-to-end verified enforcement)
 
+> **Implemented — see doc/results/71.** All three items below landed: priority is in the
+> verified Store view, `thread::set_priority` carries the write, and `derive` gained a reducing
+> `prio_ceiling` (wired through `CapCopy` / `cap_copy_prio`). 318 verified, 0 errors.
+
 Per the chosen scope, the fuller fix is recorded here for a subsequent task. It closes the
 F-70-6 seam and the F-70-9 reduction gap:
 
@@ -286,7 +290,8 @@ verified contract — no further runtime-behaviour change.
 
 - **D-B1:** closed (this change) at the cap-model + monotone-derivation level; the
   model→TCB-write seam (F-70-6) and strict per-copy attenuation (F-70-9) are the Option-2
-  follow-on above.
+  follow-on above — **now implemented in doc/results/71** (verified `set_priority` + reducing
+  `derive` ceiling).
 - The doc-69 "Inputs to 9e" **item 3** is superseded: §2.3/§5.4 no longer carry an "entirely
   unverified" note — the cap-carried ceiling and its monotone `derive` attenuation are now
   Verus-verified. The spec text was updated in place with the honest residual-seam note.

@@ -138,7 +138,16 @@ pub fn retype(ut: u32, ty: u64, param: u64, dst: u32, dst2: u32) -> i64 {
 }
 
 pub fn cap_copy(src: u32, dst: u32, rights: u64) -> i64 {
-    unsafe { syscall(4, src as u64, dst as u64, rights, 0, 0, 0) }
+    // a[3] = 0xFF is the §5.4 "no ceiling reduction" sentinel (kcore `NO_PRIO_CEILING`);
+    // a plain copy never lowers a thread cap's priority ceiling. Use `cap_copy_prio`
+    // to attenuate it (the §2.3 supervision grant).
+    unsafe { syscall(4, src as u64, dst as u64, rights, 0xFF, 0, 0) }
+}
+
+/// Like [`cap_copy`], but caps the copied thread cap's §5.4 priority ceiling at
+/// `min(parent, prio_ceiling)` (§2.3 supervision grant; ignored for non-thread caps).
+pub fn cap_copy_prio(src: u32, dst: u32, rights: u64, prio_ceiling: u8) -> i64 {
+    unsafe { syscall(4, src as u64, dst as u64, rights, prio_ceiling as u64, 0, 0) }
 }
 
 pub fn cap_delete(slot: u32) -> i64 {

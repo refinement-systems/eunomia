@@ -77,6 +77,7 @@ struct TcbState {
     retval: u64,
     cspace: Option<ObjId>,
     aspace: Option<ObjId>,
+    priority: u8,
     bind_bits: [u64; 2],
     bind_slots: [SlotId; 2],
 }
@@ -247,6 +248,12 @@ impl Store for ArrayStore {
     }
     fn set_tcb_report(&mut self, t: ObjId, r: Report) {
         self.tcbs.get_mut(&t.0).unwrap().report = r;
+    }
+    fn tcb_priority(&self, t: ObjId) -> u8 {
+        self.tcbs[&t.0].priority
+    }
+    fn set_tcb_priority(&mut self, t: ObjId, p: u8) {
+        self.tcbs.get_mut(&t.0).unwrap().priority = p;
     }
     fn tcb_bind_slot(&self, t: ObjId, which: usize) -> SlotId {
         self.tcbs[&t.0].bind_slots[which]
@@ -745,6 +752,7 @@ fn tcb_state_default() -> TcbState {
         retval: 0,
         cspace: None,
         aspace: None,
+        priority: 0,
         bind_bits: [0, 0],
         bind_slots: [SlotId(0), SlotId(0)],
     }
@@ -825,7 +833,7 @@ fn gen_forest(seed: u64, n: usize, edges: usize) -> ArrayStore {
         }
         let src = nonempty[rng.below(nonempty.len())];
         let dst = empty.swap_remove(rng.below(empty.len()));
-        derive(&mut st, src, dst, 0xff).expect("derive Frame child");
+        derive(&mut st, src, dst, 0xff, 0xFF).expect("derive Frame child");
         nonempty.push(dst);
     }
     assert!(cspace_wf_exec(&st), "generator produced a non-cspace_wf forest");
@@ -1681,31 +1689,78 @@ fn cdt_unlink_middle_sibling() {
     let mut st = ArrayStore::new(4);
     st.slots[0] = detached(frame_cap(0)); // parent (root)
     // children c1=1, c2=2, c3=3 as 0's first_child chain
-    derive(&mut st, SlotId(0), SlotId(3), 0xff).unwrap(); // 0.first_child = 3
-    derive(&mut st, SlotId(0), SlotId(2), 0xff).unwrap(); // 0.first_child = 2, 2.next = 3
-    derive(&mut st, SlotId(0), SlotId(1), 0xff).unwrap(); // 0.first_child = 1, 1.next = 2
+    derive(&mut st, SlotId(0), SlotId(3), 0xff, 0xFF).unwrap(); // 0.first_child = 3
+    derive(&mut st, SlotId(0), SlotId(2), 0xff, 0xFF).unwrap(); // 0.first_child = 2, 2.next = 3
+    derive(&mut st, SlotId(0), SlotId(1), 0xff, 0xFF).unwrap(); // 0.first_child = 1, 1.next = 2
     assert!(cspace_wf_exec(&st));
     check_cdt_unlink(&mut st, SlotId(2)); // the middle sibling
 }
 
 #[test]
 fn derive_preserves_thread_priority_ceiling() {
-    // §5.4/§2.3 monotone priority axis (D-B1): a derived thread cap carries the
-    // same — hence `<=` — max-controlled-priority ceiling as its parent. This is
-    // the executable witness of `derive`'s ceiling `ensures` on the real body,
+    // §5.4/§2.3 monotone priority axis (D-B1): with the no-reduction sentinel
+    // (`prio_ceiling = 0xFF`), a derived thread cap carries the same — hence `<=` —
+    // max-controlled-priority ceiling as its parent. This is the executable witness
+    // of `derive`'s ceiling `ensures` on the real body for the default `cap_copy`,
     // the priority analogue of the rights-subset witnesses.
     let mut st = ArrayStore::new(4);
     st.slots[0] = detached(thread_cap(42, 19)); // parent ceiling = 19
     st.refs.insert(42, 1); // derive bumps the designated TCB's refcount
-    derive(&mut st, SlotId(0), SlotId(1), 0xff).expect("derive thread child");
+    derive(&mut st, SlotId(0), SlotId(1), 0xff, 0xFF).expect("derive thread child");
     match (st.at(SlotId(0)).cap.kind, st.at(SlotId(1)).cap.kind) {
         (CapKind::Thread(po, pmp), CapKind::Thread(co, cmp)) => {
             assert!(co.0 == po.0, "derived thread cap designates the same TCB");
-            assert_eq!(cmp, pmp, "ceiling preserved across derivation");
+            assert_eq!(cmp, pmp, "ceiling preserved across derivation (no-reduction sentinel)");
             assert!(cmp <= pmp, "§5.4 ceiling attenuates monotonically (child <= parent)");
         }
         _ => panic!("derived cap is not a thread cap"),
     }
+}
+
+#[test]
+fn derive_attenuates_thread_priority_ceiling() {
+    // §2.3 supervision grant (D-B1 Option 2, F-70-9): a thread-cap copy can carry a
+    // *strictly lower* ceiling — `min(parent, prio_ceiling)`. Executable witness of
+    // `derived_kind`'s reducing `Thread` arm + `derive`'s strengthened ceiling
+    // `ensures` on the real body.
+    let mut st = ArrayStore::new(4);
+    st.slots[0] = detached(thread_cap(42, 19)); // parent ceiling = 19
+    st.refs.insert(42, 1);
+    // Request ceiling 5 < parent 19 ⇒ child ceiling = min(19, 5) = 5.
+    derive(&mut st, SlotId(0), SlotId(1), 0xff, 5).expect("derive attenuated thread child");
+    match (st.at(SlotId(0)).cap.kind, st.at(SlotId(1)).cap.kind) {
+        (CapKind::Thread(po, pmp), CapKind::Thread(co, cmp)) => {
+            assert!(co.0 == po.0, "derived thread cap designates the same TCB");
+            assert_eq!(pmp, 19, "parent ceiling unchanged by the copy");
+            assert_eq!(cmp, 5, "child ceiling = min(parent, prio_ceiling) = 5");
+            assert!(cmp <= pmp, "§5.4 ceiling still monotone (child <= parent)");
+        }
+        _ => panic!("derived cap is not a thread cap"),
+    }
+    // A `prio_ceiling` above the parent does not raise it (min is a floor on shrink).
+    let mut st2 = ArrayStore::new(4);
+    st2.slots[0] = detached(thread_cap(7, 4)); // parent ceiling = 4
+    st2.refs.insert(7, 1);
+    derive(&mut st2, SlotId(0), SlotId(1), 0xff, 30).expect("derive thread child");
+    match st2.at(SlotId(1)).cap.kind {
+        CapKind::Thread(_, cmp) => assert_eq!(cmp, 4, "ceiling cannot be raised above parent"),
+        _ => panic!("derived cap is not a thread cap"),
+    }
+}
+
+#[test]
+fn set_priority_writes_within_ceiling() {
+    // D-B1 Option 2 (F-70-6): `thread::set_priority` writes the gated priority into
+    // the TCB through the verified Store seam — the post-state priority is exactly
+    // the requested value (hence `<= ceiling`). Executable witness on `ArrayStore`.
+    let mut st = ArrayStore::new(1);
+    st.tcbs.insert(9, tcb_state_default()); // priority starts at 0
+    crate::thread::set_priority(&mut st, ObjId(9), 5, 16);
+    assert_eq!(st.tcb_priority(ObjId(9)), 5, "priority written exactly");
+    assert!(st.tcb_priority(ObjId(9)) <= 16, "priority within ceiling");
+    // Boundary: prio == ceiling is admissible.
+    crate::thread::set_priority(&mut st, ObjId(9), 16, 16);
+    assert_eq!(st.tcb_priority(ObjId(9)), 16, "prio == ceiling allowed");
 }
 
 #[test]

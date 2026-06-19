@@ -205,6 +205,41 @@ pub fn report_terminal<S: Store>(store: &mut S, t: ObjId, r: Report)
     }
 }
 
+/// Set a thread's §5.4 run priority, bounded by the spawner's cap ceiling
+/// (D-B1 Option 2, doc/results/71). The spawn path passes `ceiling =
+/// cap_max_prio(thread_cap)`, so the verified `requires prio <= ceiling`
+/// carries the §5.4 cap-attenuation into the model and the post-state priority
+/// is exactly `prio` (hence `<= ceiling`). This makes the priority *write* a
+/// machine-checked step against the `tcb_view` seam instead of the old
+/// unverified raw-pointer store in the shell — closing the F-70-6 seam: only
+/// the trusted `Store`-trait realization of `set_tcb_priority` remains, the
+/// same posture as every other setter (`set_tcb_report`, `set_tcb_bind_bits`).
+///
+/// Frames every other view unchanged (the mutual-frame discipline), so a
+/// spawn that calls this leaves cspace/refs/channels/notifs/timers untouched.
+pub fn set_priority<S: Store>(store: &mut S, t: ObjId, prio: u8, ceiling: u8)
+    requires
+        old(store).tcb_view().dom().contains(t),
+        prio <= ceiling,
+    ensures
+        final(store).tcb_view() == old(store).tcb_view().insert(
+            t, TcbView { priority: prio, ..old(store).tcb_view()[t] }),
+        // The point of the seam: the written priority is exactly `prio`, hence
+        // within the cap ceiling — a reachable `ensures`, not a shell promise.
+        final(store).tcb_view()[t].priority == prio,
+        final(store).tcb_view()[t].priority <= ceiling,
+        final(store).slot_view() == old(store).slot_view(),
+        final(store).refs_view() == old(store).refs_view(),
+        final(store).chan_view() == old(store).chan_view(),
+        final(store).notif_view() == old(store).notif_view(),
+        final(store).timer_view() == old(store).timer_view(),
+        final(store).timer_head_view() == old(store).timer_head_view(),
+        final(store).cspace_view() == old(store).cspace_view(),
+{
+    let _ = ceiling; // spec-only (the `prio <= ceiling` `requires`); erased build sees it unused
+    store.set_tcb_priority(t, prio);
+}
+
 /// Configure a binding slot (holder-configured, §3.6): the caller's
 /// notification cap MOVES into the TCB slot (§3.4 — duplicate first to
 /// keep access), preserving its CDT position so revocation sees it.
@@ -339,7 +374,13 @@ verus! {
 // the "new clauses destabilize an unrelated proof's rlimit" effect doc 51 §3 records (resource
 // counting varies Linux<->macOS, so it flaked only in CI). Isolating `destroy_tcb` into its
 // own Z3 instance is the standard Verus headroom fix.
+//
+// `rlimit` (D-B1 Option 2, doc 71): surfacing `priority` in `TcbView` adds yet another field to
+// every `tcb_view()` term this teardown carries, pushing the isolated body just past the default
+// 10s budget on some platforms. Raising its private resource cap (it is already on its own Z3
+// instance, so no other proof is affected) restores the margin — the proof itself is unchanged.
 #[verifier::spinoff_prover]
+#[verifier::rlimit(30)]
 pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
     requires
         cspace::cspace_wf(old(store).slot_view()),

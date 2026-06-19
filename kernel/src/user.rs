@@ -140,7 +140,13 @@ unsafe fn retype(ut: u64, ty: u64, param: u64, dst: u64, dst2: u64) -> i64 {
 
 #[inline(always)]
 unsafe fn cap_copy(src: u64, dst: u64, rights: u64) -> i64 {
-    sys(4, src, dst, rights, 0, 0, 0)
+    // a[3] = 0xFF: no §5.4 priority-ceiling reduction (kcore `NO_PRIO_CEILING`).
+    sys(4, src, dst, rights, 0xFF, 0, 0)
+}
+
+#[inline(always)]
+unsafe fn cap_copy_prio(src: u64, dst: u64, rights: u64, prio_ceiling: u64) -> i64 {
+    sys(4, src, dst, rights, prio_ceiling, 0, 0)
 }
 
 #[inline(always)]
@@ -374,8 +380,12 @@ pub extern "C" fn user_main(_arg: u64) -> ! {
         }
         // Attenuation gates the report surface (§2.3): a thread cap
         // copy without bind-reports/read-report can neither configure
-        // the slots nor read the record.
-        check(cap_copy(TCB2, TCB2_WEAK, RIGHT_READ | RIGHT_WRITE), b'!');
+        // the slots nor read the record. The copy also strictly lowers the
+        // §5.4 priority ceiling (`prio_ceiling = 3`, the §2.3 supervision
+        // grant) — the boot-path witness that the reducing `derive` ABI
+        // (`cap_copy_prio`, D-B1 Option 2) runs end-to-end; the ceiling is
+        // orthogonal to the rights gating checked just below.
+        check(cap_copy_prio(TCB2, TCB2_WEAK, RIGHT_READ | RIGHT_WRITE, 3), b'!');
         let r_bind = thread_bind(TCB2_WEAK, 0, SLOT_NONE as u64, 0);
         let (r_weak, _, _) = read_report(TCB2_WEAK);
         if r_bind >= 0 || r_weak >= 0 {
