@@ -3192,6 +3192,49 @@ fn recv_null_slot_tolerance() {
 }
 
 #[test]
+fn recv_installs_exact_caps_and_mask() {
+    // D-D1 witness for recv's exported receive-half: a multi-cap message (caps in
+    // message slots 0 and 2) is received; each arriving cap lands — by exact value —
+    // in the dest the caller named (ensures B), the returned mask names exactly those
+    // slots, 0b101 (ensures A), and every dequeued queue slot is empty (ensures C).
+    let (mut st, ch, scratch0) = chan_fixture(1, 8);
+    let s0 = SlotId(scratch0 as u64);
+    let s2 = SlotId((scratch0 + 1) as u64);
+    let d0 = SlotId((scratch0 + 2) as u64);
+    let d2 = SlotId((scratch0 + 3) as u64);
+    st.slots[scratch0] = detached(frame_cap(100));
+    st.slots[scratch0 + 1] = detached(frame_cap(200));
+    assert_eq!(
+        send(&mut st, ch, ChanEnd::A, &[1u8, 2, 3, 4], &[Some(s0), None, Some(s2), None]),
+        Ok(())
+    );
+    assert!(st.at(s0).cap.is_empty() && st.at(s2).cap.is_empty(), "sources emptied at send");
+
+    let mut buf = [0u8; MSG_PAYLOAD];
+    assert_eq!(
+        recv(&mut st, ch, ChanEnd::B, &mut buf, &[Some(d0), None, Some(d2), None]),
+        Ok((4, 0b101)),
+        "mask names exactly the filled dests (bits 0 and 2)"
+    );
+    // (B) the exact caps landed where the caller asked — Cap has no PartialEq, so match.
+    match st.at(d0).cap.kind {
+        CapKind::Frame { base, .. } => assert_eq!(base, 100, "cap 0 moved into d0, by value"),
+        _ => panic!("d0 should hold the moved frame cap"),
+    }
+    match st.at(d2).cap.kind {
+        CapKind::Frame { base, .. } => assert_eq!(base, 200, "cap 2 moved into d2, by value"),
+        _ => panic!("d2 should hold the moved frame cap"),
+    }
+    // (C) every cap slot of the dequeued head is empty afterward.
+    for c in 0..4usize {
+        let rc = st.chan(ch).ring_cap[&(0, 0, c)];
+        assert!(st.at(rc).cap.is_empty(), "dequeued head ring slot emptied");
+    }
+    assert_eq!(st.chan(ch).count[0], 0, "message dequeued");
+    assert!(chan_wf_exec(&st, ch));
+}
+
+#[test]
 fn randomized_fifo_sweep() {
     // Random send/recv on the A→B ring against a reference deque of message
     // lengths; assert FIFO order, count tracking, and chan_wf_exec throughout —
