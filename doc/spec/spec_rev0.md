@@ -1,4 +1,4 @@
-# Eunomia OS — Design Document (rev3)
+# Eunomia OS — Design Document (rev0)
 
 Eunomia is an experimental operating system built around three commitments:
 

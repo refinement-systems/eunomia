@@ -2,7 +2,7 @@
 
 Full design specification: `doc/spec/spec_rev0.md`. Read the spec before
 touching any component. Section numbers below refer to that document.
-All spec references must contain the revision number, like "rev0rev0§6" or "rev0rev0§3.1".
+All spec references must contain the revision number, like "rev0§6" or "rev0§3.1".
 
 ---
 
