@@ -86,6 +86,47 @@ pub open spec fn end_idx_spec(e: ChanEnd) -> int {
     }
 }
 
+/// Bit `c` of a `recv` install mask: set iff `recv` moved a non-empty arriving cap
+/// into `dests[c]`. Named (not inline `(m >> c) & 1`) so the §3d `recv` ensures and the
+/// pass-2 invariant share one canonical trigger (`mask_bit(mask, c)`) and the bit-vector
+/// lemmas below have a single shape to discharge.
+pub open spec fn mask_bit(m: u8, c: int) -> bool {
+    (m >> (c as u64)) & 1u8 == 1u8
+}
+
+/// A zero install mask has every bit clear — the loop-entry base case for `recv`'s mask
+/// invariant. One bit_vector step (doc-25/37 §2: isolate bit reasoning to a lemma).
+proof fn lemma_mask_zero(cc: u64)
+    requires
+        cc < 8,
+    ensures
+        !mask_bit(0u8, cc as int),
+{
+    assert((0u8 >> cc) & 1u8 == 0u8) by (bit_vector) requires cc < 8;
+}
+
+/// OR-ing in bit `c2` sets exactly that bit of an install mask and leaves the others — the
+/// step `recv`'s pass-2 mask invariant needs across `mask |= 1 << c2`. `c2 < 8` covers the
+/// `u8` shift; `recv` only ever uses `c2 < 4`.
+proof fn lemma_mask_set_bit(m: u8, c2: u64)
+    requires
+        c2 < 8,
+    ensures
+        mask_bit(m | (1u8 << c2), c2 as int),
+        forall|cc: int| #![trigger mask_bit(m | (1u8 << c2), cc)]
+            0 <= cc < 8 && cc != c2 as int
+            ==> (mask_bit(m | (1u8 << c2), cc) <==> mask_bit(m, cc)),
+{
+    assert(((m | (1u8 << c2)) >> c2) & 1u8 == 1u8) by (bit_vector) requires c2 < 8;
+    assert forall|cc: int| #![trigger mask_bit(m | (1u8 << c2), cc)]
+        0 <= cc < 8 && cc != c2 as int implies
+        (mask_bit(m | (1u8 << c2), cc) <==> mask_bit(m, cc)) by {
+        let ccu = cc as u64;
+        assert(((m | (1u8 << c2)) >> ccu) & 1u8 == (m >> ccu) & 1u8) by (bit_vector)
+            requires ccu < 8, c2 < 8, ccu != c2;
+    }
+}
+
 fn end_idx(e: ChanEnd) -> (r: usize)
     ensures
         r < 2,
@@ -1073,7 +1114,43 @@ pub fn recv<S: Store>(
             && cspace::ring_fifo(final(store).chan_view()[ch], final(store).slot_view(), end_idx_spec(end))
                    == cspace::ring_fifo(old(store).chan_view()[ch], old(store).slot_view(), end_idx_spec(end))
             && res->Ok_0.0 as nat == old(store).chan_view()[ch].msg_len[
-                   (1 - end_idx_spec(end), old(store).chan_view()[ch].head[1 - end_idx_spec(end)] as int)]),
+                   (1 - end_idx_spec(end), old(store).chan_view()[ch].head[1 - end_idx_spec(end)] as int)]
+            // (D-D1) The receive-half of move semantics, mirroring `send`'s source export.
+            // (B) Every non-empty arriving cap landed in the dest the caller named — so a
+            // verified caller can conclude where the cap went, not merely that it left the
+            // queue. (`dests@[c] is Some` here is forced by the pass-1 free-slot check.)
+            && (forall|c: int| #![trigger dests@[c]]
+                   0 <= c < 4 && !cspace::is_empty_cap(
+                       old(store).slot_view()[old(store).chan_view()[ch].ring_cap[(
+                           1 - end_idx_spec(end),
+                           old(store).chan_view()[ch].head[1 - end_idx_spec(end)] as int,
+                           c)]].cap)
+                   ==> (dests@[c] is Some
+                        && final(store).slot_view()[dests@[c]->Some_0].cap
+                           == old(store).slot_view()[old(store).chan_view()[ch].ring_cap[(
+                               1 - end_idx_spec(end),
+                               old(store).chan_view()[ch].head[1 - end_idx_spec(end)] as int,
+                               c)]].cap))
+            // (C) The dequeued head's ring slots are all empty afterward — the queue-slot
+            // owner relinquished the cap (moved-out caps cleared, null caps already empty).
+            && (forall|c: int| #![trigger old(store).chan_view()[ch].ring_cap[(
+                       1 - end_idx_spec(end),
+                       old(store).chan_view()[ch].head[1 - end_idx_spec(end)] as int, c)]]
+                   0 <= c < 4 ==> cspace::is_empty_cap(
+                       final(store).slot_view()[old(store).chan_view()[ch].ring_cap[(
+                           1 - end_idx_spec(end),
+                           old(store).chan_view()[ch].head[1 - end_idx_spec(end)] as int,
+                           c)]].cap))
+            // (A) The returned install mask names exactly the filled dests: bit c set iff
+            // arriving cap c was non-empty (hence moved into dests@[c] by (B)). A caller
+            // can decode which slots it now owns directly from the mask.
+            && (forall|c: int| #![trigger mask_bit(res->Ok_0.1, c)]
+                   0 <= c < 4 ==> (mask_bit(res->Ok_0.1, c)
+                       <==> !cspace::is_empty_cap(
+                           old(store).slot_view()[old(store).chan_view()[ch].ring_cap[(
+                               1 - end_idx_spec(end),
+                               old(store).chan_view()[ch].head[1 - end_idx_spec(end)] as int,
+                               c)]].cap)))),
 {
     let ghost sv0 = old(store).slot_view();
     let ghost cv0 = old(store).chan_view();
@@ -1141,6 +1218,12 @@ pub fn recv<S: Store>(
     // ── Pass 2: move each non-empty arriving cap into its dest, dequeue. ──
     let mut mask = 0u8;
     let mut c2: usize = 0;
+    proof {
+        // (2b) base case: the empty mask has every bit clear (RHS uniformly false at c2==0).
+        assert forall|cc: int| 0 <= cc < 4 implies !mask_bit(mask, cc) by {
+            lemma_mask_zero(cc as u64);
+        }
+    }
     while c2 < MSG_CAPS
         invariant
             0 <= c2 <= 4,
@@ -1183,6 +1266,20 @@ pub fn recv<S: Store>(
             forall|cc: int| #![trigger dests@[cc]]
                 (c2 <= cc < 4 && dests@[cc] is Some)
                 ==> store.slot_view()[dests@[cc]->Some_0].cap == sv0[dests@[cc]->Some_0].cap,
+            // (2a, D-D1) processed dests (cc < c2) with a non-empty arriving cap now HOLD
+            // it — the receive-half installation we will export from the `ensures`:
+            forall|cc: int| #![trigger cv0[ch].ring_cap[(rr, hh, cc)]]
+                (0 <= cc < c2
+                    && !cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap))
+                ==> (dests@[cc] is Some
+                    && store.slot_view()[dests@[cc]->Some_0].cap
+                        == sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap),
+            // (2b, D-D1) the install mask names exactly the processed-and-filled indices:
+            // bit cc set iff (cc already processed AND arriving cap cc was non-empty):
+            forall|cc: int| #![trigger mask_bit(mask, cc)]
+                0 <= cc < 4 ==> (mask_bit(mask, cc)
+                    <==> (cc < c2
+                        && !cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap))),
             // every ring slot NOT at (rr, hh) unchanged:
             forall|r2: int, idx2: int, c3: int| #![trigger cv0[ch].ring_cap[(r2, idx2, c3)]]
                 (0 <= r2 < 2 && 0 <= idx2 < cv0[ch].depth && 0 <= c3 < 4 && (r2 != rr || idx2 != hh))
@@ -1253,15 +1350,66 @@ pub fn recv<S: Store>(
                     assert(cv0[ch].ring_cap[(r2, idx2, c3)] != src);
                     assert(cv0[ch].ring_cap[(r2, idx2, c3)] != d);
                 }
+                // (2a, D-D1) processed dests through c2 hold their arriving cap. The cc==c2
+                // case is this very `slot_move` (dst d holds src's cap); cc < c2 survive
+                // because d (dests distinct) and src (a dest is not a ring cap) are not them.
+                assert forall|cc: int| #![trigger cv0[ch].ring_cap[(rr, hh, cc)]]
+                    (0 <= cc < c2 + 1
+                        && !cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap))
+                    implies (dests@[cc] is Some
+                        && sv2[dests@[cc]->Some_0].cap
+                            == sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap) by {
+                    if cc < c2 {
+                        assert(dests@[cc]->Some_0 != d);
+                        if dests@[cc]->Some_0 == src {
+                            assert(cspace::is_ring_cap_of(cv0[ch], dests@[cc]->Some_0));
+                        }
+                    } else {
+                        assert(cv0[ch].ring_cap[(rr, hh, cc)] == src);
+                        assert(dests@[cc]->Some_0 == d);
+                    }
+                }
             }
-            mask |= 1 << c2;
+            let ghost m_pre = mask;
+            let c2u: u64 = c2 as u64;
+            mask = mask | (1u8 << c2u);
+            proof {
+                // (2b, D-D1) re-establish the mask invariant for c2+1: the lemma sets bit
+                // c2 and frames the rest; the arriving cap at c2 is non-empty in this branch.
+                lemma_mask_set_bit(m_pre, c2u);
+                assert forall|cc: int| 0 <= cc < 4 implies (mask_bit(mask, cc)
+                    <==> (cc < c2 + 1
+                        && !cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap))) by {
+                    if cc == c2 as int {
+                        assert(!cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap));
+                    }
+                }
+            }
         } else {
             // null cap (revoked in flight): skip; head cap cc=c2 already empty.
             assert(cspace::is_empty_cap(store.slot_view()[cv0[ch].ring_cap[(rr, hh, c2 as int)]].cap));
+            proof {
+                // arriving cap c2 is empty (this branch), so the cc==c2 obligation is vacuous;
+                // nothing moved this iteration, so cc < c2 ride through unchanged.
+                assert(cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, c2 as int)]].cap));
+                assert forall|cc: int| #![trigger cv0[ch].ring_cap[(rr, hh, cc)]]
+                    (0 <= cc < c2 + 1
+                        && !cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap))
+                    implies (dests@[cc] is Some
+                        && store.slot_view()[dests@[cc]->Some_0].cap
+                            == sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap) by {
+                    assert(cc < c2);
+                }
+                // (2b, D-D1) mask unchanged; arriving c2 empty ⟹ bit c2 stays 0.
+                assert forall|cc: int| 0 <= cc < 4 implies (mask_bit(mask, cc)
+                    <==> (cc < c2 + 1
+                        && !cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap))) by {}
+            }
         }
         c2 += 1;
     }
 
+    let ghost sv_loop = store.slot_view();
     let len = store.chan_msg_len(ch, ring, head);
     assert(len as nat == cv0[ch].msg_len[(rr, hh)]);
     store.chan_msg_read(ch, ring, head, len as usize, buf);
@@ -1365,6 +1513,23 @@ pub fn recv<S: Store>(
                     (cv0[ch].head[1 - rr] + j) % (cv0[ch].depth as int));
             }
         }
+
+        // ── (D-D1) export the receive-half of move semantics ──
+        // The dequeue ops + fire frame slot_view, so the pass-2 installation rides to
+        // `final`; the c2==4 loop invariants then yield ensures (B) and (C) directly.
+        assert(svf == sv_loop);
+        // (C) every dequeued-head ring slot is empty (loop invariant "processed emptied").
+        assert forall|c: int| #![trigger cv0[ch].ring_cap[(rr, hh, c)]]
+            0 <= c < 4 implies cspace::is_empty_cap(svf[cv0[ch].ring_cap[(rr, hh, c)]].cap) by {}
+        // (B) each non-empty arriving cap landed in the named dest ((2a) at c2==4).
+        assert forall|c: int| #![trigger dests@[c]]
+            (0 <= c < 4 && !cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, c)]].cap))
+            implies (dests@[c] is Some
+                && svf[dests@[c]->Some_0].cap == sv0[cv0[ch].ring_cap[(rr, hh, c)]].cap) by {}
+        // (A) mask exactness ((2b) at c2==4: cc < 4 always holds, so RHS == non-emptiness).
+        assert forall|c: int| #![trigger mask_bit(mask, c)]
+            0 <= c < 4 implies (mask_bit(mask, c)
+                <==> !cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, c)]].cap)) by {}
     }
     Ok((len as usize, mask))
 }
