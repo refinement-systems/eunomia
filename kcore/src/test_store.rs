@@ -2927,6 +2927,61 @@ fn check_revoke_root_survives() {
     assert!(st.at(SlotId(2)).cap.is_empty(), "the cross-object teardown fired (resident emptied)");
 }
 
+#[test]
+fn check_revoke_root_survives_homed_external_ref() {
+    // The **faithful resident-with-external-reference** shape (plan §6e-dual, doc 55 §3): the
+    // revoked root `slot 0` *is* homed — a resident of cspace 10 — so the conservative `!is_homed`
+    // survival theorem does NOT apply (this is exactly the residue case). Yet `slot 0` still
+    // survives, because cspace 10 keeps a live reference *outside* `slot 0`'s subtree:
+    //   cspace 10 residents = [slot 0];
+    //   slot 0 (Frame) ── child ──▶ slot 1 = CSpace(10)   (a cap to 10, IN slot 0's subtree)
+    //   slot 2 = CSpace(10)                                (an EXTERNAL un-homed cap to 10)
+    //   refs[10] = 2 (slots 1 and 2 both designate cspace 10).
+    // revoke(slot 0) deletes the subtree (slot 1) → refs[10] drops 2 → 1, NOT zero, so
+    // destroy_cspace(10) never fires and the resident `slot 0` is never emptied. This is the
+    // contrapositive of `revoke`'s new §6e-dual `ensures`: no homing object of `slot 0` was
+    // destroyed (refs[10] stayed ≥ 1, witnessed by the external slot 2), so `slot 0` survived.
+    // Contrast `revoke_can_empty_its_own_root_zombie`, where slot 1 is the *only* cap to 10 (no
+    // external ref) ⟹ destroy_cspace(10) fires ⟹ the homed root self-empties.
+    let mut st = ArrayStore::new(3);
+    st.slots[0] = CapSlot {
+        cap: frame_cap(0),
+        parent: None,
+        first_child: Some(SlotId(1)),
+        next_sib: None,
+        prev_sib: None,
+    };
+    st.slots[1] = CapSlot {
+        cap: cspace_cap(10),
+        parent: Some(SlotId(0)),
+        first_child: None,
+        next_sib: None,
+        prev_sib: None,
+    };
+    // slot 2: an external, un-homed cap to cspace 10 — keeps refs[10] alive across the revoke.
+    st.slots[2] = detached(cspace_cap(10));
+    st.refs.insert(10, 2); // slots 1 and 2 both designate cspace 10
+    st.cspaces.insert(10, vec![SlotId(0)]); // cspace 10 homes slot 0 as its resident
+    assert!(cspace_wf_exec(&st), "the resident-with-external-ref shape is well-formed");
+    // `slot 0` IS homed (a resident of cspace 10) — the conservative theorem excludes it.
+    assert!(is_homed_exec(&st, SlotId(0)), "the revoke root is homed (a cspace resident)");
+    // `slot 2` is un-homed (no cspace resident / ring cap / bind slot designates it) and external
+    // to slot 0's subtree — the live reference that keeps cspace 10 alive.
+    assert!(!is_homed_exec(&st, SlotId(2)), "the external ref is un-homed (outside the subtree)");
+
+    revoke(&mut st, SlotId(0));
+
+    assert!(cspace_wf_exec(&st), "revoke preserves cspace_wf");
+    assert!(st.at(SlotId(0)).first_child.is_none(), "revoke: subtree empty");
+    // The §6e-dual headline: the *homed* revoked root survives because its homing cspace kept a
+    // live external reference (no homing object died — the contrapositive of the new `ensures`).
+    assert!(!st.at(SlotId(0)).cap.is_empty(), "revoke: the homed root SURVIVES (external ref alive)");
+    // The subtree cap to cspace 10 was deleted, but cspace 10 stayed alive via the external ref.
+    assert!(st.at(SlotId(1)).cap.is_empty(), "the subtree cap to cspace 10 was revoked");
+    assert!(!st.at(SlotId(2)).cap.is_empty(), "the external cap to cspace 10 survives the revoke");
+    assert_eq!(st.refs[&10], 1, "cspace 10 keeps the external reference (never destroyed)");
+}
+
 // ── Channel send/recv (plan §3d): the FIFO core, host-differential ──────────
 //
 // `send`/`recv` carry full Verus contracts (FIFO `Seq` push/pop, move totality,

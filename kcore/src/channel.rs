@@ -255,6 +255,10 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
         // frames `tcb`/`refs` whole, and the peer-closed `fire` is signal-shaped (its own
         // `dead_tcb_frozen`). `delete`'s Channel branch reads it off.
         cspace::dead_tcb_frozen(old(store), final(store)),
+        // §6e-dual "dead stays dead": `set_chan_end_caps` frames `refs` whole and the peer-closed
+        // `fire` carries `refs_death_persist`, so a dead object stays dead. `delete`'s Channel
+        // branch composes it for the §6e-dual provenance frame.
+        cspace::refs_death_persist(old(store), final(store)),
         // The TCB domain + every immutable `bind_slots` ride through (plan §6e): `set_chan_end_caps`
         // frames `tcb`, `fire` keeps both — the `home_views_frozen` stability `delete`'s Channel
         // branch threads for the §6e provenance frame.
@@ -314,7 +318,11 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
         fire(store, ch, 1 - e, EV_PEER_CLOSED);
     } else {
         // No fire ⇒ the store is unchanged since `st_mid`, so it is trivially dead-tcb-frozen.
-        proof { assert(cspace::dead_tcb_frozen(&st_mid, store)); }
+        proof {
+            assert(cspace::dead_tcb_frozen(&st_mid, store));
+            // …and trivially death-preserving (`refs` unchanged since `st_mid`).
+            cspace::lemma_refs_death_persist_from_refs_eq(&st_mid, store);
+        }
     }
     // caps_consistent + end_caps_sound at exit: established after the decrement above; in the
     // fired branch `fire` carries `caps_consistent` (its conditional ensures) and frames
@@ -358,6 +366,10 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
         // keeps both, or the unfired branch leaves the store at `st_mid`).
         assert forall|k: ObjId| #[trigger] store.tcb_view()[k].bind_slots
             == old(store).tcb_view()[k].bind_slots by {}
+        // §6e-dual: `set_chan_end_caps` froze `refs` (`old → st_mid` death-persist refl); the fire
+        // (or no-op) carries `st_mid → final` death-persist; compose.
+        cspace::lemma_refs_death_persist_from_refs_eq(old(store), &st_mid);
+        cspace::lemma_refs_death_persist_trans(old(store), &st_mid, store);
     }
 }
 
@@ -412,6 +424,10 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
         // mutated before it); the unbound branch is a no-op. `endpoint_cap_dropped`/`delete`
         // carry it up the teardown chain.
         cspace::dead_tcb_frozen(old(store), final(store)),
+        // §6e-dual "dead stays dead" across the fire: the bound branch rides `signal`'s own
+        // `refs_death_persist`; the unbound branch is a no-op. `endpoint_cap_dropped`/`delete`
+        // carry it up the teardown chain.
+        cspace::refs_death_persist(old(store), final(store)),
         // The TCB domain + every immutable `bind_slots` ride the fire (plan §6e): `signal` keeps
         // both (the bound branch) and the unbound branch is a no-op — the `home_views_frozen`
         // stability `endpoint_cap_dropped`/`delete` thread for the §6e provenance frame.
@@ -483,6 +499,11 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
         // store untouched in the unbound one).
         assert forall|k: ObjId| #[trigger] store.tcb_view()[k].bind_slots
             == old(store).tcb_view()[k].bind_slots by {}
+        // §6e-dual: death persists — the bound branch rides `signal`'s `refs_death_persist` (its
+        // `old` is this `old`, nothing preceded it); the unbound branch frames `refs` whole.
+        if b.notif is None {
+            cspace::lemma_refs_death_persist_from_refs_eq(old(store), store);
+        }
     }
 }
 
@@ -1383,6 +1404,10 @@ fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
         // The home maps are framed (plan §6e): `release_binding` frames `tcb` whole and the
         // bindings-only chan edit keeps the skeleton — `destroy_channel` threads it.
         cspace::home_views_frozen(old(store), final(store)),
+        // §6e-dual "dead stays dead": the bound case drops only `refs[n]` (positive — a binding
+        // held a ref), keeping the domain; the unbound case frames `refs` whole. `destroy_channel`
+        // composes it across the binding-release loop.
+        cspace::refs_death_persist(old(store), final(store)),
 {
     let b = store.chan_binding(ch, end, ev);
     if let Some(n) = b.notif {
@@ -1496,6 +1521,10 @@ fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
             assert(store.refs_view().dom() =~= old(store).refs_view().dom());
             assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
             cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, n);
+            // §6e-dual: the bound case drops only `refs[n]` (positive), keeping the domain.
+            assert(store.refs_view()
+                == old(store).refs_view().insert(n, (old(store).refs_view()[n] - 1) as nat));
+            cspace::lemma_refs_death_persist_dec_ref(old(store), store, n);
         }
     } else {
         // No bound notification ⇒ the store is unchanged, so it is trivially dead-tcb-frozen.
@@ -1505,6 +1534,8 @@ fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
             assert(store.refs_view().dom() =~= old(store).refs_view().dom());
             assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
             cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, ch);
+            // §6e-dual: the store is unchanged, so death is trivially preserved.
+            cspace::lemma_refs_death_persist_from_refs_eq(old(store), store);
         }
     }
     // §6e: the home maps are framed — `tcb` is framed whole in both branches, `cspace_view` too,
@@ -1542,6 +1573,10 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
         cspace::end_caps_sound(old(store)),
         // Refs-domain completeness (plan §6d body-removal): the body's `delete`s thread it.
         cspace::census_dom_complete(old(store)),
+        // §6e-dual: `ch` is dead — its last endpoint cap is gone, so it is out of `refs.dom` or
+        // sits there at `refs == 0` (`obj_unref` calls this at `refs[ch] == 0`). `ch` homes its ring
+        // caps, so it is the death witness for each ring slot the teardown empties.
+        cspace::dead_obj(old(store), ch),
     ensures
         cspace::cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom() == old(store).slot_view().dom(),
@@ -1574,6 +1609,12 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
         // §6e provenance: this destructor empties only its ring caps (each homed in `ch`) and
         // their recursive closure, so every un-homed slot keeps its cap. `obj_unref` reads it off.
         cspace::unhomed_frozen_free(old(store), final(store)),
+        // §6e-dual provenance: every emptied slot was a home handle of a dead object. A ring cap
+        // emptied by a `delete` is homed by `ch` (dead throughout: it entered dead and stays so);
+        // the recursive closure each `delete` clears carries its own witness. `obj_unref` reads it.
+        cspace::emptied_via_dead_home_free(old(store), final(store)),
+        // "Dead stays dead" across the ring-cap deletes + binding releases (each decrements only).
+        cspace::refs_death_persist(old(store), final(store)),
     // SCC measure (plan §6d-final): height 3 — above `delete` (0), below `obj_unref` (4); its
     // ring-cap `delete`s are count-flat on the first iteration, so the height drops.
     decreases cspace::count_nonempty(old(store).slot_view()), 3int
@@ -1603,6 +1644,12 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
             cspace::dead_tcb_frozen(old(store), store),
             cspace::home_views_frozen(old(store), store),
             cspace::unhomed_frozen_free(old(store), store),
+            // §6e-dual provenance composes across the ring-cap deletes (plan §6e-dual).
+            cspace::emptied_via_dead_home_free(old(store), store),
+            cspace::refs_death_persist(old(store), store),
+            // `ch` is dead throughout (it entered dead, death is monotone-preserved) — the witness
+            // for each ring cap being emptied.
+            cspace::dead_obj(store, ch),
             store.chan_view().dom().contains(ch),
             store.chan_view()[ch].ring_cap == rc,
             forall|r: int, i: int, c: int|
@@ -1632,6 +1679,10 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                 cspace::dead_tcb_frozen(old(store), store),
                 cspace::home_views_frozen(old(store), store),
                 cspace::unhomed_frozen_free(old(store), store),
+                // §6e-dual provenance composes across the ring-cap deletes (plan §6e-dual).
+                cspace::emptied_via_dead_home_free(old(store), store),
+                cspace::refs_death_persist(old(store), store),
+                cspace::dead_obj(store, ch),
                 store.chan_view().dom().contains(ch),
                 store.chan_view()[ch].ring_cap == rc,
                 forall|r: int, ii: int, c: int|
@@ -1666,6 +1717,10 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                     cspace::dead_tcb_frozen(old(store), store),
                     cspace::home_views_frozen(old(store), store),
                     cspace::unhomed_frozen_free(old(store), store),
+                    // §6e-dual provenance composes across the ring-cap deletes (plan §6e-dual).
+                    cspace::emptied_via_dead_home_free(old(store), store),
+                    cspace::refs_death_persist(old(store), store),
+                    cspace::dead_obj(store, ch),
                     store.chan_view().dom().contains(ch),
                     store.chan_view()[ch].ring_cap == rc,
                     forall|r: int, ii: int, cc: int|
@@ -1711,6 +1766,22 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                         cspace::lemma_unhomed_frozen_free_from_homed(&st_before, store, cs);
                         cspace::lemma_unhomed_frozen_free_trans(old(store), &st_before, store);
                         cspace::lemma_home_views_frozen_trans(old(store), &st_before, store);
+                        // §6e-dual: `ch` homes `cs` (ring cap at `(ring, i, c)`) at `st_before`, and
+                        // `ch` is dead there (loop invariant) and stays dead (`delete`'s
+                        // `refs_death_persist`), so the directly-deleted `cs` carries the death
+                        // witness `ch`. Lift `delete`'s target-aware frame to the free frame, compose.
+                        assert(cspace::homes_in_chan(&st_before, ch, cs)) by {
+                            assert(st_before.chan_view().dom().contains(ch));
+                            assert(st_before.chan_view()[ch].ring_cap[(ring as int, i as int,
+                                c as int)] == cs);
+                        }
+                        assert(cspace::homes(&st_before, ch, cs));
+                        assert(cspace::dead_obj(&st_before, ch));  // loop invariant
+                        assert(cspace::dead_obj(store, ch));        // `delete`'s `refs_death_persist`
+                        cspace::lemma_emptied_via_dead_home_free_from_homed(
+                            &st_before, store, cs, ch);
+                        cspace::lemma_emptied_via_dead_home_free_trans(old(store), &st_before, store);
+                        cspace::lemma_refs_death_persist_trans(old(store), &st_before, store);
                     }
                 }
                 // Re-establish the empty prefix: prior empties stay empty (`only_empties` from
@@ -1756,6 +1827,8 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
             cspace::dead_tcb_frozen(old(store), store),
             cspace::home_views_frozen(old(store), store),
             cspace::unhomed_frozen_free(old(store), store),
+            cspace::emptied_via_dead_home_free(old(store), store),
+            cspace::refs_death_persist(old(store), store),
             store.chan_view().dom().contains(ch),
             forall|r: int, i: int, c: int|
                 (0 <= r < 2 && 0 <= i < depth0 && 0 <= c < 4)
@@ -1780,6 +1853,8 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                 cspace::dead_tcb_frozen(old(store), store),
                 cspace::home_views_frozen(old(store), store),
                 cspace::unhomed_frozen_free(old(store), store),
+                cspace::emptied_via_dead_home_free(old(store), store),
+                cspace::refs_death_persist(old(store), store),
                 store.chan_view().dom().contains(ch),
                 forall|r: int, i: int, c: int|
                     (0 <= r < 2 && 0 <= i < depth0 && 0 <= c < 4)
@@ -1797,6 +1872,11 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                 cspace::lemma_unhomed_frozen_free_from_slot_eq(&st_before, store);
                 cspace::lemma_unhomed_frozen_free_trans(old(store), &st_before, store);
                 cspace::lemma_home_views_frozen_trans(old(store), &st_before, store);
+                // §6e-dual: `release_binding` frames `slot_view` (free refl) and exports
+                // `refs_death_persist`; compose across the binding-release loop.
+                cspace::lemma_emptied_via_dead_home_free_from_slot_eq(&st_before, store);
+                cspace::lemma_emptied_via_dead_home_free_trans(old(store), &st_before, store);
+                cspace::lemma_refs_death_persist_trans(old(store), &st_before, store);
             }
         }
     }

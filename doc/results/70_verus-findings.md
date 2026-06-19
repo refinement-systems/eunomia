@@ -159,7 +159,9 @@ pass unchanged — runtime behaviour is identical; only the contracts moved.
   CapRevoke … witnessed only by `revoke_can_empty_its_own_root_zombie`") is **superseded** and
   was removed from `revoke`'s doc comment.
 - **D-A2:** the faithfulness gap is closed at the contract level; the resident-with-external-
-  reference residue stays follow-on (doc/results/55, refs-monotone frame).
+  reference residue stays follow-on (doc/results/55, refs-monotone frame). **— now closed in
+  doc/results/72:** the `emptied_via_dead_home` frame + the refs-monotone *dead-stays-dead*
+  argument landed and `revoke` exports the faithful theorem, plus the §2.2/§2.5 spec note.
 - **D-A3:** still follow-on — add a `subtree_empty` `ensures`/lemma and a queued-descendant
   test on real `revoke`; the now-reachable descendant-deletion makes this strictly easier.
 - The §2.2/§2.5 spec-prose notes (doc 69 "Inputs to 9e", item 4) can drop their D-A1 sub-clause

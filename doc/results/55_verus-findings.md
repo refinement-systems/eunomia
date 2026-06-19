@@ -101,6 +101,13 @@ contract; `verus!{}` erases it — confirmed `cd kernel && cargo build`). No rli
 
 ## 3. The recorded residue (the faithful resident-with-external-reference theorem)
 
+> **Closed in doc/results/72** (D-A2). The `emptied_via_dead_home` frame and the refs-monotone
+> *dead-stays-dead* argument described below landed: `revoke` now exports
+> `is_empty_cap(final[slot]) ⟹ ∃o. o homes slot ∧ o destroyed`, the caller-completable form of
+> the faithful theorem. (The death model is the disjunction `o ∉ refs.dom ∨ refs[o] == 0`, since
+> the cspace/channel/TCB destructors leave their object in `refs.dom` at `refs == 0` — see doc 72
+> F-72-1. The conservative `!is_homed` theorem remains the sound floor beside it.)
+
 `revoke`'s precondition is the plan §6e **conservative** form (`slot` homed by no object). The
 **faithful** form — a `slot` that *is* a cspace resident but whose homing cspace keeps a live
 reference *outside* `slot`'s subtree also survives — is **not** closed here, and is the explicit
