@@ -2059,6 +2059,43 @@ pub proof fn lemma_waiter_refs_frame_dequeued(
     }
 }
 
+// `waiter_refs(o)` is unchanged by a TCB edit that preserves every thread's *chain* fields —
+// `qnext`, `wait_notif`, and `state`. `waiter_chain` reads only those (plus the domain and the
+// notification view), so the chain predicate is identical in both states; hence the existence
+// and the unique chosen sequence agree. This is the frame `thread::bind` (D-F2) needs for its
+// `set_tcb_bind_bits` step, which writes only `bind_bits` — a field no census term reads, and on
+// a thread that may itself be on a chain (so the off-chain frames don't apply).
+pub proof fn lemma_waiter_refs_frame_fields(
+    nv: Map<ObjId, NotifView>,
+    tv0: Map<ObjId, TcbView>,
+    tvf: Map<ObjId, TcbView>,
+    o: ObjId,
+)
+    requires
+        tvf.dom() == tv0.dom(),
+        forall|k: ObjId| #[trigger] tvf[k].qnext == tv0[k].qnext,
+        forall|k: ObjId| #[trigger] tvf[k].wait_notif == tv0[k].wait_notif,
+        forall|k: ObjId| #[trigger] tvf[k].state == tv0[k].state,
+    ensures
+        waiter_refs(nv, tvf, o) == waiter_refs(nv, tv0, o),
+{
+    if exists|ws: Seq<ObjId>| waiter_chain(nv, tv0, o, ws) {
+        let a = waiter_seq(nv, tv0, o);
+        assert(waiter_chain(nv, tv0, o, a));
+        assert(waiter_chain(nv, tvf, o, a));
+        let b = waiter_seq(nv, tvf, o);
+        assert(waiter_chain(nv, tvf, o, b));
+        lemma_waiter_chain_unique(nv, tvf, o, a, b);
+    } else {
+        assert(!exists|ws: Seq<ObjId>| waiter_chain(nv, tvf, o, ws)) by {
+            if exists|ws: Seq<ObjId>| waiter_chain(nv, tvf, o, ws) {
+                let w = choose|ws: Seq<ObjId>| waiter_chain(nv, tvf, o, ws);
+                assert(waiter_chain(nv, tv0, o, w));
+            }
+        }
+    }
+}
+
 // `caps_consistent` is preserved by an edit that holds the slot/chan/timer/notif/cspace views
 // fixed and changes only threads that are **off every chain in both states** (keeping each TCB's
 // `bind_slots`/`cspace`). This is `destroy_tcb`'s `set_tcb_qnext`/`set_tcb_state` step (the
@@ -3170,6 +3207,73 @@ proof fn lemma_same_caps_same_frame_map(m1: Map<SlotId, CapSlot>, m2: Map<SlotId
         }
     }
     assert(s1 =~= s2);
+}
+
+// Moving a cap from slot `a` (emptied) to a previously-empty slot `b` preserves both
+// slot-derived census terms at every object: the designating-slot count is fixed because one
+// slot loses the cap exactly as another gains it (the filter set merely swaps `a`↔`b`). This
+// is the census frame `slot_move` exports operationally (`refs_view` fixed) but never as an
+// `ensures`; `thread::bind` (D-F2) consumes it to carry `refcount_sound` across its
+// notification-cap `slot_move`.
+pub proof fn lemma_cap_move_census(
+    pre: Map<SlotId, CapSlot>,
+    post: Map<SlotId, CapSlot>,
+    a: SlotId,
+    b: SlotId,
+    o: ObjId,
+)
+    requires
+        pre.dom() == post.dom(),
+        pre.dom().finite(),
+        a != b,
+        pre.dom().contains(a),
+        pre.dom().contains(b),
+        is_empty_cap(pre[b].cap),
+        is_empty_cap(post[a].cap),
+        post[b].cap == pre[a].cap,
+        forall|x: SlotId| #[trigger] pre.dom().contains(x) && x != a && x != b
+            ==> post[x].cap == pre[x].cap,
+    ensures
+        slot_refs(post, o) == slot_refs(pre, o),
+        frame_map_refs(post, o) == frame_map_refs(pre, o),
+{
+    // An empty cap designates / maps nothing, so `a` (post) and `b` (pre) are in neither filter.
+    let s1 = pre.dom().filter(|k: SlotId| cap_obj(pre[k].cap) == Some(o));
+    let s2 = post.dom().filter(|k: SlotId| cap_obj(post[k].cap) == Some(o));
+    assert(s1.finite());
+    if cap_obj(pre[a].cap) == Some(o) {
+        assert forall|k: SlotId| #![trigger s2.contains(k)]
+            s2.contains(k) <==> s1.remove(a).insert(b).contains(k) by {
+            if pre.dom().contains(k) && k != a && k != b { assert(post[k].cap == pre[k].cap); }
+        }
+        assert(s2 =~= s1.remove(a).insert(b));
+        assert(s1.contains(a));
+        assert(!s1.contains(b));
+        assert(!s1.remove(a).contains(b));
+    } else {
+        assert forall|k: SlotId| #![trigger s2.contains(k)] s2.contains(k) <==> s1.contains(k) by {
+            if pre.dom().contains(k) && k != a && k != b { assert(post[k].cap == pre[k].cap); }
+        }
+        assert(s2 =~= s1);
+    }
+    let g1 = pre.dom().filter(|k: SlotId| cap_frame_aspace(pre[k].cap) == Some(o));
+    let g2 = post.dom().filter(|k: SlotId| cap_frame_aspace(post[k].cap) == Some(o));
+    assert(g1.finite());
+    if cap_frame_aspace(pre[a].cap) == Some(o) {
+        assert forall|k: SlotId| #![trigger g2.contains(k)]
+            g2.contains(k) <==> g1.remove(a).insert(b).contains(k) by {
+            if pre.dom().contains(k) && k != a && k != b { assert(post[k].cap == pre[k].cap); }
+        }
+        assert(g2 =~= g1.remove(a).insert(b));
+        assert(g1.contains(a));
+        assert(!g1.contains(b));
+        assert(!g1.remove(a).contains(b));
+    } else {
+        assert forall|k: SlotId| #![trigger g2.contains(k)] g2.contains(k) <==> g1.contains(k) by {
+            if pre.dom().contains(k) && k != a && k != b { assert(post[k].cap == pre[k].cap); }
+        }
+        assert(g2 =~= g1);
+    }
 }
 
 // Same-dom, same-caps arenas have the same `end_cap_count` (the `cap_chan_end` companion).
@@ -5078,6 +5182,68 @@ pub proof fn lemma_armed_timer_disarm(
             if j != t {
                 assert(post[j].armed == pre[j].armed && post[j].notif == pre[j].notif);
             }
+        }
+        assert(f2 =~= f1);
+    }
+}
+
+// Armed-timer **retarget**, the general single-timer transition (D-E1, `arm`). Like
+// `lemma_armed_timer_disarm` but with no restriction on `post[t]`: `t`'s `(armed, notif)`
+// may change arbitrarily (disarm, arm, or re-arm) while every other timer keeps both
+// fields. `arm` produces exactly this shape end-to-end — its body `disarm`s then pushes,
+// but only `t`'s `(armed, notif)` differs between the entry and exit maps (the predecessor
+// splice touches only `next`, which `armed_timer_refs` ignores). The delta at `o` is the
+// symmetric indicator form: `post`-count + `[t was bound to o]` == `pre`-count + `[t is now
+// bound to o]`, so a consumer reads `o`'s census change off `t`'s membership transition.
+pub proof fn lemma_armed_timer_retarget(
+    pre: Map<ObjId, TimerView>,
+    post: Map<ObjId, TimerView>,
+    t: ObjId,
+    o: ObjId,
+)
+    requires
+        pre.dom().finite(),
+        post.dom() == pre.dom(),
+        pre.dom().contains(t),
+        forall|j: ObjId| #![trigger post[j]]
+            j != t ==> post[j].armed == pre[j].armed && post[j].notif == pre[j].notif,
+    ensures
+        armed_timer_refs(post, o)
+            + (if pre[t].armed && pre[t].notif == Some(o) { 1nat } else { 0nat })
+            == armed_timer_refs(pre, o)
+            + (if post[t].armed && post[t].notif == Some(o) { 1nat } else { 0nat }),
+{
+    let f1 = pre.dom().filter(|j: ObjId| pre[j].armed && pre[j].notif == Some(o));
+    let f2 = post.dom().filter(|j: ObjId| post[j].armed && post[j].notif == Some(o));
+    let pre_in = pre[t].armed && pre[t].notif == Some(o);
+    let post_in = post[t].armed && post[t].notif == Some(o);
+    // Off `t`, the two filters agree (both fields framed); they differ only on `t`.
+    if pre_in && post_in {
+        assert forall|j: ObjId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.contains(j) by {
+            if j != t { assert(post[j].armed == pre[j].armed && post[j].notif == pre[j].notif); }
+        }
+        assert(f2 =~= f1);
+    } else if pre_in && !post_in {
+        assert(!f2.contains(t));
+        assert forall|j: ObjId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.remove(t).contains(j) by {
+            if j != t { assert(post[j].armed == pre[j].armed && post[j].notif == pre[j].notif); }
+        }
+        assert(f2 =~= f1.remove(t));
+        assert(f1.contains(t));
+        assert(f1.finite());
+    } else if !pre_in && post_in {
+        assert(!f1.contains(t));
+        assert forall|j: ObjId| #![trigger f1.contains(j)] f1.contains(j) <==> f2.remove(t).contains(j) by {
+            if j != t { assert(post[j].armed == pre[j].armed && post[j].notif == pre[j].notif); }
+        }
+        assert(f1 =~= f2.remove(t));
+        assert(f2.contains(t));
+        assert(f2.finite());
+    } else {
+        assert(!f1.contains(t));
+        assert(!f2.contains(t));
+        assert forall|j: ObjId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.contains(j) by {
+            if j != t { assert(post[j].armed == pre[j].armed && post[j].notif == pre[j].notif); }
         }
         assert(f2 =~= f1);
     }

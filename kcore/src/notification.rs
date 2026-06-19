@@ -337,15 +337,22 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
 /// (the queue/refs are untouched); otherwise `cur` is appended at the tail
 /// (`waiter_seq` grows by `Seq::push` — the FIFO/block-order half of the wake-order
 /// theorem), is marked `BlockedNotif`/`wait_notif = Some(n)`, and acquires one ref on
-/// `n` (released on wake or teardown). `notif_wf` is preserved. The `cur` thread must
-/// not already be waiting on `n` (`wait_notif != Some(n)`), so the push keeps the
-/// chain duplicate-free.
+/// `n` (released on wake or teardown). `notif_wf` is preserved. The `cur` thread (the
+/// running caller) must not be queued on any notification (`wait_notif is None`): this
+/// keeps `n`'s push duplicate-free *and* lets the census frame conclude `cur` is off every
+/// other notification's chain, so `waiter_refs(o)` is unperturbed for `o != n`.
+///
+/// **Refcount census (D-E1).** Exports `census_delta_frozen` + conditional `refcount_sound`,
+/// matching `signal`/`remove_waiter`: on the block path the `refs[n] += 1` acquire is matched
+/// by `waiter_refs(n)` gaining `cur` (`waiter_seq` push), the reverse of `signal`'s wake; the
+/// consume path moves no census term. This closes the soundness chain so a verified caller
+/// after a syscall `wait` can discharge its `refcount_sound(old)` precondition.
 pub fn wait<S: Store>(store: &mut S, n: ObjId, cur: ObjId) -> (res: Option<u64>)
     requires
         old(store).notif_view().dom().contains(n),
         old(store).tcb_view().dom().contains(cur),
         cspace::notif_wf(old(store).notif_view(), old(store).tcb_view(), n),
-        old(store).tcb_view()[cur].wait_notif != Some(n),
+        old(store).tcb_view()[cur].wait_notif is None,
         old(store).notif_view()[n].word == 0
             ==> old(store).refs_view().dom().contains(n) && old(store).refs_view()[n] < u32::MAX,
     ensures
@@ -354,6 +361,10 @@ pub fn wait<S: Store>(store: &mut S, n: ObjId, cur: ObjId) -> (res: Option<u64>)
         final(store).notif_view().dom() == old(store).notif_view().dom(),
         final(store).tcb_view().dom() == old(store).tcb_view().dom(),
         cspace::notif_wf(final(store).notif_view(), final(store).tcb_view(), n),
+        // The refcount census moves in lockstep (D-E1): block acquires `refs[n]` and a waiter
+        // slot together; consume touches neither.
+        cspace::census_delta_frozen(old(store), final(store)),
+        cspace::refcount_sound(old(store)) ==> cspace::refcount_sound(final(store)),
         // Consume path: word returned and cleared, queue + refs + TCBs untouched.
         old(store).notif_view()[n].word != 0 ==> {
             &&& res == Some(old(store).notif_view()[n].word)
@@ -388,6 +399,21 @@ pub fn wait<S: Store>(store: &mut S, n: ObjId, cur: ObjId) -> (res: Option<u64>)
             cspace::lemma_waiter_chain_unique(
                 store.notif_view(), store.tcb_view(), n,
                 cspace::waiter_seq(store.notif_view(), store.tcb_view(), n), ws0);
+            // D-E1 census: only `nv[n].word` moved (not a census term), `refs`/`tcb` untouched
+            // and the slot/chan/timer views framed, so `waiter_refs(o)` rides through for every
+            // `o` (`lemma_waiter_refs_frame_nv`). Refs and census both unchanged ⇒ frozen.
+            assert(store.refs_view() == old(store).refs_view());
+            assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o)
+                == cspace::obj_census(old(store), o) by {
+                if o != n {
+                    cspace::lemma_waiter_refs_frame_nv(
+                        old(store).notif_view(), store.notif_view(), store.tcb_view(), o);
+                }
+            }
+            assert(cspace::census_delta_frozen(old(store), store));
+            if cspace::refcount_sound(old(store)) {
+                cspace::lemma_refcount_sound_from_frozen(old(store), store);
+            }
         }
         return Some(word);
     }
@@ -451,6 +477,58 @@ pub fn wait<S: Store>(store: &mut S, n: ObjId, cur: ObjId) -> (res: Option<u64>)
         }
         cspace::lemma_waiter_chain_unique(nvf, tvf, n,
             cspace::waiter_seq(nvf, tvf, n), pws);
+
+        // D-E1 census. The block path acquires `refs[n] += 1`, matched by `waiter_refs(n)`
+        // gaining `cur` (`waiter_seq(n) == ws0.push(cur)`, one longer) — the reverse of
+        // `signal`'s wake. Every other census term is framed: `thread_hold` via
+        // `lemma_thread_hold_frame` (only `cur`/the tail's queue links moved, never
+        // cspace/aspace), and `waiter_refs(o)` for `o != n` via `lemma_waiter_refs_frame`.
+        let ghost old_tail = nv0[n].wait_tail;
+        assert(store.refs_view()
+            == old(store).refs_view().insert(n, (old(store).refs_view()[n] + 1) as nat));
+        assert(store.refs_view().dom() == old(store).refs_view().dom());
+        assert(cspace::waiter_seq(nvf, tvf, n) == pws);
+        assert(cspace::waiter_refs(nv0, tv0, n) == ws0.len());
+        assert(cspace::waiter_refs(nvf, tvf, n) == pws.len());
+        assert(pws.len() == ws0.len() + 1);
+        // `wait_notif` is written for `cur` alone (the tail set touches only `qnext`); and the
+        // only non-`cur` TCB written is the old tail, which keeps its on-`n`-chain `wait_notif`.
+        assert forall|k: ObjId| #[trigger] tvf[k] != tv0[k] && k != cur implies
+            old_tail == Some(k) by {}
+        assert(old_tail matches Some(tl) ==> tv0[tl].wait_notif == Some(n)) by {
+            if let Some(tl) = old_tail {
+                // The wait_tail is `ws0`'s last node, and every chain node waits on `n`.
+                assert(ws0.len() >= 1);
+                assert(tl == ws0[ws0.len() - 1]);
+                assert(tv0[ws0[ws0.len() - 1]].wait_notif == Some(n));
+            }
+        }
+        assert(tvf.dom() == tv0.dom());
+        assert forall|k: ObjId| #[trigger] tvf[k].cspace == tv0[k].cspace by {}
+        assert forall|k: ObjId| #[trigger] tvf[k].aspace == tv0[k].aspace by {}
+        assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o)
+            == (if o == n { (cspace::obj_census(old(store), n) + 1) as nat } else {
+                cspace::obj_census(old(store), o)
+            }) by {
+            cspace::lemma_thread_hold_frame(tv0, tvf, o);
+            if o != n {
+                assert(nvf[o] == nv0[o]);
+                assert forall|k: ObjId| #[trigger] tvf[k] != tv0[k]
+                    implies tv0[k].wait_notif != Some(o) && tvf[k].wait_notif != Some(o) by {
+                    if k == cur {
+                        assert(tv0[cur].wait_notif is None);
+                    } else {
+                        assert(old_tail == Some(k));
+                        assert(tvf[k].wait_notif == tv0[k].wait_notif);
+                    }
+                }
+                cspace::lemma_waiter_refs_frame(nv0, tv0, nvf, tvf, n, o);
+            }
+        }
+        assert(cspace::census_delta_frozen(old(store), store));
+        if cspace::refcount_sound(old(store)) {
+            cspace::lemma_refcount_sound_from_frozen(old(store), store);
+        }
     }
     None
 }
