@@ -1,4 +1,4 @@
-//! Session/handle semantics tests (spec §2.2–2.4): handle relativity,
+//! Session/handle semantics tests (spec rev0§2.2-2.4): handle relativity,
 //! subtree confinement, monotone attenuation, generation revocation,
 //! one-shot tickets, audit.
 
@@ -29,7 +29,7 @@ fn handles_are_session_relative() {
     let s2 = srv.open_session(vec![]);
 
     // Same integer, different sessions: handle 0 means something in s1,
-    // nothing in s2 — the integers carry no authority (§2.4).
+    // nothing in s2 — the integers carry no authority (rev0§2.4).
     assert_eq!(
         srv.handle(s1, Request::Read { handle: 0, path: p(&["top.txt"]), offset: 0, len: u32::MAX }, 10),
         Response::Data(b"top secret".to_vec())
@@ -59,13 +59,13 @@ fn subtree_confinement_by_unreachability() {
         srv.handle(s, Request::Read { handle: sub, path: p(&["readme"]), offset: 0, len: u32::MAX }, 11),
         Response::Data(b"public info".to_vec())
     );
-    // The sibling simply has no name from here (§2.3): the same path that
+    // The sibling simply has no name from here (rev0§2.3): the same path that
     // works on the root handle resolves under pub/ and finds nothing.
     assert_eq!(
         srv.handle(s, Request::Read { handle: sub, path: p(&["top.txt"]), offset: 0, len: u32::MAX }, 11),
         Response::NotFound
     );
-    // ".." is path syntax, never stored — rejected outright (§4.9).
+    // ".." is path syntax, never stored — rejected outright (rev0§4.9).
     assert_eq!(
         srv.handle(s, Request::Read { handle: sub, path: p(&["..", "top.txt"]), offset: 0, len: u32::MAX }, 11),
         Response::Err(ErrorCode::BadPath)
@@ -144,7 +144,7 @@ fn generation_bump_revokes_all_handles_lazily() {
         panic!()
     };
 
-    // Mass revocation from s1: O(1), no enumeration of holders (§2.2).
+    // Mass revocation from s1: O(1), no enumeration of holders (rev0§2.2).
     assert_eq!(srv.handle(s1, Request::RevokeRef { handle: 0 }, 11), Response::Ok);
 
     // Every outstanding handle on the ref is stale on next use —
@@ -331,7 +331,7 @@ fn history_rewriting_needs_the_right_and_triggers_gc() {
     );
 
     // Deletion is a small ref-table edit that arms the GC trigger
-    // (§4.6); the reclamation itself happens in the drained cycle.
+    // (rev0§4.6); the reclamation itself happens in the drained cycle.
     assert!(!srv.gc_requested());
     assert_eq!(
         srv.handle(s, Request::DeleteSnapshot { handle: 0, snap_id: snap }, 106),
@@ -453,7 +453,7 @@ fn session_cleanup_and_audit() {
         Response::Err(ErrorCode::Denied)
     );
 
-    // Peer-closed → whole table dropped (§2.4 cleanup).
+    // Peer-closed → whole table dropped (rev0§2.4 cleanup).
     srv.close_session(s);
     assert_eq!(
         srv.handle(s, Request::Read { handle: 0, path: p(&["top.txt"]), offset: 0, len: u32::MAX }, 12),

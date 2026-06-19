@@ -1,5 +1,5 @@
 //! Kernel-side capability-space surface: the object machinery lives in
-//! [`kcore::cspace`] (host-buildable, plan §4.1); this module re-exports it and
+//! [`kcore::cspace`] (host-buildable); this module re-exports it and
 //! supplies the `KernelStore`-bound wrappers for the few ops that fire events or
 //! tear objects down — wrapping the raw `*mut CapSlot` call sites into
 //! [`SlotId`](kcore::id::SlotId) handles. Call sites elsewhere in the kernel see

@@ -1,6 +1,6 @@
-//! cfg-selected concurrency primitives for the IPC model + harnesses (plan
-//! `doc/plans/2_ipc.md` §3.2): `std` by default, `loom` under `--cfg loom`,
-//! `shuttle` under `--cfg shuttle`. Mirrors `urt`'s proven Phase-1 seam.
+//! cfg-selected concurrency primitives for the IPC model + harnesses:
+//! `std` by default, `loom` under `--cfg loom`,
+//! `shuttle` under `--cfg shuttle`. Mirrors `urt`'s concurrency seam.
 //!
 //! The production `no_std` crate uses **none** of this — it is single-threaded
 //! and talks to the real kernel through `SyscallTransport`. This module (and

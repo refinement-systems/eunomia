@@ -232,7 +232,7 @@ fn mount_recovery_seeds() {
     seed_both("wal_pending", &dump(&store.into_dev()));
 
     // Torn images straight out of the crash device: durable state plus a
-    // random kept/dropped/torn subset of unflushed writes (§4.5).
+    // random kept/dropped/torn subset of unflushed writes (rev0§4.5).
     for seed in [0xDEADu64, 0x1234, 0xF00D] {
         let mut store = Store::format(CrashDev::new(32 * 1024), small_opts()).unwrap();
         store.create_ref(b"main").unwrap();
@@ -245,7 +245,7 @@ fn mount_recovery_seeds() {
     }
 
     // A deliberately old-format image, intact but re-stamped v2: the
-    // refusal branch (§2.6 — pre-v3 images get a version error, never a
+    // refusal branch (pre-v3 images get a version error, never a
     // reinterpretation) is code under test, and without a committed seed
     // a format bump silently rots mount coverage toward the live path.
     // (Under mount_reseal the fix-up re-stamps the current version, so

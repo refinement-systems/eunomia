@@ -1,8 +1,7 @@
-//! `ModelTransport` (plan `doc/plans/2_ipc.md` §3.4): a deterministic in-memory
-//! kernel implementing `Transport`, so Shuttle/Loom can schedule the
-//! communicating processes (sender, receiver) over the shared channel +
-//! notification objects — the cross-process races where the real concurrency
-//! lives (§2 of the plan).
+//! `ModelTransport`: a deterministic in-memory kernel implementing `Transport`,
+//! so Shuttle/Loom can schedule the communicating processes (sender, receiver)
+//! over the shared channel + notification objects — the cross-process races
+//! where the real concurrency lives.
 //!
 //! Faithful to the kernel it models:
 //!   - the channel is a bounded FIFO ring (`send` → `Full`, `recv` → `Empty`);
@@ -10,7 +9,7 @@
 //!     into the word and wakes a waiter or accumulates; `wait` consumes the
 //!     word if non-zero, **else blocks** (the `while word == 0` check below is
 //!     the lost-wakeup guard the harnesses exercise);
-//!   - a send fires the persistent on-readable binding (§3.6).
+//!   - a send fires the persistent on-readable binding (rev0§3.6).
 //!
 //! Compiled only for the model/harnesses; built on `crate::sync` so the same
 //! code runs under std (smoke), loom (exhaustive), and shuttle (randomized).
@@ -26,7 +25,7 @@ struct ModelMsg {
     caps: [u32; 4],
 }
 
-/// One channel: a bounded FIFO ring plus its event bindings (§3.3, §3.6).
+/// One channel: a bounded FIFO ring plus its event bindings (rev0§3.3, rev0§3.6).
 struct Ring {
     msgs: VecDeque<ModelMsg>,
     peer_closed: bool,
@@ -35,7 +34,7 @@ struct Ring {
     on_peer_closed: Option<(Notif, u64)>,
 }
 
-/// One notification object: a word + a condvar (§3.6). The `Mutex<u64>` word is
+/// One notification object: a word + a condvar (rev0§3.6). The `Mutex<u64>` word is
 /// the source of truth; the condvar is only the wake mechanism, so a notify
 /// that races ahead of a waiter is harmless — the waiter re-checks the word.
 struct Notification {
@@ -45,8 +44,9 @@ struct Notification {
 
 /// A deterministic in-memory kernel: a fixed set of channels (indexed by the
 /// `Chan` handle, each a bounded FIFO ring) and a fixed set of notifications.
-/// Shared across model threads via `crate::sync::Arc`. Harnesses #1–#4 drive a
-/// single channel (`Chan` 0); harness #5 multiplexes several through one reactor.
+/// Shared across model threads via `crate::sync::Arc`. The single-channel
+/// harnesses drive `Chan` 0; the multi-client harness multiplexes several
+/// through one reactor.
 pub struct ModelTransport {
     rings: Vec<Mutex<Ring>>,
     cap: usize,
@@ -64,14 +64,14 @@ fn fresh_ring() -> Ring {
 }
 
 impl ModelTransport {
-    /// A single channel of capacity `cap` slots (§3.2) and `num_notifs`
-    /// notifications — the shape harnesses #1–#4 use (`Chan` 0).
+    /// A single channel of capacity `cap` slots (rev0§3.2) and `num_notifs`
+    /// notifications — the shape the single-channel harnesses use (`Chan` 0).
     pub fn new(cap: usize, num_notifs: usize) -> ModelTransport {
         ModelTransport::with_channels(1, cap, num_notifs)
     }
 
     /// `num_chans` channels, each of capacity `cap`, plus `num_notifs`
-    /// notifications (§4.6 / harness #5: one channel per client, one server
+    /// notifications (the multi-client shape: one channel per client, one server
     /// notification multiplexing them).
     pub fn with_channels(num_chans: usize, cap: usize, num_notifs: usize) -> ModelTransport {
         let mut rings = Vec::with_capacity(num_chans);
@@ -101,7 +101,7 @@ impl ModelTransport {
         &self.rings[ch as usize]
     }
 
-    /// Destroy the channel (§3.4): queued messages — and their caps — are
+    /// Destroy the channel (rev0§3.4): queued messages — and their caps — are
     /// **gone**, the peer is marked closed, and the on-peer-closed binding
     /// fires. Models the kernel reclaiming the channel's backing untyped (in
     /// production a cspace `cap_delete`/`revoke`, not a `Transport` op). After
@@ -113,7 +113,7 @@ impl ModelTransport {
         self.destroy_chan(0);
     }
 
-    /// Destroy a specific channel (§3.4) — see [`destroy`](Self::destroy).
+    /// Destroy a specific channel (rev0§3.4) — see [`destroy`](Self::destroy).
     pub fn destroy_chan(&self, ch: Chan) {
         let binding = {
             let mut ring = self.ring(ch).lock().unwrap();
@@ -164,8 +164,8 @@ impl Transport for ModelTransport {
                             cap_mask |= 1 << i;
                         }
                     }
-                    // A slot freed up: fire the on-writable binding (§3.3) so a
-                    // sender blocked on backpressure is woken (phase-3 §4.3).
+                    // A slot freed up: fire the on-writable binding (rev0§3.3) so a
+                    // sender blocked on backpressure is woken.
                     (Ok(RecvOk { len, cap_mask }), ring.on_writable)
                 }
                 None if ring.peer_closed => (Err(RecvErr::Closed), None),
@@ -217,8 +217,8 @@ mod tests {
     use super::*;
     use crate::sync::{thread, Arc};
 
-    // Shuttle reproducibility (plan §5.2/§7, loom-shuttle §5: "fixed seed +
-    // replay corpus"): run every harness under a *pinned* seed + iteration count
+    // Shuttle reproducibility ("fixed seed + replay corpus"): run every harness
+    // under a *pinned* seed + iteration count
     // rather than `check_random`'s entropy seed, so each CI run explores the same
     // schedules and a failure reproduces from source — not only from the
     // schedule the failing run happens to print. Arbitrary but fixed; bump
@@ -237,8 +237,8 @@ mod tests {
         Runner::new(scheduler, Default::default()).run(f);
     }
 
-    // The Shuttle replay corpus (loom-shuttle §5; the fuzz-corpus discipline
-    // applied to interleavings). When Shuttle finds a failing schedule it prints
+    // The Shuttle replay corpus (the fuzz-corpus discipline applied to
+    // interleavings). When Shuttle finds a failing schedule it prints
     // an encoded replay string; paste it here as a `(harness, schedule)` entry
     // and it becomes a deterministic regression pinning that exact interleaving,
     // independent of SHUTTLE_SEED. Empty until the first bug — the designated
@@ -256,15 +256,14 @@ mod tests {
         }
     }
 
-    // The Phase-0 rig smoke: a sender process enqueues one message (firing the
+    // The rig smoke: a sender process enqueues one message (firing the
     // on-readable binding) while a receiver process binds, polls, and — if the
     // poll is Empty — waits, then receives. The message must always arrive (no
-    // lost wakeup at the rig level). This is NOT the reactor (phase 2) — a
-    // hand-inlined poll-then-wait that proves the rig is drivable by both tools,
-    // the scratchpad analogue for `ipc`.
+    // lost wakeup at the rig level). This is NOT the reactor — a
+    // hand-inlined poll-then-wait that proves the rig is drivable by both tools.
     fn rig_smoke() {
         let t = ModelTransport::shared(2, 1);
-        // Bind on-readable -> (notif 0, bit 1) before the race (the §3.6 "bind
+        // Bind on-readable -> (notif 0, bit 1) before the race (the rev0§3.6 "bind
         // first" half of the discipline).
         t.bind(0, Event::Readable, 0, 1).unwrap();
 
@@ -310,12 +309,12 @@ mod tests {
         check_pinned(rig_smoke);
     }
 
-    // Harness #3 (plan doc/plans/2_ipc.md §5.2): FIFO / no double-delivery under
-    // concurrent senders, over the *typed* Endpoint (the real Phase-1 code).
-    // Two sender processes each send `per_sender` distinct ids on one channel
-    // (A: 1..=k, B: 101..=100+k); a receiver drains all 2k. Capacity = 2k, so
-    // Full never fires here — backpressure/retry is harness #2 (phase 3) — and
-    // no notifications are used (waiting is harness #1, phase 2): pure poll.
+    // FIFO / no double-delivery under concurrent senders, over the *typed*
+    // Endpoint. Two sender processes each send `per_sender` distinct ids on one
+    // channel (A: 1..=k, B: 101..=100+k); a receiver drains all 2k. Capacity =
+    // 2k, so Full never fires here — backpressure/retry is the backpressure
+    // harness — and no notifications are used (waiting is the no-lost-wakeup
+    // harness): pure poll.
     // Gated to the tiers that drive it (std + shuttle); there is no loom variant.
     #[cfg(not(loom))]
     fn fifo_no_drop(per_sender: u8) {
@@ -369,7 +368,7 @@ mod tests {
         assert_eq!(sorted, expected, "every id received exactly once (no drop, no dup)");
 
         // Per-sender FIFO: each sender's ids arrive in increasing (send) order,
-        // since the channel is FIFO (§3.3).
+        // since the channel is FIFO (rev0§3.3).
         let a: std::vec::Vec<u8> = got.iter().copied().filter(|&x| x <= per_sender).collect();
         assert!(a.windows(2).all(|w| w[0] < w[1]), "sender A not FIFO: {:?}", a);
         let b: std::vec::Vec<u8> = got.iter().copied().filter(|&x| x > 100).collect();
@@ -382,16 +381,16 @@ mod tests {
         fifo_no_drop(2);
     }
 
-    // Shuttle is harness #3's tier (interleaving/SC); loom is reserved for the
-    // phase-2 lost-wakeup fragment (§5.3), so there is no loom variant here.
+    // Shuttle is this harness's tier (interleaving/SC); loom is reserved for the
+    // lost-wakeup fragment, so there is no loom variant here.
     #[cfg(shuttle)]
     #[test]
     fn fifo_no_drop_shuttle() {
         check_pinned(|| fifo_no_drop(2));
     }
 
-    // Harness #1 (plan §5.2/§5.3): no lost wakeup, over the *real* Reactor (the
-    // phase-2 §4.2 code). A sender sends one message; a receiver registers the
+    // No lost wakeup, over the *real* Reactor. A sender sends one message; a
+    // receiver registers the
     // channel for readable on a Reactor, then loops wait() -> recv_nb. The
     // threads race — the send may land before *or* after the receiver's bind,
     // and inside the wait window — and the message must always be received.
@@ -448,7 +447,7 @@ mod tests {
         check_pinned(reactor_no_lost_wakeup);
     }
 
-    // The §5.3 weak-memory fragment: the poll-then-wait sequence against the
+    // The weak-memory fragment: the poll-then-wait sequence against the
     // notification word, exhaustively, at a tiny bound (one message).
     #[cfg(loom)]
     #[test]
@@ -456,8 +455,8 @@ mod tests {
         loom::model(reactor_no_lost_wakeup);
     }
 
-    // Harness #2 (plan §5.2): Full backpressure + retry, no drop, over the real
-    // Endpoint::send_blocking (phase-3 §4.3). The channel capacity is 1, so a
+    // Full backpressure + retry, no drop, over the real
+    // Endpoint::send_blocking. The channel capacity is 1, so a
     // sender pushing n > 1 ids hits Full and blocks on the writable signal; the
     // receiver drains, each recv firing on_writable to wake the sender. The
     // receiver must get [1, 2, .., n] — no drop, FIFO, and the sender made
@@ -511,20 +510,20 @@ mod tests {
     }
 
     // Shuttle tier (interleaving/progress); the lost-wakeup memory ordering is
-    // harness #1's loom job (§5.3), so there is no loom variant here.
+    // the no-lost-wakeup harness's loom job, so there is no loom variant here.
     #[cfg(shuttle)]
     #[test]
     fn full_backpressure_no_drop_shuttle() {
         check_pinned(|| full_backpressure_no_drop(3));
     }
 
-    // Harness #4 (plan §5.2): the valuable-cap ack protocol — no lost cap. The
+    // The valuable-cap ack protocol — no lost cap. The
     // sender hands off a message carrying a cap via Endpoint::send_acked, then
     // destroy()s the channel; the receiver drains via recv_acked and acks. The
     // ack gates the destroy, so the cap is received *before* destruction shreds
     // the queue — the receiver always gets it (never Closed). Removing the ack
     // gate (send_nb + immediate destroy) lets destroy race recv and lose the cap
-    // (the negative control). Scope (§5.1): this checks the protocol's no-loss;
+    // (the negative control). Scope: this checks the protocol's no-loss;
     // the cap's exactly-one-owner/no-dup is the kernel's (CapRevocation).
     #[cfg(not(loom))]
     fn valuable_cap_ack_no_loss() {
@@ -580,15 +579,15 @@ mod tests {
         check_pinned(valuable_cap_ack_no_loss);
     }
 
-    // Harness #5 (plan doc/plans/2_ipc.md §5.2, §6 phase 6): multi-client
-    // fairness / liveness *smoke* over the real Reactor multiplexing several
-    // client channels, plus the §4.6 connect/admission handshake. `num_clients`
-    // client processes each fund their own request channel (chan i) and reply
-    // channel (chan num_clients+i); each sends one `ConnectReq` and polls its
-    // reply channel. One server process runs a single Reactor (one notification)
-    // registering *every* request channel for readable, then wait()-dispatches
-    // and services each connect via `admit_connect` under a `budget`-bounded
-    // `Admission` — the §3.5 single admission point. The threads race (a connect
+    // Multi-client fairness / liveness *smoke* over the real Reactor
+    // multiplexing several client channels, plus the connect/admission handshake.
+    // `num_clients` client processes each fund their own request channel (chan i)
+    // and reply channel (chan num_clients+i); each sends one `ConnectReq` and
+    // polls its reply channel. One server process runs a single Reactor (one
+    // notification) registering *every* request channel for readable, then
+    // wait()-dispatches and services each connect via `admit_connect` under a
+    // `budget`-bounded `Admission` — the rev0§3.5 single admission point. The
+    // threads race (a connect
     // may land before or after its bind); poll-once + the notif word-check make
     // the reactor surface every client (no lost wakeup at N sources).
     //
@@ -696,16 +695,16 @@ mod tests {
         fairness_smoke(3, 2); // quota refuses one
     }
 
-    // Shuttle is harness #5's tier (interleaving / progress at scale); the
-    // lost-wakeup memory ordering stays harness #1's loom job (§5.3), so there
-    // is no loom variant.
+    // Shuttle is this harness's tier (interleaving / progress at scale); the
+    // lost-wakeup memory ordering stays the no-lost-wakeup harness's loom job, so
+    // there is no loom variant.
     #[cfg(shuttle)]
     #[test]
     fn fairness_smoke_shuttle() {
         check_pinned(|| fairness_smoke(3, 2));
     }
 
-    // `register_bound` dispatch — the §5.1 thread-source path the shell's
+    // `register_bound` dispatch — the rev0§5.1 thread-source path the shell's
     // spawn/reap loop uses (`user/shell/src/main.rs`): two externally-bound,
     // edge-triggered sources on one notification, each dispatched to its key.
     // Unlike `register`, `register_bound` does NOT poll-once; the test proves it
@@ -713,7 +712,7 @@ mod tests {
     // `wait` returns *its* key — a fabricated poll-once would have left the low
     // bit pending and (lowest-first) returned it instead. Also checks that a
     // re-register of a used bit is `Taken`. Std-only: a sequential check of the
-    // dispatch logic, not a concurrency harness (multi-source Shuttle is rec 4).
+    // dispatch logic, not a concurrency harness.
     #[cfg(all(not(loom), not(shuttle)))]
     #[test]
     fn reactor_register_bound_dispatch() {

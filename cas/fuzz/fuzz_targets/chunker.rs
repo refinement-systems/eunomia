@@ -1,5 +1,5 @@
 #![no_main]
-//! FastCDC chunker invariants on arbitrary input (§4.1). Boundaries decide
+//! FastCDC chunker invariants on arbitrary input (rev0§4.1). Boundaries decide
 //! chunk hashes, so they are a format property: deterministic, chunks
 //! concatenate back to the input, and every chunk is within bounds (only
 //! the final one may fall below `min`). proptest covers this too; coverage

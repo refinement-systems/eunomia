@@ -1,8 +1,8 @@
-//! Kernel-side address-space shell (spec §2.5). The walker itself — table
+//! Kernel-side address-space shell (spec rev0§2.5). The walker itself — table
 //! allocation, `map`/`unmap`, the read-only lookup, the descriptor bit
-//! assembly, the VA-index arithmetic — now lives in [`kcore::aspace`] as safe
-//! Rust over the table pool as an indexed slice (plan §2.4), so Kani verifies
-//! it (§4.5). What stays here is the irreducibly architectural half: ASID
+//! assembly, the VA-index arithmetic — lives in [`kcore::aspace`] as safe
+//! Rust over the table pool as an indexed slice, where it is Verus-verified.
+//! What stays here is the irreducibly architectural half: ASID
 //! assignment, the boot kernel-L1 copy, `ttbr0`, and the **one sanctioned
 //! int→pointer boundary** — building the `&mut [[u64; 512]]` slice views over
 //! the `AspaceObj`'s physical L1/pool addresses so the kcore walker can drive
@@ -27,7 +27,7 @@ use core::ptr;
 
 static mut NEXT_ASID: u16 = 1;
 
-// ── the int→pointer boundary (plan §2.2 rule 2): the L1 table and the table
+// ── the int→pointer boundary: the L1 table and the table
 //    pool are 512-entry u64 tables laid out contiguously after the AspaceObj
 //    header (`init`), disjoint from the header itself, so these slice views
 //    never alias `*this`'s other fields. This is the one place a PA becomes a

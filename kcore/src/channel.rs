@@ -1,18 +1,18 @@
-//! Asynchronous IPC channels (spec §3.1–3.4, §3.6).
+//! Asynchronous IPC channels (spec rev0§3.1-3.4, rev0§3.6).
 //!
 //! A channel is two endpoints (A, B) over two fixed-depth rings of message
 //! slots — ring 0 carries A→B, ring 1 carries B→A. A message slot is a
 //! 256-byte inline payload plus 4 real `CapSlot`s: queued caps are
 //! CDT-visible and owned by the channel, so revocation sees through queues
-//! (§3.4) with no special case.
+//! (rev0§3.4) with no special case.
 //!
 //! Queue memory comes from the untyped donated at retype; capacity is the
-//! creator-chosen depth (§3.2). Send is non-blocking and returns FULL;
+//! creator-chosen depth (rev0§3.2). Send is non-blocking and returns FULL;
 //! messages are never dropped. Each endpoint carries fixed binding slots
 //! (on-readable / on-writable / on-peer-closed → notification, bits);
-//! event delivery never allocates (§3.6).
+//! event delivery never allocates (rev0§3.6).
 //!
-//! Arena rewrite (plan §3): the channel is addressed by an opaque
+//! The channel is addressed by an opaque
 //! [`ObjId`](crate::id::ObjId) and all of its state is reached through the
 //! [`Store`] seam — ring caps are [`SlotId`](crate::id::SlotId) handles, event
 //! bindings are [`crate::store::Binding`]s. The construction/layout helpers
@@ -25,10 +25,9 @@ use crate::notification;
 use crate::store::{Binding, Store};
 use vstd::prelude::*;
 // `StoreSpec` (the `external_trait_extension`) must be in scope to resolve the
-// `slot_view`/`chan_view`/`refs_view` views the §3b contracts quantify over, and
+// `slot_view`/`chan_view`/`refs_view` views the contracts quantify over, and
 // `ChanView` names the channel ghost view in those contracts; both appear only in
-// `requires`/`ensures`, which erase in a normal build — hence unused there (the
-// doc/results/26 §2.3 idiom).
+// `requires`/`ensures`, which erase in a normal build — hence unused there.
 #[allow(unused_imports)]
 use crate::cspace::{ChanView, StoreSpec};
 
@@ -54,7 +53,7 @@ pub struct MsgSlot {
 pub struct Channel {
     pub hdr: ObjHeader,
     pub depth: u32,
-    /// Live endpoint caps per end, for peer-closed (§3.3).
+    /// Live endpoint caps per end, for peer-closed (rev0§3.3).
     pub end_caps: [u32; 2],
     pub head: [u32; 2],
     pub count: [u32; 2],
@@ -77,7 +76,7 @@ pub enum ChanError {
 
 verus! {
 
-/// Ghost mirror of [`end_idx`]: A → 0, B → 1. Lets the §3b contracts name the
+/// Ghost mirror of [`end_idx`]: A → 0, B → 1. Lets the contracts name the
 /// `end_caps`/ring index a `ChanEnd` selects.
 pub open spec fn end_idx_spec(e: ChanEnd) -> int {
     match e {
@@ -87,7 +86,7 @@ pub open spec fn end_idx_spec(e: ChanEnd) -> int {
 }
 
 /// Bit `c` of a `recv` install mask: set iff `recv` moved a non-empty arriving cap
-/// into `dests[c]`. Named (not inline `(m >> c) & 1`) so the §3d `recv` ensures and the
+/// into `dests[c]`. Named (not inline `(m >> c) & 1`) so the `recv` ensures and the
 /// pass-2 invariant share one canonical trigger (`mask_bit(mask, c)`) and the bit-vector
 /// lemmas below have a single shape to discharge.
 pub open spec fn mask_bit(m: u8, c: int) -> bool {
@@ -95,7 +94,7 @@ pub open spec fn mask_bit(m: u8, c: int) -> bool {
 }
 
 /// A zero install mask has every bit clear — the loop-entry base case for `recv`'s mask
-/// invariant. One bit_vector step (doc-25/37 §2: isolate bit reasoning to a lemma).
+/// invariant. One bit_vector step (bit reasoning isolated to a lemma).
 proof fn lemma_mask_zero(cc: u64)
     requires
         cc < 8,
@@ -176,13 +175,13 @@ impl Channel {
 
 verus! {
 
-/// Account a newly installed endpoint cap (retype's channel arm, §2.5; §3.3
+/// Account a newly installed endpoint cap (retype's channel arm, rev0§2.5; rev0§3.3
 /// peer-closed accounting).
 ///
-/// Verified (plan §3b): bumps `end_caps[end]` by one, leaving `slot_view`/
+/// Bumps `end_caps[end]` by one, leaving `slot_view`/
 /// `refs_view` and every other channel field untouched. The `requires` bound on
-/// the count discharges the `+ 1` (no `u32` wrap); the caller (3c's
-/// `retype_install`) supplies it from the freshly carved channel's zero counts.
+/// the count discharges the `+ 1` (no `u32` wrap); the caller (`retype_install`)
+/// supplies it from the freshly carved channel's zero counts.
 pub fn endpoint_cap_added<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
     requires
         old(store).chan_view().dom().contains(ch),
@@ -199,7 +198,7 @@ pub fn endpoint_cap_added<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
                     (old(store).chan_view()[ch].end_caps[end_idx_spec(end)] + 1) as nat),
                 ..old(store).chan_view()[ch]
             }),
-        // `refcount_sound` as a system invariant (plan §6f): `end_caps` is no census term and the
+        // `refcount_sound` as a system invariant: `end_caps` is no census term and the
         // bindings are untouched, so refs and census are both unchanged ⇒ a sound census carries.
         cspace::refcount_sound(old(store)) ==> cspace::refcount_sound(final(store)),
 {
@@ -225,9 +224,9 @@ pub fn endpoint_cap_added<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
 }
 
 /// Called on every endpoint-cap deletion; the last cap of an end raises
-/// the other end's peer-closed event (§3.3, session cleanup §2.4).
+/// the other end's peer-closed event (rev0§3.3, session cleanup rev0§2.4).
 ///
-/// Verified (plan §3e): decrements `end_caps[end]`, then — only when that count
+/// Decrements `end_caps[end]`, then — only when that count
 /// reaches zero — fires the *other* end's peer-closed event through the verified
 /// `fire` (3b). The `requires` bound (`> 0`) discharges the `- 1` (no `u32`
 /// wrap). The `slot_view`/`chan_view` frames hold on every path (`fire` keeps
@@ -244,8 +243,8 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
             old(store).tcb_view(), ch),
         cspace::binding_refs_ok(old(store).chan_view(), old(store).notif_view(),
             old(store).refs_view(), ch, 1 - end_idx_spec(end), EV_PEER_CLOSED as int),
-        // The cap→object invariant + the §3.3 endpoint census, both off by one at `(ch, end)`
-        // (plan §6d body PR): `delete` cleared the deleted cap's slot before this call, so
+        // The cap→object invariant + the rev0§3.3 endpoint census, both off by one at `(ch, end)`:
+        // `delete` cleared the deleted cap's slot before this call, so
         // `end_caps[ch][end]` over-counts the arena by one. The decrement here restores
         // `end_caps_sound` and re-establishes `caps_consistent` (no sibling stranded — a live
         // sibling makes the count ≥ 1, so the over-count is ≥ 2). `delete`-supplied.
@@ -254,7 +253,7 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
     ensures
         final(store).slot_view() == old(store).slot_view(),
         // Residency is framed: `set_chan_end_caps` and `fire` both frame `cspace_view`, so
-        // `delete`'s Channel branch carries it to `obj_unref` (plan §6d body PR).
+        // `delete`'s Channel branch carries it to `obj_unref`.
         final(store).cspace_view() == old(store).cspace_view(),
         cspace::caps_consistent(final(store)),
         cspace::end_caps_sound(final(store)),
@@ -270,14 +269,14 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
             ==> final(store).refs_view() == old(store).refs_view(),
         cspace::binding_notif_wf(final(store).chan_view(), final(store).notif_view(),
             final(store).tcb_view(), ch),
-        // The refcount census moves in lockstep (plan §6d body PR, doc 45 §3): the only state
+        // The refcount census moves in lockstep: the only state
         // change before a possible fire is `set_chan_end_caps`, and `end_caps` is **not** a
         // census term — `binding_refs` reads only the (unchanged) bindings, the other five
         // terms read framed views — so refs *and* census are unchanged across the decrement,
         // and `fire` freezes the delta across the peer-closed fire. Unconditional and
         // `requires`-free — `delete`'s Channel branch consumes it in the off-by-one window.
         cspace::census_delta_frozen(old(store), final(store)),
-        // `refcount_sound` as a system invariant (plan §6f): the frozen delta bridges it.
+        // `refcount_sound` as a system invariant: the frozen delta bridges it.
         // Conditional + `requires`-free — `delete`'s Channel branch runs this in the off-by-one
         // window where `refcount_sound` is *false*, so it consumes the frozen delta directly,
         // never this clause; a census-sound caller gets a census-sound result.
@@ -290,19 +289,19 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
         // the fire only drops a census term and keeps the domain). `delete` carries it to `obj_unref`.
         cspace::census_dom_complete(old(store)) ==> cspace::census_dom_complete(final(store)),
         // The channel skeleton rides through the `end_caps`-only update (`fire` frames
-        // `chan_view`): `delete`'s Channel branch composes it to `obj_unref` (plan §6d-final).
+        // `chan_view`): `delete`'s Channel branch composes it to `obj_unref`.
         cspace::chan_struct_frame(old(store).chan_view(), final(store).chan_view()),
-        // Dead, queue-detached TCBs are frozen (plan §6d-final-thread-body): `set_chan_end_caps`
+        // Dead, queue-detached TCBs are frozen: `set_chan_end_caps`
         // frames `tcb`/`refs` whole, and the peer-closed `fire` is signal-shaped (its own
         // `dead_tcb_frozen`). `delete`'s Channel branch reads it off.
         cspace::dead_tcb_frozen(old(store), final(store)),
-        // §6e-dual "dead stays dead": `set_chan_end_caps` frames `refs` whole and the peer-closed
+        // "Dead stays dead": `set_chan_end_caps` frames `refs` whole and the peer-closed
         // `fire` carries `refs_death_persist`, so a dead object stays dead. `delete`'s Channel
-        // branch composes it for the §6e-dual provenance frame.
+        // branch composes it for the provenance frame.
         cspace::refs_death_persist(old(store), final(store)),
-        // The TCB domain + every immutable `bind_slots` ride through (plan §6e): `set_chan_end_caps`
+        // The TCB domain + every immutable `bind_slots` ride through: `set_chan_end_caps`
         // frames `tcb`, `fire` keeps both — the `home_views_frozen` stability `delete`'s Channel
-        // branch threads for the §6e provenance frame.
+        // branch threads for the provenance frame.
         final(store).tcb_view().dom() == old(store).tcb_view().dom(),
         forall|k: ObjId| #[trigger] final(store).tcb_view()[k].bind_slots
             == old(store).tcb_view()[k].bind_slots,
@@ -378,7 +377,7 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
     // survives by `lemma_off_by_one_frozen` applied to that frozen delta.
     proof {
         assert(cspace::census_delta_frozen(old(store), store));
-        // refcount_sound (conditional, plan §6f): the frozen delta bridges it.
+        // refcount_sound (conditional): the frozen delta bridges it.
         if cspace::refcount_sound(old(store)) {
             cspace::lemma_refcount_sound_from_frozen(old(store), store);
         }
@@ -403,25 +402,25 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
             cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), &st_mid, ch);
         }
         cspace::lemma_dead_tcb_frozen_trans(old(store), &st_mid, store);
-        // §6e: TCB domain + `bind_slots` ride through (`set_chan_end_caps` froze `tcb`; `fire`
+        // TCB domain + `bind_slots` ride through (`set_chan_end_caps` froze `tcb`; `fire`
         // keeps both, or the unfired branch leaves the store at `st_mid`).
         assert forall|k: ObjId| #[trigger] store.tcb_view()[k].bind_slots
             == old(store).tcb_view()[k].bind_slots by {}
-        // §6e-dual: `set_chan_end_caps` froze `refs` (`old → st_mid` death-persist refl); the fire
-        // (or no-op) carries `st_mid → final` death-persist; compose.
+        // "Dead stays dead": `set_chan_end_caps` froze `refs` (`old → st_mid` death-persist refl);
+        // the fire (or no-op) carries `st_mid → final` death-persist; compose.
         cspace::lemma_refs_death_persist_from_refs_eq(old(store), &st_mid);
         cspace::lemma_refs_death_persist_trans(old(store), &st_mid, store);
     }
 }
 
-/// Raise an endpoint's event into its bound notification, if bound (§3.6).
+/// Raise an endpoint's event into its bound notification, if bound (rev0§3.6).
 ///
-/// Verified (plan §3b frame; §4b signal discharge): reads a binding (a getter) and
-/// conditionally calls `signal` (now a *proven* body, doc/results/32). `signal`'s new
+/// Reads a binding (a getter) and
+/// conditionally calls `signal` (a proven body). `signal`'s
 /// preconditions — the bound notification is live + `notif_wf`, and a queued waiter
 /// implies `refs > 0` — are discharged from `cspace::binding_notif_wf` (the named
 /// binding-liveness invariant) and the per-call refs clause. `slot_view`/`chan_view`
-/// stay unchanged (the §3d frame `send`/`recv` need); `binding_notif_wf` is *preserved*
+/// stay unchanged (the frame `send`/`recv` need); `binding_notif_wf` is *preserved*
 /// (signal preserves the fired notification's `notif_wf` and, via
 /// `cspace::lemma_notif_wf_frame`, leaves every other bound notification's intact).
 fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
@@ -437,17 +436,17 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
         final(store).slot_view() == old(store).slot_view(),
         final(store).chan_view() == old(store).chan_view(),
         // Residency is framed across the fire — `signal` frames `cspace_view`, the unbound
-        // branch is a no-op; the teardown chain reads it off to `obj_unref` (plan §6d body PR).
+        // branch is a no-op; the teardown chain reads it off to `obj_unref`.
         final(store).cspace_view() == old(store).cspace_view(),
         cspace::binding_notif_wf(final(store).chan_view(), final(store).notif_view(),
             final(store).tcb_view(), ch),
-        // The cap→object invariant survives the fire (plan §6d body PR): `signal` keeps every
+        // The cap→object invariant survives the fire: `signal` keeps every
         // notification well-formed (the fired one by its own `ensures`, the rest by
         // `lemma_notif_wf_frame`) and every TCB's `bind_slots`, so `lemma_caps_consistent_frame`
         // applies. **Conditional** (no new `requires`) so `send`/`recv` keep no obligation;
         // `endpoint_cap_dropped`/`delete` supply the hypothesis.
         cspace::caps_consistent(old(store)) ==> cspace::caps_consistent(final(store)),
-        // The refcount census moves in lockstep across the fire (plan §6d body PR): `fire`
+        // The refcount census moves in lockstep across the fire: `fire`
         // reads a binding then either does nothing or calls `signal` (whose own
         // `census_delta_frozen` applies, its `old` being this `old` — no mutation precedes
         // it). Unconditional and `requires`-free, so `send`/`recv` (the construction-op
@@ -460,18 +459,18 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
         // …and refs-domain completeness survives (`signal`'s own conditional, or the unbound
         // no-op) — the teardown chain carries it to `obj_unref`.
         cspace::census_dom_complete(old(store)) ==> cspace::census_dom_complete(final(store)),
-        // Dead, queue-detached TCBs are frozen across the fire (plan §6d-final-thread-body): the
+        // Dead, queue-detached TCBs are frozen across the fire: the
         // bound branch rides `signal`'s own `dead_tcb_frozen` (its `old` is this `old`, nothing
         // mutated before it); the unbound branch is a no-op. `endpoint_cap_dropped`/`delete`
         // carry it up the teardown chain.
         cspace::dead_tcb_frozen(old(store), final(store)),
-        // §6e-dual "dead stays dead" across the fire: the bound branch rides `signal`'s own
+        // "Dead stays dead" across the fire: the bound branch rides `signal`'s own
         // `refs_death_persist`; the unbound branch is a no-op. `endpoint_cap_dropped`/`delete`
         // carry it up the teardown chain.
         cspace::refs_death_persist(old(store), final(store)),
-        // The TCB domain + every immutable `bind_slots` ride the fire (plan §6e): `signal` keeps
+        // The TCB domain + every immutable `bind_slots` ride the fire: `signal` keeps
         // both (the bound branch) and the unbound branch is a no-op — the `home_views_frozen`
-        // stability `endpoint_cap_dropped`/`delete` thread for the §6e provenance frame.
+        // stability `endpoint_cap_dropped`/`delete` thread for the provenance frame.
         final(store).tcb_view().dom() == old(store).tcb_view().dom(),
         forall|k: ObjId| #[trigger] final(store).tcb_view()[k].bind_slots
             == old(store).tcb_view()[k].bind_slots,
@@ -509,12 +508,12 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
                 assert forall|k: ObjId| #[trigger] tvf[k].bind_slots
                     == old(store).tcb_view()[k].bind_slots by {}
                 // The bound cspace of every TCB is framed across the wake — `signal` moves only
-                // the woken head's queue/wait/retval fields, never any cspace (plan
-                // §6d-final-thread, the strengthened `cap_consistent(Thread)` clause).
+                // the woken head's queue/wait/retval fields, never any cspace (the strengthened
+                // `cap_consistent(Thread)` clause).
                 assert forall|k: ObjId| #[trigger] tvf[k].cspace
                     == old(store).tcb_view()[k].cspace by {}
                 // The only changed TCB is the woken head — `signal` sets it `Runnable`, so it is
-                // not blocked in the post-state (waiter-coherence frame, plan §6d-final-thread;
+                // not blocked in the post-state (waiter-coherence frame;
                 // a changed-and-still-blocked thread would have to be blocked on `n`).
                 assert forall|k: ObjId| #[trigger] tvf[k] != old(store).tcb_view()[k]
                     && tvf[k].state == crate::thread::ThreadState::BlockedNotif
@@ -536,11 +535,11 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
         // census_dom_complete: the bound branch rides `signal`'s own conditional (its `old` is
         // this `old`); the unbound branch leaves the store untouched.
         assert(cspace::census_dom_complete(old(store)) ==> cspace::census_dom_complete(store));
-        // §6e: TCB domain + `bind_slots` ride the fire (signal's own ensures in the bound branch;
+        // TCB domain + `bind_slots` ride the fire (signal's own ensures in the bound branch;
         // store untouched in the unbound one).
         assert forall|k: ObjId| #[trigger] store.tcb_view()[k].bind_slots
             == old(store).tcb_view()[k].bind_slots by {}
-        // §6e-dual: death persists — the bound branch rides `signal`'s `refs_death_persist` (its
+        // Death persists — the bound branch rides `signal`'s `refs_death_persist` (its
         // `old` is this `old`, nothing preceded it); the unbound branch frames `refs` whole.
         if b.notif is None {
             cspace::lemma_refs_death_persist_from_refs_eq(old(store), store);
@@ -551,9 +550,8 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
 /// The `refs_view` after `bind` releases `old_notif`'s ref and then adds
 /// `new_notif`'s — the decrement-before-increment order the body performs, so a
 /// rebind to the *same* notification (`old_notif == new_notif`) is provably
-/// net-zero (the second `insert` reads the already-decremented count). The first
-/// installment of `refcount_sound`'s binding term; the full census lands
-/// phases 4–5.
+/// net-zero (the second `insert` reads the already-decremented count). The
+/// binding term of `refcount_sound`'s census.
 pub open spec fn bind_refs_post(
     r0: Map<ObjId, nat>,
     old_notif: Option<ObjId>,
@@ -569,7 +567,7 @@ pub open spec fn bind_refs_post(
     }
 }
 
-/// The per-object delta of `bind_refs_post`, additive form (plan §6f): `refs[x]` drops at the
+/// The per-object delta of `bind_refs_post`, additive form: `refs[x]` drops at the
 /// old notif and rises at the new one, matching `lemma_binding_replace`'s binding-census delta
 /// term-for-term — the lockstep `channel::bind` reads off to preserve `refcount_sound`. The
 /// `old > 0` guard is the same `nat`-underflow gate the body's `- 1` already requires.
@@ -610,11 +608,11 @@ proof fn lemma_bind_refs_post_at(
     }
 }
 
-/// Configure an endpoint's event binding (holder-configured, §3.6).
+/// Configure an endpoint's event binding (holder-configured, rev0§3.6).
 /// Replacing a binding releases the old notification's ref and adds the new
-/// one's (§3.6 binding-refcount discipline).
+/// one's (rev0§3.6 binding-refcount discipline).
 ///
-/// Verified (plan §3e): installs `Binding { notif, bits }` at `(end, event)`,
+/// Installs `Binding { notif, bits }` at `(end, event)`,
 /// leaving `slot_view` and every other channel field untouched; the `refs_view`
 /// delta is `bind_refs_post`. The `requires` refcount bounds discharge the
 /// `- 1` (old notif's ref, `> 0`) and `+ 1` (new notif's ref, `< u32::MAX`).
@@ -650,7 +648,7 @@ pub fn bind<S: Store>(
             old(store).refs_view(),
             old(store).chan_view()[ch].bindings[(end_idx_spec(end), event as int)].notif,
             notif),
-        // `refcount_sound` as a system invariant (plan §6f): the binding-census delta
+        // `refcount_sound` as a system invariant: the binding-census delta
         // (`lemma_binding_replace`) matches the `bind_refs_post` refs delta
         // (`lemma_bind_refs_post_at`) term-for-term — `refs` and the census move in lockstep at
         // the old and new notifications. Conditional + `requires`-free; the finiteness antecedent
@@ -700,9 +698,9 @@ pub fn bind<S: Store>(
 }
 
 /// Send: copy the payload into the ring and move caps from the sender's
-/// slots into the message's CDT-visible slots (§3.4 move semantics).
+/// slots into the message's CDT-visible slots (rev0§3.4 move semantics).
 ///
-/// Verified (plan §3d): on `Ok` the message is enqueued FIFO at the tail —
+/// On `Ok` the message is enqueued FIFO at the tail —
 /// `ring_fifo` of the sending ring grows by `Seq::push`, the other ring is
 /// untouched — the supplied caps move out of the sender's slots (move totality,
 /// via the verified `slot_move`), and `chan_wf` is preserved; the readable event
@@ -1058,11 +1056,11 @@ verus! {
 
 /// Receive into `buf`, installing caps into `dests`. If any arriving cap
 /// has no free destination the receive fails and the message stays queued
-/// (§3.3) — receive-side exhaustion is the receiver's own problem.
+/// (rev0§3.3) — receive-side exhaustion is the receiver's own problem.
 /// Revocation may have emptied queued slots in flight; receivers see those
-/// as absent caps (§3.4 null slots).
+/// as absent caps (rev0§3.4 null slots).
 ///
-/// Verified (plan §3d): two-pass atomicity — pass 1 is read-only, so `Empty`/
+/// Two-pass atomicity — pass 1 is read-only, so `Empty`/
 /// `NoCapSlot` leave the store (and the queued message) unchanged; pass 2 moves
 /// the head message's caps into `dests` and dequeues, so `ring_fifo` of the
 /// receiving ring loses its head (`Seq::drop_first`), the other ring is
@@ -1115,7 +1113,7 @@ pub fn recv<S: Store>(
                    == cspace::ring_fifo(old(store).chan_view()[ch], old(store).slot_view(), end_idx_spec(end))
             && res->Ok_0.0 as nat == old(store).chan_view()[ch].msg_len[
                    (1 - end_idx_spec(end), old(store).chan_view()[ch].head[1 - end_idx_spec(end)] as int)]
-            // (D-D1) The receive-half of move semantics, mirroring `send`'s source export.
+            // The receive-half of move semantics, mirroring `send`'s source export.
             // (B) Every non-empty arriving cap landed in the dest the caller named — so a
             // verified caller can conclude where the cap went, not merely that it left the
             // queue. (`dests@[c] is Some` here is forced by the pass-1 free-slot check.)
@@ -1266,7 +1264,7 @@ pub fn recv<S: Store>(
             forall|cc: int| #![trigger dests@[cc]]
                 (c2 <= cc < 4 && dests@[cc] is Some)
                 ==> store.slot_view()[dests@[cc]->Some_0].cap == sv0[dests@[cc]->Some_0].cap,
-            // (2a, D-D1) processed dests (cc < c2) with a non-empty arriving cap now HOLD
+            // (2a) processed dests (cc < c2) with a non-empty arriving cap now HOLD
             // it — the receive-half installation we will export from the `ensures`:
             forall|cc: int| #![trigger cv0[ch].ring_cap[(rr, hh, cc)]]
                 (0 <= cc < c2
@@ -1274,7 +1272,7 @@ pub fn recv<S: Store>(
                 ==> (dests@[cc] is Some
                     && store.slot_view()[dests@[cc]->Some_0].cap
                         == sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap),
-            // (2b, D-D1) the install mask names exactly the processed-and-filled indices:
+            // (2b) the install mask names exactly the processed-and-filled indices:
             // bit cc set iff (cc already processed AND arriving cap cc was non-empty):
             forall|cc: int| #![trigger mask_bit(mask, cc)]
                 0 <= cc < 4 ==> (mask_bit(mask, cc)
@@ -1350,7 +1348,7 @@ pub fn recv<S: Store>(
                     assert(cv0[ch].ring_cap[(r2, idx2, c3)] != src);
                     assert(cv0[ch].ring_cap[(r2, idx2, c3)] != d);
                 }
-                // (2a, D-D1) processed dests through c2 hold their arriving cap. The cc==c2
+                // (2a) processed dests through c2 hold their arriving cap. The cc==c2
                 // case is this very `slot_move` (dst d holds src's cap); cc < c2 survive
                 // because d (dests distinct) and src (a dest is not a ring cap) are not them.
                 assert forall|cc: int| #![trigger cv0[ch].ring_cap[(rr, hh, cc)]]
@@ -1374,7 +1372,7 @@ pub fn recv<S: Store>(
             let c2u: u64 = c2 as u64;
             mask = mask | (1u8 << c2u);
             proof {
-                // (2b, D-D1) re-establish the mask invariant for c2+1: the lemma sets bit
+                // (2b) re-establish the mask invariant for c2+1: the lemma sets bit
                 // c2 and frames the rest; the arriving cap at c2 is non-empty in this branch.
                 lemma_mask_set_bit(m_pre, c2u);
                 assert forall|cc: int| 0 <= cc < 4 implies (mask_bit(mask, cc)
@@ -1400,7 +1398,7 @@ pub fn recv<S: Store>(
                             == sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap) by {
                     assert(cc < c2);
                 }
-                // (2b, D-D1) mask unchanged; arriving c2 empty ⟹ bit c2 stays 0.
+                // (2b) mask unchanged; arriving c2 empty ⟹ bit c2 stays 0.
                 assert forall|cc: int| 0 <= cc < 4 implies (mask_bit(mask, cc)
                     <==> (cc < c2 + 1
                         && !cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap))) by {}
@@ -1514,7 +1512,7 @@ pub fn recv<S: Store>(
             }
         }
 
-        // ── (D-D1) export the receive-half of move semantics ──
+        // ── export the receive-half of move semantics ──
         // The dequeue ops + fire frame slot_view, so the pass-2 installation rides to
         // `final`; the c2==4 loop invariants then yield ensures (B) and (C) directly.
         assert(svf == sv_loop);
@@ -1540,8 +1538,8 @@ verus! {
 
 /// Release one event binding's notification reference: drop `refs[n]` and **clear the
 /// binding** (`notif: None`) so `binding_refs(n)` falls in lockstep — the census's
-/// answer to the "no clean closed form" the §6a contract left for `destroy_channel`
-/// (plan §6d-final). Quarantined from `destroy_channel`'s loop (doc 25 §2) so its census
+/// answer to the "no clean closed form" `destroy_channel` would otherwise face.
+/// Quarantined from `destroy_channel`'s loop so its census
 /// recount is one context-light SMT query; non-recursive (no `delete`), so not an SCC
 /// member.
 fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
@@ -1562,14 +1560,14 @@ fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
         final(store).cspace_view() == old(store).cspace_view(),
         final(store).chan_view().dom() == old(store).chan_view().dom(),
         cspace::chan_struct_frame(old(store).chan_view(), final(store).chan_view()),
-        // Dead, queue-detached TCBs are frozen (plan §6d-final-thread-body): `release_binding`
+        // Dead, queue-detached TCBs are frozen: `release_binding`
         // frames `tcb` whole and drops `refs` only at the binding's notification (which had a
         // binding ref, so `refs > 0`). `destroy_channel`'s binding-release loop reads it off.
         cspace::dead_tcb_frozen(old(store), final(store)),
-        // The home maps are framed (plan §6e): `release_binding` frames `tcb` whole and the
+        // The home maps are framed: `release_binding` frames `tcb` whole and the
         // bindings-only chan edit keeps the skeleton — `destroy_channel` threads it.
         cspace::home_views_frozen(old(store), final(store)),
-        // §6e-dual "dead stays dead": the bound case drops only `refs[n]` (positive — a binding
+        // "Dead stays dead": the bound case drops only `refs[n]` (positive — a binding
         // held a ref), keeping the domain; the unbound case frames `refs` whole. `destroy_channel`
         // composes it across the binding-release loop.
         cspace::refs_death_persist(old(store), final(store)),
@@ -1640,8 +1638,8 @@ fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
                         assert(cvf[ch].count == cv_b[ch].count);
                         assert(cvf[ch].bindings.dom() =~= cv_b[ch].bindings.dom());
                         // `chan_wf` lift via the dedicated frame lemma — proving it inline blew
-                        // the trigger context after the `cap_consistent` strengthening widened it
-                        // (doc 51 §2 hazard); the lemma isolates a clean context (plan §6d-final).
+                        // the trigger context after the `cap_consistent` strengthening widened it;
+                        // the lemma isolates a clean context.
                         // `release_binding` touches no slot, so `sv0 == sv1`.
                         cspace::lemma_chan_wf_frame(cv_b, store.chan_view(), store.slot_view(),
                             store.slot_view(), ch);
@@ -1686,7 +1684,7 @@ fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
             assert(store.refs_view().dom() =~= old(store).refs_view().dom());
             assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
             cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, n);
-            // §6e-dual: the bound case drops only `refs[n]` (positive), keeping the domain.
+            // "Dead stays dead": the bound case drops only `refs[n]` (positive), keeping the domain.
             assert(store.refs_view()
                 == old(store).refs_view().insert(n, (old(store).refs_view()[n] - 1) as nat));
             cspace::lemma_refs_death_persist_dec_ref(old(store), store, n);
@@ -1699,11 +1697,11 @@ fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
             assert(store.refs_view().dom() =~= old(store).refs_view().dom());
             assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
             cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, ch);
-            // §6e-dual: the store is unchanged, so death is trivially preserved.
+            // "Dead stays dead": the store is unchanged, so death is trivially preserved.
             cspace::lemma_refs_death_persist_from_refs_eq(old(store), store);
         }
     }
-    // §6e: the home maps are framed — `tcb` is framed whole in both branches, `cspace_view` too,
+    // The home maps are framed — `tcb` is framed whole in both branches, `cspace_view` too,
     // and the chan edit (if any) is the skeleton-preserving binding clear.
     proof {
         assert(store.tcb_view() == old(store).tcb_view());
@@ -1714,31 +1712,30 @@ fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
 
 /// Tear a channel down once its last endpoint cap is gone (`refs == 0`): delete
 /// every queued cap with ordinary CDT cleanup — cashing a shredded envelope
-/// (§3.4) — and release every event binding's notification ref.
+/// (rev0§3.4) — and release every event binding's notification ref.
 ///
-/// **Proven body (plan §6d-final).** The `external_body` is gone — the real
-/// teardown verifies against the full contract, closing the channel arm of the
+/// The teardown verifies against the full contract, closing the channel arm of the
 /// cross-object SCC `obj_unref → destroy_channel → delete → obj_unref` under the
 /// shared lexicographic `decreases (count_nonempty(slot_view), height)` with
 /// `destroy_channel` at height 3. The ring-cap delete loop reads `old.ring_cap[ch]`
 /// across the recursive `delete`s via `chan_struct_frame` (the channel skeleton is
 /// immutable), and the per-binding release matches each `refs -= 1` with a
 /// `binding_refs` drop — by **clearing the binding** (`set_chan_binding(.., None)`,
-/// `lemma_binding_drop`), the "no clean closed form" the §6a contract anticipated.
+/// `lemma_binding_drop`), the "no clean closed form" a queued-binding census faces.
 pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
     requires
         cspace::cspace_wf(old(store).slot_view()),
         cspace::chan_wf(old(store).chan_view(), old(store).slot_view(), ch),
         cspace::refcount_sound(old(store)),
-        // Cap→object consistency (plan §6d foundation): the body deletes ring caps of
+        // Cap→object consistency: the body deletes ring caps of
         // arbitrary kind, so it needs each one's object well-formed.
         cspace::caps_consistent(old(store)),
-        // The §3.3 endpoint-cap census (plan §6d body-removal gate): ring caps may be
+        // The rev0§3.3 endpoint-cap census: ring caps may be
         // channel caps, so the body's `delete`s thread it.
         cspace::end_caps_sound(old(store)),
-        // Refs-domain completeness (plan §6d body-removal): the body's `delete`s thread it.
+        // Refs-domain completeness: the body's `delete`s thread it.
         cspace::census_dom_complete(old(store)),
-        // §6e-dual: `ch` is dead — its last endpoint cap is gone, so it is out of `refs.dom` or
+        // "Dead stays dead": `ch` is dead — its last endpoint cap is gone, so it is out of `refs.dom` or
         // sits there at `refs == 0` (`obj_unref` calls this at `refs[ch] == 0`). `ch` homes its ring
         // caps, so it is the death witness for each ring slot the teardown empties.
         cspace::dead_obj(old(store), ch),
@@ -1753,34 +1750,34 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
         cspace::census_dom_complete(final(store)),
         cspace::only_empties(old(store).slot_view(), final(store).slot_view()),
         // Residency is immutable: the ring-cap `delete`s and `set_obj_refs` all frame
-        // `cspace_view`, so `obj_unref`'s Channel arm carries it (plan §6d body PR).
+        // `cspace_view`, so `obj_unref`'s Channel arm carries it.
         final(store).cspace_view() == old(store).cspace_view(),
         // The channel skeleton (`ring_cap`/`depth`/dom) is immutable: the body deletes ring
-        // caps (slots, not the layout) and clears bindings, never re-homing a channel
-        // (plan §6d body PR). `obj_unref`'s Channel arm reads it off.
+        // caps (slots, not the layout) and clears bindings, never re-homing a channel.
+        // `obj_unref`'s Channel arm reads it off.
         cspace::chan_struct_frame(old(store).chan_view(), final(store).chan_view()),
         forall|r: int, i: int, c: int|
             (0 <= r < 2 && 0 <= i < old(store).chan_view()[ch].depth && 0 <= c < 4)
                 ==> cspace::is_empty_cap(
                     final(store).slot_view()[
                         #[trigger] old(store).chan_view()[ch].ring_cap[(r, i, c)]].cap),
-        // Dead, queue-detached TCBs are frozen across the teardown (plan §6d-final-thread-body):
+        // Dead, queue-detached TCBs are frozen across the teardown:
         // each ring-cap `delete` and binding `release_binding` carries `dead_tcb_frozen`, threaded
         // through the loops by `lemma_dead_tcb_frozen_trans`. `obj_unref`'s Channel arm reads it.
         cspace::dead_tcb_frozen(old(store), final(store)),
-        // The home maps are framed (plan §6e): residency immutable, channel skeleton fixed, TCB
+        // The home maps are framed: residency immutable, channel skeleton fixed, TCB
         // domain + every `bind_slots` preserved across the ring-cap deletes + binding releases.
         cspace::home_views_frozen(old(store), final(store)),
-        // §6e provenance: this destructor empties only its ring caps (each homed in `ch`) and
+        // Provenance: this destructor empties only its ring caps (each homed in `ch`) and
         // their recursive closure, so every un-homed slot keeps its cap. `obj_unref` reads it off.
         cspace::unhomed_frozen_free(old(store), final(store)),
-        // §6e-dual provenance: every emptied slot was a home handle of a dead object. A ring cap
+        // Dual provenance: every emptied slot was a home handle of a dead object. A ring cap
         // emptied by a `delete` is homed by `ch` (dead throughout: it entered dead and stays so);
         // the recursive closure each `delete` clears carries its own witness. `obj_unref` reads it.
         cspace::emptied_via_dead_home_free(old(store), final(store)),
         // "Dead stays dead" across the ring-cap deletes + binding releases (each decrements only).
         cspace::refs_death_persist(old(store), final(store)),
-    // SCC measure (plan §6d-final): height 3 — above `delete` (0), below `obj_unref` (4); its
+    // SCC measure: height 3 — above `delete` (0), below `obj_unref` (4); its
     // ring-cap `delete`s are count-flat on the first iteration, so the height drops.
     decreases cspace::count_nonempty(old(store).slot_view()), 3int
 {
@@ -1809,7 +1806,7 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
             cspace::dead_tcb_frozen(old(store), store),
             cspace::home_views_frozen(old(store), store),
             cspace::unhomed_frozen_free(old(store), store),
-            // §6e-dual provenance composes across the ring-cap deletes (plan §6e-dual).
+            // Dual provenance composes across the ring-cap deletes.
             cspace::emptied_via_dead_home_free(old(store), store),
             cspace::refs_death_persist(old(store), store),
             // `ch` is dead throughout (it entered dead, death is monotone-preserved) — the witness
@@ -1844,7 +1841,7 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                 cspace::dead_tcb_frozen(old(store), store),
                 cspace::home_views_frozen(old(store), store),
                 cspace::unhomed_frozen_free(old(store), store),
-                // §6e-dual provenance composes across the ring-cap deletes (plan §6e-dual).
+                // Dual provenance composes across the ring-cap deletes.
                 cspace::emptied_via_dead_home_free(old(store), store),
                 cspace::refs_death_persist(old(store), store),
                 cspace::dead_obj(store, ch),
@@ -1882,7 +1879,7 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                     cspace::dead_tcb_frozen(old(store), store),
                     cspace::home_views_frozen(old(store), store),
                     cspace::unhomed_frozen_free(old(store), store),
-                    // §6e-dual provenance composes across the ring-cap deletes (plan §6e-dual).
+                    // Dual provenance composes across the ring-cap deletes.
                     cspace::emptied_via_dead_home_free(old(store), store),
                     cspace::refs_death_persist(old(store), store),
                     cspace::dead_obj(store, ch),
@@ -1918,7 +1915,7 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                         cspace::lemma_chan_struct_frame_trans(
                             old(store).chan_view(), cv_before, store.chan_view());
                         cspace::lemma_dead_tcb_frozen_trans(old(store), &st_before, store);
-                        // §6e: `cs` is a ring cap of `ch` (homed), so `delete`'s target-aware frame
+                        // `cs` is a ring cap of `ch` (homed), so `delete`'s target-aware frame
                         // is already target-free — composing the provenance frame across the loop.
                         assert(cspace::homed_in_chan(&st_before, cs)) by {
                             // `cs` is `ch`'s ring cap at `(ring, i, c)` — the getter pinned the
@@ -1931,7 +1928,7 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                         cspace::lemma_unhomed_frozen_free_from_homed(&st_before, store, cs);
                         cspace::lemma_unhomed_frozen_free_trans(old(store), &st_before, store);
                         cspace::lemma_home_views_frozen_trans(old(store), &st_before, store);
-                        // §6e-dual: `ch` homes `cs` (ring cap at `(ring, i, c)`) at `st_before`, and
+                        // Dual provenance: `ch` homes `cs` (ring cap at `(ring, i, c)`) at `st_before`, and
                         // `ch` is dead there (loop invariant) and stays dead (`delete`'s
                         // `refs_death_persist`), so the directly-deleted `cs` carries the death
                         // witness `ch`. Lift `delete`'s target-aware frame to the free frame, compose.
@@ -1973,7 +1970,7 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
         }
     }
     // Release every event binding's notification ref — clearing the binding so the
-    // `binding_refs` census drops in lockstep with the `refs -= 1` (plan §6d-final).
+    // `binding_refs` census drops in lockstep with the `refs -= 1`.
     for end in 0..2usize
         invariant
             depth as nat == depth0,
@@ -2032,12 +2029,12 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                 cspace::lemma_chan_struct_frame_trans(
                     old(store).chan_view(), cv_before, store.chan_view());
                 cspace::lemma_dead_tcb_frozen_trans(old(store), &st_before, store);
-                // §6e: `release_binding` frames `slot_view` (only bindings/refs move), so no slot
+                // `release_binding` frames `slot_view` (only bindings/refs move), so no slot
                 // is emptied — the free + home frames compose across the binding-release loop.
                 cspace::lemma_unhomed_frozen_free_from_slot_eq(&st_before, store);
                 cspace::lemma_unhomed_frozen_free_trans(old(store), &st_before, store);
                 cspace::lemma_home_views_frozen_trans(old(store), &st_before, store);
-                // §6e-dual: `release_binding` frames `slot_view` (free refl) and exports
+                // Dual provenance: `release_binding` frames `slot_view` (free refl) and exports
                 // `refs_death_persist`; compose across the binding-release loop.
                 cspace::lemma_emptied_via_dead_home_free_from_slot_eq(&st_before, store);
                 cspace::lemma_emptied_via_dead_home_free_trans(old(store), &st_before, store);

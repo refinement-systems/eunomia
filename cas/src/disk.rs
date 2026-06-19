@@ -1,6 +1,6 @@
-//! On-disk formats (spec §4.2): superblocks, WAL records, the ref table,
+//! On-disk formats (rev0§4.2): superblocks, WAL records, the ref table,
 //! and the chunk index. All hand-defined and little-endian — nothing
-//! persistent speaks postcard (§3.7). Decoders are strict and reject
+//! persistent speaks postcard (rev0§3.7). Decoders are strict and reject
 //! trailing bytes.
 //!
 //! Device layout:
@@ -9,13 +9,13 @@
 //!   [8192,   8192 + wal_len)  WAL region (wal_len recorded in the SB)
 //!   [chunk_off, dev_len)      chunk store: framed chunks + index objects
 //!
-//! Format v2 (M5): the superblock references a durable index object — the
+//! Format v2: the superblock references a durable index object — the
 //! hash → (offset, length, birth generation) map plus the free-extent
-//! list (§4.2 items 3 and 4) — written as an ordinary self-verifying
+//! list (rev0§4.2 items 3 and 4) — written as an ordinary self-verifying
 //! frame. v1 rebuilt the index by scanning an append-only region; a scan
 //! cannot represent holes, and GC exists to make holes.
 //!
-//! Format v3 (time page, §2.6): snapshot timestamps and file mtimes are
+//! Format v3 (time page, rev0§2.6): snapshot timestamps and file mtimes are
 //! UTC nanoseconds since the Unix epoch. The layout did not change — a
 //! tick field and a nanosecond field are structurally identical — which
 //! is exactly why the version had to: pre-v3 images (whose on-OS rows
@@ -23,7 +23,7 @@
 //! with mkfs, never silently misread as dates in 1970.
 //!
 //! The generation-checksummed A/B superblock flip is the single atomicity
-//! mechanism for the entire system (§4.2).
+//! mechanism for the entire system (rev0§4.2).
 
 use crate::hash::Hash;
 use crate::prolly::{FormatError, Reader};
@@ -73,19 +73,18 @@ impl Superblock {
         buf
     }
 
-    /// Geometry chokepoint (fuzzing findings, MNT-1). The body checksum is
-    /// integrity, not authenticity: it proves the slot was written whole,
-    /// not that this code wrote it, so every offset/length field is
-    /// untrusted until checked here against the device length — the one
-    /// ground truth mount has that no field in the block can vouch for.
-    /// Checked arithmetic throughout: a wrapping sum that passes a bound is
-    /// the same failure shape as OVL-1/ELF-1. After this returns Ok,
-    /// downstream code may trust that the WAL region, the committed chunk
-    /// region, and the index frame header all lie within the device.
+    /// Geometry chokepoint. The body checksum is integrity, not
+    /// authenticity: it proves the slot was written whole, not that this
+    /// code wrote it, so every offset/length field is untrusted until
+    /// checked here against the device length — the one ground truth mount
+    /// has that no field in the block can vouch for. Checked arithmetic
+    /// throughout: a wrapping sum that passes a bound is the same failure
+    /// shape as a forged extent overrun. After this returns Ok, downstream
+    /// code may trust that the WAL region, the committed chunk region, and
+    /// the index frame header all lie within the device.
     ///
-    /// Thin delegator to the Verus-verified [`validate_geometry_fields`]
-    /// (plan §7f): the totality + region-within-device invariant is proven ∀
-    /// there, replacing the bounded `check_superblock_geometry` Kani harness.
+    /// Thin delegator to the Verus-verified [`validate_geometry_fields`]:
+    /// the totality + region-within-device invariant is proven ∀ there.
     pub fn validate_geometry(&self, dev_len: u64) -> Result<(), &'static str> {
         validate_geometry_fields(
             self.wal_head,
@@ -96,7 +95,7 @@ impl Superblock {
         )
     }
 
-    /// None = unusable for any reason; recovery discards it (§4.5).
+    /// None = unusable for any reason; recovery discards it (rev0§4.5).
     pub fn decode(buf: &[u8]) -> Option<Superblock> {
         Self::decode_checked(buf).ok()
     }
@@ -105,15 +104,15 @@ impl Superblock {
     /// slot is recovery's business (discard, try the other slot), while an
     /// intact slot from another format version must surface as a version
     /// error — tick-era (pre-v3) timestamp fields are structurally
-    /// identical to nanosecond fields, so misreading is silent (§2.6).
+    /// identical to nanosecond fields, so misreading is silent (rev0§2.6).
     ///
-    /// Thin assembly wrapper over the Verus-verified [`decode_checked_fields`]
-    /// (plan §7f): that function proves the parse is **total** ∀ buffer bytes
-    /// (no panic — every fixed-offset read is in bounds, the blake3 checksum is
-    /// the assumed-total seam), replacing the bounded `check_superblock_decode_total`
-    /// Kani harness. The remaining step here — wrapping the raw `[u8; 32]` into a
-    /// `Hash` and building the `Superblock` — is trivially total (`Hash::from_bytes`
-    /// and the struct literal never panic), so it stays plain Rust.
+    /// Thin assembly wrapper over the Verus-verified [`decode_checked_fields`]:
+    /// that function proves the parse is **total** ∀ buffer bytes (no panic —
+    /// every fixed-offset read is in bounds, the blake3 checksum is the
+    /// assumed-total seam). The remaining step here — wrapping the raw
+    /// `[u8; 32]` into a `Hash` and building the `Superblock` — is trivially
+    /// total (`Hash::from_bytes` and the struct literal never panic), so it
+    /// stays plain Rust.
     pub fn decode_checked(buf: &[u8]) -> Result<Superblock, SbError> {
         let f = decode_checked_fields(buf)?;
         Ok(Superblock {
@@ -135,7 +134,7 @@ verus! {
 pub const SB_SIZE: usize = 4096;
 /// First byte of the WAL region (after the two 4 KiB superblock slots).
 pub const WAL_OFF: u64 = 8192;
-/// On-disk format version (format v3, §2.6). Inside the macro for the version
+/// On-disk format version (format v3, rev0§2.6). Inside the macro for the version
 /// gate in `decode_checked_fields`.
 pub(crate) const SB_VERSION: u32 = 3;
 /// Chunk frame header size (magic + len + birth gen + hash). Inside the macro
@@ -143,10 +142,10 @@ pub(crate) const SB_VERSION: u32 = 3;
 pub const CHUNK_HEADER: usize = 4 + 4 + 8 + 32;
 
 /// WAL record header size (magic + seq + payload len + payload checksum). Inside
-/// the macro (since 8c) so `store.rs`'s verified `decode_frame`/`replay_bound`
-/// can name its concrete value — a `const` declared outside `verus!{}` is opaque
-/// to it (the 7f rule). Erases to the same `pub const`, so external refs (the
-/// plain-Rust `encode_record`/`decode_record` below) are unchanged.
+/// the macro so `store.rs`'s verified `decode_frame`/`replay_bound` can name its
+/// concrete value — a `const` declared outside `verus!{}` is opaque to it. Erases
+/// to the same `pub const`, so external refs (the plain-Rust
+/// `encode_record`/`decode_record` below) are unchanged.
 pub const WAL_HEADER: usize = 4 + 8 + 4 + 32;
 
 /// Geometry predicate (the ghost model of [`validate_geometry_fields`]): every
@@ -167,10 +166,10 @@ pub open spec fn geometry_ok(
     &&& (index_off as int + CHUNK_HEADER as int <= chunk_tail as int)
 }
 
-/// The §4.5 mount geometry chokepoint, verified ∀ (plan §7f). Total over all
+/// The rev0§4.5 mount geometry chokepoint, verified ∀. Total over all
 /// field values and `dev_len` (it is all `checked_add`); accepts iff
 /// [`geometry_ok`]; and on `Ok` the committed chunk region provably fits the
-/// device. Supersedes the bounded `check_superblock_geometry` Kani harness.
+/// device.
 pub fn validate_geometry_fields(
     wal_head: u64,
     wal_len: u64,
@@ -229,7 +228,7 @@ pub enum SbError {
     /// Torn, unwritten, or not a superblock at all.
     Invalid,
     /// Intact (magic and checksum verify) but written by another format
-    /// version — refuse, never reinterpret (§2.6).
+    /// version — refuse, never reinterpret (rev0§2.6).
     WrongVersion(u32),
 }
 
@@ -253,8 +252,8 @@ fn magic_ok(buf: &[u8]) -> bool
 
 /// Ghost value of [`read_u32_le`] — the little-endian `u32` at `off`. Same
 /// shift form as the exec reader, so the reader's `ensures` is definitional (no
-/// `by (bit_vector)` bridge). Phase 8d's recovery-core spec (`store.rs`'s
-/// `frame_at`/`run_len`) names the decoded `seq`/`len` through this.
+/// `by (bit_vector)` bridge). `store.rs`'s recovery-core spec (`frame_at`/
+/// `run_len`) names the decoded `seq`/`len` through this.
 pub(crate) open spec fn spec_u32_le(b: Seq<u8>, off: int) -> u32 {
     (b[off] as u32)
         | ((b[off + 1] as u32) << 8)
@@ -275,9 +274,9 @@ pub(crate) open spec fn spec_u64_le(b: Seq<u8>, off: int) -> u64 {
 }
 
 /// Little-endian `u32` from four bytes at `off`, by explicit indexing + shifts
-/// (not `from_le_bytes`/`try_into`, which Verus does not spec — the 7a recipe).
-/// `pub(crate)` since 8c so `store.rs`'s `decode_frame` reuses it; the `ensures`
-/// tying it to [`spec_u32_le`] is what lets 8d's `frame_at` mirror the framing.
+/// (not `from_le_bytes`/`try_into`, which Verus does not spec).
+/// `pub(crate)` so `store.rs`'s `decode_frame` reuses it; the `ensures`
+/// tying it to [`spec_u32_le`] is what lets `frame_at` mirror the framing.
 pub(crate) fn read_u32_le(buf: &[u8], off: usize) -> (r: u32)
     requires
         off + 4 <= buf@.len(),
@@ -292,7 +291,7 @@ pub(crate) fn read_u32_le(buf: &[u8], off: usize) -> (r: u32)
 }
 
 /// Little-endian `u64` from eight bytes at `off` (see [`read_u32_le`]).
-/// `pub(crate)` since 8c so `store.rs`'s `decode_frame` reuses it.
+/// `pub(crate)` so `store.rs`'s `decode_frame` reuses it.
 pub(crate) fn read_u64_le(buf: &[u8], off: usize) -> (r: u64)
     requires
         off + 8 <= buf@.len(),
@@ -330,7 +329,7 @@ fn read_arr32(buf: &[u8], off: usize) -> [u8; 32]
 
 /// The body-checksum gate: `blake3(buf[..SB_BODY]) == buf[SB_BODY..SB_BODY+32]`.
 /// `external_body` because blake3 is interpreted hashing — out of verification
-/// scope (Kani stubbed it with `-Z stubbing` for the same reason). Assumed
+/// scope. Assumed
 /// **total**: it inspects the buffer and returns a bool, never panics. Totality
 /// needs no collision-freedom (a deterministic total function suffices); a
 /// round-trip proof would instead axiomatize injectivity here. The
@@ -346,9 +345,9 @@ fn checksum_ok(buf: &[u8]) -> bool
 
 /// Parse the integer/byte fields of a superblock slot, or reject. **Total ∀**
 /// buffer bytes — verifying this *is* the totality theorem (Verus proves every
-/// fixed-offset read in bounds and no arithmetic overflow for all inputs), the
-/// unbounded form of `check_superblock_decode_total`. The `Hash`/`Superblock`
-/// assembly is the caller's trivially-total job (`Superblock::decode_checked`).
+/// fixed-offset read in bounds and no arithmetic overflow for all inputs). The
+/// `Hash`/`Superblock` assembly is the caller's trivially-total job
+/// (`Superblock::decode_checked`).
 pub fn decode_checked_fields(buf: &[u8]) -> (r: Result<RawSuperblock, SbError>) {
     broadcast use vstd::slice::group_slice_axioms;
     if buf.len() != SB_SIZE {
@@ -380,14 +379,14 @@ pub fn decode_checked_fields(buf: &[u8]) -> (r: Result<RawSuperblock, SbError>) 
 
 } // verus!
 
-// ── Chunk index object (§4.2 items 3–4, durable since format v2) ───────
+// ── Chunk index object (rev0§4.2 items 3–4, durable since format v2) ───────
 
 const INDEX_MAGIC: &[u8; 4] = b"CIDX";
 
 /// One indexed object: `off` is the *data* offset within the chunk region
 /// (the frame header sits CHUNK_HEADER bytes before it). `birth` is the
 /// superblock generation the object was appended under — the GC epoch
-/// hook (§4.2, §4.6).
+/// hook (rev0§4.2, rev0§4.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexEntry {
     pub off: u64,
@@ -468,7 +467,7 @@ pub fn decode_index(
 // ── WAL records ─────────────────────────────────────────────────────────
 
 pub(crate) const WAL_MAGIC: &[u8; 4] = b"WREC";
-// WAL_HEADER is declared inside the `verus!{}` block above (8c: the verified
+// WAL_HEADER is declared inside the `verus!{}` block above (the verified
 // `decode_frame`/`replay_bound` in store.rs name its concrete value); it erases
 // to the same `pub const WAL_HEADER: usize = 48`.
 
@@ -579,7 +578,7 @@ impl WalOp {
 
     /// Parse one record at the start of `buf`. Returns (seq, op, record
     /// length). None = no valid record here (torn tail or end of log —
-    /// either way replay stops, §4.5: such records were never acked).
+    /// either way replay stops, rev0§4.5: such records were never acked).
     pub fn decode_record(buf: &[u8]) -> Option<(u64, WalOp, usize)> {
         if buf.len() < WAL_HEADER || &buf[0..4] != WAL_MAGIC {
             return None;
@@ -598,7 +597,7 @@ impl WalOp {
     }
 }
 
-// ── Ref table (§4.1, §4.7) ──────────────────────────────────────────────
+// ── Ref table (rev0§4.1, rev0§4.7) ──────────────────────────────────────────────
 
 const REFT_MAGIC: &[u8; 4] = b"REFT";
 
@@ -609,7 +608,7 @@ pub const CLASS_EPHEMERAL: u8 = 2;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefEntry {
     pub root: Hash,
-    /// Storage-cap revocation generation (§2.2) — not the superblock
+    /// Storage-cap revocation generation (rev0§2.2) — not the superblock
     /// generation. Bumping it lazily invalidates all outstanding handles.
     pub generation: u64,
     pub next_snap_id: u64,
@@ -620,9 +619,9 @@ pub struct SnapRow {
     pub id: u64,
     pub root: Hash,
     /// UTC nanoseconds since the Unix epoch (format v3; the spec-level
-    /// representation is signed 64-bit, §2.6 — positive in practice, so
+    /// representation is signed 64-bit, rev0§2.6 — positive in practice, so
     /// the u64 carries identical bytes). Server-assigned, strictly
-    /// increasing per ref (§4.7).
+    /// increasing per ref (rev0§4.7).
     pub timestamp: u64,
     pub provenance: Vec<u8>,
     pub parent: Option<u64>,
@@ -634,7 +633,7 @@ pub struct SnapRow {
 pub struct RefTable {
     pub refs: BTreeMap<Vec<u8>, RefEntry>,
     /// (ref name, snapshot id) → row. Snapshot identity is the per-ref
-    /// sequence number, never a hash (§4.7).
+    /// sequence number, never a hash (rev0§4.7).
     pub snaps: BTreeMap<(Vec<u8>, u64), SnapRow>,
     pub tags: BTreeMap<Vec<u8>, (Vec<u8>, u64)>,
 }
@@ -743,7 +742,7 @@ pub const CHUNK_MAGIC: &[u8; 4] = b"CHNK";
 // it); it erases to the same `pub const CHUNK_HEADER: usize = 48`.
 
 /// Frame a chunk for the append-only store: magic, length, birth
-/// generation (§4.2 — the GC epoch hook), content hash, data.
+/// generation (rev0§4.2 — the GC epoch hook), content hash, data.
 pub fn encode_chunk_frame(data: &[u8], birth_gen: u64, hash: &Hash) -> Vec<u8> {
     let mut out = Vec::with_capacity(CHUNK_HEADER + data.len());
     out.extend_from_slice(CHUNK_MAGIC);

@@ -1,9 +1,9 @@
 # Verus
 
 Verus is the kernel core's **deductive-verification tier**: it proves the `kcore`
-object model and the §4.7/§4.8 host chokepoints meet functional `ensures`,
-**terminate**, and preserve their `wf` invariants **for all inputs** — the
-unbounded successor to the retired Kani tier (`kani.md`). The authoritative plan
+object model and the rev0§4.7/rev0§4.8 host chokepoints meet functional `ensures`,
+**terminate**, and preserve their `wf` invariants **for all inputs**, with no
+bound to pick — the proofs hold over the unbounded input space. The authoritative plan
 is `../plans/3_verus-rewrite.md`; the enumerated trusted base is
 `../results/68_verus-findings.md`; the dated technique record is the series of 47
 findings docs, `../results/21_verus-findings.md` through `…/67_verus-findings.md`,
@@ -32,7 +32,7 @@ Three versions move as **one unit**, pinned in every verified crate's
 Verus has no crates.io binary: CI fetches the release zip (it bundles
 `verus`/`cargo-verus`/`z3`) and caches it by version. **An upgrade is its own PR**
 — bump binary + `vstd` + toolchain together, re-run the whole suite, never fold
-into a feature change (the cargo-kani-0.67.0 discipline).
+into a feature change.
 
 ## The CI job and erasure
 

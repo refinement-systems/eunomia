@@ -1,4 +1,4 @@
-//! Per-directory prolly trees (Merkle search trees) — spec §4.1, §4.9.
+//! Per-directory prolly trees (Merkle search trees) — spec rev0§4.1, rev0§4.9.
 //!
 //! A directory is a sorted sequence of entries, split into content-addressed
 //! nodes by a content-defined rule, so tree shape is history-independent
@@ -7,7 +7,7 @@
 //!
 //! Format constants (changing any of these is a format migration):
 //!   - Entry encoding: deterministic TLV, little-endian, exactly one
-//!     encoding per logical entry (§4.9).
+//!     encoding per logical entry (rev0§4.9).
 //!   - Split rule: an item is a node boundary iff the low SPLIT_BITS bits
 //!     of BLAKE3(item bytes) are zero (average fanout 2^SPLIT_BITS), with
 //!     a forced boundary every MAX_NODE_ENTRIES items. The split decision
@@ -19,12 +19,12 @@
 //!
 //! Incremental node-level surgery is deliberately absent: `Dir::save`
 //! rebuilds one directory's node tree from its full entry list. Editing a
-//! file path-copies only the directories on its path (§4.3), and per-node
+//! file path-copies only the directories on its path (rev0§4.3), and per-node
 //! dedup in the store makes the rebuild emit only changed nodes. Node-level
 //! incremental update is an optimization for very large directories,
 //! deferred past MVP.
 //!
-//! Decoders here are strict (they are cargo-fuzz targets, §3.7/§6): every
+//! Decoders here are strict (they are cargo-fuzz targets, rev0§3.7/rev0§6): every
 //! canonicality rule checked on encode is also rejected on decode, and
 //! trailing bytes are errors.
 
@@ -34,12 +34,12 @@ use alloc::vec;
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
-/// Files at or below this size live inline in the directory entry (§4.9).
+/// Files at or below this size live inline in the directory entry (rev0§4.9).
 /// The rule is a pure function of content, preserving canonical form.
 pub const INLINE_MAX: usize = 512;
 
 /// Advisory-executable bit in the flags word — a type hint with zero
-/// security semantics (§4.9).
+/// security semantics (rev0§4.9).
 pub const FLAG_EXECUTABLE: u32 = 1 << 0;
 
 const SPLIT_BITS: u32 = 5;
@@ -47,10 +47,9 @@ const SPLIT_MASK: u64 = (1 << SPLIT_BITS) - 1;
 const MAX_NODE_ENTRIES: usize = 128;
 
 // MAX_OPT_BYTES / OPT_TAG_FLAGS live inside the `verus!{}` block at the end of
-// this file (a const declared outside the macro is invisible to Verus — the 7f
-// gotcha); they erase to the same `pub const` / `const` so external code is
-// unchanged. The verified TLV core (`decode_raw`/`encode_raw`, plan §7g) names
-// them.
+// this file: a const declared outside the macro is invisible to Verus, and the
+// verified TLV core (`decode_raw`/`encode_raw`) names them. They erase to the
+// same `pub const` / `const` so external code is unchanged.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
@@ -70,7 +69,7 @@ pub enum EntryKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Content {
-    /// ≤ INLINE_MAX bytes, inlined (§4.9).
+    /// ≤ INLINE_MAX bytes, inlined (rev0§4.9).
     Inline(Vec<u8>),
     /// Chunk-list object hash (file > INLINE_MAX bytes).
     ChunkList(Hash),
@@ -103,7 +102,7 @@ impl core::fmt::Display for FormatError {
 impl std::error::Error for FormatError {}
 
 /// Content-addressed object store: chunks, tree nodes, and chunk lists all
-/// live in one keyspace (hash = address, §4.1).
+/// live in one keyspace (hash = address, rev0§4.1).
 pub trait NodeStore {
     fn put(&mut self, bytes: &[u8]) -> Hash;
     fn get(&self, hash: &Hash) -> Option<Vec<u8>>;
@@ -322,7 +321,7 @@ fn build_level(
 
 // ── Directory ───────────────────────────────────────────────────────────
 
-/// In-memory logical directory: name → entry, memcmp order (§4.9).
+/// In-memory logical directory: name → entry, memcmp order (rev0§4.9).
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct Dir {
     entries: BTreeMap<Vec<u8>, Entry>,
@@ -412,7 +411,7 @@ impl Dir {
     }
 }
 
-/// One stored node, shallowly parsed — the GC mark walk (§4.6) needs the
+/// One stored node, shallowly parsed — the GC mark walk (rev0§4.6) needs the
 /// raw child hashes of internal nodes, which `Dir::load` flattens away.
 #[derive(Debug)]
 pub enum NodeRefs {
@@ -507,9 +506,9 @@ pub enum DiffKind {
 }
 
 /// Entry-level diff between two directory roots. Equal roots short-circuit
-/// (equal hashes ⇒ identical subtrees, §4.9). Node-granular pruning inside
+/// (equal hashes ⇒ identical subtrees, rev0§4.9). Node-granular pruning inside
 /// one directory is a deferred optimization; nested-tree diff recursion
-/// belongs to the storage server (M2).
+/// belongs to the storage server.
 pub fn diff(
     store: &impl NodeStore,
     a: &Hash,
@@ -537,22 +536,22 @@ pub fn diff(
     Ok(out)
 }
 
-// ── Verified TLV core (plan doc/plans/3_verus-rewrite.md §7g) ────────────
+// ── Verified TLV core ─────────────────────────────────────────────────────
 //
-// The directory-entry TLV codec (§4.9), proven in Verus: `decode_raw` is
+// The directory-entry TLV codec (rev0§4.9), proven in Verus: `decode_raw` is
 // **total ∀ bytes** (verifying the body *is* the no-panic theorem) and the
 // **canonical-form round-trip is a theorem ∀** — `encode_raw(decode_raw(b)) ==
 // b[..k]` (the property `cas/fuzz/.../tlv_entry.rs` samples). `Hash` is kept
-// out of the proof surface (the 7f `RawSuperblock` discipline): the verified
-// core carries `[u8; 32]` so the 32 hash bytes round-trip *inside* the proof,
-// and `decode_entry`/`encode_entry` are thin `Entry ↔ RawEntry` converters that
-// do the trivially-total `Hash::{from_bytes,as_bytes}` wrap. Entry-level
-// well-formedness (`validate_entry`) stays plain Rust — it only shrinks the
-// accept set and so does not bear on the round-trip; the fuzz oracle covers the
-// full `Entry` path.
+// out of the proof surface: the verified core carries `[u8; 32]` so the 32 hash
+// bytes round-trip *inside* the proof, and `decode_entry`/`encode_entry` are
+// thin `Entry ↔ RawEntry` converters that do the trivially-total
+// `Hash::{from_bytes,as_bytes}` wrap. Entry-level well-formedness
+// (`validate_entry`) stays plain Rust — it only shrinks the accept set and so
+// does not bear on the round-trip; the fuzz oracle covers the full `Entry`
+// path.
 verus! {
 
-/// Hard cap on optional-TLV bytes per entry (§4.9) — keeps directory nodes
+/// Hard cap on optional-TLV bytes per entry (rev0§4.9) — keeps directory nodes
 /// directory-shaped regardless of future tags. Inside the macro so the verified
 /// `decode_raw` can name it (a const outside `verus!{}` is invisible to Verus).
 pub const MAX_OPT_BYTES: usize = 4096;
@@ -626,7 +625,7 @@ pub open spec fn canonical_bytes(e: RawEntry) -> Seq<u8> {
         + content_bytes(e.content) + opt_bytes(e.flags)
 }
 
-// ── Exec byte readers (the 7f recipe: explicit index + shift, not
+// ── Exec byte readers (explicit index + shift, not
 //    `from_le_bytes`/`try_into`), each carrying its `*_le` round-trip ───────
 
 fn read_u16_le(buf: &[u8], off: usize) -> (v: u16)
@@ -1322,7 +1321,7 @@ mod tests {
             cases: if cfg!(miri) { 4 } else { 256 },
             ..ProptestConfig::default()
         })]
-        /// §4.1: same logical contents ⇒ same root, regardless of edit
+        /// rev0§4.1: same logical contents ⇒ same root, regardless of edit
         /// order and regardless of churn (inserts later removed).
         #[test]
         fn canonical_form(

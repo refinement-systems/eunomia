@@ -1,6 +1,6 @@
 #![no_main]
 //! The format-v2 durable index: the hash→extent map plus the free-extent
-//! list, one frame (§4.2 items 3–4). We fuzz `decode_index` directly —
+//! list, one frame (rev0§4.2 items 3–4). We fuzz `decode_index` directly —
 //! the frame's content hash is verified one layer up in `Store::mount`, so
 //! the decoder itself sees unauthenticated bytes.
 //!

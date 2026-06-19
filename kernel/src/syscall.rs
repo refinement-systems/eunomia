@@ -5,8 +5,8 @@
 //! are slot indices into the calling thread's cspace. User pointers must
 //! lie inside the identity-mapped user window (until M3 address spaces).
 //!
-//! This ABI is a milestone scaffold, not a stable surface — the public
-//! syscall ABI is an explicit later milestone (§3.7, §8).
+//! This ABI is a scaffold, not a stable surface — the public syscall ABI
+//! is deferred (rev0§3.7, rev0§8).
 
 use crate::channel::{self, ChanError, MSG_CAPS, MSG_PAYLOAD};
 use crate::cspace::{self, CapKind, CapSlot, CSpaceObj, Rights};
@@ -27,9 +27,9 @@ use kcore::timer::TimerObj;
 
 // Handle → pointer for the architectural shell paths that legitimately own the
 // object (this file places objects in donated untyped, switches frames, and
-// bumps refcounts directly). The converted `CapKind`/`Tcb` fields carry opaque
-// `ObjId` handles (plan §3, the arena rewrite); resolve them back to the live
-// address the shell code dereferences — the same boundary the scheduler shell
+// bumps refcounts directly). The `CapKind`/`Tcb` fields carry opaque
+// `ObjId` handles; resolve them back to the live address the shell code
+// dereferences — the same boundary the scheduler shell
 // (`kernel/src/thread.rs`) uses.
 #[inline]
 unsafe fn cspace_ptr(o: ObjId) -> *mut CSpaceObj {
@@ -140,9 +140,9 @@ unsafe fn resolve_cap_list(
     Ok(())
 }
 
-/// Map a decode-time validation failure to the legacy errno. Every such
-/// condition returned `ERR_ARG` in the pre-split dispatch, so the observable
-/// code is unchanged (plan §2.5).
+/// Map a decode-time validation failure to the errno. Every such
+/// condition returns `ERR_ARG`, the value the dispatch returns for any
+/// argument-validation failure.
 fn errno_of(_e: SysError) -> i64 {
     ERR_ARG
 }
@@ -150,9 +150,9 @@ fn errno_of(_e: SysError) -> i64 {
 /// Returns Some(result for x0), or None when the thread blocked (its x0
 /// will be written by whoever wakes it).
 ///
-/// The pure decode + argument validation lives in [`kcore::sysabi::decode`]
-/// (plan §2.5); this consumes the typed [`Sys`] and does the capability
-/// lookup, rights checks, user-pointer validation, and the operation.
+/// The pure decode + argument validation lives in [`kcore::sysabi::decode`];
+/// this consumes the typed [`Sys`] and does the capability lookup, rights
+/// checks, user-pointer validation, and the operation.
 pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
     let nr = (*frame).x[7];
     let a = [
@@ -169,10 +169,9 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
     }
 }
 
-/// Execute a decoded syscall against live kernel state. Each arm is the
-/// pre-split dispatch arm with argument extraction removed (now done by
-/// `decode`); the capability lookup (`cur_slot`), rights checks, user-range
-/// validation, and operation are unchanged.
+/// Execute a decoded syscall against live kernel state. Argument extraction
+/// is done by `decode`; each arm performs the capability lookup (`cur_slot`),
+/// rights checks, user-range validation, and the operation.
 unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
     match sys {
         Sys::DebugPutc { ch } => {
@@ -224,8 +223,8 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
                 Err(RetypeError::BadArg) => ERR_ARG,
             })
         }
-        // cap_copy — derive, monotone (§2.3). `prio_ceiling` attenuates a thread-cap
-        // copy's §5.4 ceiling to `min(parent, prio_ceiling)` (the supervision grant);
+        // cap_copy — derive, monotone (rev0§2.3). `prio_ceiling` attenuates a thread-cap
+        // copy's rev0§5.4 ceiling to `min(parent, prio_ceiling)` (the supervision grant);
         // `NO_PRIO_CEILING` (0xFF) from the default `cap_copy` leaves it unchanged.
         Sys::CapCopy { src, dst, mask, prio_ceiling } => {
             let src = cur_slot(src);
@@ -261,7 +260,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             Some(0)
         }
         // cap_install — move a cap into another cspace (explicit child-cspace
-        // construction, §5.1).
+        // construction, rev0§5.1).
         Sys::CapInstall { cs, src, dst_index } => {
             let cs_slot = cur_slot(cs);
             let src = cur_slot(src);
@@ -417,7 +416,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if !user_range_ok(entry, 4) || !user_range_ok(sp, 0) {
                 return Some(ERR_FAULT);
             }
-            // §5.4 maximum-controlled-priority: the ceiling is carried on the
+            // rev0§5.4 maximum-controlled-priority: the ceiling is carried on the
             // thread cap (`max_prio`, stamped at retype = the retyper's
             // priority), so spawn gates on the cap, not the caller's live
             // priority — the lattice stays monotone and the ceiling is
@@ -427,9 +426,9 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             }
             (*csp).hdr.refs += 1;
             (*tp).cspace = Some(cs);
-            // §5.4: the gated priority is written through the verified
+            // rev0§5.4: the gated priority is written through the verified
             // `kcore::thread::set_priority` (`prio <= max_prio` discharged by the
-            // gate above), not a raw store — closing the F-70-6 seam (doc 71).
+            // gate above), not a raw store.
             thread::set_priority(tp, prio, max_prio);
             (*tp).frame = TrapFrame::zeroed();
             (*tp).frame.elr = entry;
@@ -458,7 +457,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             timer::arm(timer_ptr(t), notif_ptr(n), bits, timer::counter().saturating_add(delta));
             Some(0)
         }
-        // thread_exit — the only voluntary stop (§5.1). The kernel records
+        // thread_exit — the only voluntary stop (rev0§5.1). The kernel records
         // the status, so a child can neither lie about nor forget its own
         // death; the on-exit binding fires here.
         Sys::ThreadExit { status } => {
@@ -469,7 +468,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             // frame is never restored, so there is no x0 to write.
             None
         }
-        // map(aspace, frame, va, perms) — §2.5: the mapping lives in the
+        // map(aspace, frame, va, perms) — rev0§2.5: the mapping lives in the
         // frame cap; mapping an already-mapped cap fails (copy the cap to
         // map the frame twice).
         Sys::Map { aspace, frame: fr, va, perms } => {
@@ -494,7 +493,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if perms & crate::aspace::PERM_W != 0 && !(*fr_slot).cap.rights.has(Rights::WRITE) {
                 return Some(ERR_PERM);
             }
-            // Device mappings only via phys-capable caps (§2.5).
+            // Device mappings only via phys-capable caps (rev0§2.5).
             if perms & crate::aspace::PERM_DEVICE != 0 && !(*fr_slot).cap.rights.has(Rights::PHYS) {
                 return Some(ERR_PERM);
             }
@@ -556,7 +555,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if (*tp).state != ThreadState::Inactive {
                 return Some(ERR_STATE);
             }
-            // §5.4 ceiling carried on the thread cap (see ThreadStart).
+            // rev0§5.4 ceiling carried on the thread cap (see ThreadStart).
             if prio > max_prio {
                 return Some(ERR_PERM);
             }
@@ -568,7 +567,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             (*asp_ptr).hdr.refs += 1;
             (*tp).cspace = Some(cs);
             (*tp).aspace = Some(asp);
-            // §5.4: gated priority via the verified setter (see ThreadStart).
+            // rev0§5.4: gated priority via the verified setter (see ThreadStart).
             thread::set_priority(tp, prio, max_prio);
             (*tp).frame = TrapFrame::zeroed();
             (*tp).frame.elr = entry;
@@ -577,7 +576,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             thread::enqueue(tp);
             Some(0)
         }
-        // frame_paddr → PA. Gated on the phys-read bit (§2.5): only the
+        // frame_paddr → PA. Gated on the phys-read bit (rev0§2.5): only the
         // DmaPool holder's caps carry it.
         Sys::FramePaddr { slot } => {
             let s = cur_slot(slot);
@@ -593,13 +592,13 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             Some(base as i64)
         }
         // debug_getc → byte, or ERR_EMPTY. Scaffold console input until the
-        // userspace UART driver exists (§7).
+        // userspace UART driver exists (rev0§7).
         Sys::DebugGetc => Some(match crate::uart::getc() {
             Some(b) => b as i64,
             None => ERR_EMPTY,
         }),
         // thread_bind(tcb, which, notif, bits) — configure the on-exit /
-        // on-fault slot (§5.1). `which` is already <= 1 (decode). The notif
+        // on-fault slot (rev0§5.1). `which` is already <= 1 (decode). The notif
         // cap moves into the TCB's CDT-visible slot; notif = SLOT_NONE
         // unbinds. A child holds no cap to its own threads, so it can neither
         // silence nor forge its own death notice.
@@ -611,7 +610,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             let CapKind::Thread(t, _) = (*ts).cap.kind else {
                 return Some(ERR_TYPE);
             };
-            // bind-reports gates slot configuration (§2.3): a supervisor holds
+            // bind-reports gates slot configuration (rev0§2.3): a supervisor holds
             // it; an attenuated observer does not.
             if !(*ts).cap.rights.has(Rights::BIND_REPORTS) {
                 return Some(ERR_PERM);
@@ -626,7 +625,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
                 let CapKind::Notification(_) = (*ns).cap.kind else {
                     return Some(ERR_TYPE);
                 };
-                // The kernel will signal through this cap (§3.6).
+                // The kernel will signal through this cap (rev0§3.6).
                 if !(*ns).cap.rights.has(Rights::WRITE) {
                     return Some(ERR_PERM);
                 }
@@ -636,7 +635,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             Some(0)
         }
         // read_report(tcb) → x0 = 0 running | 1 exited | 2 faulted,
-        // x1 = status / cause, x2 = faulting address (§5.1).
+        // x1 = status / cause, x2 = faulting address (rev0§5.1).
         Sys::ReadReport { tcb } => {
             let ts = cur_slot(tcb);
             if ts.is_null() {
@@ -645,7 +644,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             let CapKind::Thread(t, _) = (*ts).cap.kind else {
                 return Some(ERR_TYPE);
             };
-            // read-report gates the read (§2.3).
+            // read-report gates the read (rev0§2.3).
             if !(*ts).cap.rights.has(Rights::READ_REPORT) {
                 return Some(ERR_PERM);
             }
@@ -659,8 +658,8 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             Some(code)
         }
         // untyped_reset(ut) — watermark back to 0 once the caller has revoked
-        // every object carved from it (§2.5). Pairs with cap_revoke for
-        // per-spawn donation reuse (§5.1); refuses while CDT children remain
+        // every object carved from it (rev0§2.5). Pairs with cap_revoke for
+        // per-spawn donation reuse (rev0§5.1); refuses while CDT children remain
         // so a live object can never be reused under.
         Sys::UntypedReset { slot } => {
             let s = cur_slot(slot);

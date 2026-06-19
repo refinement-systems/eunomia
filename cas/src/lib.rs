@@ -1,4 +1,4 @@
-//! Content-addressed storage primitives (spec §4).
+//! Content-addressed storage primitives (spec rev0§4).
 //!
 //! This crate is pure Rust, host-testable (std), no kernel dependency.
 //! It is the primary target for Miri, proptest, and the TLA+ commit-
@@ -13,12 +13,12 @@
 //!
 //!   - `dev`      — block-device trait; file/mem/crash-injection backends
 //!   - `disk`     — on-disk formats: superblocks, WAL, ref table, index
-//!   - `overlay`  — per-ref in-memory overlay (interval maps, §4.3–4.4)
+//!   - `overlay`  — per-ref in-memory overlay (interval maps, rev0§4.3–4.4)
 //!   - `store`    — the engine: WAL + flush + A/B commit + recovery + GC
-//!   - `gc`       — the mark walk (reachability over the tree, §4.6)
+//!   - `gc`       — the mark walk (reachability over the tree, rev0§4.6)
 
 #![cfg_attr(not(feature = "std"), no_std)]
-// Clippy is not a CI gate (closeout 9a): `assign_op_pattern` fires in `verus!{}`
+// Clippy is not a CI gate: `assign_op_pattern` fires in `verus!{}`
 // verified exec code (`x = x + y` is the form Verus reasons about), `BlockDev` is
 // a device-size trait where `is_empty` is meaningless, and the flagged type is a
 // cohesive store-internal alias. Refactoring for them would be cosmetic churn.
@@ -44,6 +44,6 @@ pub mod tree;
 
 /// Fuzz-only buffer mutators (checksum/chain re-sealing). Compiled only
 /// under the `fuzzing` feature so the forgery helpers never reach a real
-/// build (spec §6: decoders are cargo-fuzz targets on the host).
+/// build (spec rev0§6: decoders are cargo-fuzz targets on the host).
 #[cfg(feature = "fuzzing")]
 pub mod fuzz_support;

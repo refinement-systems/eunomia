@@ -1,6 +1,6 @@
 //! Regression tests for findings surfaced by the storage-server and cas
 //! fuzz targets, rooted in cas. Each pins the hardened behavior so the
-//! finding cannot silently regress. See doc/results/1_fuzzing-findings.md.
+//! finding cannot silently regress.
 
 use cas::chunk::ChunkerParams;
 use cas::dev::{BlockDev, MemDev};
@@ -25,12 +25,11 @@ fn fresh() -> Store<MemDev> {
     store
 }
 
-/// FINDING OVL-1 (fixed): a write at `offset` near u64::MAX used to panic
-/// with an arithmetic overflow in `FileOverlay::insert` (`off + data.len()`,
-/// overlay.rs), reachable from a `Write` request — a client with write
-/// access could crash the storage server with one message (found by the
-/// `request_dispatch` target). `Store::write` now rejects the extent before
-/// it reaches the WAL.
+/// A write at `offset` near u64::MAX could arithmetic-overflow in
+/// `FileOverlay::insert` (`off + data.len()`, overlay.rs), reachable from a
+/// `Write` request — a client with write access could crash the storage
+/// server with one message. `Store::write` rejects the extent before it
+/// reaches the WAL.
 #[test]
 fn ovl1_write_offset_overflow_rejected() {
     let mut store = fresh();
@@ -42,7 +41,7 @@ fn ovl1_write_offset_overflow_rejected() {
     assert_eq!(store.read(b"main", &path).unwrap(), Some(b"hello".to_vec()));
 }
 
-/// Companion to OVL-1: an extent that cannot overflow but exceeds the chunk
+/// Companion case: an extent that cannot overflow but exceeds the chunk
 /// region capacity is rejected too — accepting it would ack a WAL record
 /// that can never flush (and would materialize the whole extent in
 /// `FileOverlay::apply`).
@@ -56,7 +55,7 @@ fn ovl1_write_extent_beyond_capacity_rejected() {
     assert_eq!(store.read(b"main", &path).unwrap(), Some(b"hello".to_vec()));
 }
 
-// ── MNT-1: mount must not trust superblock geometry ─────────────────────
+// ── Mount must not trust superblock geometry ────────────────────────────
 //
 // The superblock checksum is integrity, not authenticity: it distinguishes
 // torn writes from complete ones, and anyone who can place bytes on the
@@ -96,13 +95,12 @@ fn mount(img: Vec<u8>) -> Result<Store<MemDev>, StoreError> {
     Store::mount(MemDev::from_bytes(img), small_opts())
 }
 
-/// The reviewer-named regression: a checksum-valid superblock whose
-/// `chunk_tail` claims more than the device holds must be rejected with a
-/// specific error *before any sized allocation* — `chunk_tail` was the
-/// "ground truth" the index-frame length gate validated against, and it was
-/// itself validated against nothing (untrusted data vouching for untrusted
-/// data). Pre-fix this mounted Ok and left a store whose first allocation
-/// would trap on `tail + need`.
+/// A checksum-valid superblock whose `chunk_tail` claims more than the
+/// device holds must be rejected with a specific error *before any sized
+/// allocation* — `chunk_tail` is the "ground truth" the index-frame length
+/// gate validates against, so it must itself be validated against the device
+/// length (otherwise untrusted data vouches for untrusted data, and the
+/// store's first allocation traps on `tail + need`).
 #[test]
 fn mnt1_forged_chunk_tail_rejected() {
     let mut img = image();
@@ -130,9 +128,8 @@ fn mnt1_forged_chunk_tail_rejected() {
 
 /// Not every forgeable scalar is geometry: `generation` feeds
 /// `birth_gen = generation + 1` at mount (and `generation + 1` at every
-/// commit). A re-sealed superblock with `generation = u64::MAX` overflowed
-/// that derive — the second crash `mount_reseal` found, after the geometry
-/// fields were already covered.
+/// commit). A re-sealed superblock with `generation = u64::MAX` would
+/// overflow that derive, so it is rejected.
 #[test]
 fn mnt1_forged_generation_max_rejected() {
     let mut img = image();
@@ -146,9 +143,8 @@ fn mnt1_forged_generation_max_rejected() {
     );
 }
 
-/// `wal_len` near u64::MAX used to overflow `WAL_OFF + sb.wal_len` at the
-/// very first use of a forged field — the path the `mount_reseal` fuzz
-/// target found within two minutes of being pointed at pre-fix code.
+/// `wal_len` near u64::MAX could overflow `WAL_OFF + sb.wal_len` at the very
+/// first use of a forged field, so it is bounded against the device length.
 #[test]
 fn mnt1_forged_wal_len_rejected() {
     let mut img = image();
@@ -162,9 +158,9 @@ fn mnt1_forged_wal_len_rejected() {
     );
 }
 
-/// `index_off` near u64::MAX used to overflow `chunk_off + sb.index_off`
+/// `index_off` near u64::MAX could overflow `chunk_off + sb.index_off`
 /// before the device read (a trap under overflow-checks, a wild read
-/// without them).
+/// without them), so it is checked against the committed region.
 #[test]
 fn mnt1_forged_index_off_rejected() {
     let mut img = image();
@@ -178,8 +174,8 @@ fn mnt1_forged_index_off_rejected() {
     );
 }
 
-/// `wal_head` beyond the WAL region used to panic the replay scan's slice
-/// (`&wal[off..]` with off > len).
+/// `wal_head` beyond the WAL region could panic the replay scan's slice
+/// (`&wal[off..]` with off > len), so it is rejected.
 #[test]
 fn mnt1_forged_wal_head_rejected() {
     let mut img = image();
@@ -193,10 +189,10 @@ fn mnt1_forged_wal_head_rejected() {
     );
 }
 
-/// `wal_next_seq = u64::MAX` plus a (re-sealed) record at that seq drove
-/// the replay loop's `seq += 1` past u64::MAX — the third `mount_reseal`
-/// crash, in replay rather than setup. A forged WAL record at this seq is
-/// rejected, not silently treated as an unacked tail.
+/// `wal_next_seq = u64::MAX` plus a (re-sealed) record at that seq could
+/// drive the replay loop's `seq += 1` past u64::MAX, in replay rather than
+/// setup. A forged WAL record at this seq is rejected, not silently treated
+/// as an unacked tail.
 #[test]
 fn mnt1_forged_wal_seq_max_rejected() {
     let mut img = image();
@@ -220,13 +216,13 @@ fn mnt1_forged_wal_seq_max_rejected() {
     );
 }
 
-/// A forged WAL record with an OVL-1-shaped extent. `Store::write` rejects
+/// A forged WAL record with an out-of-range extent. `Store::write` rejects
 /// such an extent before it is logged, so no image this code produced
 /// contains one — but WAL record checksums cover only the payload, so a
 /// disk-writing adversary can plant a perfectly sealed record (the
 /// superblock checksum does not cover the WAL region; no re-seal even
-/// needed). Pre-fix, replay applied it straight into the overlay and
-/// trapped on `off + data.len()` at the original OVL-1 site.
+/// needed). Replay must reject it rather than apply it straight into the
+/// overlay and trap on `off + data.len()`.
 #[test]
 fn mnt1_forged_wal_record_extent_rejected() {
     let mut img = image();
@@ -249,9 +245,9 @@ fn mnt1_forged_wal_record_extent_rejected() {
 }
 
 /// The spurious-pass shape inside the index itself: an entry with
-/// `off + len` wrapping u64 used to pass `off + len <= chunk_tail` (the sum
-/// wrapped to a tiny value) and mount returned Ok with a poisoned index —
-/// any later read of that hash issued a wild device access. The whole forged
+/// `off + len` wrapping u64 could pass `off + len <= chunk_tail` (the sum
+/// wraps to a tiny value) and let mount return Ok with a poisoned index —
+/// any later read of that hash would issue a wild device access. The whole forged
 /// frame is re-sealed (payload hash recomputed), as a disk-writer would.
 #[test]
 fn mnt1_forged_index_entry_wrap_rejected() {

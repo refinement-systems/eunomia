@@ -1,5 +1,5 @@
 #![no_main]
-//! `parse_node` is the shallow node decoder the GC mark walk (§4.6) runs
+//! `parse_node` is the shallow node decoder the GC mark walk (rev0§4.6) runs
 //! on raw stored bytes — *below* the fetch-time hash check, so it must be
 //! total on hostile input. The node hash gate lives above it, so this
 //! harness feeds arbitrary bytes directly.

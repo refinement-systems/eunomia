@@ -1,8 +1,7 @@
 //! Regression test for a finding surfaced by storage-server/fuzz.
 //!
-//! The root cause lives in cas (`cas/tests/fuzz_regressions.rs::ovl1_*`);
-//! this is the end-to-end view that makes the security claim concrete.
-//! See doc/results/1_fuzzing-findings.md.
+//! The root cause lives in cas (`cas/tests/fuzz_regressions.rs`); this is
+//! the end-to-end view that makes the security claim concrete.
 
 use cas::chunk::ChunkerParams;
 use cas::dev::MemDev;
@@ -23,11 +22,11 @@ fn fresh() -> (Server<MemDev>, SessionId) {
     (server, session)
 }
 
-/// FINDING OVL-1 (fixed), end to end: a client holding a write handle used
-/// to crash the server with one `Write` whose `offset` is near u64::MAX —
-/// the request decoded, dispatch passed the rights check, and the store's
-/// overlay overflowed `off + data.len()`. Dispatch now turns it into an
-/// error `Response` and the server keeps serving.
+/// Write-offset overflow, end to end: a client holding a write handle could
+/// crash the server with one `Write` whose `offset` is near u64::MAX — the
+/// request decoded, dispatch passed the rights check, and the store's
+/// overlay overflowed `off + data.len()`. Dispatch turns it into an error
+/// `Response` and the server keeps serving.
 #[test]
 fn ovl1_dispatch_write_offset_overflow_rejected() {
     let (mut server, session) = fresh();

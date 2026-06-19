@@ -1,6 +1,6 @@
 //! Userspace runtime: a global allocator over a static in-image heap.
 //!
-//! Eunomia processes are single-threaded (M3); the allocator is a plain
+//! Eunomia processes are single-threaded; the allocator is a plain
 //! first-fit free list with address-ordered coalescing, no locking. The
 //! heap lives in .bss, so the loader maps and zeroes it with the RW
 //! segment — no untyped or mapping calls needed to get a heap.
@@ -10,17 +10,17 @@
 //!   static HEAP: urt::Heap<{ 2 * 1024 * 1024 }> = urt::Heap::new();
 
 #![no_std]
-// Clippy is not a CI gate (closeout 9a): both fire in `verus!{}` verified exec
-// code where the explicit forms are deliberate — `x = x + y` and the explicit
-// saturating-subtract branch (the §7d restructure of `.saturating_sub`, which
-// Verus has no model for). Fixing them would refactor verified code cosmetically.
+// Clippy is not a CI gate: both fire in `verus!{}` verified exec code where the
+// explicit forms are deliberate — `x = x + y` and the explicit saturating-subtract
+// branch (a hand-spelled `.saturating_sub`, which Verus has no model for). Fixing
+// them would refactor verified code cosmetically.
 #![allow(clippy::assign_op_pattern, clippy::implicit_saturating_sub)]
 
-// Verus (plan doc/plans/3_verus-rewrite.md phase 7c): the deductive-proof tier
-// for the §4.7 host chokepoints. `vstd::prelude` supplies the `verus!{}` macro +
-// ghost vocabulary the `slots` proof uses; Verus requires it imported at the crate
-// root. In an ordinary build the macro erases ghost code, so this import is
-// otherwise unused — hence the allow (same as kcore/src/lib.rs, ipc/src/lib.rs).
+// Verus, the deductive-proof tier for the host-side userspace bookkeeping.
+// `vstd::prelude` supplies the `verus!{}` macro + ghost vocabulary the `slots`
+// proof uses; Verus requires it imported at the crate root. In an ordinary build
+// the macro erases ghost code, so this import is otherwise unused — hence the
+// allow (same as kcore/src/lib.rs, ipc/src/lib.rs).
 #[allow(unused_imports)]
 use vstd::prelude::*;
 

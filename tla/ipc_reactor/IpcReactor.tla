@@ -1,51 +1,48 @@
 ---- MODULE IpcReactor ----
-\* Userspace IPC reactor: the lost-wakeup + backpressure protocol (spec §3.3,
-\* §3.6; plan doc/plans/2_ipc.md §5.1).
+\* Userspace IPC reactor: the lost-wakeup + backpressure protocol (spec rev0§3.3,
+\* rev0§3.6).
 \*
 \* Models one channel between a sender and a receiver: the bounded FIFO queue,
 \* and the kernel notification word (faithful to kcore::notification — signal
 \* ORs a bit in and either wakes the FIFO waiter or accumulates; wait consumes
-\* the word if non-zero, else blocks). The receiver runs the §3.6 "bind, poll
+\* the word if non-zero, else blocks). The receiver runs the rev0§3.6 "bind, poll
 \* once, then wait" discipline: it blocks only when the queue is empty AND the
 \* notification word is clear, and every enqueue fires the persistent on-readable
 \* binding, which wakes a blocked receiver or accumulates for a polling one.
 \*
 \* Scope: cap move/teardown safety is already CapRevocation.tla's
 \* (MoveSemantics / FireSafe). This spec owns only the genuinely-new wakeup +
-\* backpressure protocol — the design risk the reactor (plan §4.2) introduces.
+\* backpressure protocol the reactor introduces.
 \*
-\* Scope limitation (single source; review doc/results/19_ipc-review.md gap #5).
-\* This spec models ONE source on ONE notification bit (word in {0,1}), and the
-\* Loom fragment (ipc model.rs reactor_no_lost_wakeup_loom) likewise drives a
-\* single source. The reactor's MULTI-source dispatch — the `used`-mask bit
-\* allocation, the `pending` drain, and the `trailing_zeros` lowest-bit-first scan
-\* (ipc/src/reactor.rs) — is exercised only by Shuttle harness #5 (fairness_smoke,
-\* a best-effort smoke), and that lowest-bit ordering bias has NO fairness /
-\* starvation property in any tier. Recorded rather than modelled: extending this
-\* spec (or Loom) to multiple bits is a deliberate future step, not an MVP gate.
+\* Scope limitation (single source). This spec models ONE source on ONE
+\* notification bit (word in {0,1}). The reactor's MULTI-source dispatch — the
+\* `used`-mask bit allocation, the `pending` drain, and the `trailing_zeros`
+\* lowest-bit-first scan (ipc/src/reactor.rs) — is not modelled here, and that
+\* lowest-bit ordering bias carries no fairness / starvation property. Extending
+\* this spec to multiple bits is a possible future step.
 \*
-\* Properties (plan §5.1, framing "both"):
-\*   Safety (the gate; ports to the §5.2 Shuttle harness):
+\* Properties:
+\*   Safety (the gate):
 \*     - NoLostWakeup: a blocked receiver has nothing pending — no queued
 \*       message, no set notification bit. A lost wakeup is exactly a blocked
 \*       receiver with work waiting and no pending signal to deliver it.
 \*     - NoDrop: every offered message is accounted for (received or still
-\*       queued) — Full is the only refusal, never a silent drop (§3.3).
-\*     - FifoPerChannel: receive order = send order (§3.3).
-\*   Liveness (TLC-only; Shuttle's bounded randomized search cannot establish it):
+\*       queued) — Full is the only refusal, never a silent drop (rev0§3.3).
+\*     - FifoPerChannel: receive order = send order (rev0§3.3).
+\*   Liveness (TLC-only; a bounded randomized search cannot establish it):
 \*     - EventuallyDelivered: under weak fairness, every offered message is
 \*       eventually received — no lost wakeup strands delivery forever.
 \*
 \* Negative control (the loom-fence-removal discipline): delete RecvBlock's
 \* `word = 0` conjunct — block without checking the word — and NoLostWakeup
 \* becomes reachable-false; TLC reports a blocked receiver holding word = 1 (a
-\* missed accumulated wakeup). Confirmed during bring-up, then reverted.
+\* missed accumulated wakeup).
 
 EXTENDS Naturals, Sequences
 
 CONSTANTS
     MaxMsgs,     \* messages the sender offers — bounds the state space
-    QueueDepth   \* channel queue capacity (§3.2)
+    QueueDepth   \* channel queue capacity (rev0§3.2)
 
 VARIABLES
     nextSend,    \* count of messages enqueued so far (ids 1..nextSend)
@@ -67,7 +64,7 @@ Init ==
 
 \* The sender enqueues the next message; backpressure disables it when the queue
 \* is full (Full, never a drop). The enqueue fires the persistent on-readable
-\* binding (§3.6): a blocked receiver is woken and receives the word (clearing
+\* binding (rev0§3.6): a blocked receiver is woken and receives the word (clearing
 \* it); a polling receiver just sees the word accumulate.
 Send ==
     /\ nextSend < MaxMsgs
@@ -136,17 +133,17 @@ TypeOK ==
     /\ \A i \in 1..Len(recvd) : recvd[i] \in 1..MaxMsgs
 
 \* No lost wakeup: a blocked receiver has nothing pending. Blocked with a queued
-\* message or a set word would mean a wakeup was lost (§3.6).
+\* message or a set word would mean a wakeup was lost (rev0§3.6).
 NoLostWakeup ==
     (recv = "blocked") => (Len(queue) = 0 /\ word = 0)
 
 \* No drop: every offered message is either received or still queued — Full is
-\* the only refusal (§3.3). With FIFO contiguity this is a counting identity.
+\* the only refusal (rev0§3.3). With FIFO contiguity this is a counting identity.
 NoDrop ==
     nextSend = Len(recvd) + Len(queue)
 
 \* FIFO per channel: received in send order, with the queue holding the next
-\* contiguous run (§3.3).
+\* contiguous run (rev0§3.3).
 FifoPerChannel ==
     /\ \A i \in 1..Len(recvd) : recvd[i] = i
     /\ \A i \in 1..Len(queue) : queue[i] = Len(recvd) + i
@@ -154,8 +151,8 @@ FifoPerChannel ==
 \* --- Liveness (TLC-only) -----------------------------------------------
 
 \* Under weak fairness, every offered message is eventually received: no lost
-\* wakeup strands delivery forever. This is the property the §5.2 Shuttle
-\* harness (bounded, randomized) cannot establish and TLC can.
+\* wakeup strands delivery forever. This is a liveness property a bounded,
+\* randomized search cannot establish and TLC can.
 EventuallyDelivered ==
     <>(Len(recvd) = MaxMsgs)
 

@@ -1,4 +1,4 @@
-//! Object and slot handles (plan `doc/plans/3_verus-rewrite.md` phase 1).
+//! Object and slot handles.
 //!
 //! The arena rewrite replaces `kcore`'s intrusive `*mut` graph with opaque,
 //! `Copy` handles resolved through the [`Store`](crate::store::Store) seam. The
@@ -11,8 +11,8 @@
 //!   - in proofs/host tests a handle is an index into a plain array.
 //!
 //! Because the core treats them opaquely, the same code verifies over the array
-//! model and runs over the address model — the `Env`/`Hal` seam (plan §3.1),
-//! extended to object storage.
+//! model and runs over the address model — the `Env`/`Hal` seam, extended to
+//! object storage.
 
 /// A handle to a refcounted kernel object (cspace, channel, TCB, notification,
 /// timer, aspace). Tagged with its kind by the carrying [`CapKind`] /

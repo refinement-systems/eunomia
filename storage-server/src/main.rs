@@ -1,8 +1,8 @@
-//! Storage server — userspace process holding the virtio-blk cap (spec §4).
+//! Storage server — userspace process holding the virtio-blk cap (spec rev0§4).
 //!
 //! The session/handle/dispatch core lives in lib.rs and is host-testable.
-//! This binary becomes the on-OS server at M3 (real processes + IPC
-//! transport over channel sessions); until then it has nothing to run.
+//! This binary is the on-OS server (real processes + IPC transport over
+//! channel sessions); the host build has nothing to run.
 
 fn main() {
     eprintln!(

@@ -1,12 +1,12 @@
-//! The IPC reactor (plan `doc/plans/2_ipc.md` §4.2; spec §3.6) — the
-//! lost-wakeup core. An epoll-shaped `register(source, signals, key)` /
-//! `wait() -> (key, signals)` API over a notification word's **bit-groups**.
+//! The IPC reactor (spec rev0§3.6) — the lost-wakeup core. An epoll-shaped
+//! `register(source, signals, key)` / `wait() -> (key, signals)` API over a
+//! notification word's **bit-groups**.
 //! It **owns the "bind, poll once, then wait" discipline**, so no server reaches
-//! for a notification bit, and the §3.6 wait-set kernel object is a future O(1)
-//! drop-in behind this same API.
+//! for a notification bit, and the rev0§3.6 wait-set kernel object is a future
+//! O(1) drop-in behind this same API.
 //!
 //! Lost-wakeup safety has two halves, both modeled by `tla/ipc_reactor` and
-//! re-checked on this code by harness #1 (model.rs, Shuttle + Loom):
+//! re-checked on this code by the no-lost-wakeup harness (model.rs, Shuttle + Loom):
 //!   1. `register` binds the source's events to a bit and then **self-signals**
 //!      that bit — the "poll once". It forces the first `wait()` to surface the
 //!      source, so a message queued *before* the bind (whose edge signal went
@@ -20,7 +20,7 @@
 //! and is **level-triggered**: it `bind`s the channel's events and self-signals
 //! a poll-once so a message queued before the bind still surfaces.
 //! [`Reactor::register_bound`] takes an **externally-bound, edge-triggered**
-//! source — a thread on-exit/on-fault binding (`thread_bind`, §5.1), a timer, an
+//! source — a thread on-exit/on-fault binding (`thread_bind`, rev0§5.1), a timer, an
 //! IRQ — already wired to a caller-chosen bit; it neither binds nor self-signals
 //! (a poll-once would fabricate a one-shot event), so lost-wakeup safety there
 //! rests on the caller binding before the source can fire plus `wait`'s
@@ -29,13 +29,13 @@
 //!
 //! Generic over `Transport`: production drives `SyscallTransport`, the harnesses
 //! drive `ModelTransport`. Single-threaded per process (`wait` takes `&mut`), so
-//! the reactor itself holds no locks (§2 of the plan).
+//! the reactor itself holds no locks.
 
 use core::ops::BitOr;
 
 use crate::transport::{Chan, Event, Notif, Transport};
 
-/// The events a source can be registered for / reported ready on (§3.3, §3.6).
+/// The events a source can be registered for / reported ready on (rev0§3.3, rev0§3.6).
 /// A set of bits; combine with `|`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Signals(u8);
@@ -78,7 +78,7 @@ pub enum RegisterErr {
     Taken,
 }
 
-/// Width of the notification word — the MVP per-thread source limit (§3.6).
+/// Width of the notification word — the MVP per-thread source limit (rev0§3.6).
 const WORD_BITS: usize = 64;
 
 #[derive(Debug, Clone, Copy)]
@@ -87,7 +87,7 @@ struct Reg {
     signals: Signals,
 }
 
-/// The reactor (§4.2): waits on one notification multiplexing many sources.
+/// The reactor: waits on one notification multiplexing many sources.
 pub struct Reactor<'t, T: Transport> {
     transport: &'t T,
     notif: Notif,
@@ -146,7 +146,7 @@ impl<'t, T: Transport> Reactor<'t, T> {
 
     /// Register a source whose events are bound to `mask` **outside** the reactor
     /// and are **edge-triggered**: a thread on-exit/on-fault binding (a
-    /// `thread_bind` into the TCB, §5.1), a timer (armed via `sys::timer_arm`),
+    /// `thread_bind` into the TCB, rev0§5.1), a timer (armed via `sys::timer_arm`),
     /// or an IRQ — anything the kernel signals into this notification at a bit
     /// the caller controls. Each set bit in `mask` dispatches to `key`.
     ///

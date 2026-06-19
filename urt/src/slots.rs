@@ -1,7 +1,7 @@
 //! A free-list over a contiguous block of a process's own cspace slots.
 //!
 //! A parent that spawns children needs to recycle the cspace slots that
-//! held the children's object caps. The subtlety the §5.1 reclaim loop
+//! held the children's object caps. The subtlety the rev0§5.1 reclaim loop
 //! turns on: those slots become free *because `cap_revoke` nulled them* —
 //! this allocator's bookkeeping must therefore agree with kernel behaviour,
 //! never run ahead of it. Free a range only after the revoke that emptied
@@ -14,10 +14,8 @@
 //! The window holds up to `WORDS * 64` slots; `cap` (≤ that) is the actual
 //! number in play, so the same `WORDS` covers any cspace that fits.
 //!
-//! **Verified by Verus** (plan `doc/plans/3_verus-rewrite_phase7-detail.md` §7c —
-//! the §4.7 host-chokepoint port of `urt::slots`, after the 7a/7b `ipc` ports).
-//! The properties hold ∀ `cap` and `WORDS` (vs the bounded CAP=4 Kani harnesses
-//! this supersedes): every [`SlotAlloc::alloc`] hands out an in-window slot that
+//! **Verified by Verus.** The properties hold ∀ `cap` and `WORDS`: every
+//! [`SlotAlloc::alloc`] hands out an in-window slot that
 //! was free and is now used (so successive allocations are distinct — a corollary
 //! of the modular contract, not a bounded drain loop); exhaustion is exact
 //! ([`SlotAlloc::alloc`] returns `None` ⟺ no slot is free); [`SlotAlloc::free`]
@@ -46,7 +44,7 @@ impl<const WORDS: usize> SlotAlloc<WORDS> {
     /// window fits the `u32` slot-id space (so `base + i` never overflows). The
     /// invariant `new` establishes and every op preserves. `closed` because the
     /// body reads the private `base`/`cap`/`free` fields — opaque outside the
-    /// module, with the body visible to in-module proofs (the 7b `Admission` recipe).
+    /// module, with the body visible to in-module proofs.
     pub closed spec fn wf(self) -> bool {
         &&& self.free@.len() == WORDS
         &&& self.cap <= WORDS * 64
@@ -61,8 +59,7 @@ impl<const WORDS: usize> SlotAlloc<WORDS> {
     }
 
     /// The window base (first slot id). A `closed` accessor so the public
-    /// contracts can speak of the slot-id arithmetic without exposing the field
-    /// (the 7b `Admission::spec_remaining` recipe).
+    /// contracts can speak of the slot-id arithmetic without exposing the field.
     pub closed spec fn spec_base(self) -> u32 {
         self.base
     }
@@ -339,8 +336,7 @@ impl<const WORDS: usize> SlotAlloc<WORDS> {
     /// free list must be currently allocated. `external_body` so Verus does not
     /// see the `debug_assert!` (it lowers to a `panic!`, which Verus forbids in
     /// exec code); the *static* guarantee is [`SlotAlloc::free`]'s `!is_free_spec`
-    /// precondition. Keeps the host `double_free_panics` panic witness that the
-    /// deleted `check_slots_double_free` Kani harness used to cover.
+    /// precondition. The host `double_free_panics` test pins this runtime witness.
     #[verifier::external_body]
     fn debug_check_free(&self, i: usize) {
         debug_assert!(i < self.cap, "slot index {i} outside the allocator window");

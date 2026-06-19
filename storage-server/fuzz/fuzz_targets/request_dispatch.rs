@@ -26,7 +26,7 @@ const NOW: u64 = 1_000;
 // small handle values land on *valid, varied* targets instead of bouncing
 // off BadHandle — a full-rights ref root, a read-only subtree view, and a
 // read-only snapshot. Larger/garbage handles still exercise the rejection
-// path. (Found by review: a single handle starved most dispatch paths.)
+// path; a single handle would starve most dispatch paths.
 fn fresh() -> (Server<MemDev>, SessionId) {
     let opts = StoreOptions {
         wal_len: 4096,

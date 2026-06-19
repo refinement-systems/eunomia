@@ -1,4 +1,4 @@
-//! The object-store seam (plan `doc/plans/3_verus-rewrite.md` phase 1).
+//! The object-store seam.
 //!
 //! `kcore`'s operations are written against this trait instead of raw pointers:
 //! every kernel object and cap slot is reached through an opaque
@@ -10,7 +10,7 @@
 //!     accessor is a behaviour-preserving field read/write at the one sanctioned
 //!     `unsafe` boundary (replacing the old scattered `(*p).field` derefs);
 //!   - **proofs / host tests**: the handle is an array index and the accessors
-//!     touch plain arrays — the model Verus (phases 2–5) and `cargo test` verify.
+//!     touch plain arrays — the model Verus and `cargo test` verify.
 //!
 //! Accessors are **by value** on `Copy` data, so no two `&mut` overlap (the
 //! aliasing the old free pointer-mutation sidestepped). A `CapSlot` is `Copy`
@@ -27,7 +27,7 @@ use crate::id::{ObjId, SlotId};
 use crate::thread::{Report, ThreadState};
 
 /// An event binding: the notification a channel/TCB event fires into, and the
-/// bits to OR (§3.6). Handle-based (was a `*mut NotifObj`); `None` == unbound.
+/// bits to OR (rev0§3.6). Handle-based (was a `*mut NotifObj`); `None` == unbound.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Binding {
     pub notif: Option<ObjId>,
@@ -90,8 +90,8 @@ pub trait Store {
     fn set_tcb_wait_notif(&mut self, t: ObjId, n: Option<ObjId>);
     fn tcb_report(&self, t: ObjId) -> Report;
     fn set_tcb_report(&mut self, t: ObjId, r: Report);
-    /// The thread's §5.4 run priority — bounded by the spawner's cap ceiling and
-    /// written through the verified [`crate::thread::set_priority`] (D-B1 Option 2).
+    /// The thread's rev0§5.4 run priority — bounded by the spawner's cap ceiling and
+    /// written through the verified [`crate::thread::set_priority`].
     fn tcb_priority(&self, t: ObjId) -> u8;
     fn set_tcb_priority(&mut self, t: ObjId, p: u8);
     fn tcb_bind_slot(&self, t: ObjId, which: usize) -> SlotId;
@@ -101,7 +101,7 @@ pub trait Store {
     fn set_tcb_cspace(&mut self, t: ObjId, cs: Option<ObjId>);
     fn tcb_aspace(&self, t: ObjId) -> Option<ObjId>;
     fn set_tcb_aspace(&mut self, t: ObjId, a: Option<ObjId>);
-    /// Set the thread's return register (`frame.x[0]`) — the woken word (§3.6).
+    /// Set the thread's return register (`frame.x[0]`) — the woken word (rev0§3.6).
     fn set_tcb_retval(&mut self, t: ObjId, v: u64);
 
     // ── timer ─────────────────────────────────────────────────────────────
@@ -117,7 +117,7 @@ pub trait Store {
     fn set_timer_next(&mut self, t: ObjId, n: Option<ObjId>);
 
     // ── hardware / scheduler seam (folded from Env) ───────────────────────
-    /// Make a thread Runnable (notification delivery, §3.6). pre: `t` detached
+    /// Make a thread Runnable (notification delivery, rev0§3.6). pre: `t` detached
     /// from any wait queue, register state consistent. post: `t` schedulable.
     fn make_runnable(&mut self, t: ObjId);
     /// Remove a Runnable thread from the ready structure (teardown).

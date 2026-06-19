@@ -1,6 +1,6 @@
 //! Raw syscall wrappers for Eunomia userspace (aarch64-none only).
 //!
-//! ABI (M1/M3 scaffold, not stable — §3.7): SVC #0, number in x7, args
+//! ABI (scaffold, not stable — rev0§3.7): SVC #0, number in x7, args
 //! x0..x5, result in x0 (negative = error), secondary result in x1.
 
 pub const ERR_BADSLOT: i64 = -1;
@@ -24,8 +24,8 @@ pub const OBJ_NOTIF: u64 = 3;
 pub const OBJ_TIMER: u64 = 4;
 pub const OBJ_FRAME: u64 = 5;
 pub const OBJ_ASPACE: u64 = 6;
-/// A carved sub-range untyped (§2.3); retype param is bytes. The per-spawn
-/// donation a parent funds for one child (§5.1).
+/// A carved sub-range untyped (rev0§2.3); retype param is bytes. The per-spawn
+/// donation a parent funds for one child (rev0§5.1).
 pub const OBJ_UNTYPED: u64 = 7;
 
 pub const RIGHT_READ: u64 = 1;
@@ -37,16 +37,16 @@ pub const PERM_X: u64 = 2;
 pub const PERM_DEVICE: u64 = 4;
 
 pub const RIGHT_PHYS: u64 = 4;
-/// Thread rights (§2.3): configure on-exit/on-fault binding slots.
+/// Thread rights (rev0§2.3): configure on-exit/on-fault binding slots.
 pub const RIGHT_BIND_REPORTS: u64 = 8;
-/// Thread rights (§2.3): read the terminal report record.
+/// Thread rights (rev0§2.3): read the terminal report record.
 pub const RIGHT_READ_REPORT: u64 = 16;
 
 pub const EV_READABLE: u64 = 0;
 pub const EV_WRITABLE: u64 = 1;
 pub const EV_PEER_CLOSED: u64 = 2;
 
-/// TCB binding slots (§5.1).
+/// TCB binding slots (rev0§5.1).
 pub const BIND_EXIT: u64 = 0;
 pub const BIND_FAULT: u64 = 1;
 
@@ -138,14 +138,14 @@ pub fn retype(ut: u32, ty: u64, param: u64, dst: u32, dst2: u32) -> i64 {
 }
 
 pub fn cap_copy(src: u32, dst: u32, rights: u64) -> i64 {
-    // a[3] = 0xFF is the §5.4 "no ceiling reduction" sentinel (kcore `NO_PRIO_CEILING`);
+    // a[3] = 0xFF is the rev0§5.4 "no ceiling reduction" sentinel (kcore `NO_PRIO_CEILING`);
     // a plain copy never lowers a thread cap's priority ceiling. Use `cap_copy_prio`
-    // to attenuate it (the §2.3 supervision grant).
+    // to attenuate it (the rev0§2.3 supervision grant).
     unsafe { syscall(4, src as u64, dst as u64, rights, 0xFF, 0, 0) }
 }
 
-/// Like [`cap_copy`], but caps the copied thread cap's §5.4 priority ceiling at
-/// `min(parent, prio_ceiling)` (§2.3 supervision grant; ignored for non-thread caps).
+/// Like [`cap_copy`], but caps the copied thread cap's rev0§5.4 priority ceiling at
+/// `min(parent, prio_ceiling)` (rev0§2.3 supervision grant; ignored for non-thread caps).
 pub fn cap_copy_prio(src: u32, dst: u32, rights: u64, prio_ceiling: u8) -> i64 {
     unsafe { syscall(4, src as u64, dst as u64, rights, prio_ceiling as u64, 0, 0) }
 }
@@ -189,7 +189,7 @@ pub fn timer_arm(timer: u32, notif: u32, bits: u64, delta: u64) -> i64 {
     unsafe { syscall(14, timer as u64, notif as u64, bits, delta, 0, 0) }
 }
 
-/// The only voluntary stop (§5.1): the kernel records the status — a
+/// The only voluntary stop (rev0§5.1): the kernel records the status — a
 /// child can neither lie about nor forget its own death.
 pub fn thread_exit(status: u64) -> ! {
     unsafe {
@@ -220,14 +220,14 @@ pub fn thread_start_as(tcb: u32, cspace: u32, aspace: u32, entry: u64, sp: u64, 
     }
 }
 
-/// Physical address of a frame — phys-read right required (§2.5); the
+/// Physical address of a frame — phys-read right required (rev0§2.5); the
 /// DmaPool is the only legitimate caller.
 pub fn frame_paddr(frame: u32) -> i64 {
     unsafe { syscall(19, frame as u64, 0, 0, 0, 0, 0) }
 }
 
 /// Reset a carved untyped's watermark to 0 so its range can be reused
-/// (§2.5). Pairs with `cap_revoke`: revoke deletes every object carved
+/// (rev0§2.5). Pairs with `cap_revoke`: revoke deletes every object carved
 /// from the untyped, then reset reclaims the bytes. Fails with ERR_STATE
 /// if the untyped still has live children (revoke first).
 pub fn untyped_reset(ut: u32) -> i64 {
@@ -239,21 +239,21 @@ pub fn debug_getc() -> i64 {
     unsafe { syscall(20, 0, 0, 0, 0, 0, 0) }
 }
 
-/// Configure a thread's on-exit / on-fault binding slot (§5.1). The
+/// Configure a thread's on-exit / on-fault binding slot (rev0§5.1). The
 /// notification cap MOVES into the TCB (duplicate first to keep access);
 /// `notif` = SLOT_NONE unbinds.
 pub fn thread_bind(tcb: u32, which: u64, notif: u32, bits: u64) -> i64 {
     unsafe { syscall(21, tcb as u64, which, notif as u64, bits, 0, 0) }
 }
 
-/// Terminal report states returned by `read_report` (§5.1).
+/// Terminal report states returned by `read_report` (rev0§5.1).
 pub const REPORT_RUNNING: i64 = 0;
 pub const REPORT_EXITED: i64 = 1;
 pub const REPORT_FAULTED: i64 = 2;
 
 /// Reserved terminal exit status: the process stopped through its panic
 /// handler rather than an orderly `thread_exit(status)` (urt convention,
-/// §5.1). A faulting thread is `REPORT_FAULTED`, but a Rust `panic!`
+/// rev0§5.1). A faulting thread is `REPORT_FAULTED`, but a Rust `panic!`
 /// unwinds to the handler and exits normally — without a reserved status
 /// it would be indistinguishable from `thread_exit(0)`, and a child could
 /// disguise a crash as clean success. The kernel records whatever status
@@ -263,7 +263,7 @@ pub const REPORT_FAULTED: i64 = 2;
 /// statuses real programs use).
 pub const STATUS_PANIC: u64 = u64::MAX;
 
-/// Read a thread's terminal report record (§5.1). Returns
+/// Read a thread's terminal report record (rev0§5.1). Returns
 /// (state, status-or-cause, faulting-address); negative state = error.
 pub fn read_report(tcb: u32) -> (i64, u64, u64) {
     unsafe { syscall3(22, tcb as u64) }

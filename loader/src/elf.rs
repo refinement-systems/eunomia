@@ -37,7 +37,7 @@ pub struct Image<'a> {
 }
 
 // `off` comes from untrusted header fields: the end offset needs checked
-// math, not just the slice bounds check (ELF-1, fuzzing findings).
+// math, not just the slice bounds check.
 fn u16le(b: &[u8], off: usize) -> Result<u16, ElfError> {
     off.checked_add(2)
         .and_then(|end| b.get(off..end))
@@ -72,7 +72,7 @@ pub fn parse(bytes: &[u8]) -> Result<Image<'_>, ElfError> {
     }
     let e_type = u16le(bytes, 16)?;
     if e_type != 2 {
-        // ET_EXEC: userspace is statically linked at fixed VAs (§5).
+        // ET_EXEC: userspace is statically linked at fixed VAs (rev0§5).
         return Err(ElfError::NotExecutable);
     }
     if u16le(bytes, 18)? != 183 {

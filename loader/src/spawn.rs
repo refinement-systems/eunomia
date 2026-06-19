@@ -1,16 +1,16 @@
-//! Spawn-with-caps (spec §5, §5.1): build a child process from an ELF
+//! Spawn-with-caps (rev0§5, rev0§5.1): build a child process from an ELF
 //! image and an explicitly constructed cspace.
 //!
 //! The caller owns the policy: `prepare` creates the kernel objects and
 //! maps the image; the caller then installs whatever caps the child
-//! should start with (bootstrap channel in slot 0 — §5.1 — plus any
+//! should start with (bootstrap channel in slot 0 — rev0§5.1 — plus any
 //! grants) via `ipc::sys::cap_install`, and finally calls `start`.
 
 use crate::elf::{self, ElfError, PF_W, PF_X};
 use ipc::sys::{self, OBJ_ASPACE, OBJ_CSPACE, OBJ_FRAME, OBJ_THREAD, PERM_W, PERM_X};
 
 pub const PAGE: u64 = 4096;
-/// Fixed-size stack with an unmapped guard region below it (§5.3).
+/// Fixed-size stack with an unmapped guard region below it (rev0§5.3).
 pub const STACK_TOP: u64 = 0x9000_0000;
 pub const STACK_PAGES: u64 = 16;
 

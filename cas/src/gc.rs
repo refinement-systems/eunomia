@@ -1,4 +1,4 @@
-//! GC mark phase (spec §4.6): the reachability walk from a tree root.
+//! GC mark phase (spec rev0§4.6): the reachability walk from a tree root.
 //!
 //! Mark state is an exact in-memory hash set — the MVP bet that mark time
 //! ≪ server uptime. The walk reads only directory nodes and chunk-list

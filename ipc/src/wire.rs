@@ -1,18 +1,18 @@
-//! The wire codec (spec §3.7, plan `doc/plans/2_ipc.md` §4.5): every message is
-//! the fixed [`Header`](crate::header::Header) (`header.rs`, byte-stable and
-//! Kani-verified) followed by a **postcard**-encoded body.
+//! The wire codec (spec rev0§3.7): every message is the fixed
+//! [`Header`](crate::header::Header) (`header.rs`, byte-stable and Verus-verified)
+//! followed by a **postcard**-encoded body.
 //!
 //! The postcard backend sits behind a **module-private** [`Codec`] trait, so
 //! servers and clients construct and consume plain typed bodies and never reach
 //! the serializer — no ad-hoc encoding, no pre-encoded byte blobs smuggled
-//! through (§3.7) — and the future IDL is just a second `Codec` impl. Bodies are
+//! through (rev0§3.7) — and the future IDL is just a second `Codec` impl. Bodies are
 //! kept deliberately *boring* (owned, no borrowed lifetimes, no `flatten`, no
 //! untagged enums, no non-string-keyed maps).
 //!
 //! Decoders treat every byte as untrusted: a malformed header, a `body_len`
 //! that does not match the frame, and trailing bytes after the body are all
 //! rejected, and `decode` is **total** (never panics) — it is the cargo-fuzz
-//! target (§5.4).
+//! target.
 
 use alloc::vec::Vec;
 use serde::de::DeserializeOwned;
@@ -26,11 +26,11 @@ pub enum WireError {
     Header,
     /// The body did not (de)serialize as the expected type, or was truncated.
     Body,
-    /// Bytes remained after the declared body — a framing violation (§3.7).
+    /// Bytes remained after the declared body — a framing violation (rev0§3.7).
     Trailing,
 }
 
-/// The serializer seam (§3.7): module-private so it can be swapped for an IDL
+/// The serializer seam (rev0§3.7): module-private so it can be swapped for an IDL
 /// backend later without touching any server. `Postcard` is the only impl today.
 trait Codec {
     fn encode_body<B: Serialize>(body: &B) -> Result<Vec<u8>, WireError>;
@@ -46,7 +46,7 @@ impl Codec for Postcard {
 
     fn decode_body<B: DeserializeOwned>(bytes: &[u8]) -> Result<B, WireError> {
         // take_from_bytes returns the unconsumed tail; any leftover is trailing
-        // junk inside the declared body region — reject it (§3.7).
+        // junk inside the declared body region — reject it (rev0§3.7).
         let (body, rest) = postcard::take_from_bytes(bytes).map_err(|_| WireError::Body)?;
         if !rest.is_empty() {
             return Err(WireError::Trailing);
@@ -79,7 +79,7 @@ pub fn encode<B: Serialize>(
 /// The declared `body_len` is never used to size an allocation — the body is the
 /// real remaining slice — so a forged length cannot drive an OOM here (a body
 /// that itself claims an enormous inner length is postcard's concern, and a
-/// cargo-fuzz target, §5.4).
+/// cargo-fuzz target).
 pub fn decode<B: DeserializeOwned>(buf: &[u8]) -> Result<(Header, B), WireError> {
     if buf.len() < HEADER_SIZE {
         return Err(WireError::Header);

@@ -1,4 +1,4 @@
-//! Userspace virtio-blk driver (spec §2.5, M2): virtio-mmio (modern,
+//! Userspace virtio-blk driver (rev0§2.5): virtio-mmio (modern,
 //! version 2) split virtqueue, written exclusively against DmaPool —
 //! the driver never sees a physical address, only opaque
 //! `DeviceAddress`es.
@@ -10,12 +10,12 @@
 //!
 //! MVP shape: one queue, one synchronous in-flight request, completion
 //! by polling the used ring. On the OS the device interrupt binds to a
-//! notification (§3.6) and the poll loop becomes a wait; the driver
+//! notification (rev0§3.6) and the poll loop becomes a wait; the driver
 //! exposes `complete()` so the caller owns the waiting strategy.
 //! QEMU note: modern MMIO needs `-global virtio-mmio.force-legacy=false`.
 
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
-// Clippy is not a CI gate (closeout 9a): these are device-driver cosmetics — a
+// Clippy is not a CI gate: these are device-driver cosmetics — a
 // block-device size trait where `is_empty` is meaningless, MMIO `unsafe` methods
 // documented with prose contracts rather than a `# Safety` heading, an explicit
 // alignment check, and a cohesive descriptor type. Suppressed, not applied.
@@ -298,7 +298,7 @@ impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
     }
 
     /// VIRTIO_BLK_T_FLUSH — the fsync barrier the storage stack trusts
-    /// (§4.8: stated axiom; QEMU honors FLUSH with cache=writeback).
+    /// (rev0§4.8: stated axiom; QEMU honors FLUSH with cache=writeback).
     pub fn flush(&mut self) -> Result<(), VirtioError> {
         self.request(REQ_FLUSH, 0, 0, false)
     }

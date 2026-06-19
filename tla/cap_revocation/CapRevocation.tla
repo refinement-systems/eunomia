@@ -1,6 +1,6 @@
 ---- MODULE CapRevocation ----
-\* Kernel capability revocation model for Eunomia OS (spec §2.2, §3.4,
-\* §5.1, §6).
+\* Kernel capability revocation model for Eunomia OS (spec rev0§2.2, rev0§3.4,
+\* rev0§5.1, rev0§6).
 \*
 \* Models the capability derivation tree (CDT), per-process cspaces,
 \* channel queues holding in-flight caps, TCB on-exit/on-fault binding
@@ -8,7 +8,7 @@
 \* bind/thread-death.
 \*
 \* Two specifications share this module and its variables. Spec is the CDT
-\* revocation model (the bulk below). TSpec is the §3.3 channel
+\* revocation model (the bulk below). TSpec is the rev0§3.3 channel
 \* whole-object teardown model — peer-closed bindings and their firing —
 \* checked by CapRevocation_Teardown.cfg; see its own header further down.
 \* Each spec keeps the other's variables constant, so they do not multiply
@@ -17,16 +17,16 @@
 \* Key properties checked:
 \*   - MoveSemantics: at every instant a live cap has exactly one owner —
 \*     a process cspace, a queue slot, or a TCB binding slot, never two
-\*     (spec §3.4).
+\*     (spec rev0§3.4).
 \*   - LiveParent: a live cap's CDT parent is live. Together with
 \*     DeadNowhere this is "revoke destroys all descendants" in invariant
 \*     form: no descendant can survive its ancestor's revocation anywhere,
 \*     channel queues and TCB binding slots included — unconditionally,
-\*     no "except messages in flight" caveat (spec §2.2).
+\*     no "except messages in flight" caveat (spec rev0§2.2).
 \*   - DeadNowhere: a deleted cap appears in no cspace, no queue slot,
 \*     and no binding slot.
 \*   - FireSafe: a non-NULL binding slot always names a live cap. This is
-\*     the §5.1 firing obligation in invariant form: revoking the
+\*     the rev0§5.1 firing obligation in invariant form: revoking the
 \*     notification's lineage racing thread-death must either leave a
 \*     live cap for the firing to signal through (the cap holds a ref, so
 \*     its object is live) or have cleared the slot (signaling nothing is
@@ -36,9 +36,9 @@
 \*   - RevokedDead: ghost check — a revoked slot stays dead until reused
 \*     by a fresh Copy.
 \*   - ReportMonotone (action property): the terminal report transitions
-\*     at most once, running -> exited | faulted (§5.1).
+\*     at most once, running -> exited | faulted (rev0§5.1).
 \*
-\* TSpec properties (§3.3 channel teardown):
+\* TSpec properties (rev0§3.3 channel teardown):
 \*   - ChannelFireSafe: every peer-closed binding on a live channel names a
 \*     live notification — the teardown firing signals a live object, never
 \*     a freed one, even when the notification's whole cap lineage was
@@ -55,20 +55,20 @@
 \*     every preemption point) is recorded here as the obligation.
 \*   - Receivers tolerate sparse messages: revoke deletes caps out of
 \*     queued messages in place, so a message can arrive with fewer caps
-\*     than were sent — the "null cap slots" of §3.4.
+\*     than were sent — the "null cap slots" of rev0§3.4.
 \*   - Retype models only its authority precondition: it requires that the
-\*     cap has no live descendants (exclusivity proven by revoke, §2.2).
+\*     cap has no live descendants (exclusivity proven by revoke, rev0§2.2).
 \*   - Bind moves the cap out of the binder's cspace into the TCB slot
-\*     (§3.4 move semantics; the kernel caller duplicates first to keep
+\*     (rev0§3.4 move semantics; the kernel caller duplicates first to keep
 \*     access). Kernel rebind = delete-the-displaced-cap + bind; single-
 \*     cap delete (children re-parent one level up) preserves LiveParent
 \*     by construction and is not modeled. Channel destruction's queued-cap
 \*     cleanup is the same shape and likewise unmodeled here; its NEW
 \*     content — peer-closed firing under whole-object teardown — is the
-\*     separate TSpec at the foot of this file (§3.3).
+\*     separate TSpec at the foot of this file (rev0§3.3).
 \*   - Thread destruction deletes binding caps with ordinary CDT cleanup
 \*     and produces no report and no firing — destruction is the parent
-\*     acting, not the thread dying (§5.1).
+\*     acting, not the thread dying (rev0§5.1).
 
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
@@ -77,13 +77,13 @@ CONSTANTS
     Procs,      \* set of process IDs
     Channels,   \* set of channel IDs
     Threads,    \* set of TCB IDs (each carrying exit/fault binding slots)
-    Notifs,     \* notification object IDs (TSpec; §3.3 channel teardown)
-    QueueDepth, \* per-channel queue capacity (donated at creation, §3.2)
+    Notifs,     \* notification object IDs (TSpec; rev0§3.3 channel teardown)
+    QueueDepth, \* per-channel queue capacity (donated at creation, rev0§3.2)
     NULL        \* null/empty sentinel (model value)
 
-MaxCapsPerMsg == 4  \* spec §3.1: 4 cap slots per message
+MaxCapsPerMsg == 4  \* spec rev0§3.1: 4 cap slots per message
 
-BindKinds == {"exit", "fault"}  \* the two fixed TCB binding slots (§5.1)
+BindKinds == {"exit", "fault"}  \* the two fixed TCB binding slots (rev0§5.1)
 
 Ends     == {0, 1}  \* the two channel endpoints (TSpec)
 MaxNCaps == 2       \* bound on outstanding caps per notification (TSpec)
@@ -94,9 +94,9 @@ VARIABLES
     cspaces,    \* Procs -> SUBSET CapIds  (caps owned by each process)
     queues,     \* Channels -> Seq(SUBSET CapIds)  (in-flight cap sets)
     bindings,   \* Threads -> [BindKinds -> CapIds \cup {NULL}]
-    treport,    \* Threads -> {"running", "exited", "faulted"}  (§5.1)
+    treport,    \* Threads -> {"running", "exited", "faulted"}  (rev0§5.1)
     revoked,    \* SUBSET CapIds — ghost: revoked ids not yet reused
-    \* --- TSpec only (channel teardown, §3.3); constant under Spec -------
+    \* --- TSpec only (channel teardown, rev0§3.3); constant under Spec -------
     nlive,      \* SUBSET Notifs — alive notification objects
     ncaps,      \* Notifs -> 0..MaxNCaps  (outstanding caps per notif)
     pcbind,     \* Channels -> [Ends -> Notifs \cup {NULL}]  (peer-closed)
@@ -104,7 +104,7 @@ VARIABLES
 
 \* The revocation half (Spec) and the channel-teardown half (TSpec) carry
 \* disjoint variables; each half holds the other's constant, so neither
-\* multiplies the other's state space (Spec stays the 799k-state proof).
+\* multiplies the other's state space.
 crVars == <<live, parent, cspaces, queues, bindings, treport, revoked>>
 tdVars == <<nlive, ncaps, pcbind, eopen>>
 vars   == <<live, parent, cspaces, queues, bindings, treport, revoked,
@@ -148,8 +148,8 @@ Copy(p, src, dst) ==
     /\ revoked' = revoked \ {dst}
     /\ UNCHANGED <<queues, bindings, treport>>
 
-\* Send: caps move from the sender's cspace into a queue slot (§3.4).
-\* Non-blocking; disabled (FULL) when the queue is at capacity (§3.3).
+\* Send: caps move from the sender's cspace into a queue slot (rev0§3.4).
+\* Non-blocking; disabled (FULL) when the queue is at capacity (rev0§3.3).
 Send(p, ch, cs) ==
     /\ cs /= {}
     /\ cs \subseteq cspaces[p]
@@ -161,14 +161,14 @@ Send(p, ch, cs) ==
 
 \* Receive: head message's surviving caps land in the receiver's cspace.
 \* (Cspace-slot exhaustion makes receive fail with the message left
-\* queued, §3.3 — equivalent to this action simply not being taken.)
+\* queued, rev0§3.3 — equivalent to this action simply not being taken.)
 Receive(p, ch) ==
     /\ queues[ch] /= << >>
     /\ cspaces' = [cspaces EXCEPT ![p] = @ \cup Head(queues[ch])]
     /\ queues'  = [queues EXCEPT ![ch] = Tail(@)]
     /\ UNCHANGED <<live, parent, bindings, treport, revoked>>
 
-\* Bind: configure a TCB binding slot (§5.1) — the cap moves from the
+\* Bind: configure a TCB binding slot (rev0§5.1) — the cap moves from the
 \* binder's cspace into the slot, exactly as Send moves caps into queue
 \* slots. Binding is legal regardless of the thread's report state (a
 \* late binding simply never fires).
@@ -179,7 +179,7 @@ Bind(p, t, k, c) ==
     /\ cspaces'  = [cspaces EXCEPT ![p] = @ \ {c}]
     /\ UNCHANGED <<live, parent, queues, treport, revoked>>
 
-\* Thread death (§5.1): the terminal record transitions exactly once,
+\* Thread death (rev0§5.1): the terminal record transitions exactly once,
 \* and the kernel fires the matching binding slot at this instant — it
 \* reads bindings[t][k] and signals through the cap if one is present.
 \* The firing itself moves no caps; its safety is the FireSafe invariant
@@ -215,7 +215,7 @@ Revoke(c) ==
 
 \* Retype: consume an exclusive cap (e.g. untyped -> kernel object).
 \* Sound only when no derived caps exist anywhere — the guard the kernel
-\* establishes by running revoke first (§2.2). Caps parked in binding
+\* establishes by running revoke first (rev0§2.2). Caps parked in binding
 \* slots are not in any cspace, so they cannot be retyped; as CDT
 \* residents they still block an ancestor's retype via Descendants.
 Retype(p, c) ==
@@ -259,7 +259,7 @@ QueuePlaces(c) == {<<ch, i>> \in Channels \X (1..QueueDepth) :
                       i <= Len(queues[ch]) /\ c \in queues[ch][i]}
 BindPlaces(c)  == {<<t, k>> \in Threads \X BindKinds : bindings[t][k] = c}
 
-\* §3.4: exactly one owner at every instant — a cspace, a queue slot, or
+\* rev0§3.4: exactly one owner at every instant — a cspace, a queue slot, or
 \* a TCB binding slot, never two.
 MoveSemantics ==
     \A c \in live :
@@ -277,7 +277,7 @@ DeadNowhere ==
 LiveParent ==
     \A c \in live : parent[c] = NULL \/ parent[c] \in live
 
-\* §5.1's firing obligation: a configured binding slot names a live cap
+\* rev0§5.1's firing obligation: a configured binding slot names a live cap
 \* — so a thread-death firing signals a live object (the cap's ref keeps
 \* the notification alive) or skips a cleared slot, never touches a
 \* freed one. Implied by DeadNowhere; named because it is the property
@@ -289,16 +289,16 @@ FireSafe ==
 \* Ghost: revoked slots stay dead until explicitly reused.
 RevokedDead == revoked \cap live = {}
 
-\* §5.1: at most one terminal report per thread, ever — the record never
+\* rev0§5.1: at most one terminal report per thread, ever — the record never
 \* leaves a terminal state.
 ReportMonotone ==
     [][\A t \in Threads :
         treport[t] /= "running" => treport'[t] = treport[t]]_vars
 
 \* =======================================================================
-\* Channel whole-object teardown and peer-closed firing (§3.3) — TSpec
+\* Channel whole-object teardown and peer-closed firing (rev0§3.3) — TSpec
 \* =======================================================================
-\* The §3.3 teardown rule: deleting one endpoint fires the surviving
+\* The rev0§3.3 teardown rule: deleting one endpoint fires the surviving
 \* peer's peer-closed binding, and destroying the whole object at once —
 \* its backing untyped revoked — fires EVERY endpoint's binding before
 \* reclamation, each firing naming a LIVE notification, never a freed one.
@@ -310,7 +310,7 @@ ReportMonotone ==
 \* through the slot (the FireSafe story). Channel `bind` instead bumps the
 \* notification OBJECT's refcount and leaves the binder's cap in place, so
 \* revocation does NOT see through the slot: the notification "outlives the
-\* channel if separately funded" (§3.3), and — the property that makes the
+\* channel if separately funded" (rev0§3.3), and — the property that makes the
 \* firing safe — a notification whose entire cap lineage is revoked stays
 \* alive as long as a channel still holds it. That is a refcount
 \* discipline, modeled here with explicit notification objects (`nlive`),
@@ -355,7 +355,7 @@ NotifDropCap(n) ==
     /\ nlive' = IF (ncaps[n] - 1) + Holds(n) = 0 THEN nlive \ {n} ELSE nlive
     /\ UNCHANGED <<pcbind, eopen>>
 
-\* Revoke a notification's WHOLE cap lineage at once (§2.2). The object
+\* Revoke a notification's WHOLE cap lineage at once (rev0§2.2). The object
 \* survives iff a channel still holds it — the refcount-keeps-alive
 \* property that makes a teardown firing safe after the holder's caps die.
 RevokeNotif(n) ==
@@ -365,7 +365,7 @@ RevokeNotif(n) ==
     /\ nlive' = IF Holds(n) = 0 THEN nlive \ {n} ELSE nlive
     /\ UNCHANGED <<pcbind, eopen>>
 
-\* Configure an endpoint's peer-closed binding (§3.6): the channel takes a
+\* Configure an endpoint's peer-closed binding (rev0§3.6): the channel takes a
 \* hold on a live notification. Bind through a live endpoint cap into a
 \* free slot; the binder keeps its own cap (refcount bump, not a move).
 ChanBindPC(ch, e, n) ==
@@ -419,12 +419,12 @@ TTypeOK ==
 \* — a cap OR a channel hold. The inductive invariant the per-action
 \* nlive updates must preserve; a slip that freed a still-referenced object
 \* (or leaked a zero-referenced one) breaks it. ChannelFireSafe below is
-\* its §3.3 corollary, named separately because it is the property the
+\* its rev0§3.3 corollary, named separately because it is the property the
 \* teardown firing relies on.
 RefCountSound ==
     \A n \in Notifs : (n \in nlive) <=> (ncaps[n] + Holds(n) > 0)
 
-\* §3.3 firing safety: every peer-closed binding on a not-yet-reclaimed
+\* rev0§3.3 firing safety: every peer-closed binding on a not-yet-reclaimed
 \* channel names a LIVE notification, so the firing at close / whole-object
 \* teardown signals a live object, never a freed one. Holds across
 \* RevokeNotif precisely because the channel's own hold keeps the

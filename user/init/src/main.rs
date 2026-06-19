@@ -1,11 +1,11 @@
-//! init — the one process the kernel constructs (§1). Holds all initial
-//! authority and wires the running system (§5.2: init is the only
-//! binder): it reads the PL031 once and publishes the time page (§2.6),
+//! init — the one process the kernel constructs (rev0§1). Holds all initial
+//! authority and wires the running system (rev0§5.2: init is the only
+//! binder): it reads the PL031 once and publishes the time page (rev0§2.6),
 //! spawns storaged (granting the virtio MMIO window, a DMA region whose
 //! device address it reads via phys-read, the session channel, and the
 //! time page) and the shell (granting the session's other end, an untyped
 //! for spawning, the time page, and the console-by-syscall), each with an
-//! explicitly constructed cspace and a §5.1 startup block.
+//! explicitly constructed cspace and a rev0§5.1 startup block.
 
 #![no_std]
 #![no_main]
@@ -47,7 +47,7 @@ const DMA_VA: u64 = 0xA100_0000;
 /// PL031 window in init's own aspace (the one self-mapping in the system).
 const RTC_VA: u64 = 0xA200_0000;
 /// Where the time page lands in every child; the address still travels in
-/// the startup block (the `"time"` grant, §5.1) — never assumed.
+/// the startup block (the `"time"` grant, rev0§5.1) — never assumed.
 const TIME_VA: u64 = 0xA300_0000;
 const DMA_PAGES: u64 = 64;
 
@@ -67,7 +67,7 @@ fn check(r: i64, what: &[u8]) -> i64 {
     r
 }
 
-/// One-shot PL031 read (§2.6): map the RTC read-only into our own aspace,
+/// One-shot PL031 read (rev0§2.6): map the RTC read-only into our own aspace,
 /// pair seconds-since-epoch from RTCDR with CNTVCT, and never touch the
 /// device again — there is deliberately no RTC driver.
 fn read_boot_utc() -> (i64, u64, u64) {
@@ -79,7 +79,7 @@ fn read_boot_utc() -> (i64, u64, u64) {
     let cntfrq = urt::time::cntfrq();
     // A missing or insane RTC is a boot failure, not a degraded mode:
     // the one-shot read is the design and QEMU virt always provides the
-    // device (§2.6). Every timestamp in the store inherits this value —
+    // device (rev0§2.6). Every timestamp in the store inherits this value —
     // fail loudly rather than seed them garbage.
     if secs < RTC_MIN_SANE_SECS || cntfrq == 0 {
         sys::debug_write(b"[init] FAILED: insane PL031/CNTFRQ read\n");
@@ -88,7 +88,7 @@ fn read_boot_utc() -> (i64, u64, u64) {
     // The RTC's one-second granularity leaves ±1 s absolute error in
     // wall_base. Polling for a tick edge would shrink it at the cost of
     // up to a second of boot latency — wrong trade for retention rules
-    // denominated in hours. Accepted, not polled away (§2.6).
+    // denominated in hours. Accepted, not polled away (rev0§2.6).
     ((secs as i64) * 1_000_000_000, cntvct_base, cntfrq)
 }
 
@@ -101,8 +101,8 @@ pub extern "C" fn _start() -> ! {
     check(sys::retype(UNTYPED, OBJ_CHANNEL, 4, SH_BOOT_A, SH_BOOT_B), b"sh boot chan");
     check(sys::retype(UNTYPED, OBJ_CHANNEL, 4, SESSION_A, SESSION_B), b"session chan");
 
-    // ── the time page (§2.6) ────────────────────────────────────────
-    // Funded from init's untyped — the §2.5 grant rule in its degenerate,
+    // ── the time page (rev0§2.6) ────────────────────────────────────────
+    // Funded from init's untyped — the rev0§2.5 grant rule in its degenerate,
     // correct form: the supervisor whose liveness dominates everyone's
     // funds the mapping everyone shares, so nobody can fault anybody.
     let (wall_base_ns, cntvct_base, cntfrq) = read_boot_utc();
@@ -119,7 +119,7 @@ pub extern "C" fn _start() -> ! {
         }
     };
     // The MMIO window: a phys-capable copy, device-mapped into the
-    // child. The phys-read bit travels only along this one grant (§2.5).
+    // child. The phys-read bit travels only along this one grant (rev0§2.5).
     check(sys::cap_copy(DEVICE_FRAME, DEV_COPY, RIGHTS_WITH_PHYS), b"dev copy");
     check(sys::map(sd.aspace_slot, DEV_COPY, MMIO_VA, PERM_DEVICE | PERM_W), b"map mmio");
     // The DMA pool: ordinary RAM whose PA init reads and tells the
@@ -127,7 +127,7 @@ pub extern "C" fn _start() -> ! {
     check(sys::retype(UNTYPED, OBJ_FRAME, DMA_PAGES, DMA_FRAME, 0), b"dma frame");
     let dma_pa = check(sys::frame_paddr(DMA_FRAME), b"frame_paddr") as u64;
     check(sys::map(sd.aspace_slot, DMA_FRAME, DMA_VA, PERM_W), b"map dma");
-    // The "time" grant (§5.1): a read-only derivation per consumer —
+    // The "time" grant (rev0§5.1): a read-only derivation per consumer —
     // rights-level read-only, so no holder can ever map it writable.
     check(sys::cap_copy(TIME_FRAME, TIME_SD, RIGHT_READ), b"time sd copy");
     check(sys::map(sd.aspace_slot, TIME_SD, TIME_VA, 0), b"time sd map");
@@ -141,7 +141,7 @@ pub extern "C" fn _start() -> ! {
     config[36..44].copy_from_slice(&TIME_VA.to_le_bytes());
     check(sys::chan_send(SD_BOOT_A, &config, None), b"sd startup block");
     // Block-don't-spin: requests wake storaged through a readable→
-    // notification binding (§3.6) — under strict priorities a busy-poll
+    // notification binding (rev0§3.6) — under strict priorities a busy-poll
     // server would starve its clients.
     check(sys::retype(UNTYPED, sys::OBJ_NOTIF, 0, SD_NOTIF, 0), b"sd notif");
     check(sys::chan_bind(SESSION_A, sys::EV_READABLE, SD_NOTIF, 1), b"sd bind");
@@ -153,7 +153,7 @@ pub extern "C" fn _start() -> ! {
     // ── shell ───────────────────────────────────────────────────────
     // 64-slot cspace: slots 0-4 are wired below / carved by the shell,
     // slot 5 is the re-grantable time cap, and 8.. is the shell's
-    // recyclable spawn window (§5.1 reclaim loop).
+    // recyclable spawn window (rev0§5.1 reclaim loop).
     let sh = match spawn::prepare(SHELL_ELF, UNTYPED, SH_SPAWN_BASE, 64) {
         Ok(p) => p,
         Err(_) => {
@@ -165,7 +165,7 @@ pub extern "C" fn _start() -> ! {
     check(sys::map(sh.aspace_slot, TIME_SH, TIME_VA, 0), b"time sh map");
     // Re-grantable copy in the shell's cspace slot 5: the shell holds a
     // read-only time cap it can copy and map into each child it spawns,
-    // extending the §2.6 time grant one hop (init→shell→child, §5.1).
+    // extending the rev0§2.6 time grant one hop (init→shell→child, rev0§5.1).
     check(sys::cap_copy(TIME_FRAME, TIME_SH_CHILD, RIGHT_READ), b"time child copy");
     check(sys::cap_install(sh.cspace_slot, TIME_SH_CHILD, 5), b"time child install");
 

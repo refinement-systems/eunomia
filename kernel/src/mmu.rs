@@ -8,10 +8,10 @@
 //            - kernel DRAM: normal WB, EL1-only, UXN
 //            - user window: normal WB, EL0+EL1 RW, EL0-executable, PXN
 //
-// The user window hosts the M1 embedded EL0 test program and its stacks.
-// Proper per-process address-space objects (created from donated untyped,
-// pool-at-creation, §2.5) arrive with M3; until then every thread runs in
-// this single identity map.
+// The user window hosts the embedded EL0 test program and its stacks.
+// Proper per-process address-space objects are created from donated untyped
+// (pool-at-creation, rev0§2.5); threads without one run in this single
+// identity map.
 //
 // MAIR_EL1:
 //   Attr0 = 0xFF  normal outer/inner write-back, read/write allocate
@@ -118,8 +118,9 @@ pub fn init() {
 
         // Enable MMU (M) + D-cache (C) + I-cache (I), plus nTWI so the
         // EL0 idle thread's WFI doesn't trap. Leave SCTLR_EL1.SPAN and
-        // friends at reset values. WXN stays off: the user window is
-        // deliberately RWX until the M3 loader builds real address spaces.
+        // friends at reset values. WXN stays off: the identity user window is
+        // deliberately RWX; real per-process address spaces are built by the
+        // loader instead.
         let mut sctlr: u64;
         core::arch::asm!("mrs {s}, sctlr_el1", s = out(reg) sctlr);
         sctlr |= (1 << 0) | (1 << 2) | (1 << 12) | (1 << 16);

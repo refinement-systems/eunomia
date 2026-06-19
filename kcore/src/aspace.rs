@@ -1,10 +1,10 @@
-//! Address spaces and the page-table walker (spec §2.5).
+//! Address spaces and the page-table walker (rev0§2.5).
 //!
 //! The AArch64 translation-table walk lives here as **safe Rust over the table
-//! pool as an indexed slice** (plan §2.4): `map_in`/`unmap_in`/`range_mapped_in`
+//! pool as an indexed slice**: `map_in`/`unmap_in`/`range_mapped_in`
 //! address tables by *pool index*, never by casting a descriptor's physical
-//! address to a pointer. The on-hardware descriptor format is byte-identical to
-//! the old kernel walker — a table descriptor still stores the table's PA in
+//! address to a pointer. The on-hardware descriptor format matches the
+//! aarch64 walker — a table descriptor stores the table's PA in
 //! its output-address field; the walker just converts that PA to a pool index
 //! ([`pool_index`]) to follow it, and back ([`pa_of_table`]) to install it.
 //!
@@ -13,14 +13,14 @@
 //! sanctioned int→pointer boundary), holds the ASID allocator and the boot
 //! kernel-L1 copy, and implements the TLBI/barrier `Env` hooks the walker calls.
 //!
-//! Mapping state lives in the frame cap, not here (§2.5): one mapping per cap
+//! Mapping state lives in the frame cap, not here (rev0§2.5): one mapping per cap
 //! copy, and deleting or revoking the cap unmaps it (via [`unmap_in`] behind
 //! [`crate::store::Store::aspace_unmap`]).
 
 use crate::cspace::ObjHeader;
 // `StoreSpec` (the `external_trait_extension`) must be in scope so `unmap_in` can
 // name the `tlb_log_view` ghost view on the generic `S: Store`; it erases in a
-// normal build, so it is otherwise unused here (the doc/results/26 §2.3 idiom).
+// normal build, so it is otherwise unused here.
 #[allow(unused_imports)]
 use crate::cspace::StoreSpec;
 use crate::store::Store;
@@ -28,7 +28,7 @@ use vstd::prelude::*;
 
 verus! {
 
-// The geometry/permission/descriptor consts live inside `verus!{}` so the §4.5
+// The geometry/permission/descriptor consts live inside `verus!{}` so the
 // `pte_encode`/`va_range_ok` contracts can name them (the `channel::MSG_PAYLOAD`
 // idiom — a const must be in a `verus!{}` block to be spec-visible; it erases to
 // a byte-identical `pub`/`pub(crate) const`, so the kernel's glob re-export and
@@ -52,8 +52,8 @@ pub const PERM_X: u64 = 1 << 1;
 /// [`pte_encode`]).
 pub const PERM_DEVICE: u64 = 1 << 2;
 
-// ── descriptor bits (the on-hardware format; byte-identical to the old
-//    kernel walker, plan §2.4) ──────────────────────────────────────────────
+// ── descriptor bits (the on-hardware format, matching the aarch64
+//    walker) ──────────────────────────────────────────────────────────────
 // `pub(crate)` so the in-module `tests` assert against the named bits rather
 // than magic numbers; not part of the crate's public API.
 pub(crate) const DESC_TABLE: u64 = 0b11;
@@ -84,7 +84,7 @@ verus! {
 pub enum MapError {
     BadVa,
     AlreadyMapped,
-    /// Table pool exhausted — donate a bigger pool (§2.5: one error path).
+    /// Table pool exhausted — donate a bigger pool (rev0§2.5: one error path).
     NeedMemory,
 }
 
@@ -114,14 +114,13 @@ impl AspaceObj {
     }
 }
 
-// ── pure functions (plan §2.4 / §4.5), verified (plan
-//    doc/plans/3_verus-rewrite_phase5-detail.md §5b) ──────────────────────────
+// ── pure functions, verified ────────────────────────────────────────────────
 
 verus! {
 
 /// L1/L2/L3 indices of a VA (39-bit, 4 KiB granule, 512-entry tables). The
 /// `spec_*` mirrors make the indices spec-visible (`when_used_as_spec`) so the
-/// [`lemma_user_va_l1_index`] corollary — and 5c's page-table spec walk — can
+/// [`lemma_user_va_l1_index`] corollary — and the page-table spec walk — can
 /// name them.
 pub open spec fn spec_l1_index(va: u64) -> usize {
     ((va >> 30) & 0x1FF) as usize
@@ -173,12 +172,11 @@ pub fn va_range_ok(va: u64, pages: u64) -> (ok: bool)
 /// Build a leaf (L3 page) descriptor. AF and PXN are unconditional (user pages
 /// are never EL1-executable); a writable perm grants `AP_EL0_RW`, else RO;
 /// **device memory is never executable** — `PERM_X` is ignored when
-/// `PERM_DEVICE` is set (spec §2.5; the kernel walker honoured `PERM_X` here,
-/// finding AS-1). The output address is masked to bits [47:12].
+/// `PERM_DEVICE` is set (rev0§2.5). The output address is masked to bits [47:12].
 ///
-/// Verified — the §2.5/§4.5 **isolation theorem**, ∀ `(pa, perms)`: AF + PXN
+/// Verified — the rev0§2.5 **isolation theorem**, ∀ `(pa, perms)`: AF + PXN
 /// always set; `AP` grants EL0 write iff `PERM_W`; device is non-executable
-/// (`UXN`) + `SH_NONE` + `ATTR_DEVICE` even when `PERM_X` is set (the AS-1 fix);
+/// (`UXN`) + `SH_NONE` + `ATTR_DEVICE` even when `PERM_X` is set;
 /// a non-device non-`X` page is `UXN`; the address field round-trips. The
 /// security corollary — no `perms` yields an EL1-writable or EL0-kernel-
 /// executable page — is the conjunction of PXN-always + the `AP`/`UXN` clauses.
@@ -189,7 +187,7 @@ pub fn va_range_ok(va: u64, pages: u64) -> (ok: bool)
 /// Spec mirror of [`pte_encode`] — the leaf-PTE bit pattern as a `spec fn`, so the
 /// `map_in` postcondition can say "the installed leaf is exactly `pte_encode(pa,
 /// perms)`". `pub closed` so the cross-crate `pub map_in` may name it without
-/// leaking the `pub(crate)` descriptor-bit consts (the doc-38 §2 idiom).
+/// leaking the `pub(crate)` descriptor-bit consts.
 pub closed spec fn spec_pte_encode(pa: u64, perms: u64) -> u64 {
     let ap = if perms & PERM_W != 0 { AP_EL0_RW } else { AP_EL0_RO };
     let device = perms & PERM_DEVICE != 0;
@@ -236,8 +234,8 @@ pub(crate) fn pte_output_pa(pte: u64) -> (r: u64)
     pte & ADDR_MASK
 }
 
-/// The PTE field-extraction facts, isolated into one `bit_vector` step (the
-/// `untyped.rs` §2.5 discipline). The descriptor-bit masks are pairwise
+/// The PTE field-extraction facts, isolated into one `bit_vector` step. The
+/// descriptor-bit masks are pairwise
 /// disjoint, so each field of `pte` is independent of the others; the value
 /// constraints on `ap`/`sh`/`attr`/`xn` (the `pte_encode` if-arms) plus the
 /// const literals (fixed via `compute`) make the bit-blast a tautology.
@@ -302,8 +300,8 @@ proof fn lemma_pte_bits(pa: u64, ap: u64, sh: u64, attr: u64, xn: u64, pte: u64)
 }
 
 /// A user mapping never touches the two shared kernel L1 entries (indices 0/1):
-/// every page VA in `[USER_VA_BASE, USER_VA_END)` has `l1_index ≥ 2` (the §4.5
-/// theorem, consumed by 5d's `walk_alloc`). Stated over the half-open
+/// every page VA in `[USER_VA_BASE, USER_VA_END)` has `l1_index ≥ 2` (consumed
+/// by `walk_alloc`). Stated over the half-open
 /// mapped-page range, so the `pages == 0` edge (`va` can equal `USER_VA_END`) is
 /// excluded by construction.
 pub proof fn lemma_user_va_l1_index(va: u64)
@@ -318,15 +316,14 @@ pub proof fn lemma_user_va_l1_index(va: u64)
 
 } // verus!
 
-// ── the page-table partial-map model (plan
-//    doc/plans/3_verus-rewrite_phase5-detail.md §1.2/§5c) ──────────────────────
+// ── the page-table partial-map model ────────────────────────────────────────
 //
-// The first kcore Verus reasoning over concrete Rust slices: the L1 table is a
+// kcore Verus reasoning over concrete Rust slices: the L1 table is a
 // `&[u64; 512]` (view `Seq<u64>`) and the table pool a `&[[u64; 512]]` (view
 // `Seq<[u64; 512]>`). The model is defined over the **natural** slice view
 // `Seq<[u64; 512]>` (i.e. `pool@`), not `Seq<Seq<u64>>` — `pool@[i][j]` already
 // resolves to the array `spec_index`, matching the exec read `pool[i][j]`
-// directly, so there is no `deep_view` conversion to thread (doc 38 §2).
+// directly, so there is no `deep_view` conversion to thread.
 
 verus! {
 
@@ -349,8 +346,8 @@ pub closed spec fn pool_index_spec(pool_base: u64, pool_len: nat, desc: u64) -> 
 
 /// The leaf PTE that a read-only walk of `va` resolves to, or `None` if any
 /// level is absent (the spec analog of [`lookup`] + the `pool[l3][e]` read). The
-/// §4.5 ghost `Map<va_page, pte>` in pointwise form (the per-node idiom, doc 27
-/// §3). Returns the leaf *value* (which [`range_mapped_in`] tests for `!= 0` and
+/// ghost `Map<va_page, pte>` in pointwise form. Returns the leaf *value* (which
+/// [`range_mapped_in`] tests for `!= 0` and
 /// writability), so `pt_lookup(va) == Some(0)` means "tables present, page empty".
 pub closed spec fn pt_lookup(l1: Seq<u64>, pool: Seq<[u64; 512]>, pool_base: u64, va: u64) -> Option<u64> {
     let l1e = l1[spec_l1_index(va) as int];
@@ -375,7 +372,7 @@ pub closed spec fn pt_lookup(l1: Seq<u64>, pool: Seq<[u64; 512]>, pool_base: u64
 }
 
 /// Is the page at `va` present and (if `write`) writable? The per-page predicate
-/// [`range_mapped_in`]'s `forall` ranges over (the 5b `(pte >> 6) & 0b11 == 0b01`
+/// [`range_mapped_in`]'s `forall` ranges over (the `(pte >> 6) & 0b11 == 0b01`
 /// writability bridge).
 pub closed spec fn page_ok(l1: Seq<u64>, pool: Seq<[u64; 512]>, pool_base: u64, page: u64, write: bool) -> bool {
     match pt_lookup(l1, pool, pool_base, page) {
@@ -438,9 +435,9 @@ pub proof fn lemma_leaf_slot_lookup(l1: Seq<u64>, pool: Seq<[u64; 512]>, pool_ba
 }
 
 /// Table-pool well-formedness — the `chan_wf`/`notif_wf`/`timer_wf` analog for the
-/// page table, **refined in 5d** (doc 39) to carry the L2/L3 level structure
-/// `map_in` needs. The 5c definition quantified closure over *all* used tables,
-/// which is unsatisfiable once a real mapping is installed: a leaf (L3) PTE has
+/// page table, carrying the L2/L3 level structure
+/// `map_in` needs. A definition that quantified closure over *all* used tables
+/// would be unsatisfiable once a real mapping is installed: a leaf (L3) PTE has
 /// `DESC_PAGE == DESC_TABLE == 0b11` (`aspace.rs`), so its frame-PA address field
 /// would be (wrongly) required to resolve into the pool. The level *partition*
 /// fixes this — closure/no-aliasing apply to the intermediate (L2) tables only;
@@ -545,8 +542,7 @@ fn pa_of_table(pool_base: u64, pool_len: usize, idx: usize) -> (r: u64)
 /// arithmetic linchpin of `walk_alloc`'s closure reasoning — the low 0b11 tag is
 /// disjoint from `ADDR_MASK[47:12]`, and a page-aligned in-range PA round-trips
 /// through `(.. & ADDR_MASK) - pool_base) / PAGE`. The hard mask/division steps
-/// are isolated into `bit_vector`/`nonlinear_arith` one-liners (the doc-25/37 §2
-/// discipline).
+/// are isolated into `bit_vector`/`nonlinear_arith` one-liners.
 proof fn lemma_desc_roundtrip(pool_base: u64, pool_len: nat, idx: nat, pa: u64)
     requires
         pool_geom_ok(pool_base, pool_len),
@@ -588,12 +584,12 @@ proof fn lemma_desc_roundtrip(pool_base: u64, pool_len: nat, idx: nat, pa: u64)
 
 /// The pool index a table descriptor points at, or `None` if it addresses
 /// outside the pool. Well-formed tables (everything [`map_in`] writes) always
-/// yield `Some(idx)` with `idx < pool_len`; the bound keeps the walker total
-/// (the old pointer walk had no bound — and no provenance either).
+/// yield `Some(idx)` with `idx < pool_len`; the bound keeps the walker total —
+/// it never chases a descriptor outside the pool, and carries provenance.
 ///
 /// Verified equal to [`pool_index_spec`]. The comparison is done in `u64`
 /// **before** the `as usize` cast (`off < pool_len as u64 <= usize::MAX`), so the
-/// cast is provably lossless without pinning `usize`'s width (doc 38 §2).
+/// cast is provably lossless without pinning `usize`'s width.
 fn pool_index(pool_base: u64, pool_len: usize, desc: u64) -> (r: Option<usize>)
     ensures
         match r {
@@ -620,8 +616,7 @@ fn pool_index(pool_base: u64, pool_len: usize, desc: u64) -> (r: Option<usize>)
 verus! {
 
 /// Grab the next free pool table, zero it, and return its index. The zeroing
-/// matches the old `alloc_table`'s `write_bytes(.., 0, PAGE)` so a freshly
-/// allocated table starts empty (`check_pool_accounting`).
+/// makes a freshly allocated table start empty (`check_pool_accounting`).
 ///
 /// Purely structural — no `pt_wf`/`pt_lookup` here; [`walk_alloc`] combines this
 /// with `pt_wf` to conclude the fresh table perturbs no lookup. `Ok` carries: the
@@ -651,8 +646,7 @@ fn alloc_table(pool: &mut [[u64; 512]], pool_used: &mut u64) -> (r: Result<usize
 {
     broadcast use {vstd::slice::group_slice_axioms, vstd::array::group_array_axioms};
     // Compare in `u64` before the `as usize` cast so the cast is lossless without
-    // pinning `usize`'s width (the doc-38 §2 discipline; `pool.len() as u64` is
-    // exact since `usize <= u64`).
+    // pinning `usize`'s width (`pool.len() as u64` is exact since `usize <= u64`).
     if *pool_used >= pool.len() as u64 {
         return Err(MapError::NeedMemory);
     }
@@ -1261,8 +1255,8 @@ verus! {
 /// `(pool index, entry index)` of the L3 slot. The presence tests are on the
 /// **descriptor tag** (`& DESC_TABLE`), matching [`lookup`]/[`pt_lookup`] — for a
 /// well-formed table (entries are `0` or table descriptors) this is identical to
-/// the old `== 0`, and it makes the walker total: a non-table-descriptor is
-/// treated as absent and re-allocated rather than chased (doc 39).
+/// testing `== 0`, and it makes the walker total: a non-table-descriptor is
+/// treated as absent and re-allocated rather than chased.
 ///
 /// Verified against the `pt_wf` tree model: preserves `pt_wf`, grows `pool_used`
 /// monotonically, **clobbers no nonzero leaf** (the no-overwrite frame), and on
@@ -1438,7 +1432,7 @@ proof fn lemma_walk_alloc_resolves(
 verus! {
 
 /// Read-only walk to `va`'s L3 entry. `None` if any intermediate table is
-/// absent. Mirrors the old `l3_lookup`. `pub(crate)` so the §4.5 harnesses can
+/// absent. `pub(crate)` so the host harnesses can
 /// read the installed leaf directly.
 ///
 /// Verified equal to the model [`pt_lookup`]: a `Some((l3, e))` result names the
@@ -1446,9 +1440,9 @@ verus! {
 /// `pt_lookup`'s leaf PTE; `None` matches `pt_lookup` being `None`. The bounds
 /// are what let [`range_mapped_in`] index `pool[l3][e]` safely. The slot is also
 /// returned *structurally* as [`pt_leaf_slot`] (`== Some((l3, e))`) — `unmap_in`
-/// (5e) needs the slot, not just the value, to hand the leaf-clear frame lemma.
+/// needs the slot, not just the value, to hand the leaf-clear frame lemma.
 /// The two `?` are spelled as explicit `match`/early-return so the control flow
-/// stays in the verified fragment (the 5a convention).
+/// stays in the verified fragment.
 pub(crate) fn lookup(l1: &[u64; 512], pool: &[[u64; 512]], pool_base: u64, va: u64) -> (r: Option<(usize, usize)>)
     ensures
         match r {
@@ -1489,13 +1483,13 @@ pub closed spec fn pg(base: u64, i: int) -> u64 {
     (base + i * (PAGE as int)) as u64
 }
 
-/// Map `pages` frames at `pa` into `[va, …)`. Two-pass (like the old `map`):
+/// Map `pages` frames at `pa` into `[va, …)`. Two-pass:
 /// pass 1 allocates the tables along the range and rejects any already-mapped
 /// page; pass 2 writes the leaves. Because pass 1 walked the whole range, pass
 /// 2 allocates nothing and cannot return `NeedMemory` (the two-pass theorem,
 /// `walk_alloc`'s present⇒Ok). Issues the post-map barrier through `store`.
 ///
-/// Verified against the `pt_wf` tree model (doc 39): adds **exactly** the
+/// Verified against the `pt_wf` tree model: adds **exactly** the
 /// requested pages (`pt_lookup` == `spec_pte_encode`) or fails atomically
 /// (`BadVa`/`AlreadyMapped`/`NeedMemory` with no leaf written); preserves `pt_wf`;
 /// grows `pool_used` monotonically; and **clobbers no nonzero (mapped) page** (the
@@ -1815,8 +1809,8 @@ verus! {
 
 /// The TLBI log `unmap_in` issues over `[va, va+n*PAGE)`: one `(asid, pg(va,j))`
 /// entry per **present** page (`pt_lookup` of the *original* table is `Some`), in
-/// ascending `j` order — the §4.5 "one TLBI per cleared page, in order" as a
-/// closed-form spec (the `expected_tlb_log` of the detail plan). Built over the
+/// ascending `j` order — "one TLBI per cleared page, in order" as a
+/// closed-form spec. Built over the
 /// original tables: a clear sets a leaf to `0` (still `Some`), so a page's
 /// presence is invariant across the unmap, and the runtime branch (`lookup` of the
 /// *current* table) agrees with this original-table predicate (bridged by the
@@ -2077,16 +2071,16 @@ proof fn lemma_unmap_in_step(
 }
 
 /// Unmap `pages` frames at `va`, invalidating each cleared page's TLB entry
-/// through `store`. Mirrors the old `unmap` (clear + per-page TLBI wherever the
-/// L3 table exists, then a single trailing barrier).
+/// through `store`. Clears the leaf + issues a per-page TLBI wherever the
+/// L3 table exists, then a single trailing barrier.
 ///
-/// Verified against the `pt_wf` tree model + the TLBI effect-log (doc 40): on
+/// Verified against the `pt_wf` tree model + the TLBI effect-log: on
 /// return every page in `[va, va+pages·PAGE)` is unmapped (`pt_lookup` is `None`
 /// or `Some(0)`), every aligned user page **outside** the range keeps its mapping
 /// (the frame), `pt_wf` is preserved (clearing a leaf keeps the tree — no table is
 /// freed), and `store`'s TLBI log grows by **exactly one `(asid, va+i·PAGE)` per
 /// cleared page, in ascending order** ([`unmap_log`]) followed by the trailing
-/// barrier — the §4.5 "one TLBI per cleared page, in order" as a postcondition.
+/// barrier — "one TLBI per cleared page, in order" as a postcondition.
 pub fn unmap_in<S: Store>(
     l1: &[u64; 512],
     pool: &mut [[u64; 512]],
@@ -2344,7 +2338,7 @@ mod tests {
 
     #[test]
     fn pte_encode_device_never_executable() {
-        // AS-1 regression: PERM_X is ignored when PERM_DEVICE is set.
+        // PERM_X is ignored when PERM_DEVICE is set.
         let pte = pte_encode(0x0900_0000, PERM_DEVICE | PERM_X | PERM_W);
         assert_eq!(pte & UXN, UXN, "device memory must be execute-never");
         assert_eq!(pte & SH_INNER, 0, "device memory is SH_NONE");
@@ -2384,8 +2378,8 @@ mod tests {
         assert!(l1_index(USER_VA_END - PAGE) >= 2);
     }
 
-    // ── range_mapped_in: the first executable check of the verified walker
-    //    against the page-table model (the §5c host tests) ─────────────────────
+    // ── range_mapped_in: an executable check of the verified walker
+    //    against the page-table model (host tests) ──────────────────────────────
 
     /// Build an L1 table + a two-table pool (one L2, one L3) mapping `npages`
     /// consecutive pages from `va` to `pte_for(i)`. `va` and `npages` must stay

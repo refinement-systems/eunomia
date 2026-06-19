@@ -1,4 +1,4 @@
-//! Untyped memory and retype (spec §1, §2.5, §3.2).
+//! Untyped memory and retype (rev0§1, rev0§2.5, rev0§3.2).
 //!
 //! An untyped cap names a physical range and carries a watermark; retype
 //! carves the next object out of the range and installs the new cap as a
@@ -7,18 +7,18 @@
 //! cap derived from it) followed by watermark reset, proving exclusivity
 //! exactly as the TLA+ Retype guard requires.
 //!
-//! Retype is the system's one int→pointer boundary (plan §2.3): kcore owns
+//! Retype is the system's one int→pointer boundary: kcore owns
 //! the pure validation ([`retype_check`]) and placement ([`carve`])
 //! arithmetic and the CDT install ([`retype_install`]); the `kernel` crate's
 //! `retype` composes them and performs the `start as *mut T` object
-//! construction in between, where CBMC never sees it. Every kernel object is
-//! created this way: the kernel has no global pool (§3.2). The one exception
+//! construction in between, outside the verified core. Every kernel object is
+//! created this way: the kernel has no global pool (rev0§3.2). The one exception
 //! is the statically allocated root cspace, which is morally init's memory
 //! baked into the image.
 
 use crate::cspace::{self, Cap, CapKind, ChanEnd, CSpaceObj, Rights};
 // `StoreSpec` carries the `Store` ghost-view extension (`slot_view`/`refs_view`/
-// `chan_view`) the §3a/§3c contracts quantify over. Only referenced from
+// `chan_view`) the retype contracts quantify over. Only referenced from
 // `requires`/`ensures`, which erase in a normal build — hence unused there. The spec
 // `fn`s (`cspace_wf`/`is_empty_cap`/`reset_slot`) and the proof lemma are reached by
 // **full path** inside contracts/proofs: they erase to nothing in a normal build, so
@@ -27,7 +27,7 @@ use crate::cspace::{self, Cap, CapKind, ChanEnd, CSpaceObj, Rights};
 #[allow(unused_imports)]
 use crate::cspace::StoreSpec;
 use crate::id::SlotId;
-// `ObjId` appears only in the §3c channel postcondition (the `forall|o: ObjId|`
+// `ObjId` appears only in the channel postcondition (the `forall|o: ObjId|`
 // other-channels-untouched frame), which erases in a normal build — hence unused there.
 #[allow(unused_imports)]
 use crate::id::ObjId;
@@ -45,21 +45,21 @@ pub enum ObjType {
     Timer,
     /// param = page count; 4 KiB-aligned, zeroed at retype.
     Frame,
-    /// param = table-pool pages (pool-at-creation, §2.5).
+    /// param = table-pool pages (pool-at-creation, rev0§2.5).
     Aspace,
-    /// A sub-range untyped (§2.3: untyped derivations are page-aligned
+    /// A sub-range untyped (rev0§2.3: untyped derivations are page-aligned
     /// sub-ranges). param = bytes, rounded up to a page. The carved cap
     /// is a CDT child of the parent untyped with its own watermark, so a
     /// whole subtree of objects can be retyped from it and reclaimed as a
     /// unit by `revoke(child) + reset(child)` — the per-spawn donation a
-    /// parent funds for one child (§5.1).
+    /// parent funds for one child (rev0§5.1).
     Untyped,
 }
 
 impl ObjType {
     /// Ghost model of [`from_u64`](Self::from_u64): the discriminant decode as a
     /// total `spec fn`, so the exec decoder can be used in `requires`/`ensures`
-    /// (via `when_used_as_spec`) and the §4.6 "`from_u64` total" obligation is a
+    /// (via `when_used_as_spec`) and the "`from_u64` total" obligation is a
     /// theorem. `Some` for exactly the eight valid discriminants `0..8`, `None`
     /// otherwise — the characterization `decode` leans on for its BadObjType arm.
     pub open spec fn spec_from_u64(v: u64) -> Option<ObjType> {
@@ -125,7 +125,7 @@ pub enum RetypeError {
 
 /// Geometry of a carved object: the placed range and its size. Pure output
 /// of [`carve`]; the int→ptr conversion that turns `start` into an object
-/// pointer is the caller's job (plan §2.3 — the one sanctioned boundary).
+/// pointer is the caller's job — the one sanctioned boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Carve {
     pub start: u64,
@@ -142,8 +142,8 @@ verus! {
 /// before [`carve`], so the error precedence is NotUntyped → DestOccupied →
 /// (BadArg | NoMemory).
 ///
-/// Verified (plan doc/plans/3_verus-rewrite_phase3-detail.md §3a): pure
-/// `slot_view` reasoning, no channel/notification coupling. It calls no `set_*`,
+/// Verified with pure `slot_view` reasoning, no channel/notification
+/// coupling. It calls no `set_*`,
 /// so the store is provably unchanged on **every** path; on `Ok` the returned
 /// triple is the untyped's geometry and the destination(s) are empty and
 /// distinct. The `Err` arms pin the precedence (NotUntyped before DestOccupied).
@@ -222,15 +222,13 @@ impl ObjType {
     }
 }
 
-// Trusted boundary (plan doc/plans/3_verus-rewrite.md, phase 0; closeout phase
-// 9a, doc/results/68): the per-object size helpers live in plain Rust (shared
+// Trusted boundary: the per-object size helpers live in plain Rust (shared
 // with the kernel shell); `carve`'s geometry needs the single fact that each
 // returns a *positive* byte count (every helper adds a non-zero struct base to
-// `n` items — `size_of::<CSpaceObj>()` etc.). That fact is now a named
+// `n` items — `size_of::<CSpaceObj>()` etc.). That fact is a named
 // `ensures r > 0` **contract** on the helper signature, host-checked in
-// `bytes_for_positive` below — replacing the bare `assume(bytes > 0)` the
-// caller used to carry (9a: a bare in-proof `assume` should not survive
-// closeout; a tested boundary contract is the justified form). The `size_of`
+// `bytes_for_positive` below — a tested boundary contract rather than a bare
+// in-proof `assume`. The `size_of`
 // arms (Thread/Notification/Timer) and the page-rounded Untyped arm need no
 // contract — Verus discharges their positivity directly.
 pub assume_specification [ CSpaceObj::bytes_for ](n: u32) -> (r: usize) ensures r > 0;
@@ -238,8 +236,8 @@ pub assume_specification [ crate::channel::Channel::bytes_for ](n: u32) -> (r: u
 pub assume_specification [ crate::aspace::AspaceObj::bytes_for ](n: u64) -> (r: usize) ensures r > 0;
 
 // The fixed-size object arms take `core::mem::size_of::<T>()` of these kcore
-// types, which live outside `verus!{}` (their own ports come in phases 2–5);
-// register them as opaque so `size_of` typechecks in the verified `carve`.
+// types, which live outside `verus!{}`; register them as opaque so `size_of`
+// typechecks in the verified `carve`.
 // (`allow(dead_code)`: these wrappers are Verus-only scaffolding — after the
 // macro erases ghost code in a normal build they are unread tuple structs.)
 #[verifier::external_type_specification]
@@ -262,14 +260,13 @@ pub assume_specification [ usize::checked_next_multiple_of ](
     b: usize,
 ) -> Option<usize>;
 
-// Trusted boundary (closeout phase 9a, doc/results/68): the fixed-size kernel
+// Trusted boundary: the fixed-size kernel
 // object structs (`Tcb`/`NotifObj`/`TimerObj`) each carry at least an
 // `ObjHeader`, so their `size_of` is positive — but Verus treats them as opaque
 // (the `Ex*` `external_type_specification` registrations above) and cannot see
 // the fields, so it cannot derive `size_of::<Tcb>() > 0` on its own. This helper
 // names that fact as an `ensures r > 0` **contract**, host-checked in
-// `object_size_positive` — the justified replacement for the bare
-// `assume(bytes > 0)` `carve` used to carry. Only the three fixed-size `ObjType`
+// `object_size_positive`. Only the three fixed-size `ObjType`
 // arms call it; the `_` arm returns 1 only to keep the helper total (it is
 // unreachable, so the contract holds trivially there).
 #[verifier::external_body]
@@ -291,11 +288,11 @@ fn fixed_object_bytes(ty: ObjType) -> (r: u64)
 /// **total** (no panic/overflow for any inputs) and fully functional for **all**
 /// `(base, size, watermark, align ∈ {16,4096}, bytes > 0)`. `carve` (below)
 /// computes `bytes`/`align` and forwards here; this split keeps the geometry
-/// proof free of the size-helper trusted boundary (plan §4.2 / phase 0).
+/// proof free of the size-helper trusted boundary.
 ///
-/// The monotone-watermark/disjointness property the old Kani harness needed a
-/// *second* carve to assert is now a free corollary of the containment `ensures`:
-/// a follow-on carve at `new_wm = end - base` has `start' >= base + new_wm = end`.
+/// The monotone-watermark/disjointness property is a free corollary of the
+/// containment `ensures`: a follow-on carve at `new_wm = end - base` has
+/// `start' >= base + new_wm = end`.
 pub fn carve_place(
     base: u64,
     size: u64,
@@ -361,8 +358,8 @@ pub fn carve_place(
 /// watermark bump, bounds against `[base, base + size)`. No pointers.
 ///
 /// Verus proves this **total** — no panic, no arithmetic overflow for **any**
-/// `(base, size, watermark, ty, param)` (the UO-1/UO-2 findings as a theorem,
-/// for all inputs, not bounded) — and forwards the geometry guarantees of
+/// `(base, size, watermark, ty, param)`, for all inputs, not bounded — and
+/// forwards the geometry guarantees of
 /// [`carve_place`]. The size helpers are a trusted boundary (`0 < bytes`); the
 /// `param` arithmetic (`param * 4096`, the page round-up) is verified here.
 ///
@@ -421,7 +418,7 @@ pub fn carve(
         }
         ObjType::Untyped => {
             // param is bytes; round up to a page so the carved range is
-            // page-aligned at both ends (§2.3). 0 is meaningless; a param
+            // page-aligned at both ends (rev0§2.3). 0 is meaningless; a param
             // within a page of the address space top has no rounded size.
             if param == 0 {
                 return Err(RetypeError::BadArg);
@@ -452,8 +449,7 @@ verus! {
 /// per the inheritance table, link it as a CDT child, and run the channel
 /// two-endpoint dance. All checks already passed; this is infallible.
 ///
-/// Verified (plan doc/plans/3_verus-rewrite_phase3-detail.md §3c; doc/results/28).
-/// The §2.5 rights-inheritance table is proven as theorems: a Frame inherits the
+/// The rev0§2.5 rights-inheritance table is proven as theorems: a Frame inherits the
 /// untyped's rights (so phys-read flows only along boot untypeds); a Thread carries
 /// `THREAD_ALL`; a carved sub-Untyped is masked to `READ|WRITE` and so **provably
 /// never carries `PHYS`** — phys stays off ordinary derivation chains by
@@ -510,7 +506,7 @@ pub fn retype_install<S: Store>(
         // `dst` holds the new cap as a CDT child of `ut_slot`.
         final(store).slot_view()[dst].cap.kind == kind,
         final(store).slot_view()[dst].parent == Some(ut_slot),
-        // §2.5 rights-inheritance table, as theorems keyed on `ty`.
+        // rev0§2.5 rights-inheritance table, as theorems keyed on `ty`.
         (ty == ObjType::Frame ==> final(store).slot_view()[dst].cap.rights.0
             == old(store).slot_view()[ut_slot].cap.rights.0),
         (ty == ObjType::Thread ==> final(store).slot_view()[dst].cap.rights.0 == Rights::THREAD_ALL.0),
@@ -568,7 +564,7 @@ pub fn retype_install<S: Store>(
         _ => Rights::ALL,
     };
     proof {
-        // §2.5 sub-untyped-never-PHYS: masking to READ|WRITE clears the PHYS bit for
+        // rev0§2.5 sub-untyped-never-PHYS: masking to READ|WRITE clears the PHYS bit for
         // every possible rights value — the theorem, ∀, not a sampled assert. (The
         // bit-vector tactic needs a plain `u8`, so bind `ut_rights.0` to `b` first.)
         assert(Rights::READ | Rights::WRITE == 3u8) by (compute);
@@ -683,14 +679,14 @@ pub open spec fn reset_slot(s: crate::cspace::CapSlot) -> crate::cspace::CapSlot
 }
 
 /// Reset the watermark once exclusivity is proven — the second half of the
-/// reclaim primitive (§2.5: "reclaiming the range is revoke(untyped) then
+/// reclaim primitive (rev0§2.5: "reclaiming the range is revoke(untyped) then
 /// watermark reset"). A parent reuses one child-sized donation across many
-/// spawns this way (§5.1); the next retype re-zeroes the frames it carves.
+/// spawns this way (rev0§5.1); the next retype re-zeroes the frames it carves.
 ///
 /// pre:  ut_slot holds an Untyped cap with no CDT children (caller revoked).
 /// post: watermark = 0; the whole range is reusable.
 ///
-/// Verified (plan §3a). It mirrors [`retype_check`]'s read-only-on-error
+/// It mirrors [`retype_check`]'s read-only-on-error
 /// discipline: the contract is stated per-arm rather than via a
 /// `requires`-Untyped (which would make the NotUntyped path dead and drop its
 /// store-unchanged guarantee). On `Ok` the arena differs from entry by exactly
@@ -738,11 +734,11 @@ pub fn reset<S: Store>(store: &mut S, ut_slot: SlotId) -> (result: Result<(), Re
 mod tests {
     use super::*;
 
-    // Host witness of the `bytes_for` `ensures r > 0` contracts (closeout 9a,
-    // doc/results/68): each size helper adds a non-zero struct base to its item
+    // Host witness of the `bytes_for` `ensures r > 0` contracts: each size helper
+    // adds a non-zero struct base to its item
     // count, so the byte count is positive for every slot/depth/page-pool count —
     // including 0 items. This is the runtime check of the contract `carve`'s
-    // geometry trusts, replacing the deleted bare `assume(bytes > 0)`.
+    // geometry trusts.
     #[test]
     fn bytes_for_positive() {
         for n in [0u32, 1, 256, 1024] {

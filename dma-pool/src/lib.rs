@@ -1,5 +1,5 @@
 //! DmaPool — the single place in the system where physical addresses are
-//! visible (spec §2.5).
+//! visible (rev0§2.5).
 //!
 //! Drivers are written against this crate and never see a PA: buffers are
 //! labeled with opaque `DeviceAddress`es (what the device dereferences)
@@ -8,40 +8,34 @@
 //! the `phys-read` rights bit (init grants that bit only to the pool's
 //! holder); on the host it is plain memory with a fake device base.
 //!
-//! When the IO-space object lands (§2.5 committed upgrade), the backing
+//! When the IO-space object lands (rev0§2.5 committed upgrade), the backing
 //! swaps to IOVA-labeled mappings and no driver changes.
 //!
 //! MVP allocator: first-fit free list with merge-on-free. The pool is
 //! bounded and persistent for the driver's lifetime — the steady state
 //! needs zero mapping operations per request.
 //!
-//! **Verified by Verus** (plan `doc/plans/3_verus-rewrite_phase7-detail.md` §7e —
-//! the §4.7 host-chokepoint port of `dma-pool`, after the 7a/7b `ipc` and 7c/7d
-//! `urt` ports). The free-list arithmetic is split into a self-contained
+//! **Verified by Verus.** The free-list arithmetic is split into a self-contained
 //! [`FreeList`] verified inside `verus!{}`; the [`DmaPool`] wrapper that touches
 //! the trusted hardware seam (`DmaBacking`, raw-pointer slices, device addresses)
 //! stays plain Rust — which is the honest line, since `dma-pool` *is* "the single
 //! place PAs are visible", so the PA/backing boundary is exactly the trusted seam.
-//! The properties hold ∀ pool length, request size, and alignment (vs the bounded
-//! POOL=16 / one-concrete-pair Kani harnesses this supersedes — **DN-10**, the
-//! two-buffer disjointness + alignment round-up that bit-blasted CaDiCaL to OOM):
-//! every [`FreeList::alloc`] hands out an in-pool, aligned offset whose region was
+//! The properties hold ∀ pool length, request size, and alignment: every
+//! [`FreeList::alloc`] hands out an in-pool, aligned offset whose region was
 //! free and is now used, with coverage elsewhere unchanged ([`FreeList::covers`]
 //! frame). **Two live buffers are therefore disjoint ∀** — a corollary of the
-//! contract, demonstrated by the verified [`lemma_two_allocs_disjoint`]; this is
-//! the "unbounded beats bounded" trophy §4.7 promised. [`FreeList::free`] returns
-//! a region to the list (the two-sided adjacency merge), making it allocatable
-//! again. The array-splice bookkeeping is factored into the verified [`FreeList`]
-//! helpers `remove_at`/`insert_at` (explicit shift loops in place of `copy_within`,
-//! which has no Verus model) — the same `copy_within` reasoning kcore's
-//! `cdt_unlink`/`slot_move` closed. The alignment round-up is computed in modular
-//! form (`off + (align - off%align)%align`) rather than the bit-mask
-//! `(off+align-1) & !(align-1)`: behaviourally identical, but `start % align == 0`
-//! is then pure `vstd::arithmetic` and needs no `by (bit_vector)` (the form that
-//! OOM'd Kani).
+//! contract, demonstrated by the verified [`lemma_two_allocs_disjoint`].
+//! [`FreeList::free`] returns a region to the list (the two-sided adjacency merge),
+//! making it allocatable again. The array-splice bookkeeping is factored into the
+//! verified [`FreeList`] helpers `remove_at`/`insert_at` (explicit shift loops in
+//! place of `copy_within`, which has no Verus model). The alignment round-up is
+//! computed in modular form (`off + (align - off%align)%align`) rather than the
+//! bit-mask `(off+align-1) & !(align-1)`: behaviourally identical, but
+//! `start % align == 0` is then pure `vstd::arithmetic` and needs no
+//! `by (bit_vector)`.
 
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
-// Clippy is not a CI gate (closeout 9a): the `DmaBacking` seam is a device-size
+// Clippy is not a CI gate: the `DmaBacking` seam is a device-size
 // trait where `is_empty` is meaningless, and its `unsafe` methods are documented
 // with prose contracts rather than a `# Safety` heading. Suppressed, not applied.
 #![allow(clippy::len_without_is_empty, clippy::missing_safety_doc)]
@@ -110,15 +104,14 @@ pub struct FreeList<const N: usize> {
 
 impl<const N: usize> FreeList<N> {
     /// The pool length, as a ghost int — a `closed` accessor so the public
-    /// contracts speak of the offset arithmetic without exposing the field
-    /// (the 7b/7c opaque-field rule).
+    /// contracts speak of the offset arithmetic without exposing the field.
     pub closed spec fn spec_len(self) -> int {
         self.len as int
     }
 
     /// The live extent count, as a ghost int — a `closed` accessor so the public
     /// `free` contract can state the not-full precondition without exposing the
-    /// field (the 7b/7c opaque-field rule).
+    /// field.
     pub closed spec fn spec_nfree(self) -> int {
         self.nfree as int
     }
@@ -193,8 +186,7 @@ impl<const N: usize> FreeList<N> {
     /// the next multiple of `align`) lands a multiple of `align`, with the pad
     /// strictly under `align`. The exec uses this instead of the bit-mask
     /// `(off+align-1) & !(align-1)`: behaviourally identical, but `start % align
-    /// == 0` is then pure `vstd::arithmetic` — no `by (bit_vector)` (the form
-    /// that bit-blasted CaDiCaL to OOM, DN-10).
+    /// == 0` is then pure `vstd::arithmetic` — no `by (bit_vector)`.
     proof fn lemma_round_up_aligned(off: int, align: int, pad: int)
         requires
             align > 0,
@@ -604,7 +596,7 @@ impl<const N: usize> FreeList<N> {
     /// becomes two — the pad `[off, off+pad)` at `i` and the remainder
     /// `[rest_off, off+flen)` at `i+1` — with everything above shifted up one
     /// (the (T,T) arm). The carved region `R = [off+pad, rest_off)`. Dispatches to
-    /// two spinoff'd halves so neither blows the per-function rlimit (doc 25 §2).
+    /// two spinoff'd halves so neither blows the per-function rlimit.
     proof fn alloc_proof_split(new: FreeList<N>, old: FreeList<N>, i: int, off: int, flen: int,
         pad: int, rest_off: int, rest_len: int, start: int, n: int)
         requires
@@ -1111,13 +1103,13 @@ impl<const N: usize> FreeList<N> {
     /// Caller's contract: the region is in-pool and currently NOT free (it was
     /// handed out by [`FreeList::alloc`]) — so the merges are adjacency-only,
     /// never overlap. Ensures the region is free again, coverage elsewhere
-    /// unchanged (the post-revoke reuse the §5.1 reclaim loop turns on).
+    /// unchanged — the reuse a revoke-then-reclaim loop turns on.
     ///
-    /// Refactor for verifiability (the §7e `copy_within`-has-no-Verus-model line):
-    /// the merge result is computed from *original* indices — left/right merges
+    /// Structured for verifiability (`copy_within` has no Verus model): the merge
+    /// result is computed from *original* indices — left/right merges
     /// are independent (both pivot on `off+n` being the merged region's end) — so
     /// the surgery is one in-place `set` (single merge), a `set`+`remove_at` (both
-    /// merges), or one `insert_at` (no merge), never the original three nested
+    /// merges), or one `insert_at` (no merge), rather than three nested
     /// `copy_within`s.
     #[verifier::spinoff_prover]
     #[verifier::rlimit(100)]
@@ -1220,10 +1212,8 @@ impl<const N: usize> FreeList<N> {
     }
 }
 
-/// **The DN-10 trophy, ∀.** Two buffers carved by successive [`FreeList::alloc`]s
-/// are disjoint — for *all* sizes and alignments, the property Kani could only
-/// check at one concrete pair (`alloc(5,1)` then `alloc(4,4)`; the symbolic
-/// two-buffer case bit-blasted CaDiCaL to OOM). A pure corollary of `alloc`'s
+/// **Disjointness ∀.** Two buffers carved by successive [`FreeList::alloc`]s
+/// are disjoint — for *all* sizes and alignments. A pure corollary of `alloc`'s
 /// contract: `fl1` is the pool *after* the first carve, so `alloc`'s ensures give
 /// `![a]` covered in `fl1` (the first buffer's region was freshly used) yet the
 /// second buffer's region was carved from still-covered `fl1` space — a shared
@@ -1286,7 +1276,7 @@ impl<B: DmaBacking> DmaPool<B> {
     /// CPU access; drivers never hold raw pointers into DMA memory.
     pub fn bytes(&self, buf: &DmaBuf) -> &[u8] {
         // Volatile-correctness note: QEMU DMA is host memcpy and
-        // cache-coherent (§2.5 real-hardware debt: cache maintenance owed
+        // cache-coherent (rev0§2.5 real-hardware debt: cache maintenance owed
         // with real hardware, alongside barriers tighter than these).
         unsafe { core::slice::from_raw_parts(self.backing.cpu_base().add(buf.offset), buf.len) }
     }

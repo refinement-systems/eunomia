@@ -1,4 +1,4 @@
-//! mkfs — host-side tool to build the initial disk image (spec §7).
+//! mkfs — host-side tool to build the initial disk image (rev0§7).
 //!
 //! Reuses the cas storage engine: format the device, create the `main`
 //! ref, populate it from a host directory tree, take snapshot #1. The
@@ -35,7 +35,7 @@ fn populate(
             eprintln!("skipping non-UTF-8 name: {:?}", name);
             continue;
         };
-        // Tooling enforces the printable-ASCII convention (§4.9); the
+        // Tooling enforces the printable-ASCII convention (rev0§4.9); the
         // format itself only excludes NUL and '/'.
         if !name_str.bytes().all(|b| (0x20..0x7F).contains(&b)) || name_str.contains('/') {
             eprintln!("skipping non-printable name: {:?}", name);
@@ -69,7 +69,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let dev = FileDev::create(image, size_mib * 1024 * 1024)?;
     // A modest WAL: recovery replay buffers the whole region, and the
     // on-OS server has megabytes of heap, not gigabytes. (Streaming
-    // replay is recorded M4 debt in store.rs.)
+    // replay remains future work, tracked in store.rs.)
     let opts = StoreOptions { wal_len: 1024 * 1024, ..StoreOptions::default() };
     let mut store = Store::format(dev, opts)?;
     store.create_ref(b"main")?;

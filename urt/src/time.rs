@@ -1,4 +1,4 @@
-//! The time page (spec §2.6): wall-clock time with zero syscalls.
+//! The time page (spec rev0§2.6): wall-clock time with zero syscalls.
 //!
 //! Init reads the PL031 RTC once at boot and publishes
 //! `(seq, wall_base_ns, cntvct_base, cntfrq)` in a read-only frame mapped
@@ -8,7 +8,7 @@
 //!
 //! `seq` is constant zero today — the page is write-once at boot — but the
 //! reader ships seqlock-shaped anyway: if today's readers did plain loads
-//! because "the page never changes", deferred clock setting (§8) would
+//! because "the page never changes", deferred clock setting (rev0§8) would
 //! mean updating every reader, the exact flag day the field was bought to
 //! avoid. The protocol is the deliverable, not the integer.
 //!
@@ -26,8 +26,8 @@
 //! stays data-race-free under Miri.
 
 // The seqlock's atomics come through a single cfg-selected seam: `--cfg loom`
-// (the certifying Phase-1 model, §4.1) gets loom's instrumented atomics;
-// `--cfg shuttle` (the non-certifying breadth-smoke, §4.1 item 5) gets
+// (the certifying interleaving model) gets loom's instrumented atomics;
+// `--cfg shuttle` (the non-certifying breadth-smoke) gets
 // shuttle's; every normal/aarch64 build is unchanged. AtomicUsize is needed
 // only by the `static TIME_PAGE` page-location cell, which is real-build-only
 // (neither model can put an atomic in a `static`); the seqlock protocol both
@@ -50,9 +50,9 @@ use shuttle::hint::spin_loop;
 #[cfg(all(not(loom), not(shuttle)))]
 use core::hint::spin_loop;
 
-// Verus (plan doc/plans/3_verus-rewrite.md phase 7d): the `verus!{}` macro +
-// ghost vocabulary for the §4.7 host-chokepoint proof of the tick→ns conversion
-// (`Sample::utc_ns_at`, below). Erases under every ordinary build, like slots.rs.
+// Verus: the `verus!{}` macro + ghost vocabulary for the host-side proof of the
+// tick→ns conversion (`Sample::utc_ns_at`, below). Erases under every ordinary
+// build, like slots.rs.
 #[allow(unused_imports)]
 use vstd::prelude::*;
 
@@ -148,12 +148,11 @@ impl Sample {
     /// of uptime, and the sub-second remainder is `< cntfrq`, kept exact
     /// by one u128 multiply-divide.
     ///
-    /// **Verified by Verus** (plan §7d): `r == result_spec(cntvct)` — totality
-    /// (no overflow/panic ∀ page contents and counter, the proof Kani's
-    /// `check_time_conversion_total` gave bounded) *and* the functional value,
+    /// **Verified by Verus**: `r == result_spec(cntvct)` — totality (no
+    /// overflow/panic ∀ page contents and counter) *and* the functional value,
     /// from which [`Sample::lemma_utc_ns_at_monotone`] makes monotonicity a
-    /// theorem (what Kani could not prove — two u128 divisions — and proptest
-    /// only sampled).
+    /// theorem (it turns on two u128 divisions, which the host proptests below
+    /// only sample).
     pub fn utc_ns_at(&self, cntvct: u64) -> (r: i64)
         ensures
             r as int == self.result_spec(cntvct),
@@ -203,7 +202,7 @@ impl Sample {
 
     /// Monotone in the counter: `c1 ≤ c2 ⇒ utc_ns_at(c1) ≤ utc_ns_at(c2)`. A
     /// clock that ran backwards between two reads would re-disorder everything
-    /// the §4.7 snapshot-timestamp clamp protects. Stated over [`Sample::result_spec`]
+    /// the rev0§4.7 snapshot-timestamp clamp protects. Stated over [`Sample::result_spec`]
     /// (the value [`Sample::utc_ns_at`] returns), so the exec ordering follows.
     pub proof fn lemma_utc_ns_at_monotone(self, c1: u64, c2: u64)
         requires
@@ -227,9 +226,9 @@ impl Sample {
 }
 
 /// The overflow-safe decomposition is exact: `secs·10⁹ + (m·10⁹)/f == (delta·10⁹)/f`
-/// where `secs = delta/f`, `m = delta%f`. The crux — it relates two divisions, the
-/// step Kani could not take (`doc/results/8` SOLVER note). Reduces to
-/// `lemma_hoist_over_denominator` once `delta` is split by `lemma_fundamental_div_mod`.
+/// where `secs = delta/f`, `m = delta%f`. The crux — it relates two divisions.
+/// Reduces to `lemma_hoist_over_denominator` once `delta` is split by
+/// `lemma_fundamental_div_mod`.
 proof fn lemma_decompose(delta: u64, f: u64)
     requires
         1 <= f,
@@ -347,7 +346,7 @@ pub fn encode_boot(wall_base_ns: i64, cntvct_base: u64, cntfrq: u64) -> [u8; PAG
 static TIME_PAGE: AtomicUsize = AtomicUsize::new(0);
 
 /// Register the time-page mapping for this process. The address comes
-/// from the startup block (the `"time"` grant, §5.1) — never a constant.
+/// from the startup block (the `"time"` grant, rev0§5.1) — never a constant.
 ///
 /// # Safety
 /// `va` must be the base of a live `TimePage` mapping (read-only is
@@ -390,7 +389,7 @@ pub fn cntfrq() -> u64 {
 }
 
 /// Current UTC nanoseconds — two register reads and a page read, no
-/// syscall, no IPC (§2.6).
+/// syscall, no IPC (rev0§2.6).
 ///
 /// Panics if no time page was attached: a process that asks for wall time
 /// without holding the `"time"` grant is mis-wired, not degraded.
@@ -405,7 +404,7 @@ pub fn now_utc_ns() -> i64 {
 // loom/shuttle, which construct their atomics inside the model/run — the
 // std-thread test would build a TimePage outside one and panic. The exhaustive
 // ordering proof lives in `loom_tests`, the randomized smoke in `shuttle_tests`
-// below (plan 1_loom-shuttle §4.1).
+// below.
 #[cfg(all(test, not(loom), not(shuttle)))]
 mod tests {
     use super::*;
@@ -550,7 +549,7 @@ mod tests {
         }
 
         /// Monotone in the counter — a clock that runs backwards between
-        /// two reads would re-disorder everything the §4.7 clamp protects.
+        /// two reads would re-disorder everything the rev0§4.7 clamp protects.
         #[test]
         fn conversion_is_monotone(
             wall_base_ns in -1_000_000_000_000_000_000i64..=2_000_000_000_000_000_000,
@@ -582,13 +581,12 @@ mod tests {
     }
 }
 
-/// Exhaustive Loom proof of the seqlock protocol (plan 1_loom-shuttle-rewrite
-/// §4.1): under every C11-permitted interleaving *and reordering* of one
-/// writer's odd→stagger→even update and one reader's `sample()`, the reader
-/// never observes a torn `(k, 2k, 3k+1)` triple. Where the native
-/// `torn_writes_are_never_observed` only *hopes* to hit a tear over 50k real
-/// races, Loom enumerates them — and would flag a missing/weakened fence (it
-/// does; see the fence-removal negative control in the part-3 PR).
+/// Exhaustive Loom proof of the seqlock protocol: under every C11-permitted
+/// interleaving *and reordering* of one writer's odd→stagger→even update and one
+/// reader's `sample()`, the reader never observes a torn `(k, 2k, 3k+1)` triple.
+/// Where the native `torn_writes_are_never_observed` only *hopes* to hit a tear
+/// over 50k real races, Loom enumerates them — and flags a missing/weakened fence
+/// (a fence-removal negative control confirms it).
 ///
 /// Bounded to a single write: the torn-read invariant is per-critical-section,
 /// not cumulative, so one writer epoch over the initial one is the whole
@@ -630,17 +628,17 @@ mod loom_tests {
     }
 }
 
-/// Shuttle breadth-smoke of the same seqlock model (plan 1_loom-shuttle-rewrite
-/// §4.1 item 5) — a *second* scheduler over the same one-writer/one-reader
-/// interleavings, structurally identical to `loom_tests`.
+/// Shuttle breadth-smoke of the same seqlock model — a *second* scheduler over
+/// the same one-writer/one-reader interleavings, structurally identical to
+/// `loom_tests`.
 ///
 /// NON-CERTIFYING, and deliberately so: Shuttle models only SeqCst and
 /// reinterprets the seqlock's Relaxed/Acquire/Release as SeqCst (it prints a
 /// one-time warning to that effect on the first run), so it **cannot witness a
 /// torn read** — under SeqCst the seqlock cannot tear. `loom_tests` is the proof
 /// of record; this is a randomized-scheduler sanity pass (deadlock / retry-loop
-/// / logic smoke) and the template for the future IPC Shuttle work (§4.2). Run
-/// with `RUSTFLAGS="--cfg shuttle" cargo test -p urt --lib`.
+/// / logic smoke) and the template for future IPC Shuttle work. Run with
+/// `RUSTFLAGS="--cfg shuttle" cargo test -p urt --lib`.
 #[cfg(all(test, shuttle))]
 mod shuttle_tests {
     use super::*;

@@ -1,4 +1,4 @@
-//! Thread objects and their terminal reports (spec §5.1, §5.3).
+//! Thread objects and their terminal reports (spec rev0§5.1, rev0§5.3).
 //!
 //! kcore owns the thread *object*: the TCB layout, the trap frame (plain
 //! data), the report state machine, the on-exit/on-fault binding slots, and
@@ -15,14 +15,13 @@ use crate::id::{ObjId, SlotId};
 use crate::store::Store;
 use vstd::prelude::*;
 // `StoreSpec` (the `external_trait_extension`) must be in scope to resolve
-// `store.tcb_view()`/`notif_view()`/… in the §4d contracts, and `TcbView` appears in
-// `bind`'s `ensures`; both erase in a normal build, so they are otherwise unused here
-// (the doc/results/26 §2.3 idiom).
+// `store.tcb_view()`/`notif_view()`/… in the verified contracts, and `TcbView` appears
+// in `bind`'s `ensures`; both erase in a normal build, so they are otherwise unused here.
 #[allow(unused_imports)]
 use crate::cspace::{StoreSpec, TcbView};
 
-/// The terminal report record (§5.1), preallocated in the TCB so death
-/// delivery never allocates (§3.6). One transition ever: Running →
+/// The terminal report record (rev0§5.1), preallocated in the TCB so death
+/// delivery never allocates (rev0§3.6). One transition ever: Running →
 /// Exited | Faulted — suspend-on-fault means no second fault, and a
 /// halted thread never runs again, but `report_terminal` guards anyway
 /// so the state machine doesn't depend on scheduler invariants.
@@ -59,11 +58,11 @@ pub enum ThreadState {
     Runnable,
     /// The current thread.
     Running,
-    /// Waiting on a notification word (§3.6).
+    /// Waiting on a notification word (rev0§3.6).
     BlockedNotif,
     /// Exited or killed; never scheduled again.
     Halted,
-    /// Took an unhandled fault; suspended, not destroyed (§5.3).
+    /// Took an unhandled fault; suspended, not destroyed (rev0§5.3).
     Faulted,
 }
 
@@ -82,7 +81,7 @@ pub struct Tcb {
     pub qnext: Option<ObjId>,
     pub wait_notif: Option<ObjId>,
     pub report: Report,
-    /// on-exit / on-fault binding slots (§5.1): real, CDT-visible cap
+    /// on-exit / on-fault binding slots (rev0§5.1): real, CDT-visible cap
     /// slots holding moved-in notification caps, exactly like channel
     /// queue slots — so revoking the notification's lineage sees through
     /// the TCB and empties the slot, and a thread-death firing can only
@@ -121,16 +120,16 @@ verus! {
 pub const BIND_EXIT: usize = 0;
 pub const BIND_FAULT: usize = 1;
 
-/// Record the terminal report and fire the matching binding (§5.1).
+/// Record the terminal report and fire the matching binding (rev0§5.1).
 /// pre:  r is Exited or Faulted; the caller has already moved t out of
 ///       Running (Halted / Faulted).
 /// post: first call wins — the record holds r and the binding fired
 ///       exactly once; later calls are no-ops. An empty binding slot is
 ///       one the holder never configured or one revoke already cleared:
-///       signaling nothing is a no-op (§5.1). A non-empty slot's cap
+///       signaling nothing is a no-op (rev0§5.1). A non-empty slot's cap
 ///       holds a ref, so the notification it names is necessarily live.
 ///
-/// Verified (plan §4d, doc/results/34): the two §5.1 properties.
+/// Verus proves the two rev0§5.1 properties.
 /// **ReportMonotone** — the `report != Running` guard makes the transition
 /// Running → Exited|Faulted happen **at most once** and terminal states absorbing
 /// (a later call is a no-op, the store untouched). **FireSafe** — discharged *by the
@@ -189,7 +188,7 @@ pub fn report_terminal<S: Store>(store: &mut S, t: ObjId, r: Report)
     if let CapKind::Notification(n) = cap.kind {
         let bits = store.tcb_bind_bits(t, which);
         proof {
-            // The cap is a notification, so the §4d `requires` conditional fires at `nn = n`.
+            // The cap is a notification, so the `requires` conditional fires at `nn = n`.
             assert(cspace::cap_notif(cap) == Some(n));
             // `set_tcb_report` inserts at the resident key `t`, so the TCB domain is
             // unchanged (extensional).
@@ -205,13 +204,11 @@ pub fn report_terminal<S: Store>(store: &mut S, t: ObjId, r: Report)
     }
 }
 
-/// Set a thread's §5.4 run priority, bounded by the spawner's cap ceiling
-/// (D-B1 Option 2, doc/results/71). The spawn path passes `ceiling =
-/// cap_max_prio(thread_cap)`, so the verified `requires prio <= ceiling`
-/// carries the §5.4 cap-attenuation into the model and the post-state priority
-/// is exactly `prio` (hence `<= ceiling`). This makes the priority *write* a
-/// machine-checked step against the `tcb_view` seam instead of the old
-/// unverified raw-pointer store in the shell — closing the F-70-6 seam: only
+/// Set a thread's rev0§5.4 run priority, bounded by the spawner's cap ceiling.
+/// The spawn path passes `ceiling = cap_max_prio(thread_cap)`, so the verified
+/// `requires prio <= ceiling` carries the rev0§5.4 cap-attenuation into the model
+/// and the post-state priority is exactly `prio` (hence `<= ceiling`). This makes
+/// the priority *write* a machine-checked step against the `tcb_view` seam: only
 /// the trusted `Store`-trait realization of `set_tcb_priority` remains, the
 /// same posture as every other setter (`set_tcb_report`, `set_tcb_bind_bits`).
 ///
@@ -240,24 +237,23 @@ pub fn set_priority<S: Store>(store: &mut S, t: ObjId, prio: u8, ceiling: u8)
     store.set_tcb_priority(t, prio);
 }
 
-/// Configure a binding slot (holder-configured, §3.6): the caller's
-/// notification cap MOVES into the TCB slot (§3.4 — duplicate first to
+/// Configure a binding slot (holder-configured, rev0§3.6): the caller's
+/// notification cap MOVES into the TCB slot (rev0§3.4 — duplicate first to
 /// keep access), preserving its CDT position so revocation sees it.
 /// Rebinding deletes the displaced cap; a `None` src just unbinds.
 ///
 /// pre:  which < 2; notif_src is `None` or a slot holding a notification
 ///       cap owned by the caller.
 ///
-/// Verified (plan §4d, doc/results/34): the analog of `channel::bind` (3e) in shape
-/// (release old / install new / set bits), but — unlike the refcount-only channel
+/// Verus proves this the analog of `channel::bind` in shape (release old /
+/// install new / set bits), but — unlike the refcount-only channel
 /// binding — the TCB bind slots are CDT-visible cap slots, so it composes the real
-/// `cspace::delete` (the §4d-strengthened notification-cap frame) + the verified
+/// `cspace::delete` (the notification-cap frame) + the verified
 /// `cspace::slot_move`. The bind slot ends holding the moved cap (or empty on a `None`
 /// src); `bind_bits[which]` is updated; the object views are framed; `cspace_wf` is
 /// preserved.
 ///
-/// **Refcount census (D-F2).** Exports `refcount_sound(final)` (the contract previously
-/// dropped it, weaker than the code's own guarantee). The displaced-notification `-1` is
+/// **Refcount census.** Exports `refcount_sound(final)`. The displaced-notification `-1` is
 /// proven inside `delete` (which re-establishes `refcount_sound`); `set_tcb_bind_bits` writes
 /// a non-census field and `slot_move` relocates a cap without changing any object's census,
 /// so soundness carries to the exit.
@@ -266,9 +262,8 @@ pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<S
         cspace::cspace_wf(old(store).slot_view()),
         old(store).slot_view().dom().finite(),
         // `delete` (the displaced-bind-cap teardown, the first mutation) requires
-        // `refcount_sound` (§6a/§1.3), `caps_consistent` (§6d foundation), and the §3.3
-        // endpoint-cap census (§6d body-removal gate); all hold unmutated from entry to
-        // that call.
+        // `refcount_sound`, `caps_consistent`, and the endpoint-cap census; all hold
+        // unmutated from entry to that call.
         cspace::refcount_sound(old(store)),
         cspace::caps_consistent(old(store)),
         cspace::end_caps_sound(old(store)),
@@ -278,7 +273,7 @@ pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<S
         old(store).tcb_view()[t].bind_bits.len() == 2,
         old(store).tcb_view()[t].bind_slots.len() == 2,
         old(store).slot_view().dom().contains(old(store).tcb_view()[t].bind_slots[which as int]),
-        // The displaced cap is empty or a notification, so the `delete` takes the §4d
+        // The displaced cap is empty or a notification, so the `delete` takes the
         // clean notification-cap frame (a bind slot only ever holds a notification cap).
         cspace::is_empty_cap(old(store).slot_view()[old(store).tcb_view()[t].bind_slots[which as int]].cap)
             || cspace::cap_notif(old(store).slot_view()[old(store).tcb_view()[t].bind_slots[which as int]].cap) is Some,
@@ -302,7 +297,7 @@ pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<S
         final(store).notif_view() == old(store).notif_view(),
         final(store).timer_view() == old(store).timer_view(),
         final(store).timer_head_view() == old(store).timer_head_view(),
-        // Refcount soundness is preserved (D-F2): the displaced-cap `delete` re-establishes it
+        // Refcount soundness is preserved: the displaced-cap `delete` re-establishes it
         // (and proves the `-1`), `set_tcb_bind_bits` writes a non-census field, and the
         // notification-cap `slot_move` relocates a cap without changing any object's census.
         cspace::refcount_sound(final(store)),
@@ -379,31 +374,24 @@ verus! {
 ///
 /// Destroying a still-running thread produces NO report and fires
 /// nothing: destruction is the parent acting, not the thread dying, and
-/// the parent needs no letter about its own revoke (§5.1). The record
+/// the parent needs no letter about its own revoke (rev0§5.1). The record
 /// only ever transitions on the thread's own exit or fault.
 ///
-/// The unqueue split (plan §2.2): a Runnable thread is removed from the
+/// The unqueue split: a Runnable thread is removed from the
 /// ready structure through `Store::unqueue_ready` (the scheduler is
 /// kernel-side); a thread blocked on a notification is unlinked here,
 /// since the waiter queue is a kcore object.
 ///
-/// **Assumed, host-test-checked (plan §4e — the declared scope-out, §1.4).** Its
-/// body recurses through the still-`external_body` `cspace::delete` and the
-/// plain-Rust `unref_cspace`/`unref_aspace` (the cross-object teardown, deferred to
-/// the post-phase-5 census phase), so — like `delete`/`channel::destroy_channel` —
-/// it carries an `external_body` contract checked against its real body in
-/// `test_store.rs` (`check_destroy_tcb`), not a Verus body proof. The contract is the
-/// robustly-true structural core: `t` ends `Halted` with its queue link and both
-/// binding slots cleared, **its report UNCHANGED** (destruction fires no report,
-/// §5.1), and `cspace_wf` preserved. `unqueue_ready` therefore needs no Verus
-/// contract (the body is unverified) — a small simplification of the §1.3 note.
-// **Refcount census (plan §6a).** The contract now also requires and preserves
-// `refcount_sound` and states the `count_nonempty` non-increase 6d's measure needs:
-// the bind-cap deletes drop `slot_refs`, and the `unref_cspace`/`unref_aspace`
-// releases drop `thread_hold_refs`, each matched by its `-1` (6d closes the body).
-// **Proven body (plan §6d-final-thread-body-2).** The `external_body` is gone — the real
-// teardown (detach → halt → bind-slot `delete`s → clear-before-unref cspace/aspace) is verified
-// against the full contract. Un-`external_body`-ing it opens the cross-module cycle
+/// The teardown (detach → halt → bind-slot `delete`s → clear-before-unref cspace/aspace)
+/// has a fully proven Verus body verified against the full contract. The contract's
+/// structural core: `t` ends `Halted` with its queue link and both binding slots cleared,
+/// **its report UNCHANGED** (destruction fires no report, rev0§5.1), and `cspace_wf`
+/// preserved. `unqueue_ready` needs no Verus contract (its body is unverified).
+//
+// **Refcount census.** The contract requires and preserves `refcount_sound` and states the
+// `count_nonempty` non-increase the recursion's measure needs: the bind-cap deletes drop
+// `slot_refs`, and the `unref_cspace`/`unref_aspace` releases drop `thread_hold_refs`, each
+// matched by its `-1`. The body opens the cross-module cycle
 // `destroy_tcb → unref_cspace → destroy_cspace → delete → obj_unref → destroy_tcb`, closed under
 // the shared lexicographic measure `(count_nonempty(slot_view), height)` with `destroy_tcb = 3`
 // (its calls to `delete`/`unref_cspace`/`unref_aspace` are count-flat-or-dropping, the descent by
@@ -411,18 +399,16 @@ verus! {
 // halted with `wait_notif` cleared it is dead (`refs[t] == 0`) and queue-detached, so the
 // `dead_tcb_frozen` frame fixes its TCB; the census rides the **clear-before-unref** discipline
 // (`lemma_census_after_hold_clear` opens the off-by-one window `unref_cspace`/`unref_aspace`
-// consume). The last `external_body` object op in `kcore` — phase 6d is now complete.
-// `spinoff_prover` (cross-platform headroom, D-B1): giving `CapKind::Thread` its §5.4
-// `max_prio` ceiling adds a datatype field + the `is_thread_cap_for`/`cap_max_prio` axioms to
-// this module's shared SMT batch, shifting Z3's resource accounting for this borderline body —
-// the "new clauses destabilize an unrelated proof's rlimit" effect doc 51 §3 records (resource
-// counting varies Linux<->macOS, so it flaked only in CI). Isolating `destroy_tcb` into its
+// consume).
+// `spinoff_prover`: giving `CapKind::Thread` its rev0§5.4 `max_prio` ceiling adds a datatype
+// field + the `is_thread_cap_for`/`cap_max_prio` axioms to this module's shared SMT batch,
+// shifting Z3's resource accounting for this borderline body. Isolating `destroy_tcb` into its
 // own Z3 instance is the standard Verus headroom fix.
 //
-// `rlimit` (D-B1 Option 2, doc 71): surfacing `priority` in `TcbView` adds yet another field to
-// every `tcb_view()` term this teardown carries, pushing the isolated body just past the default
-// 10s budget on some platforms. Raising its private resource cap (it is already on its own Z3
-// instance, so no other proof is affected) restores the margin — the proof itself is unchanged.
+// `rlimit`: surfacing `priority` in `TcbView` adds yet another field to every `tcb_view()` term
+// this teardown carries, pushing the isolated body just past the default 10s budget on some
+// platforms. Raising its private resource cap (it is already on its own Z3 instance, so no other
+// proof is affected) restores the margin — the proof itself is unchanged.
 #[verifier::spinoff_prover]
 #[verifier::rlimit(30)]
 pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
@@ -433,31 +419,28 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         // `t` is already dead (its last designating cap is gone — `obj_unref` calls this only at
         // `refs[t] == 0`). Needed so the cross-object teardown's `dead_tcb_frozen` frame applies to
         // `t` itself, preserving `t`'s `report`/`state`/`qnext` across the recursive
-        // `unref_cspace`/`delete` (plan §6d-final-thread-body).
+        // `unref_cspace`/`delete`.
         old(store).refs_view().dom().contains(t),
         old(store).refs_view()[t] == 0,
         old(store).tcb_view().dom().contains(t),
         old(store).tcb_view()[t].bind_slots.len() == 2,
         old(store).slot_view().dom().contains(old(store).tcb_view()[t].bind_slots[0]),
         old(store).slot_view().dom().contains(old(store).tcb_view()[t].bind_slots[1]),
-        // Cap→object consistency (plan §6d foundation): the body deletes the two bind-slot
-        // caps (notification caps) and unrefs the cspace/aspace, so it needs their objects
-        // well-formed. Assumed here (`external_body`), discharged by the body PR;
-        // host-checked (`check_destroy_tcb`).
+        // Cap→object consistency: the body deletes the two bind-slot caps (notification caps)
+        // and unrefs the cspace/aspace, so it needs their objects well-formed.
         cspace::caps_consistent(old(store)),
-        // The §3.3 endpoint-cap census (plan §6d body-removal gate): the body's bind-slot
-        // `delete`s thread it (the bind caps are notifications, but `delete` requires it
-        // unconditionally). Assumed here, discharged by the body PR; host-checked.
+        // The endpoint-cap census: the body's bind-slot `delete`s thread it (the bind caps are
+        // notifications, but `delete` requires it unconditionally).
         cspace::end_caps_sound(old(store)),
-        // Refs-domain completeness (plan §6d body-removal): the body's `delete`s thread it.
+        // Refs-domain completeness: the body's `delete`s thread it.
         cspace::census_dom_complete(old(store)),
-        // The bound cspace is resident-wf (plan §6d-final-thread): `unref_cspace` needs it to
+        // The bound cspace is resident-wf: `unref_cspace` needs it to
         // drive the at-zero `destroy_cspace`. The TCB's own Thread cap is already gone by the
         // time this destructor runs, so `obj_unref` supplies it (sourced, in turn, from
         // `delete`'s `caps_consistent` over the live Thread cap).
         old(store).tcb_view()[t].cspace matches Some(cs) ==>
             cspace::cspace_resident_wf(old(store), cs),
-        // Waiter-coherence (plan §6d-final-thread): if `t` is blocked, its `wait_notif` names a
+        // Waiter-coherence: if `t` is blocked, its `wait_notif` names a
         // `notif_wf` notification — the precondition the BlockedNotif branch's `remove_waiter`
         // needs. Same provenance as the cspace fact: `obj_unref` ← `delete`'s `caps_consistent`
         // over the (now-deleted) live Thread cap's `cap_consistent` clause.
@@ -476,37 +459,36 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         cspace::only_empties(old(store).slot_view(), final(store).slot_view()),
         // Residency is immutable: the bind-cap `delete`s, `unref_cspace`/`unref_aspace`, and
         // `set_tcb_*` all frame `cspace_view` (a destroyed cspace keeps its residency map —
-        // its resident caps are emptied, not re-homed), so `obj_unref`'s Thread arm carries
-        // it (plan §6d body PR).
+        // its resident caps are emptied, not re-homed), so `obj_unref`'s Thread arm carries it.
         final(store).cspace_view() == old(store).cspace_view(),
         // The channel skeleton (`ring_cap`/`depth`/dom) is immutable: the body deletes bind
-        // caps and unrefs cspace/aspace, never touching channel layout (plan §6d body PR).
+        // caps and unrefs cspace/aspace, never touching channel layout.
         cspace::chan_struct_frame(old(store).chan_view(), final(store).chan_view()),
         final(store).tcb_view().dom().contains(t),
         final(store).tcb_view()[t].state == ThreadState::Halted,
         final(store).tcb_view()[t].qnext is None,
         // The report is untouched — destruction is the parent acting, not the thread
-        // dying, so the record never transitions here (§5.1).
+        // dying, so the record never transitions here (rev0§5.1).
         final(store).tcb_view()[t].report == old(store).tcb_view()[t].report,
         // Both binding slots emptied (their caps die with the TCB by CDT cleanup).
         cspace::is_empty_cap(
             final(store).slot_view()[old(store).tcb_view()[t].bind_slots[0]].cap),
         cspace::is_empty_cap(
             final(store).slot_view()[old(store).tcb_view()[t].bind_slots[1]].cap),
-        // Dead, queue-detached TCBs *other than `t`* are frozen (plan §6d-final-thread-body). `t`
-        // itself is excepted — the body rewrites `tcb[t]` (halts it). `obj_unref`'s Thread arm
-        // composes this with `dec_ref` to carry the base `dead_tcb_frozen` up the recursion.
+        // Dead, queue-detached TCBs *other than `t`* are frozen. `t` itself is excepted — the
+        // body rewrites `tcb[t]` (halts it). `obj_unref`'s Thread arm composes this with
+        // `dec_ref` to carry the base `dead_tcb_frozen` up the recursion.
         forall|x: ObjId|
             x != t ==> #[trigger] cspace::dead_tcb_frozen_at(old(store), final(store), x),
-        // The home maps are framed (plan §6e): residency immutable, channel skeleton fixed, and
-        // the TCB domain + every `bind_slots` survive (the detach/halt/clear edits keep both, the
+        // The home maps are framed: residency immutable, channel skeleton fixed, and the TCB
+        // domain + every `bind_slots` survive (the detach/halt/clear edits keep both, the
         // deletes + `unref_cspace` carry them). `obj_unref`'s Thread arm reads it off.
         cspace::home_views_frozen(old(store), final(store)),
-        // §6e provenance: this destructor empties only `t`'s two bind slots (each homed in `t`)
-        // and the homed slots `unref_cspace`'s `destroy_cspace` clears — so every un-homed slot
-        // keeps its cap. `obj_unref`'s Thread arm reads it off.
+        // Home-frame provenance: this destructor empties only `t`'s two bind slots (each homed
+        // in `t`) and the homed slots `unref_cspace`'s `destroy_cspace` clears — so every
+        // un-homed slot keeps its cap. `obj_unref`'s Thread arm reads it off.
         cspace::unhomed_frozen_free(old(store), final(store)),
-        // §6e-dual provenance: every emptied slot was a home handle of a dead object. The two bind
+        // Dual provenance: every emptied slot was a home handle of a dead object. The two bind
         // slots are homed by `t` itself (dead throughout: `refs[t] == 0`); `unref_cspace`'s cleared
         // residents carry their own witness. `obj_unref`'s Thread arm reads it off.
         cspace::emptied_via_dead_home_free(old(store), final(store)),
@@ -530,7 +512,7 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
             cspace::lemma_dead_tcb_frozen_refl(&st0, store);
             cspace::lemma_thread_off_all_chains(store, t);   // Runnable ⇒ not BlockedNotif
             cspace::lemma_sysinv_frame_equal_views(&st0, store);  // `unqueue_ready` frames every view
-            // §6e-dual: `unqueue_ready` frames `refs`, so death persists.
+            // `unqueue_ready` frames `refs`, so death persists.
             cspace::lemma_refs_death_persist_from_refs_eq(&st0, store);
         }
     } else if matches!(store.tcb_state(t), ThreadState::BlockedNotif) {
@@ -600,18 +582,18 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         assert forall|o: ObjId, ws: Seq<ObjId>|
             cspace::waiter_chain(st_detach.notif_view(), st_detach.tcb_view(), o, ws)
             implies !ws.contains(t) by {}
-        // §6e base: the detach frames `slot_view` (free) and the home maps (home) — `unqueue_ready`
-        // frames every view; `remove_waiter` keeps `slot_view`/`cspace_view`/the channel skeleton
-        // and the TCB domain + `bind_slots`.
+        // Home-frame base: the detach frames `slot_view` (free) and the home maps (home) —
+        // `unqueue_ready` frames every view; `remove_waiter` keeps `slot_view`/`cspace_view`/the
+        // channel skeleton and the TCB domain + `bind_slots`.
         assert(store.slot_view() == st0.slot_view());
         cspace::lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
         assert(cspace::home_views_frozen(&st0, store));
-        // §6e-dual base: the detach frames `slot_view`, so it empties no slot (free frame refl);
+        // Dual base: the detach frames `slot_view`, so it empties no slot (free frame refl);
         // `refs_death_persist(st0, st_detach)` was established per detach branch above.
         cspace::lemma_emptied_via_dead_home_free_from_slot_eq(&st0, store);
     }
 
-    // ── 2. Halt: clear `t`'s queue/wait links and mark it Halted (report untouched — §5.1).
+    // ── 2. Halt: clear `t`'s queue/wait links and mark it Halted (report untouched — rev0§5.1).
     //    This makes `t` *dead and queue-detached* (`refs[t] == 0` ∧ `wait_notif is None`), so the
     //    `dead_tcb_frozen` frame fixes `t`'s TCB across every recursive teardown call below. ──
     store.set_tcb_qnext(t, None);
@@ -647,14 +629,14 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         // and the detach's except-`t` frame (full ⇒ except-`t`), composed to `st0 → st_halt`.
         cspace::lemma_dead_tcb_frozen_to_except(&st0, &st_detach, t);
         cspace::lemma_dead_tcb_frozen_except_trans(&st0, &st_detach, store, t);
-        // §6e: the halt frames `slot_view` (free) and the home maps (the `set_tcb_*` setters keep
+        // The halt frames `slot_view` (free) and the home maps (the `set_tcb_*` setters keep
         // `cspace_view`/`chan_view` and the TCB domain + `bind_slots`); compose onto `st0`.
         assert(store.slot_view() == st_detach.slot_view());
         cspace::lemma_unhomed_frozen_free_from_slot_eq(&st_detach, store);
         assert(cspace::home_views_frozen(&st_detach, store));
         cspace::lemma_unhomed_frozen_free_trans(&st0, &st_detach, store);
         cspace::lemma_home_views_frozen_trans(&st0, &st_detach, store);
-        // §6e-dual: the halt frames `slot_view` (free refl) and `refs` (death-persist refl, the
+        // Dual: the halt frames `slot_view` (free refl) and `refs` (death-persist refl, the
         // `set_tcb_*` setters never touch `refs`); compose onto `st0`.
         assert(store.refs_view() == st_detach.refs_view());
         cspace::lemma_emptied_via_dead_home_free_from_slot_eq(&st_detach, store);
@@ -664,7 +646,7 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
     }
 
     // ── 3. Delete the two binding caps (they die with the TCB by ordinary CDT cleanup, exactly
-    //    as queued caps die with their channel, §3.4). Each `delete` is a visible cluster member;
+    //    as queued caps die with their channel, rev0§3.4). Each `delete` is a visible cluster member;
     //    `t` (dead + detached) is frozen across it, so its TCB survives. ──
     // The bind-slot `delete`s carry the **full** `dead_tcb_frozen(st_halt, ·)` (a `delete` ensures
     // it), composed across the two by `_trans`; this fixes the dead+detached subject `t` itself,
@@ -673,13 +655,13 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
     if !cspace::cap_is_empty(store.slot(s0).cap) {
         crate::cspace::delete(store, s0);
         proof {
-            // §6e: `s0` is `t`'s bind slot 0 (homed), so `delete`'s target-aware frame is already
+            // `s0` is `t`'s bind slot 0 (homed), so `delete`'s target-aware frame is already
             // target-free; `delete` exports `home_views_frozen`.
             assert(cspace::homed_in_tcb(&st_halt, s0)) by {
                 assert(st_halt.tcb_view()[t].bind_slots[0] == s0);
             }
             cspace::lemma_unhomed_frozen_free_from_homed(&st_halt, store, s0);
-            // §6e-dual: `t` homes `s0` (bind slot 0) at `st_halt`, and `t` is dead (`refs[t] == 0`,
+            // Dual: `t` homes `s0` (bind slot 0) at `st_halt`, and `t` is dead (`refs[t] == 0`,
             // monotone-preserved by `delete`'s `refs_death_persist`), so the directly-deleted `s0`
             // carries the death witness `t`. Lift `delete`'s target-aware frame to the free frame.
             assert(cspace::homes_in_tcb(&st_halt, t, s0)) by {
@@ -696,17 +678,17 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
             cspace::lemma_dead_tcb_frozen_refl(&st_halt, store);
             cspace::lemma_unhomed_frozen_free_from_slot_eq(&st_halt, store);
             cspace::lemma_home_views_frozen_refl(&st_halt, store);
-            // §6e-dual: the slot was already empty (no `delete`) — free + death-persist refl.
+            // Dual: the slot was already empty (no `delete`) — free + death-persist refl.
             cspace::lemma_emptied_via_dead_home_free_from_slot_eq(&st_halt, store);
             cspace::lemma_refs_death_persist_from_refs_eq(&st_halt, store);
         }
     }
     let ghost st_d0 = *store;
     proof {
-        // §6e: compose the bind-slot-0 delete onto the running `st0` frame.
+        // Compose the bind-slot-0 delete onto the running `st0` frame.
         cspace::lemma_unhomed_frozen_free_trans(&st0, &st_halt, &st_d0);
         cspace::lemma_home_views_frozen_trans(&st0, &st_halt, &st_d0);
-        // §6e-dual: compose the bind-slot-0 delete's frame onto the running `st0` frame.
+        // Dual: compose the bind-slot-0 delete's frame onto the running `st0` frame.
         cspace::lemma_emptied_via_dead_home_free_trans(&st0, &st_halt, &st_d0);
         cspace::lemma_refs_death_persist_trans(&st0, &st_halt, &st_d0);
         assert(cspace::dead_tcb_frozen(&st_halt, &st_d0));
@@ -722,12 +704,12 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
     if !cspace::cap_is_empty(store.slot(s1).cap) {
         crate::cspace::delete(store, s1);
         proof {
-            // §6e: `s1` is `t`'s bind slot 1 (homed) — same homed-lift as bind slot 0.
+            // `s1` is `t`'s bind slot 1 (homed) — same homed-lift as bind slot 0.
             assert(cspace::homed_in_tcb(&st_d0, s1)) by {
                 assert(st_d0.tcb_view()[t].bind_slots[1] == s1);
             }
             cspace::lemma_unhomed_frozen_free_from_homed(&st_d0, store, s1);
-            // §6e-dual: `t` homes `s1` (bind slot 1) at `st_d0`, dead there and after `delete`.
+            // Dual: `t` homes `s1` (bind slot 1) at `st_d0`, dead there and after `delete`.
             assert(cspace::homes_in_tcb(&st_d0, t, s1)) by {
                 assert(st_d0.tcb_view().dom().contains(t));
                 assert(st_d0.tcb_view()[t].bind_slots[1] == s1);
@@ -747,10 +729,10 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         }
     }
     proof {
-        // §6e: compose the bind-slot-1 delete onto the running `st0` frame.
+        // Compose the bind-slot-1 delete onto the running `st0` frame.
         cspace::lemma_unhomed_frozen_free_trans(&st0, &st_d0, store);
         cspace::lemma_home_views_frozen_trans(&st0, &st_d0, store);
-        // §6e-dual: compose the bind-slot-1 delete's frame onto the running `st0` frame.
+        // Dual: compose the bind-slot-1 delete's frame onto the running `st0` frame.
         cspace::lemma_emptied_via_dead_home_free_trans(&st0, &st_d0, store);
         cspace::lemma_refs_death_persist_trans(&st0, &st_d0, store);
         cspace::lemma_dead_tcb_frozen_trans(&st_halt, &st_d0, store);
@@ -806,13 +788,13 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
             assert(store.tcb_view()[t].qnext is None);
             assert(store.tcb_view()[t].report == report0);
             assert(store.refs_view()[t] == 0);
-            // §6e: the cspace-field clear frames `slot_view` (free) and the home maps; compose.
+            // The cspace-field clear frames `slot_view` (free) and the home maps; compose.
             assert(store.slot_view() == st_pre_cs.slot_view());
             cspace::lemma_unhomed_frozen_free_from_slot_eq(&st_pre_cs, store);
             assert(cspace::home_views_frozen(&st_pre_cs, store));
             cspace::lemma_unhomed_frozen_free_trans(&st0, &st_pre_cs, store);
             cspace::lemma_home_views_frozen_trans(&st0, &st_pre_cs, store);
-            // §6e-dual: the cspace-field clear frames `slot_view` (free refl) and `refs`
+            // Dual: the cspace-field clear frames `slot_view` (free refl) and `refs`
             // (death-persist refl, `set_tcb_cspace` never touches `refs`); compose onto `st0`.
             assert(store.refs_view() == st_pre_cs.refs_view());
             cspace::lemma_emptied_via_dead_home_free_from_slot_eq(&st_pre_cs, store);
@@ -826,10 +808,10 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
             assert(cspace::dead_tcb_frozen_at(&st_csclear, store, t));
             cspace::lemma_dead_tcb_frozen_to_except(&st_csclear, store, t);
             cspace::lemma_dead_tcb_frozen_except_trans(&st0, &st_csclear, store, t);
-            // §6e: `unref_cspace` exports the free + home frames; compose onto `st0`.
+            // `unref_cspace` exports the free + home frames; compose onto `st0`.
             cspace::lemma_unhomed_frozen_free_trans(&st0, &st_csclear, store);
             cspace::lemma_home_views_frozen_trans(&st0, &st_csclear, store);
-            // §6e-dual: `unref_cspace` exports the free + death-persist frames; compose onto `st0`.
+            // Dual: `unref_cspace` exports the free + death-persist frames; compose onto `st0`.
             cspace::lemma_emptied_via_dead_home_free_trans(&st0, &st_csclear, store);
             cspace::lemma_refs_death_persist_trans(&st0, &st_csclear, store);
         }
@@ -860,13 +842,13 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
             assert(store.tcb_view()[t].qnext is None);
             assert(store.tcb_view()[t].report == report0);
             assert(store.refs_view()[t] == 0);
-            // §6e: the aspace-field clear frames `slot_view` (free) and the home maps; compose.
+            // The aspace-field clear frames `slot_view` (free) and the home maps; compose.
             assert(store.slot_view() == st_pre_as.slot_view());
             cspace::lemma_unhomed_frozen_free_from_slot_eq(&st_pre_as, store);
             assert(cspace::home_views_frozen(&st_pre_as, store));
             cspace::lemma_unhomed_frozen_free_trans(&st0, &st_pre_as, store);
             cspace::lemma_home_views_frozen_trans(&st0, &st_pre_as, store);
-            // §6e-dual: the aspace-field clear frames `slot_view` (free refl) and `refs`
+            // Dual: the aspace-field clear frames `slot_view` (free refl) and `refs`
             // (death-persist refl); compose onto `st0`.
             assert(store.refs_view() == st_pre_as.refs_view());
             cspace::lemma_emptied_via_dead_home_free_from_slot_eq(&st_pre_as, store);
@@ -879,12 +861,12 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
             assert(cspace::dead_tcb_frozen_at(&st_asclear, store, t));
             cspace::lemma_dead_tcb_frozen_to_except(&st_asclear, store, t);
             cspace::lemma_dead_tcb_frozen_except_trans(&st0, &st_asclear, store, t);
-            // §6e: `unref_aspace` frames `slot_view` + every object view — free + home refl; compose.
+            // `unref_aspace` frames `slot_view` + every object view — free + home refl; compose.
             cspace::lemma_unhomed_frozen_free_from_slot_eq(&st_asclear, store);
             cspace::lemma_home_views_frozen_refl(&st_asclear, store);
             cspace::lemma_unhomed_frozen_free_trans(&st0, &st_asclear, store);
             cspace::lemma_home_views_frozen_trans(&st0, &st_asclear, store);
-            // §6e-dual: `unref_aspace` exports the free + death-persist frames; compose onto `st0`.
+            // Dual: `unref_aspace` exports the free + death-persist frames; compose onto `st0`.
             cspace::lemma_emptied_via_dead_home_free_trans(&st0, &st_asclear, store);
             cspace::lemma_refs_death_persist_trans(&st0, &st_asclear, store);
         }

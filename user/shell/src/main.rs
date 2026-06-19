@@ -1,7 +1,7 @@
-//! The Eunomia shell (spec §7): built-ins over a storage session.
+//! The Eunomia shell (spec rev0§7): built-ins over a storage session.
 //!
-//! World (built by init, §5.1): slot 0 = bootstrap channel (first message
-//! is the "SH01" startup block carrying the time-page address, §2.6),
+//! World (built by init, rev0§5.1): slot 0 = bootstrap channel (first message
+//! is the "SH01" startup block carrying the time-page address, rev0§2.6),
 //! slot 1 = storage session (handle 0 = main ref root, full rights),
 //! slot 2 = untyped pool for spawning, slot 5 = a read-only time-frame
 //! cap the shell re-grants to children. The shell carves slot 3 (a
@@ -9,15 +9,15 @@
 //! untyped) from the pool, and keeps slots 8.. as a recyclable cap window.
 //!
 //! `run`/`runloop` spawn a child from the store and reclaim it on exit
-//! (§5.1): one donation untyped per child, the whole subtree revoked and
+//! (rev0§5.1): one donation untyped per child, the whole subtree revoked and
 //! the donation reset between spawns — so a process can be run, watched to
 //! completion (exit *or* fault), reaped, and its memory and slots reused.
 //!
 //!   ls [path] · cat <path> · write <path> <text> · rm <path>
 //!   snap [msg] · snaps · rollback <id> · sync · help
-//!   run <path> [mode] · runloop <path> <count>          (§5.1 spawn/reap)
-//!   snapdel <id> · keep <id> · prune <n> · gc · df          (M5)
-//!   date                                              (time page, §2.6)
+//!   run <path> [mode] · runloop <path> <count>          (rev0§5.1 spawn/reap)
+//!   snapdel <id> · keep <id> · prune <n> · gc · df
+//!   date                                              (time page, rev0§2.6)
 
 #![no_std]
 #![no_main]
@@ -33,7 +33,7 @@ use urt::spawn::{Exit, SpawnRec};
 #[global_allocator]
 static HEAP: urt::Heap<{ 1024 * 1024 }> = urt::Heap::new();
 
-// Shell cspace (built by init, §5.1): slot 0 = bootstrap channel, slot 1 =
+// Shell cspace (built by init, rev0§5.1): slot 0 = bootstrap channel, slot 1 =
 // storage session, slot 2 = the untyped pool for spawning, slot 5 = a
 // read-only time cap re-granted per child. The shell carves two persistent
 // objects from the pool at startup and keeps slots 8.. as a recyclable
@@ -42,13 +42,13 @@ const BOOT_CHAN: u32 = 0;
 const STORE_CHAN: u32 = 1;
 const POOL: u32 = 2;
 /// Persistent event notification: the shell's wait point and the target of
-/// every child's on-exit/on-fault bindings (§3.6). Carved once; survives
+/// every child's on-exit/on-fault bindings (rev0§3.6). Carved once; survives
 /// each child's revoke (it descends from the pool, not the donation).
 const EVENT_NOTIF: u32 = 3;
-/// The reusable per-child donation untyped (§5.1). One child's worth of
-/// memory; `revoke` + `reset` reclaims it between spawns (§2.5).
+/// The reusable per-child donation untyped (rev0§5.1). One child's worth of
+/// memory; `revoke` + `reset` reclaims it between spawns (rev0§2.5).
 const DONATION: u32 = 4;
-/// Read-only time-frame cap (granted by init, §2.6). The shell maps a
+/// Read-only time-frame cap (granted by init, rev0§2.6). The shell maps a
 /// fresh copy into each child's aspace so children can read the clock —
 /// the init→shell time grant, one hop further. Lives in pool memory the
 /// per-child reclaim never touches.
@@ -62,16 +62,16 @@ const SPAWN_CAP: usize = 56; // slots 8..64
 const DONATION_BYTES: u64 = 4 * 1024 * 1024;
 const CHILD_CSPACE_SLOTS: u64 = 8;
 /// Children run below the shell so a blocked-shell, running-child handoff is
-/// the common case, and the §5.4 ceiling keeps a child from outranking us.
+/// the common case, and the rev0§5.4 ceiling keeps a child from outranking us.
 const CHILD_PRIO: u64 = 3;
 /// Where the time page lands in each child's aspace (init's convention,
-/// §2.6). Above the ELF (0x8000_0000) and stack (~0x9000_0000); the VA
+/// rev0§2.6). Above the ELF (0x8000_0000) and stack (~0x9000_0000); the VA
 /// still travels in the ST01 block — never assumed.
 const CHILD_TIME_VA: u64 = 0xA300_0000;
 
-/// Notification bits the kernel raises for this child (§5.1). Distinct so the
+/// Notification bits the kernel raises for this child (rev0§5.1). Distinct so the
 /// notification *word* tells exit from fault — two sources multiplexed on one
-/// notification, the §3.6 bit-group scan. The shell registers each as a source
+/// notification, the rev0§3.6 bit-group scan. The shell registers each as a source
 /// with the IPC reactor (`register_bound`), which owns the scan; the shell is
 /// the reactor's first multi-source production consumer. A console-readable
 /// source would slot in as a third bit once the console is a channel.
@@ -130,8 +130,8 @@ fn civil_from_days(days: u64) -> (u64, u64, u64) {
 
 /// UTC nanoseconds → ISO-8601 with nanosecond precision
 /// (`2026-06-11T12:34:56.123456789Z`). All stored time is UTC; timezones
-/// are presentation and this shell presents UTC only (§2.6). Full
-/// precision so per-ref strict ordering (§4.7) is visible, not rounded
+/// are presentation and this shell presents UTC only (rev0§2.6). Full
+/// precision so per-ref strict ordering (rev0§4.7) is visible, not rounded
 /// away — the RTC's whole-second base makes sub-second digits relative,
 /// not absolute.
 fn out_utc(ns: u64) {
@@ -296,7 +296,7 @@ fn cmd_snaps() {
 }
 
 /// Wall-clock time end to end: two register reads and the time page,
-/// zero syscalls, zero IPC on the read path (§2.6).
+/// zero syscalls, zero IPC on the read path (rev0§2.6).
 fn cmd_date() {
     match urt::time::page() {
         Some(p) => {
@@ -337,7 +337,7 @@ fn cmd_df() {
     }
 }
 
-/// Retention policy is shell-side (§4.7: the server stores fields, it
+/// Retention policy is shell-side (rev0§4.7: the server stores fields, it
 /// does not interpret policy): keep the newest `n` non-`keep` snapshots,
 /// delete the rest. `keep`-class and tagged rows survive.
 fn cmd_prune(n: u64) {
@@ -393,7 +393,7 @@ fn out_hex(n: u64) {
     out(&d[start..]);
 }
 
-/// Classify a fault from ESR_EL1 (§5.3): the EC names the kind of abort,
+/// Classify a fault from ESR_EL1 (rev0§5.3): the EC names the kind of abort,
 /// the low data-fault-status bits name why. Enough to print
 /// `faulted(translation, …)` for the wild-pointer demo without a full ESR
 /// table.
@@ -415,7 +415,7 @@ fn fault_class(esr: u64) -> &'static [u8] {
 fn print_exit(e: Exit) {
     match e {
         // A panic surfaces as a normal exit carrying the reserved status
-        // (§5.1, U2); name it rather than print exited(18446744073709551615).
+        // (rev0§5.1); name it rather than print exited(18446744073709551615).
         Exit::Exited(sys::STATUS_PANIC) => out(b"panicked\n"),
         Exit::Exited(status) => {
             out(b"exited(");
@@ -451,7 +451,7 @@ enum RunErr {
     Start,
 }
 
-/// Owns the recyclable slot window and drives the §5.1 spawn/reap loop. One
+/// Owns the recyclable slot window and drives the rev0§5.1 spawn/reap loop. One
 /// child outstanding at a time (the shell is single-threaded), so a single
 /// donation untyped, reused, is the whole resource story.
 struct Spawner {
@@ -502,18 +502,18 @@ impl Spawner {
                 return Err(RunErr::BadElf);
             }
         };
-        // The "time" grant (§5.1, §2.6): a fresh read-only copy of our time
+        // The "time" grant (rev0§5.1, rev0§2.6): a fresh read-only copy of our time
         // cap, mapped read-only into the child's aspace at CHILD_TIME_VA. The
         // copy lives OUTSIDE the donation, so `scrub`/`reap` must delete it
         // first — the unmap has to precede the revoke that frees the aspace
-        // it points into (§2.5 one-mapping-per-cap).
+        // it points into (rev0§2.5 one-mapping-per-cap).
         if sys::cap_copy(SH_TIME, s.time_copy, sys::RIGHT_READ) < 0
             || sys::map(prepared.aspace_slot, s.time_copy, CHILD_TIME_VA, 0) < 0
         {
             self.scrub(s.time_copy);
             return Err(RunErr::Carve);
         }
-        // Explicit child world (§5.1): bootstrap endpoint in slot 0, startup
+        // Explicit child world (rev0§5.1): bootstrap endpoint in slot 0, startup
         // block ("ST01" + mode + time-page VA) queued before the child runs.
         sys::cap_install(prepared.cspace_slot, s.chan_b, 0);
         let mut block = [0u8; 13];
@@ -529,12 +529,12 @@ impl Spawner {
             fault_bit: FAULT_BIT,
         };
         // Bind before start, so a child that exits immediately still raises
-        // the bit — the lost-wakeup discipline (§3.6).
+        // the bit — the lost-wakeup discipline (rev0§3.6).
         if rec.arm(EVENT_NOTIF, s.scratch) < 0 {
             self.scrub(s.time_copy);
             return Err(RunErr::Carve);
         }
-        // Multiplex this child's termination through the IPC reactor (§3.6/§4.2):
+        // Multiplex this child's termination through the IPC reactor (rev0§3.6):
         // the exit and fault bits were bound to the TCB by `rec.arm` (a
         // `thread_bind`, above, before start), so register them as two
         // externally-bound, edge-triggered sources — `register_bound` records
@@ -561,14 +561,14 @@ impl Spawner {
         let (key, _signals) = reactor.wait();
         debug_assert!(key == EXIT_KEY || key == FAULT_KEY, "unexpected reactor key");
         // Unmap the time grant before reap's revoke frees the child aspace
-        // (§2.5), then read_report strictly before revoke (enforced in reap).
+        // (rev0§2.5), then read_report strictly before revoke (enforced in reap).
         let _ = sys::cap_delete(s.time_copy);
         Ok(rec.reap())
     }
 
     /// Collapse a partially-built child and reset the donation (the abort
     /// counterpart of reap). Drops the time grant first (its mapping points
-    /// into the aspace the revoke frees, §2.5); harmless if never granted.
+    /// into the aspace the revoke frees, rev0§2.5); harmless if never granted.
     /// Safe with nothing carved: revoke of a childless untyped is a no-op.
     fn scrub(&self, time_copy: u32) {
         let _ = sys::cap_delete(time_copy);
@@ -719,7 +719,7 @@ fn dispatch(sp: &mut Spawner, line: &[u8]) {
 #[no_mangle]
 #[link_section = ".text._start"]
 pub extern "C" fn _start() -> ! {
-    // The §5.1 startup block, queued by init before this thread started:
+    // The rev0§5.1 startup block, queued by init before this thread started:
     // "SH01" + time-page VA. No grant, no clock — `date` degrades, the
     // store-backed built-ins don't.
     let mut boot = [0u8; 256];
@@ -733,7 +733,7 @@ pub extern "C" fn _start() -> ! {
 
     // Carve the two persistent spawn objects from the pool (slot 2): the
     // event notification every child's death will signal, and one reusable
-    // child-sized donation untyped (§5.1). Both sit in pool memory the
+    // child-sized donation untyped (rev0§5.1). Both sit in pool memory the
     // per-child reclaim never touches.
     if sys::retype(POOL, sys::OBJ_NOTIF, 0, EVENT_NOTIF, 0) < 0
         || sys::retype(POOL, sys::OBJ_UNTYPED, DONATION_BYTES, DONATION, 0) < 0

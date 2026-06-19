@@ -13,8 +13,7 @@
 //! checksum and content hash mount verifies is recomputed, no geometry
 //! field is repaired, nothing the image cannot physically hold is sealed.
 //! The mutations therefore land on the offset/length fields mount actually
-//! consumes (MNT-1, fuzzing findings), and the contract needs no
-//! threat-model carve-out left to rot.
+//! consumes, and the contract needs no threat-model carve-out left to rot.
 //!
 //! Run with a low `-malloc_limit_mb` (fuzz.sh hunt sets 128): a single
 //! oversized allocation is a finding — allocations must be bounded by the

@@ -1,14 +1,12 @@
-//! Regression tests for findings surfaced by loader/fuzz. Each pins the
-//! hardened behavior so the finding cannot silently regress. See
-//! doc/results/1_fuzzing-findings.md.
+//! Regression tests for cases surfaced by loader/fuzz. Each pins the
+//! hardened behavior so the case cannot silently regress.
 
 use loader::elf;
 
-/// FINDING ELF-1 (fixed): `e_phoff` near u64::MAX used to make `parse`
-/// panic with an arithmetic overflow in `u32le` (`off + 4`) /
-/// `phoff + i*phentsize`, despite elf.rs documenting "no panics". Found by
-/// the `elf_parse` target. The offset math is now checked and overflow is
-/// reported as `Truncated`.
+/// An `e_phoff` near u64::MAX must not make `parse` panic with an arithmetic
+/// overflow in `u32le` (`off + 4`) / `phoff + i*phentsize`: elf.rs promises
+/// "no panics". The offset math is checked and overflow is reported as
+/// `Truncated`.
 #[test]
 fn elf1_phoff_overflow_rejected() {
     let mut e = vec![0u8; 64];

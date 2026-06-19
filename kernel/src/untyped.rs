@@ -1,9 +1,9 @@
-//! Kernel-side retype: the system's one int→pointer boundary (plan §2.3).
+//! Kernel-side retype: the system's one int→pointer boundary.
 //! The validation ([`retype_check`]), placement arithmetic ([`carve`]),
-//! CDT install ([`retype_install`]), and `reset` are pure/host-verifiable
+//! CDT install ([`retype_install`]), and `reset` are pure/verifiable
 //! and live in [`kcore::untyped`]; this wrapper composes them and performs
-//! the `start as *mut T` object construction in between — the cast CBMC
-//! never sees, kept here by design.
+//! the `start as *mut T` object construction in between — the cast the
+//! verified core never sees, kept here by design.
 
 pub use kcore::untyped::*;
 
@@ -33,8 +33,8 @@ pub unsafe fn retype(
     dst: *mut CapSlot,
     dst2: *mut CapSlot,
 ) -> Result<(), RetypeError> {
-    // The int→ptr boundary stays in this wrapper (plan §2.3); the kcore halves
-    // now speak handles, so translate the slot pointers once here. `dst2` is
+    // The int→ptr boundary stays in this wrapper; the kcore halves
+    // speak handles, so translate the slot pointers once here. `dst2` is
     // nullable for every non-channel type → `None`.
     let ut_id = SlotId(ut_slot as u64);
     let dst_id = SlotId(dst as u64);
@@ -52,12 +52,11 @@ pub unsafe fn retype(
         ObjType::Thread => {
             let p = c.start as *mut Tcb;
             Tcb::init(p);
-            // §5.4 maximum-controlled-priority ceiling: a fresh thread cap is
+            // rev0§5.4 maximum-controlled-priority ceiling: a fresh thread cap is
             // born capped at the retyper's own priority, so a descendant can
-            // never be started above its creator. This reproduces the old
-            // caller-priority spawn gate exactly while making the ceiling a
+            // never be started above its creator. The ceiling is a
             // cap-carried value that `kcore::cspace::derive` attenuates
-            // monotonically (§2.3).
+            // monotonically (rev0§2.3).
             CapKind::Thread(ObjId(p as u64), (*crate::thread::current()).priority)
         }
         ObjType::Channel => {

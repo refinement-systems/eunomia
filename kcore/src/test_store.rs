@@ -1,16 +1,14 @@
 //! Concrete array-backed `Store` + the executable contract checks for the
-//! `external_body` cspace ops (`delete`, `cdt_unlink`, `slot_move`).
+//! cspace ops (`delete`, `cdt_unlink`, `slot_move`).
 //!
-//! Those three ops carry **assumed** Verus contracts (their bodies are in-place
-//! linked-list-splice walks whose deductive proof is the scoped residue —
-//! doc/results/22 §3). This module is the *executable counterpart* of that
-//! deferred proof: a plain-array `Store` over which the **real** op bodies run,
-//! with hand-built and randomly-generated CDT shapes, asserting every clause of
-//! each op's `ensures` — including the **strengthened** `cspace_wf`
+//! Those three ops carry proven Verus contracts (their bodies are in-place
+//! linked-list-splice walks). This module is the *executable counterpart* of
+//! that proof: a plain-array `Store` over which the **real** op bodies run, with
+//! hand-built and randomly-generated CDT shapes, asserting every clause of each
+//! op's `ensures` — including the `cspace_wf` clauses
 //! (`siblings_share_parent`/`parent_has_first_child`/`sib_acyclic`). If a body
 //! ever violated its contract the assertion would fire; the contract is thus
-//! continuously checked against the body in CI (`cargo test -p kcore`), the
-//! discipline the §9 review recommended.
+//! continuously checked against the body in CI (`cargo test -p kcore`).
 //!
 //! The checkers (`*_exec`) mirror the `verus!{}` `spec fn`s — which are ghost
 //! (erased in a normal build) and so uncallable from exec test code, hence the
@@ -41,14 +39,14 @@ use std::collections::{BTreeMap, VecDeque};
 // cspace resident lists are keyed maps. The CDT/teardown path needs only the
 // Frame/Untyped/CSpace/Aspace accessors.
 //
-// Phase 3b adds **real channel state** (`chans`) — the `chan_*` accessors model
-// the `ChanView` ghost view: per-end cap counts, per-ring FIFO cursors, event
+// The **real channel state** (`chans`) — the `chan_*` accessors model the
+// `ChanView` ghost view: per-end cap counts, per-ring FIFO cursors, event
 // bindings, per-message lengths, and the ring cap-slot *handles* (the cap
-// contents stay in `slots`, the single arena). It also adds the minimal
-// notification + TCB state `notification::signal` touches, so the
-// `external_body` `signal` contract (`slot_view`/`chan_view` unchanged) can be
-// checked against the real body (`check_signal_frame`). The thread/timer seam
-// `signal` never reaches stays `unimplemented!()` — a stray call panics loudly.
+// contents stay in `slots`, the single arena). It also carries the minimal
+// notification + TCB state `notification::signal` touches, so `signal`'s frame
+// contract (`slot_view`/`chan_view` unchanged) can be checked against the real
+// body (`check_signal_frame`). The thread/timer seam `signal` never reaches
+// stays `unimplemented!()` — a stray call panics loudly.
 
 #[derive(Clone, PartialEq)]
 struct ChanState {
@@ -101,10 +99,10 @@ struct ArrayStore {
     tcbs: BTreeMap<u64, TcbState>,
     timers: BTreeMap<u64, TimerState>,
     timer_armed_head: Option<ObjId>,
-    // The TLBI effect log (plan §5e): the executable counterpart of the
-    // `tlb_log_view` ghost view. `tlb_invalidate_page` appends `(asid, va)`, so
-    // `check_unmap` can assert `unmap_in` issues one TLBI per cleared page, in
-    // order (the ordering theorem checked against the real body).
+    // The TLBI effect log: the executable counterpart of the `tlb_log_view`
+    // ghost view. `tlb_invalidate_page` appends `(asid, va)`, so `check_unmap`
+    // can assert `unmap_in` issues one TLBI per cleared page, in order (the
+    // ordering theorem checked against the real body).
     tlb_log: Vec<(u16, u64)>,
 }
 
@@ -155,7 +153,7 @@ impl Store for ArrayStore {
     fn cspace_slot(&self, cs: ObjId, i: u32) -> SlotId {
         self.cspaces[&cs.0][i as usize]
     }
-    // Last-reference teardown (plan §6a): drop `a` from the refcount map, matching
+    // Last-reference teardown: drop `a` from the refcount map, matching
     // the `ExStore` contract `refs_view() == old.refs_view().remove(a)` (the real
     // kernel frees the aspace object here). `aspace_unmap` is page-table maintenance
     // with no object state, so the no-op faithfully "frames every view".
@@ -164,7 +162,7 @@ impl Store for ArrayStore {
     }
     fn aspace_unmap(&mut self, _a: ObjId, _va: u64, _pages: u64) {}
 
-    // ── channel state (plan §3b): the `chan_*` accessors backed by `chans` ──
+    // ── channel state: the `chan_*` accessors backed by `chans` ──
     fn chan_depth(&self, ch: ObjId) -> u32 {
         self.chan(ch).depth
     }
@@ -202,11 +200,11 @@ impl Store for ArrayStore {
         self.chan_mut(ch).msg_len.insert((ring, i), v);
     }
     // Payload bytes are abstracted out of the ghost view, so the write/read are
-    // no-ops on the modelled state (the §3b frame: `chan_view` unchanged).
+    // no-ops on the modelled state (the frame: `chan_view` unchanged).
     fn chan_msg_write(&mut self, _: ObjId, _: usize, _: u32, _: &[u8]) {}
     fn chan_msg_read(&self, _: ObjId, _: usize, _: u32, _: usize, _: &mut [u8]) {}
 
-    // ── notification + TCB state `signal` touches (plan §3b) ────────────────
+    // ── notification + TCB state `signal` touches ───────────────────────────
     fn notif_word(&self, n: ObjId) -> u64 {
         self.notifs[&n.0].word
     }
@@ -310,17 +308,17 @@ impl Store for ArrayStore {
         self.timers.get_mut(&t.0).unwrap().next = n;
     }
     // `make_runnable` flips the woken thread to Runnable and touches nothing else —
-    // the faithful counterpart of its §4a contract (the ready-queue linkage is
+    // the faithful counterpart of its contract (the ready-queue linkage is
     // scheduler state below the abstract `tcb_view`; a thread is off every kcore
     // queue once Runnable, so a no-op on the rest models the frame). `unqueue_ready`
-    // stays a no-op (its contract is phase 4e).
+    // stays a no-op — its effects live in scheduler state outside `tcb_view`.
     fn make_runnable(&mut self, t: ObjId) {
         self.tcbs.get_mut(&t.0).unwrap().state = ThreadState::Runnable;
     }
     fn unqueue_ready(&mut self, _: ObjId) {}
     // The real `dsb`/`isb` + TLBI is the kernel shell's job; here the barriers are
     // no-ops and `tlb_invalidate_page` records the `(asid, va)` log so `check_unmap`
-    // can assert the §5e ordering theorem against the real `unmap_in` body.
+    // can assert the TLBI ordering theorem against the real `unmap_in` body.
     fn tlb_invalidate_page(&mut self, asid: u16, va: u64) {
         self.tlb_log.push((asid, va));
     }
@@ -428,14 +426,14 @@ fn count_nonempty_exec(st: &ArrayStore) -> usize {
     (0..st.n()).filter(|&i| !st.slots[i].cap.is_empty()).count()
 }
 
-// ── The refcount census mirror (plan §6a) ───────────────────────────────────
+// ── The refcount census mirror ──────────────────────────────────────────────
 //
 // `refcount_sound_exec` is the executable counterpart of the ghost
 // `cspace::refcount_sound`: it recomputes every object's `obj_census` over the
-// concrete store and checks it equals the stored `refs`. The strengthened
-// `external_body` teardown contracts (`delete`/`destroy_channel`/`destroy_tcb`)
-// now require and preserve `refcount_sound`, so this mirror host-checks that
-// clause (`refcount_sound_exec_has_teeth` proves it is not vacuous).
+// concrete store and checks it equals the stored `refs`. The teardown contracts
+// (`delete`/`destroy_channel`/`destroy_tcb`) require and preserve
+// `refcount_sound`, so this mirror host-checks that clause
+// (`refcount_sound_exec_has_teeth` proves it is not vacuous).
 
 // Exec mirror of the spec `cap_obj` (the object a cap designates, if any).
 fn cap_obj_exec(cap: Cap) -> Option<ObjId> {
@@ -568,7 +566,7 @@ fn chan_wf_exec(st: &ArrayStore, ch: ObjId) -> bool {
             }
         }
     }
-    // ring-cap injectivity (the §3d clause): distinct positions, distinct handles.
+    // ring-cap injectivity: distinct positions, distinct handles.
     let mut seen: BTreeMap<u64, (usize, u32, usize)> = BTreeMap::new();
     for ring in 0..2usize {
         for i in 0..cs.depth {
@@ -626,7 +624,7 @@ fn notif_wf_exec(st: &ArrayStore, n: ObjId) -> bool {
     last == nv.wait_tail
 }
 
-// The exec mirror of `timer_wf` (plan §4e): the armed list from `timer_armed_head`,
+// The exec mirror of `timer_wf`: the armed list from `timer_armed_head`,
 // threaded through `next`, is a finite duplicate-free chain whose every node is a live,
 // armed timer with a bound notification (`timer_chain`), and it captures EVERY armed
 // timer (`timer_complete`). The completeness sweep is what makes `disarm`'s walk sound.
@@ -661,14 +659,14 @@ fn timer_wf_exec(st: &ArrayStore) -> bool {
     true
 }
 
-// ── The cap→object consistency mirror (plan §6d foundation) ──────────────────
+// ── The cap→object consistency mirror ────────────────────────────────────────
 //
 // `caps_consistent_exec` is the executable counterpart of the ghost
 // `cspace::caps_consistent`: every live cap's designated object is well-formed (the
-// per-kind clauses mirror `cap_consistent`). The strengthened `external_body` teardown
-// contracts (`delete`/`destroy_channel`/`destroy_tcb`) now require and preserve it, so
-// this mirror host-checks that assumed clause against the real `ArrayStore` bodies until
-// the body PR proves it (`caps_consistent_exec_has_teeth` proves it is not vacuous).
+// per-kind clauses mirror `cap_consistent`). The teardown contracts
+// (`delete`/`destroy_channel`/`destroy_tcb`) require and preserve it, so this mirror
+// host-checks that clause against the real `ArrayStore` bodies
+// (`caps_consistent_exec_has_teeth` proves it is not vacuous).
 fn cap_consistent_exec(st: &ArrayStore, cap: Cap) -> bool {
     match cap.kind {
         CapKind::Channel(o, end) => {
@@ -685,8 +683,8 @@ fn cap_consistent_exec(st: &ArrayStore, cap: Cap) -> bool {
             st.tcbs.contains_key(&o.0)
                 && (st.tcbs[&o.0].bind_slots[0].0 as usize) < st.n()
                 && (st.tcbs[&o.0].bind_slots[1].0 as usize) < st.n()
-                // The bound cspace is resident-wf (plan §6d-final-thread) — mirrors the CSpace
-                // arm's residents-live check for the TCB's `cspace`, when bound.
+                // The bound cspace is resident-wf — mirrors the CSpace arm's residents-live
+                // check for the TCB's `cspace`, when bound.
                 && match st.tcbs[&o.0].cspace {
                     Some(cs) => {
                         st.cspaces.contains_key(&cs.0)
@@ -694,9 +692,8 @@ fn cap_consistent_exec(st: &ArrayStore, cap: Cap) -> bool {
                     }
                     None => true,
                 }
-                // Waiter-coherence (plan §6d-final-thread): a BlockedNotif thread's wait_notif
-                // names a notif_wf notification (the precondition `destroy_tcb`'s `remove_waiter`
-                // needs).
+                // Waiter-coherence: a BlockedNotif thread's wait_notif names a notif_wf
+                // notification (the precondition `destroy_tcb`'s `remove_waiter` needs).
                 && match (st.tcbs[&o.0].state, st.tcbs[&o.0].wait_notif) {
                     (ThreadState::BlockedNotif, Some(wn)) => notif_wf_exec(st, wn),
                     _ => true,
@@ -717,9 +714,8 @@ fn caps_consistent_exec(st: &ArrayStore) -> bool {
 }
 
 // Exec mirror of `cspace::end_caps_sound`: every live channel's `end_caps[e]` equals the
-// count of `Channel(ch, e)` caps in the arena (the §3.3 per-endpoint census; plan §6d
-// body-removal gate, doc 45 §2). Host-checks that assumed clause against the real
-// `ArrayStore` bodies until the body PR proves it (`end_caps_sound_exec_has_teeth` proves
+// count of `Channel(ch, e)` caps in the arena (the rev0§3.3 per-endpoint census). Host-checks
+// that clause against the real `ArrayStore` bodies (`end_caps_sound_exec_has_teeth` proves
 // it is not vacuous).
 fn end_caps_sound_exec(st: &ArrayStore) -> bool {
     st.chans.iter().all(|(&ch, cs)| {
@@ -842,9 +838,9 @@ fn gen_forest(seed: u64, n: usize, edges: usize) -> ArrayStore {
 
 // ── Contract checks (the op `ensures`, asserted against the real bodies) ────
 
-// The §6d `only_empties` frame, executable: every slot empty before is still empty after
-// (teardown only clears caps, never installs one). Host-checks the assumed `external_body`
-// clause on `delete`/`destroy_channel`/`destroy_tcb`.
+// The `only_empties` frame, executable: every slot empty before is still empty after
+// (teardown only clears caps, never installs one). Host-checks that clause on
+// `delete`/`destroy_channel`/`destroy_tcb`.
 fn assert_only_empties(before: &[CapSlot], st: &ArrayStore, ctx: &str) {
     for i in 0..before.len() {
         if before[i].cap.is_empty() {
@@ -859,20 +855,20 @@ fn check_delete(st: &mut ArrayStore, slot: SlotId) {
     let (n0, c0) = (st.n(), count_nonempty_exec(st));
     let resid0 = st.cspaces.clone();
     let empty0 = st.slots.clone();
-    // The §6a census clause is conditional on the precondition `refcount_sound`,
+    // The census clause is conditional on the precondition `refcount_sound`,
     // so only assert it preserved when the fixture satisfied it (most generated
     // forests carry no object caps, so they are vacuously sound).
     let sound0 = refcount_sound_exec(st);
-    // §6d foundation: the cap→object invariant is likewise a guarded precondition.
+    // The cap→object invariant is likewise a guarded precondition.
     let consistent0 = caps_consistent_exec(st);
-    // §6d body-removal gate: the endpoint-cap census is also a guarded precondition.
+    // The endpoint-cap census is also a guarded precondition.
     let end_caps0 = end_caps_sound_exec(st);
     delete(st, slot);
     assert!(cspace_wf_exec(st), "delete post: cspace_wf preserved");
     assert_eq!(st.n(), n0, "delete post: dom preserved");
     assert!(st.at(slot).cap.is_empty(), "delete post: target slot emptied");
     assert!(count_nonempty_exec(st) < c0, "delete post: count_nonempty strictly drops");
-    // §6c: residency is immutable across delete (the frame destroy_cspace's loop reads).
+    // residency is immutable across delete (the frame destroy_cspace's loop reads).
     assert!(st.cspaces == resid0, "delete post: cspace residency unchanged");
     if sound0 {
         assert!(refcount_sound_exec(st), "delete post: refcount_sound preserved");
@@ -886,7 +882,7 @@ fn check_delete(st: &mut ArrayStore, slot: SlotId) {
     assert_only_empties(&empty0, st, "delete post");
 }
 
-// Assert `unref_aspace`'s §6b contract against the real body. The caller hands an
+// Assert `unref_aspace`'s contract against the real body. The caller hands an
 // **off-by-one** state — `refs[a] == census(a)+1`, sound everywhere else — the state a
 // real teardown reaches by clearing the mapping/hold naming `a` *before* the call
 // (delete's frame-unmap branch; destroy_tcb's aspace release). Asserts the `-1` /
@@ -1015,8 +1011,8 @@ fn cap_kind_eq(a: CapKind, b: CapKind) -> bool {
     }
 }
 
-// Assert `retype_install`'s §3c contract against the real body: the watermark bump,
-// the §2.5 rights-inheritance table (incl. PHYS cleared for a sub-Untyped), the new
+// Assert `retype_install`'s contract against the real body: the watermark bump,
+// the rev0§2.5 rights-inheritance table (incl. PHYS cleared for a sub-Untyped), the new
 // cap as a CDT child of `ut`, `cspace_wf` preserved, and the refcount/end_caps
 // deltas (non-channel: refs/chan untouched — the object's `init` pre-counts `dst`;
 // channel: refs 2, both ends accounted, `dst2` = endpoint B, other channels intact).
@@ -1045,7 +1041,7 @@ fn check_retype_install(
     assert!(cap_kind_eq(st.at(dst).cap.kind, kind), "dst holds the carved kind");
     // SlotId is not Debug (see `fingerprint`), so compare with `assert!(==)`.
     assert!(st.at(dst).parent == Some(ut), "dst is a CDT child of ut");
-    // §2.5 rights-inheritance table.
+    // rev0§2.5 rights-inheritance table.
     let expect_rights = match ty {
         ObjType::Frame => ut_rights,
         ObjType::Thread => Rights::THREAD_ALL.0,
@@ -1082,7 +1078,7 @@ fn check_retype_install(
 }
 
 // A well-formed one-deep channel (ObjId 7) + a notification (ObjId 100), the
-// fixture for the assumed-`signal` frame check. The arena holds the channel's 8
+// fixture for the `signal` frame check. The arena holds the channel's 8
 // ring cap slots (1..=8) plus a non-empty witness at slot 0; ring 0 has one
 // in-window queued cap (slot 1 non-empty), ring 1 is empty — so `chan_wf_exec`
 // holds. With `with_waiter`, the notification has one blocked waiter (TCB 200, a
@@ -1131,10 +1127,10 @@ fn signal_fixture(with_waiter: bool) -> (ArrayStore, ObjId) {
     (st, n)
 }
 
-// Run the real `notification::signal` and assert its assumed §3b frame holds:
-// `slot_view` (the `fingerprint` observable) and `chan_view` (`chans`) are both
-// unchanged. The executable counterpart of the `external_body` contract — the
-// `delete`/`signal`-against-its-body discipline.
+// Run the real `notification::signal` and assert its frame holds: `slot_view`
+// (the `fingerprint` observable) and `chan_view` (`chans`) are both unchanged.
+// The executable counterpart of the contract — the check-against-its-body
+// discipline.
 fn check_signal_frame(st: &mut ArrayStore, n: ObjId, bits: u64) {
     assert!(notif_wf_exec(st, n), "signal pre: notif_wf");
     let fp = fingerprint(st);
@@ -1145,7 +1141,7 @@ fn check_signal_frame(st: &mut ArrayStore, n: ObjId, bits: u64) {
     assert!(notif_wf_exec(st, n), "signal post: notif_wf preserved");
 }
 
-// Run the real `notification::remove_waiter` and assert its proven (§4c) frame: the
+// Run the real `notification::remove_waiter` and assert its proven frame: the
 // `slot_view`/`chan_view` are untouched, `notif_wf` is preserved, and the queued-ref
 // release happens iff `t` was on the queue (the host check of the per-op refcount
 // delta + the splice). The executable counterpart of the proven contract.
@@ -1169,7 +1165,7 @@ fn check_remove_waiter(st: &mut ArrayStore, n: ObjId, t: ObjId, queued: bool) {
 
 // The exec mirror of `cspace::binding_notif_wf`: every bound endpoint event of `ch`
 // names a notification that is resident and `notif_wf`. The plain-Rust re-expression
-// of the §4b named binding invariant (the `notif_wf_exec` discipline).
+// of the named binding invariant (the `notif_wf_exec` discipline).
 fn binding_notif_wf_exec(st: &ArrayStore, ch: ObjId) -> bool {
     let cv = match st.chans.get(&ch.0) {
         Some(c) => c,
@@ -1201,7 +1197,7 @@ fn end_idx_exec(end: ChanEnd) -> usize {
     }
 }
 
-// Run the real `endpoint_cap_dropped` and assert its §3e contract against the
+// Run the real `endpoint_cap_dropped` and assert its contract against the
 // body: `slot_view` unchanged; `end_caps[end]` decremented with every other
 // channel field untouched (the `..old` frame); and `refs_view` unchanged **iff**
 // the count did not reach zero (the conditional frame — a zero drop fires the
@@ -1225,7 +1221,7 @@ fn check_endpoint_cap_dropped(st: &mut ArrayStore, ch: ObjId, end: ChanEnd) {
     }
 }
 
-// Run the real `bind` and assert its §3e contract against the body: `slot_view`
+// Run the real `bind` and assert its contract against the body: `slot_view`
 // unchanged; the `(end, event)` binding installed with every other channel field
 // untouched; and the `refs_view` delta — old notif released, new acquired, in the
 // decrement-then-increment order so a same-notif rebind is net-zero
@@ -1252,11 +1248,11 @@ fn check_bind(st: &mut ArrayStore, ch: ObjId, end: ChanEnd, event: usize, notif:
     assert_eq!(st.refs, expect_refs, "bind: refs delta (old -1, new +1)");
 }
 
-// Run the real `destroy_channel` and assert its assumed §3e contract against the
-// body — the `external_body`-vs-real-body discipline (`delete`/`signal`). The
-// contract's checkable core: `cspace_wf` preserved, the arena unchanged in
-// extent, and **every ring-cap slot emptied**. The host test also checks the part
-// kept out of the formal contract: each bound binding's notif ref released once.
+// Run the real `destroy_channel` and assert its contract against the body — the
+// check-against-its-body discipline. The contract's checkable core: `cspace_wf`
+// preserved, the arena unchanged in extent, and **every ring-cap slot emptied**.
+// The host test also checks the part kept out of the formal contract: each bound
+// binding's notif ref released once.
 fn check_destroy_channel(st: &mut ArrayStore, ch: ObjId) {
     assert!(cspace_wf_exec(st), "destroy_channel pre: cspace_wf");
     assert!(chan_wf_exec(st, ch), "destroy_channel pre: chan_wf");
@@ -1284,7 +1280,7 @@ fn check_destroy_channel(st: &mut ArrayStore, ch: ObjId) {
 
     assert_only_empties(&empty0, st, "destroy_channel post");
     assert!(cspace_wf_exec(st), "destroy_channel post: cspace_wf preserved");
-    // §6d: residency is immutable across teardown (the frame obj_unref's Channel arm reads).
+    // residency is immutable across teardown (the frame obj_unref's Channel arm reads).
     assert!(st.cspaces == resid0, "destroy_channel post: cspace residency unchanged");
     assert_eq!(st.n(), n, "destroy_channel: arena extent unchanged");
     for cs in ring_caps {
@@ -1303,10 +1299,10 @@ fn check_destroy_channel(st: &mut ArrayStore, ch: ObjId) {
     }
 }
 
-// Run the real `delete` on a **notification** cap and assert the §4d conditional
-// frame against the body — the mandatory executable check of `delete`'s new assumed
-// `ensures` (the `external_body`-vs-real-body discipline): the TCB/channel/timer/notif
-// views and every *other* slot's cap are untouched, and the designated `refs[n]` drops
+// Run the real `delete` on a **notification** cap and assert the conditional
+// frame against the body — the executable check of `delete`'s `ensures` (the
+// check-against-its-body discipline): the TCB/channel/timer/notif views and every
+// *other* slot's cap are untouched, and the designated `refs[n]` drops
 // by one (the part the formal contract leaves to the host test). Refs start > 1 so the
 // delete just decrements (no `destroy_notif`), isolating the frame.
 fn check_delete_notif(st: &mut ArrayStore, slot: SlotId, n: ObjId) {
@@ -1328,7 +1324,7 @@ fn check_delete_notif(st: &mut ArrayStore, slot: SlotId, n: ObjId) {
     assert_eq!(st.n(), n0, "delete_notif post: dom preserved");
     assert!(st.at(slot).cap.is_empty(), "delete_notif post: target slot emptied");
     assert!(count_nonempty_exec(st) < c0, "delete_notif post: count_nonempty drops");
-    // the §4d conditional-notification object-view frame
+    // the conditional-notification object-view frame
     assert!(st.tcbs == tcbs0, "delete_notif: tcb_view unchanged");
     assert!(st.chans == chans0, "delete_notif: chan_view unchanged");
     assert!(st.timers == timers0, "delete_notif: timer_view unchanged");
@@ -1347,7 +1343,7 @@ fn check_delete_notif(st: &mut ArrayStore, slot: SlotId, n: ObjId) {
     assert_eq!(st.refs, expect_refs, "delete_notif: refs[n] -= 1");
 }
 
-// Run the real `thread::bind` and assert its §4d contract against the body: `cspace_wf`
+// Run the real `thread::bind` and assert its contract against the body: `cspace_wf`
 // preserved; only `bind_bits[which]` changes in `tcb_view`; the bind slot ends holding
 // the moved cap (or empty on a `None` src) with `src` emptied; and the refs delta —
 // the displaced notification released (`-1`), the moved-in cap net-zero (a move, not a
@@ -1385,7 +1381,7 @@ fn check_thread_bind(st: &mut ArrayStore, t: ObjId, which: usize, notif_src: Opt
     assert_eq!(st.refs, expect_refs, "thread_bind: displaced notif -1, move net-zero");
 }
 
-// `arm`'s ensures against the real body (plan §4e): `timer_wf` preserved; slot/chan/notif/
+// `arm`'s ensures against the real body: `timer_wf` preserved; slot/chan/notif/
 // tcb views framed; `t` ends armed at the list head bound to `notif`; and the net ref
 // delta is `disarm`'s -1 (on re-arm) plus arm's +1 — net-zero on a same-notif re-arm.
 fn check_arm(st: &mut ArrayStore, t: ObjId, notif: ObjId, bits: u64, deadline: u64) {
@@ -1419,7 +1415,7 @@ fn check_arm(st: &mut ArrayStore, t: ObjId, notif: ObjId, bits: u64, deadline: u
     assert!(st.timer_armed_head == Some(t), "arm: pushed onto the list head");
 }
 
-// `disarm`'s ensures against the real body (plan §4e): `timer_wf` preserved; the views
+// `disarm`'s ensures against the real body: `timer_wf` preserved; the views
 // framed; `t` cleared (armed/notif/next) and off the armed list; its notif ref released
 // iff it was armed.
 fn check_disarm(st: &mut ArrayStore, t: ObjId) {
@@ -1463,7 +1459,7 @@ fn check_destroy_timer(st: &mut ArrayStore, t: ObjId) {
     assert!(!st.timers[&t.0].armed, "destroy_timer: disarmed");
 }
 
-// `check_expired`'s ensures against the real body (plan §4e): `timer_wf` preserved, slot/
+// `check_expired`'s ensures against the real body: `timer_wf` preserved, slot/
 // chan views framed, and — stronger than the verified contract — every timer still on the
 // armed list is unexpired (every `deadline <= now` was fired and disarmed by the sweep).
 fn check_check_expired(st: &mut ArrayStore, now: u64) {
@@ -1481,9 +1477,9 @@ fn check_check_expired(st: &mut ArrayStore, now: u64) {
     }
 }
 
-// `destroy_tcb`'s assumed structural contract (plan §4e) against the real body: `t` ends
-// Halted with its queue link and both binding slots cleared, its report UNCHANGED
-// (destruction fires no report, §5.1), and `cspace_wf` preserved.
+// `destroy_tcb`'s structural contract against the real body: `t` ends Halted with its
+// queue link and both binding slots cleared, its report UNCHANGED (destruction fires no
+// report, rev0§5.1), and `cspace_wf` preserved.
 fn check_destroy_tcb(st: &mut ArrayStore, t: ObjId) {
     assert!(cspace_wf_exec(st), "destroy_tcb pre: cspace_wf");
     let n = st.n();
@@ -1501,12 +1497,12 @@ fn check_destroy_tcb(st: &mut ArrayStore, t: ObjId) {
 
     assert_only_empties(&empty0, st, "destroy_tcb post");
     assert!(cspace_wf_exec(st), "destroy_tcb post: cspace_wf preserved");
-    // §6d: residency is immutable across teardown (the frame obj_unref's Thread arm reads).
+    // residency is immutable across teardown (the frame obj_unref's Thread arm reads).
     assert!(st.cspaces == resid0, "destroy_tcb post: cspace residency unchanged");
-    // §6d-final: the channel skeleton is immutable — `destroy_tcb` touches no channel layout
+    // the channel skeleton is immutable — `destroy_tcb` touches no channel layout
     // (it deletes notification bind caps and unrefs cspace/aspace), so `chan_struct_frame`
-    // (its assumed `external_body` ensures, the Thread-arm `obj_unref` reads) holds. The real
-    // body leaves `chans` wholly unchanged, which implies it.
+    // (the ensures the Thread-arm `obj_unref` reads) holds. The real body leaves `chans`
+    // wholly unchanged, which implies it.
     assert!(st.chans == chans0, "destroy_tcb post: channel state (skeleton) unchanged");
     assert_eq!(st.n(), n, "destroy_tcb: arena extent unchanged");
     assert_eq!(st.tcbs[&t.0].state, ThreadState::Halted, "destroy_tcb: t halted");
@@ -1586,7 +1582,7 @@ fn delete_non_leaf_reparents() {
 #[test]
 fn delete_notif_frame() {
     // Deleting a notification cap leaves every object view and every other slot
-    // untouched (the §4d conditional `delete` frame `thread::bind` reads off), and
+    // untouched (the conditional `delete` frame `thread::bind` reads off), and
     // drops only the designated notif's refcount. Refs start at 2 so the delete just
     // decrements (no destroy), isolating the frame.
     let mut st = ArrayStore::new(3);
@@ -1698,7 +1694,7 @@ fn cdt_unlink_middle_sibling() {
 
 #[test]
 fn derive_preserves_thread_priority_ceiling() {
-    // §5.4/§2.3 monotone priority axis (D-B1): with the no-reduction sentinel
+    // rev0§5.4/rev0§2.3 monotone priority axis: with the no-reduction sentinel
     // (`prio_ceiling = 0xFF`), a derived thread cap carries the same — hence `<=` —
     // max-controlled-priority ceiling as its parent. This is the executable witness
     // of `derive`'s ceiling `ensures` on the real body for the default `cap_copy`,
@@ -1719,8 +1715,8 @@ fn derive_preserves_thread_priority_ceiling() {
 
 #[test]
 fn derive_attenuates_thread_priority_ceiling() {
-    // §2.3 supervision grant (D-B1 Option 2, F-70-9): a thread-cap copy can carry a
-    // *strictly lower* ceiling — `min(parent, prio_ceiling)`. Executable witness of
+    // rev0§2.3 supervision grant: a thread-cap copy can carry a *strictly lower*
+    // ceiling — `min(parent, prio_ceiling)`. Executable witness of
     // `derived_kind`'s reducing `Thread` arm + `derive`'s strengthened ceiling
     // `ensures` on the real body.
     let mut st = ArrayStore::new(4);
@@ -1750,8 +1746,8 @@ fn derive_attenuates_thread_priority_ceiling() {
 
 #[test]
 fn set_priority_writes_within_ceiling() {
-    // D-B1 Option 2 (F-70-6): `thread::set_priority` writes the gated priority into
-    // the TCB through the verified Store seam — the post-state priority is exactly
+    // `thread::set_priority` writes the gated priority into the TCB through the
+    // verified Store seam — the post-state priority is exactly
     // the requested value (hence `<= ceiling`). Executable witness on `ArrayStore`.
     let mut st = ArrayStore::new(1);
     st.tcbs.insert(9, tcb_state_default()); // priority starts at 0
@@ -1937,7 +1933,7 @@ fn retype_install_arms() {
 
 #[test]
 fn delete_cspace_in_cspace_cross_object_teardown() {
-    // The §9 cross-object case: deleting the last cap to a cspace tears down its
+    // The cross-object case: deleting the last cap to a cspace tears down its
     // residents, one of which is itself a cspace — recursion across objects.
     // slot 0: root cap CSpace(10); obj 10 residents [1, 2]; slot 1: CSpace(11);
     // obj 11 residents [3]; slots 2,3: Frame. refs: each cspace has its one cap.
@@ -2077,11 +2073,11 @@ fn randomized_sweep() {
     assert!(trials > 500, "sweep should exercise hundreds of trials, ran {trials}");
 }
 
-// ── Channel ghost view (plan §3b) ──────────────────────────────────────────
+// ── Channel ghost view ─────────────────────────────────────────────────────
 
 #[test]
 fn signal_frame() {
-    // The assumed `signal` contract: the real body leaves `slot_view`/`chan_view`
+    // The `signal` contract: the real body leaves `slot_view`/`chan_view`
     // untouched on BOTH paths, while its intended effects (accumulate / deliver)
     // still happen — so the frame is real, not a no-op masquerading as one.
 
@@ -2099,7 +2095,7 @@ fn signal_frame() {
     assert_eq!(st.tcbs[&200].retval, 0b110, "waiter received the whole word");
     assert!(st.notifs[&100].wait_head.is_none(), "waiter dequeued");
     assert_eq!(st.refs[&100], 0, "waiter's queued ref released");
-    // The §4a `make_runnable` contract, host-checked: the woken thread is Runnable.
+    // The `make_runnable` contract, host-checked: the woken thread is Runnable.
     assert_eq!(st.tcbs[&200].state, ThreadState::Runnable, "woken waiter made Runnable");
 }
 
@@ -2108,7 +2104,7 @@ fn chan_wf_exec_has_teeth() {
     // `chan_wf_exec` (and so `check_signal_frame`'s precondition) is only
     // meaningful if it rejects malformed channels. Each shape violates exactly
     // one clause; the windowing coupling (out-of-window slot non-empty) is the
-    // load-bearing §3b clause.
+    // load-bearing clause.
     let ch = ObjId(7);
     assert!(chan_wf_exec(&signal_fixture(false).0, ch), "a well-formed channel must be accepted");
 
@@ -2134,7 +2130,7 @@ fn chan_wf_exec_has_teeth() {
     st.chans.get_mut(&7).unwrap().ring_cap.insert((1, 0, 0), SlotId(999));
     assert!(!chan_wf_exec(&st, ch), "ring cap handle outside the arena must be rejected");
 
-    // Injectivity (§3d): (1,0,1) aliases (1,0,0)'s slot 5. Both ring-1 caps are
+    // Injectivity: (1,0,1) aliases (1,0,0)'s slot 5. Both ring-1 caps are
     // out-of-window and slot 5 is empty, so the windowing clause is satisfied —
     // only the injectivity clause rejects this.
     let mut st = signal_fixture(false).0;
@@ -2148,7 +2144,7 @@ fn chan_wf_exec_has_teeth() {
     assert!(!chan_wf_exec(&signal_fixture(false).0, ObjId(999)), "unknown channel must be rejected");
 }
 
-// ── Notification waiter-queue well-formedness (plan §4a) ────────────────────
+// ── Notification waiter-queue well-formedness ───────────────────────────────
 
 // A notification (ObjId 100) with a two-deep FIFO waiter chain 200 → 201: the
 // `notif_wf` fixture for the teeth test. `notif_wf_exec` must accept it.
@@ -2169,7 +2165,7 @@ fn notif_fixture() -> ArrayStore {
 
 #[test]
 fn notif_wf_exec_has_teeth() {
-    // `notif_wf_exec` (the precondition 4b/4c's `signal`/`wait`/`remove_waiter`
+    // `notif_wf_exec` (the precondition the `signal`/`wait`/`remove_waiter`
     // proofs rest on) is only meaningful if it rejects malformed queues. Each shape
     // violates exactly one clause; a well-formed queue is accepted.
     let n = ObjId(100);
@@ -2262,8 +2258,8 @@ fn refcount_sound_fixture() -> ArrayStore {
     st
 }
 
-// `refcount_sound_exec` (the §6a census mirror the strengthened teardown contracts
-// are host-checked against) is only meaningful if it rejects a census mismatch in
+// `refcount_sound_exec` (the census mirror the teardown contracts are host-checked
+// against) is only meaningful if it rejects a census mismatch in
 // **each** term. The assembled fixture is sound; perturbing any one term — slot,
 // frame-mapping, binding, waiter, armed-timer, thread-hold — must be rejected.
 #[test]
@@ -2380,7 +2376,7 @@ fn end_caps_fixture() -> ArrayStore {
 
 // `end_caps_sound_exec` is non-vacuous: it accepts the matched fixture and rejects both an
 // over-count (`end_caps` claims more caps than the arena holds) and an under-count (the
-// doc 45 §2 stranding shape — a live `(co, end)` cap `end_caps` fails to count).
+// stranding shape — a live `(co, end)` cap `end_caps` fails to count).
 #[test]
 fn end_caps_sound_exec_has_teeth() {
     let base = end_caps_fixture();
@@ -2395,7 +2391,7 @@ fn end_caps_sound_exec_has_teeth() {
     assert!(!end_caps_sound_exec(&st), "teeth: end_caps[B] undercounts the arena (stranding)");
 }
 
-// ── Aspace teardown (plan §6b): `unref_aspace` + delete's frame-unmap branch ──
+// ── Aspace teardown: `unref_aspace` + delete's frame-unmap branch ─────────────
 
 // A `refcount_sound` store whose only references to aspace `a` are `nframes` detached
 // Frame caps mapped into it (`refs[a] == nframes`), so `census(a) == frame_map_refs ==
@@ -2413,8 +2409,8 @@ fn mapped_frame_fixture(a: u64, nframes: usize) -> ArrayStore {
     st
 }
 
-// Deleting a non-last mapped frame drops the aspace ref by one (the §6b
-// frame-mapping census term moves in lockstep with `unref_aspace`'s `-1`); the aspace
+// Deleting a non-last mapped frame drops the aspace ref by one (the frame-mapping
+// census term moves in lockstep with `unref_aspace`'s `-1`); the aspace
 // survives. The generic `check_delete` asserts `cspace_wf`/count-drop/`refcount_sound`;
 // this adds the aspace-specific outcome.
 #[test]
@@ -2456,11 +2452,10 @@ fn unref_aspace_last_ref_destroys() {
     check_unref_aspace(&mut st, ObjId(2));
 }
 
-// ── Cross-object teardown refcount plumbing (plan §6c): obj_unref / unref_cspace /
-//    destroy_cspace, driven on the real ArrayStore bodies. obj_unref/unref_cspace are
-//    now proven (not external_body), so these are differential regression guards (the
-//    erasure + the ArrayStore seam); destroy_cspace's loop and the nested cross-object
-//    recursion through the still-external_body `delete` are exercised at runtime. ──
+// ── Cross-object teardown refcount plumbing: obj_unref / unref_cspace /
+//    destroy_cspace, driven on the real ArrayStore bodies. These are differential
+//    regression guards (the erasure + the ArrayStore seam); destroy_cspace's loop and
+//    the nested cross-object recursion through `delete` are exercised at runtime. ──
 
 // cap_obj as plain Rust (the spec `cap_obj` is not exec-callable from the harness).
 fn cap_obj_of(cap: Cap) -> Option<ObjId> {
@@ -2556,8 +2551,8 @@ fn destroy_cspace_empties_frame_residents() {
 
 // The nested case: cspace 10's sole resident is the *one* cap to cspace 11, which owns
 // its own frame residents. destroy_cspace(10) → delete(the CSpace(11) cap) → obj_unref →
-// destroy_cspace(11) → delete 11's residents — the opaque-`delete`-recurses path,
-// exercised at runtime (delete keeps a real body under its external_body contract).
+// destroy_cspace(11) → delete 11's residents — the `delete`-recurses path,
+// exercised at runtime against the real `delete` body.
 #[test]
 fn destroy_cspace_nested_recurses_through_delete() {
     let mut st = ArrayStore::new(3);
@@ -2625,7 +2620,7 @@ fn obj_unref_frame_is_noop() {
 }
 
 // `wait` on a nonzero word consumes it without blocking; the queue and refs are
-// untouched — the executable check of `wait`'s consume-path contract (§4b).
+// untouched — the executable check of `wait`'s consume-path contract.
 #[test]
 fn wait_consume() {
     let mut st = ArrayStore::new(0);
@@ -2693,7 +2688,7 @@ fn wait_signal_fifo() {
     assert!(notif_wf_exec(&st, n));
 }
 
-// `destroy_notif` on an empty-queue notification is a no-op (§4b).
+// `destroy_notif` on an empty-queue notification is a no-op.
 #[test]
 fn destroy_notif_noop() {
     let mut st = ArrayStore::new(0);
@@ -2708,7 +2703,7 @@ fn destroy_notif_noop() {
 }
 
 // `remove_waiter` splices a waiter out of the FIFO queue at head / middle / tail and
-// is a no-op when `t` is absent — the executable check of the proven §4c splice +
+// is a no-op when `t` is absent — the executable check of the proven splice +
 // the per-op refcount delta. Queue 200 → 201 → 202 on notification 100.
 #[test]
 fn remove_waiter_unlink() {
@@ -2786,7 +2781,7 @@ fn remove_waiter_unlink() {
 
 #[test]
 fn binding_notif_wf_exec_has_teeth() {
-    // `binding_notif_wf_exec` mirrors the §4b named invariant the channel ops carry;
+    // `binding_notif_wf_exec` mirrors the named invariant the channel ops carry;
     // it is only meaningful if it rejects bindings naming bad notifications.
     let ch = ObjId(7);
     assert!(binding_notif_wf_exec(&signal_fixture(false).0, ch),
@@ -2812,10 +2807,9 @@ fn binding_notif_wf_exec_has_teeth() {
     assert!(!binding_notif_wf_exec(&st, ch), "a binding to a malformed notification is rejected");
 }
 
-// ── §C: evidence that doc/results/21 §9's proposed fix for revoke's "revoked cap
-//    survives" is UNSOUND. §9 suggested framing `delete` to "empty only the
-//    deleted slot's CDT subtree." These two tests run the real `delete`/`revoke`
-//    and show that is false under cross-object teardown. (doc/results/23 §C) ──
+// ── Evidence that a "revoked cap survives" rule framed as "`delete` empties only
+//    the deleted slot's CDT subtree" is UNSOUND. These two tests run the real
+//    `delete`/`revoke` and show that framing is false under cross-object teardown. ──
 
 #[test]
 fn delete_empties_slots_outside_the_deleted_subtree() {
@@ -2835,7 +2829,7 @@ fn delete_empties_slots_outside_the_deleted_subtree() {
     // Yet slots 1 and 2 — outside slot 0's subtree — were emptied by the teardown.
     assert!(st.at(SlotId(1)).cap.is_empty(), "resident outside the subtree was emptied");
     assert!(st.at(SlotId(2)).cap.is_empty(), "resident outside the subtree was emptied");
-    // => "delete empties only the deleted subtree" (doc 21 §9) is FALSE.
+    // => "delete empties only the deleted subtree" is FALSE.
 }
 
 #[test]
@@ -2845,7 +2839,7 @@ fn revoke_can_empty_its_own_root_zombie() {
     //   cspace 10 residents = [slot 0];  slot 0 (Frame) ── child ──▶ slot 1 = CSpace(10).
     // revoke(slot 0) descends to the leaf slot 1 and deletes it → last ref to
     // cspace 10 → destroy_cspace(10) → deletes its resident slot 0 → the *root* is
-    // emptied. So "revoked cap survives" does NOT hold unconditionally, and §9's
+    // emptied. So "revoked cap survives" does NOT hold unconditionally, and a
     // subtree-frame cannot rescue it (the teardown crosses objects). cspace_wf is
     // still preserved — that part of revoke's contract holds.
     let mut st = ArrayStore::new(2);
@@ -2866,7 +2860,7 @@ fn revoke_can_empty_its_own_root_zombie() {
     st.refs.insert(10, 1); // slot 1 is the one (and last) cap to cspace 10
     st.cspaces.insert(10, vec![SlotId(0)]); // cspace 10 contains slot 0 as a resident
     assert!(cspace_wf_exec(&st), "the zombie shape is well-formed");
-    // §6e negative witness: `slot 0` IS homed (a resident of cspace 10), so it fails the
+    // negative witness: `slot 0` IS homed (a resident of cspace 10), so it fails the
     // non-zombie precondition `!is_homed` that `check_revoke_root_survives` relies on — exactly
     // the shape `revoke`'s conditional root-survival theorem excludes.
     assert!(is_homed_exec(&st, SlotId(0)), "the zombie root is homed (precondition violated)");
@@ -2880,7 +2874,7 @@ fn revoke_can_empty_its_own_root_zombie() {
     assert!(st.at(SlotId(0)).cap.is_empty(), "revoke emptied its own root (zombie)");
 }
 
-// `is_homed`'s executable mirror (plan §6e): `x` is some object's internal home handle — a
+// `is_homed`'s executable mirror: `x` is some object's internal home handle — a
 // cspace resident, a channel ring cap, or a TCB bind slot. Host-checks `revoke`'s non-zombie
 // precondition both ways (the zombie root is homed; the survivor root is not).
 fn is_homed_exec(st: &ArrayStore, x: SlotId) -> bool {
@@ -2891,7 +2885,7 @@ fn is_homed_exec(st: &ArrayStore, x: SlotId) -> bool {
 
 #[test]
 fn check_revoke_root_survives() {
-    // Non-zombie shape (plan §6e): the revoked root `slot 0` is **un-homed** — no cspace
+    // Non-zombie shape: the revoked root `slot 0` is **un-homed** — no cspace
     // resident, ring cap, or bind slot — so the cross-object teardown the revoke walk fires
     // cannot reach it. slot 0 (Frame) ── child ──▶ slot 1 = CSpace(10) (its last cap); cspace
     // 10's resident is slot 2 (NOT slot 0). revoke(slot 0) deletes slot 1 → destroy_cspace(10)
@@ -2921,7 +2915,7 @@ fn check_revoke_root_survives() {
 
     assert!(cspace_wf_exec(&st), "revoke preserves cspace_wf");
     assert!(st.at(SlotId(0)).first_child.is_none(), "revoke: subtree empty");
-    // The §6e headline: the un-homed revoked root survives the cross-object teardown.
+    // The headline: the un-homed revoked root survives the cross-object teardown.
     assert!(!st.at(SlotId(0)).cap.is_empty(), "revoke: the un-homed root SURVIVES");
     // …and the teardown genuinely crossed objects (cspace 10's resident was emptied).
     assert!(st.at(SlotId(2)).cap.is_empty(), "the cross-object teardown fired (resident emptied)");
@@ -2929,9 +2923,9 @@ fn check_revoke_root_survives() {
 
 #[test]
 fn check_revoke_root_survives_homed_external_ref() {
-    // The **faithful resident-with-external-reference** shape (plan §6e-dual, doc 55 §3): the
-    // revoked root `slot 0` *is* homed — a resident of cspace 10 — so the conservative `!is_homed`
-    // survival theorem does NOT apply (this is exactly the residue case). Yet `slot 0` still
+    // The **faithful resident-with-external-reference** shape: the revoked root `slot 0`
+    // *is* homed — a resident of cspace 10 — so the conservative `!is_homed` survival
+    // theorem does NOT apply (this is exactly the residue case). Yet `slot 0` still
     // survives, because cspace 10 keeps a live reference *outside* `slot 0`'s subtree:
     //   cspace 10 residents = [slot 0];
     //   slot 0 (Frame) ── child ──▶ slot 1 = CSpace(10)   (a cap to 10, IN slot 0's subtree)
@@ -2939,8 +2933,8 @@ fn check_revoke_root_survives_homed_external_ref() {
     //   refs[10] = 2 (slots 1 and 2 both designate cspace 10).
     // revoke(slot 0) deletes the subtree (slot 1) → refs[10] drops 2 → 1, NOT zero, so
     // destroy_cspace(10) never fires and the resident `slot 0` is never emptied. This is the
-    // contrapositive of `revoke`'s new §6e-dual `ensures`: no homing object of `slot 0` was
-    // destroyed (refs[10] stayed ≥ 1, witnessed by the external slot 2), so `slot 0` survived.
+    // contrapositive of `revoke`'s `ensures`: no homing object of `slot 0` was destroyed
+    // (refs[10] stayed ≥ 1, witnessed by the external slot 2), so `slot 0` survived.
     // Contrast `revoke_can_empty_its_own_root_zombie`, where slot 1 is the *only* cap to 10 (no
     // external ref) ⟹ destroy_cspace(10) fires ⟹ the homed root self-empties.
     let mut st = ArrayStore::new(3);
@@ -2973,8 +2967,8 @@ fn check_revoke_root_survives_homed_external_ref() {
 
     assert!(cspace_wf_exec(&st), "revoke preserves cspace_wf");
     assert!(st.at(SlotId(0)).first_child.is_none(), "revoke: subtree empty");
-    // The §6e-dual headline: the *homed* revoked root survives because its homing cspace kept a
-    // live external reference (no homing object died — the contrapositive of the new `ensures`).
+    // The headline: the *homed* revoked root survives because its homing cspace kept a
+    // live external reference (no homing object died — the contrapositive of the `ensures`).
     assert!(!st.at(SlotId(0)).cap.is_empty(), "revoke: the homed root SURVIVES (external ref alive)");
     // The subtree cap to cspace 10 was deleted, but cspace 10 stayed alive via the external ref.
     assert!(st.at(SlotId(1)).cap.is_empty(), "the subtree cap to cspace 10 was revoked");
@@ -2984,20 +2978,19 @@ fn check_revoke_root_survives_homed_external_ref() {
 
 #[test]
 fn revoke_sees_through_queued_descendant() {
-    // **Sees through queues (D-A3 / §3.4 / M1).** A cap *queued in an in-flight message* is an
+    // **Sees through queues (rev0§3.4).** A cap *queued in an in-flight message* is an
     // ordinary CDT descendant — its ring slot carries the parent edge that `slot_move` (the op
     // `send` uses) inherited from the source — so the real `revoke` walk finds and empties it
     // like any other descendant, with no special case. This drives the **real** `revoke` through
-    // a slot that is *both* a CDT child of the target *and* a registered channel ring cap, the
-    // witness doc 69 found absent (the prior nod only *simulated* an emptied ring slot).
+    // a slot that is *both* a CDT child of the target *and* a registered channel ring cap.
     //
     //   slot 0 (Frame, un-homed revoke target) ── child ──▶ slot 1 = ring 0 / idx 0 / cap 0 of
     //   channel 7, in its live window — a genuine cap queued in an in-flight A→B message.
     //
     // The arena holds the channel's 8 ring-cap slots (1..=8); the queued cap lives at slot 1, the
     // other 7 ring slots are empty (a one-cap message; ring 1 idle). revoke(slot 0) descends to
-    // the queued ring cap and deletes it: the ring slot is left empty — the §3.4 "receivers must
-    // tolerate null cap slots" outcome — while the un-homed target survives.
+    // the queued ring cap and deletes it: the ring slot is left empty — the rev0§3.4 "receivers
+    // must tolerate null cap slots" outcome — while the un-homed target survives.
     let mut st = ArrayStore::new(9);
     st.slots[0] = CapSlot {
         cap: frame_cap(0),
@@ -3049,13 +3042,13 @@ fn revoke_sees_through_queued_descendant() {
     assert!(st.at(SlotId(0)).first_child.is_none(), "revoke: subtree empty");
     // The headline: the real revoke walk reached *through the queue* and destroyed the in-flight cap.
     assert!(st.at(SlotId(1)).cap.is_empty(), "revoke sees through the queue: the queued cap is destroyed");
-    // The ring_cap handle still points at the now-empty slot — the §3.4 null-cap-slot a receiver tolerates.
+    // The ring_cap handle still points at the now-empty slot — the rev0§3.4 null-cap-slot a receiver tolerates.
     assert!(st.chan_ring_cap(ObjId(7), 0, 0, 0) == SlotId(1), "the ring handle is unchanged (now null)");
     // The un-homed target survives (no homing object of slot 0 was destroyed).
     assert!(!st.at(SlotId(0)).cap.is_empty(), "the un-homed revoke target survives");
 }
 
-// ── Channel send/recv (plan §3d): the FIFO core, host-differential ──────────
+// ── Channel send/recv: the FIFO core, host-differential ─────────────────────
 //
 // `send`/`recv` carry full Verus contracts (FIFO `Seq` push/pop, move totality,
 // two-pass atomicity, null-slot tolerance) — proven, not assumed. These run the
@@ -3171,7 +3164,7 @@ fn recv_nocapslot_atomic() {
 #[test]
 fn recv_null_slot_tolerance() {
     // A sends a cap; revocation empties the queued ring cap in flight; B's recv
-    // delivers it as absent (mask bit clear) — never a panic (§3.4 null slots).
+    // delivers it as absent (mask bit clear) — never a panic (rev0§3.4 null slots).
     let (mut st, ch, scratch0) = chan_fixture(1, 2);
     let send_cap = SlotId(scratch0 as u64);
     st.slots[scratch0] = detached(frame_cap(7));
@@ -3193,7 +3186,7 @@ fn recv_null_slot_tolerance() {
 
 #[test]
 fn recv_installs_exact_caps_and_mask() {
-    // D-D1 witness for recv's exported receive-half: a multi-cap message (caps in
+    // Witness for recv's exported receive-half: a multi-cap message (caps in
     // message slots 0 and 2) is received; each arriving cap lands — by exact value —
     // in the dest the caller named (ensures B), the returned mask names exactly those
     // slots, 0b101 (ensures A), and every dequeued queue slot is empty (ensures C).
@@ -3339,17 +3332,17 @@ fn destroy_channel_deletes_caps_and_releases_bindings() {
 
     assert_eq!(st.refs[&100], 2, "peer-closed binding's notif released");
     assert_eq!(st.refs[&101], 2, "readable binding's notif released");
-    // §6d-final: the now-proven body **clears** each binding so `binding_refs` falls in
-    // lockstep with the `refs -= 1` (the census's answer to the old "no clean closed form").
+    // the proven body **clears** each binding so `binding_refs` falls in lockstep
+    // with the `refs -= 1`.
     assert!(st.chan(ch).bindings[&(0, EV_PEER_CLOSED)].notif.is_none(), "peer-closed binding cleared");
     assert!(st.chan(ch).bindings[&(1, EV_READABLE)].notif.is_none(), "readable binding cleared");
 }
 
 #[test]
 fn destroy_channel_bound_preserves_refcount_sound() {
-    // A genuinely `refcount_sound` bound channel (§6d-final): one binding to a live
-    // notification whose only reference is that binding, empty rings, no endpoint caps. The
-    // now-proven `destroy_channel` clears the binding and drops `refs[n]` in lockstep, so
+    // A genuinely `refcount_sound` bound channel: one binding to a live notification whose
+    // only reference is that binding, empty rings, no endpoint caps. The proven
+    // `destroy_channel` clears the binding and drops `refs[n]` in lockstep, so
     // `check_destroy_channel`'s `refcount_sound` assertion (skipped when the fixture is
     // unsound) actually fires here — the differential check of the proven census contract.
     let (mut st, ch, _) = chan_fixture(1, 0);
@@ -3366,7 +3359,7 @@ fn destroy_channel_bound_preserves_refcount_sound() {
     assert!(st.chan(ch).bindings[&(0, EV_READABLE)].notif.is_none(), "binding cleared in lockstep");
 }
 
-// ── Timer (plan §4e) ────────────────────────────────────────────────────────
+// ── Timer ───────────────────────────────────────────────────────────────────
 
 // `timer_wf_exec` rejects each malformed armed list (so the timer-op `timer_wf`
 // precondition is non-vacuous): a head pointing at a non-timer, an unarmed node on the
@@ -3505,7 +3498,7 @@ fn destroy_tcb_structural() {
     st.refs.insert(50, 2);
     st.refs.insert(51, 2);
     // `t` is dead (its last designating cap is gone — `obj_unref` calls `destroy_tcb` only at
-    // `refs[t] == 0`), the precondition the §6d-final-thread `dead_tcb_frozen` frame needs.
+    // `refs[t] == 0`), the precondition the `dead_tcb_frozen` frame needs.
     st.refs.insert(200, 0);
     let t = ObjId(200);
     st.tcbs.insert(
@@ -3524,7 +3517,7 @@ fn destroy_tcb_structural() {
     assert_eq!(st.refs[&51], 1, "FAULT bind cap deleted (ref decremented)");
 }
 
-// ── aspace `map_in` (plan §5d): the verified two-pass walk-allocate over arrays ──
+// ── aspace `map_in`: the verified two-pass walk-allocate over arrays ─────────────
 //
 // `map_in` is generic over `Store`; these checks run the **real** body against
 // hand-built `[u64; 512]` / `Vec<[u64; 512]>` page tables, using `ArrayStore`
@@ -3660,11 +3653,11 @@ fn randomized_map_sweep() {
     assert!(trials > 300, "sweep should map hundreds of ranges, ran {trials}");
 }
 
-// ── aspace `unmap_in` (plan §5e): the verified leaf-clear + TLBI effect-log ──
+// ── aspace `unmap_in`: the verified leaf-clear + TLBI effect-log ─────────────
 //
 // `unmap_in` runs the **real** body against the same hand-built arrays, driving
 // the per-page TLBI through `ArrayStore`'s real `tlb_log`. The host checks assert
-// both halves of the §5e contract: the pages are cleared (and others framed,
+// both halves of the contract: the pages are cleared (and others framed,
 // `range_mapped_in`/`lookup`) and the TLBI log equals the expected `(asid, va)`
 // sequence, in ascending order — the executable counterpart of the ordering
 // theorem (`unmap_log`).

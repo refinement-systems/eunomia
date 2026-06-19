@@ -1,10 +1,10 @@
-//! Sessions and connect (plan `doc/plans/2_ipc.md` §4.6; spec §3.5) — the
-//! **admission** layer. A client funds the channel (retypes it from its own
-//! untyped, §3.2) and sends a `ConnectReq` naming a requested **bulk-window
-//! size**; the server grants or refuses at a **single admission point**, bounded
-//! by its per-server window quota. Queue memory is the connector's; window
-//! memory is the server's, capped by the quota it enforces here — so an
-//! anonymous connect cannot drain the server (§3.5, "fund by failure mode").
+//! Sessions and connect (spec rev0§3.5) — the **admission** layer. A client
+//! funds the channel (retypes it from its own untyped, rev0§3.2) and sends a
+//! `ConnectReq` naming a requested **bulk-window size**; the server grants or
+//! refuses at a **single admission point**, bounded by its per-server window
+//! quota. Queue memory is the connector's; window memory is the server's, capped
+//! by the quota it enforces here — so an anonymous connect cannot drain the
+//! server (rev0§3.5, "fund by failure mode").
 //!
 //! The genuinely-new, safety-bearing logic is [`Admission`]: it never grants
 //! past its budget (the quota invariant) and returns the quota on session
@@ -15,18 +15,16 @@
 //! `Endpoint::{send_nb, recv_nb}`; the server runs the decode→admit→reply step
 //! ([`admit_connect`]) inside its reactor loop exactly as it runs any request.
 //!
-//! **Verified by Verus** (plan `doc/plans/3_verus-rewrite_phase7-detail.md` §7b —
-//! the §4.6 session layer of the §4.7 host chokepoints, after the 7a header
-//! pilot). The codecs are total bijections (`[`req_encode`]`/`[`req_decode`]`,
-//! `[`grant_encode`]`/`[`grant_decode`]` as ghost models, the round-trip lemmas
-//! ∀); and [`Admission`] **never over-grants for all admit/release sequences** —
-//! `granted <= budget` ([`Admission::well_formed`]) is a pre/post-condition of
-//! every op, proven once and composed over *any* sequence by Verus's modular
-//! reasoning, so `remaining()`'s `budget - granted` is non-underflowing (vs the
-//! bounded 3-step Kani harness this supersedes). As in `header.rs` the exec
-//! codecs use explicit mask/shift arithmetic (not `to_le_bytes`/`copy_from_slice`,
-//! which Verus does not spec), so `vstd` stays ghost-only and erases into the
-//! alloc-free user binaries; the bytes produced are unchanged.
+//! **Verified by Verus.** The codecs are total bijections (`[`req_encode`]`/
+//! `[`req_decode`]`, `[`grant_encode`]`/`[`grant_decode`]` as ghost models, the
+//! round-trip lemmas ∀); and [`Admission`] **never over-grants for all
+//! admit/release sequences** — `granted <= budget` ([`Admission::well_formed`])
+//! is a pre/post-condition of every op, proven once and composed over *any*
+//! sequence by Verus's modular reasoning, so `remaining()`'s `budget - granted`
+//! is non-underflowing. As in `header.rs` the exec codecs use explicit
+//! mask/shift arithmetic (not `to_le_bytes`/`copy_from_slice`, which Verus does
+//! not spec), so `vstd` stays ghost-only and erases into the alloc-free user
+//! binaries; the bytes produced are unchanged.
 
 use vstd::prelude::*;
 
@@ -44,22 +42,22 @@ pub const REQ_LEN: usize = 5; // tag + u32
 pub const GRANT_LEN: usize = 9; // tag + u32 window + u32 size
 pub const REFUSED_LEN: usize = 1; // tag
 
-/// A granted bulk window (§3.1, §4.6): which window and how many bytes. The MVP
+/// A granted bulk window (rev0§3.1): which window and how many bytes. The MVP
 /// grants a single window, so `window` is always 0; it exists so the descriptor
-/// ABI is grow-only when multi-window lands (§9, out of scope).
+/// ABI is grow-only when multi-window lands (out of scope).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowGrant {
     pub window: u32,
     pub size: u32,
 }
 
-/// A connect request (§4.6): the client's requested bulk-window size in bytes.
+/// A connect request: the client's requested bulk-window size in bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConnectReq {
     pub requested_window: u32,
 }
 
-/// The server's reply to a connect (§4.6): a granted window, or a refusal when
+/// The server's reply to a connect: a granted window, or a refusal when
 /// the request does not fit the remaining quota (the single admission point).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrantReply {
@@ -69,12 +67,12 @@ pub enum GrantReply {
 
 /// Why a connect failed. Today the only failure is the server refusing under its
 /// window quota (`admit`'s sole error); the client-side connect *mechanism* (the
-/// endpoint-cap handshake, §3.5) is deferred, so its richer errors — a
+/// endpoint-cap handshake, rev0§3.5) is deferred, so its richer errors — a
 /// peer-closed session channel, a reply that does not decode, a transport error
 /// — are not yet constructed. They return when that mechanism lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectErr {
-    /// The server refused under its quota (§3.5).
+    /// The server refused under its quota (rev0§3.5).
     Refused,
 }
 
@@ -238,7 +236,7 @@ impl GrantReply {
     }
 }
 
-/// The per-server bulk-window quota (§3.5, §4.6): the **single admission point**.
+/// The per-server bulk-window quota (rev0§3.5): the **single admission point**.
 /// Tracks a fixed `budget` of window bytes and how much is currently `granted`;
 /// `admit` hands out a window iff it fits the remainder (it **never** over-grants
 /// — the quota invariant a malicious flood of connects cannot break), and
@@ -286,7 +284,7 @@ impl Admission {
         self.budget - self.granted
     }
 
-    /// The single admission decision (§3.5): grant `requested` bytes iff they fit
+    /// The single admission decision (rev0§3.5): grant `requested` bytes iff they fit
     /// the remaining quota, accounting for them; otherwise refuse and leave the
     /// quota untouched. **Never grants past budget** — [`Admission::well_formed`]
     /// holds after every call, for *any* `requested`, so a flood of connects can
@@ -330,7 +328,7 @@ impl Admission {
     }
 }
 
-/// The server's connect step (§4.6), the admission point as a pure function:
+/// The server's connect step, the admission point as a pure function:
 /// decode the request bytes, decide under `adm`, and return the reply to send
 /// back. A request that does not decode is refused (a server cannot grant a
 /// window it cannot size). The caller does the transport round-trip — `recv_nb`

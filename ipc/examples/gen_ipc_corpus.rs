@@ -45,7 +45,7 @@ fn main() {
     // A well-formed header declaring a zero-length body (no variant byte → the
     // postcard decode fails cleanly, not a panic).
     write_seed("wire_decode", "header_only", &[0xDE, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
-    // A valid message with one trailing byte (the §3.7 rejection path).
+    // A valid message with one trailing byte (the rev0§3.7 rejection path).
     let mut trailing = encode_demo(&DemoMsg::Ping);
     trailing.push(0);
     write_seed("wire_decode", "trailing", &trailing);

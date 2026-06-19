@@ -1,4 +1,4 @@
-//! Notification objects (spec §3.6): a machine word of signal bits plus a
+//! Notification objects (spec rev0§3.6): a machine word of signal bits plus a
 //! FIFO waiter queue. Signalers OR bits in; a waiter receives the whole
 //! accumulated word, which clears. Event delivery never allocates — the
 //! waiter queue is intrusive through the TCBs.
@@ -12,8 +12,8 @@ use crate::store::Store;
 use crate::thread::ThreadState;
 use vstd::prelude::*;
 // `StoreSpec` (the `external_trait_extension`) must be in scope to resolve
-// `store.notif_view()`/`tcb_view()`/… in the §4b contracts; it erases in a
-// normal build, so it is otherwise unused here (the doc/results/26 §2.3 idiom).
+// `store.notif_view()`/`tcb_view()`/… in the contracts; it erases in a
+// normal build, so it is otherwise unused here.
 #[allow(unused_imports)]
 use crate::cspace::StoreSpec;
 
@@ -52,11 +52,10 @@ pub open spec fn signal_wakes(nv: Map<ObjId, NotifView>, n: ObjId, bits: u64) ->
 /// OR bits into the word and deliver to the first waiter, if any.
 /// Safe from any kernel context (syscall, timer IRQ, channel binding).
 ///
-/// Verified (plan §4b, doc/results/32): graduates from the phase-3 assumed
-/// `external_body` frame (doc 27 §1) to a proven body against the `waiter_seq` FIFO
-/// model. The `slot_view`/`chan_view`-unchanged frame is *retained* (so the phase-3
-/// callers `fire`/`send`/`recv`/`endpoint_cap_dropped` keep using `signal`'s result
-/// unchanged — the strengthening is additive on the `ensures` side); the new
+/// Proven body against the `waiter_seq` FIFO
+/// model. The `slot_view`/`chan_view`-unchanged frame lets the
+/// callers `fire`/`send`/`recv`/`endpoint_cap_dropped` use `signal`'s result
+/// unchanged; the
 /// preconditions (the notification is live + `notif_wf`, and a queued waiter implies
 /// `refs > 0`) are discharged by the channel ops via `cspace::binding_notif_wf`. On
 /// the **wake** path the head waiter is dequeued (`waiter_seq` loses its head —
@@ -74,15 +73,15 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
         final(store).slot_view() == old(store).slot_view(),
         final(store).chan_view() == old(store).chan_view(),
         // `signal` touches no cspace residency (every setter frames it) — the frame
-        // `lemma_caps_consistent_frame` (via `fire`) needs (plan §6d body PR).
+        // `lemma_caps_consistent_frame` (via `fire`) needs.
         final(store).cspace_view() == old(store).cspace_view(),
-        // The refcount census moves in lockstep (plan §6d body PR): a wake drops `refs[n]`
+        // The refcount census moves in lockstep: a wake drops `refs[n]`
         // and `waiter_seq(n)` together, so `refs[x] - census(x)` is frozen at every `x`.
         // Unconditional and `requires`-free, so the kernel-shell callers
         // `report_terminal`/`check_expired` and the construction-op callers of `fire`
         // (`send`/`recv`) are undisturbed; `delete` consumes it across the off-by-one window.
         cspace::census_delta_frozen(old(store), final(store)),
-        // `refcount_sound` as a *system* invariant (plan §6f): a sound census in, a sound
+        // `refcount_sound` as a *system* invariant: a sound census in, a sound
         // census out. Conditional, so census-agnostic callers (`check_expired`'s
         // `signal`-in-a-loop, `report_terminal`) stay undisturbed; it is the frozen delta
         // (above) bridged by `lemma_refcount_sound_from_frozen`.
@@ -95,19 +94,19 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
             ==> #[trigger] cspace::census_off_by_one(final(store), z),
         // Refs-domain completeness survives the wake (the census only drops, the refs domain
         // is unchanged) — `delete`'s Channel branch carries it across the fire to `obj_unref`.
-        // Conditional + obj_census-triggered, so `check_expired` is undisturbed (doc 50).
+        // Conditional + obj_census-triggered, so `check_expired` is undisturbed.
         cspace::census_dom_complete(old(store)) ==> cspace::census_dom_complete(final(store)),
-        // Dead, queue-detached TCBs are frozen across the wake (plan §6d-final-thread-body): a
+        // Dead, queue-detached TCBs are frozen across the wake: a
         // signal touches only the woken head (`wait_notif == Some(n)`) and drops `refs[n]` (which
         // a waiter held, so `refs[n] > 0`), so a `wait_notif is None`, `refs == 0` object `x` is
         // not the head (`x != n`) and is untouched. `fire`/`endpoint_cap_dropped`/`delete` carry
         // it up the teardown chain.
         cspace::dead_tcb_frozen(old(store), final(store)),
-        // §6e-dual "dead stays dead" across the wake: the accumulate path frames `refs` whole; the
+        // "Dead stays dead" across the wake: the accumulate path frames `refs` whole; the
         // wake path drops only `refs[n]` (which a waiter held, so `refs[n] > 0`), keeping the
         // domain — so a dead object stays dead. `fire`/`endpoint_cap_dropped`/`delete` carry it.
         cspace::refs_death_persist(old(store), final(store)),
-        // The timer views are untouched (plan §4d): every setter in the body frames
+        // The timer views are untouched: every setter in the body frames
         // them and `make_runnable` frames them, so `report_terminal` (which fires
         // `signal` and otherwise touches no timer) can frame timers across the wake.
         final(store).timer_view() == old(store).timer_view(),
@@ -139,12 +138,12 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
             &&& final(store).tcb_view()[t].retval == (old(store).notif_view()[n].word | bits)
             // The woken thread's binding slots are untouched — `signal` moves only its
             // queue/wait/retval fields. The frame `caps_consistent` preservation needs (a
-            // Thread cap for `t` reads its `bind_slots`; plan §6d body PR).
+            // Thread cap for `t` reads its `bind_slots`).
             &&& final(store).tcb_view()[t].bind_slots == old(store).tcb_view()[t].bind_slots
             // …and its bound cspace/aspace are untouched too — the strengthened
             // `cap_consistent(Thread)` clause reads `tcb[t].cspace` (its `cspace_resident_wf`),
             // so `lemma_caps_consistent_frame` needs the cspace frame across the wake; the
-            // aspace half rides the same proof (`thread_hold_refs`). Plan §6d-final-thread.
+            // aspace half rides the same proof (`thread_hold_refs`).
             &&& final(store).tcb_view()[t].cspace == old(store).tcb_view()[t].cspace
             &&& final(store).tcb_view()[t].aspace == old(store).tcb_view()[t].aspace
             &&& final(store).notif_view()[n].word == 0
@@ -187,7 +186,7 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
                 }
             }
             assert(cspace::census_delta_frozen(old(store), store));
-            // refcount_sound (conditional, plan §6f): the frozen delta bridges it.
+            // refcount_sound (conditional): the frozen delta bridges it.
             if cspace::refcount_sound(old(store)) {
                 cspace::lemma_refcount_sound_from_frozen(old(store), store);
             }
@@ -208,7 +207,7 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
             assert(store.refs_view().dom() =~= old(store).refs_view().dom());
             assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
             cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, n);
-            // §6e-dual: the accumulate path frames `refs` whole, so death is preserved.
+            // "Dead stays dead": the accumulate path frames `refs` whole, so death is preserved.
             cspace::lemma_refs_death_persist_from_refs_eq(old(store), store);
         }
         return;
@@ -294,7 +293,7 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
             }
         }
         assert(cspace::census_delta_frozen(old(store), store));
-        // refcount_sound (conditional, plan §6f): the frozen delta bridges it.
+        // refcount_sound (conditional): the frozen delta bridges it.
         if cspace::refcount_sound(old(store)) {
             cspace::lemma_refcount_sound_from_frozen(old(store), store);
         }
@@ -326,14 +325,14 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
         assert(store.refs_view().dom() =~= old(store).refs_view().dom());
         assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
         cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, n);
-        // §6e-dual: the wake drops only `refs[n]` (positive), keeping the domain — death preserved.
+        // "Dead stays dead": the wake drops only `refs[n]` (positive), keeping the domain — death preserved.
         cspace::lemma_refs_death_persist_dec_ref(old(store), store, n);
     }
 }
 
 /// Wait: consume the word if nonzero, else block the current thread.
 ///
-/// Verified (plan §4b): on a nonzero word the thread returns it and the word clears
+/// On a nonzero word the thread returns it and the word clears
 /// (the queue/refs are untouched); otherwise `cur` is appended at the tail
 /// (`waiter_seq` grows by `Seq::push` — the FIFO/block-order half of the wake-order
 /// theorem), is marked `BlockedNotif`/`wait_notif = Some(n)`, and acquires one ref on
@@ -342,7 +341,7 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
 /// keeps `n`'s push duplicate-free *and* lets the census frame conclude `cur` is off every
 /// other notification's chain, so `waiter_refs(o)` is unperturbed for `o != n`.
 ///
-/// **Refcount census (D-E1).** Exports `census_delta_frozen` + conditional `refcount_sound`,
+/// **Refcount census.** Exports `census_delta_frozen` + conditional `refcount_sound`,
 /// matching `signal`/`remove_waiter`: on the block path the `refs[n] += 1` acquire is matched
 /// by `waiter_refs(n)` gaining `cur` (`waiter_seq` push), the reverse of `signal`'s wake; the
 /// consume path moves no census term. This closes the soundness chain so a verified caller
@@ -361,7 +360,7 @@ pub fn wait<S: Store>(store: &mut S, n: ObjId, cur: ObjId) -> (res: Option<u64>)
         final(store).notif_view().dom() == old(store).notif_view().dom(),
         final(store).tcb_view().dom() == old(store).tcb_view().dom(),
         cspace::notif_wf(final(store).notif_view(), final(store).tcb_view(), n),
-        // The refcount census moves in lockstep (D-E1): block acquires `refs[n]` and a waiter
+        // The refcount census moves in lockstep: block acquires `refs[n]` and a waiter
         // slot together; consume touches neither.
         cspace::census_delta_frozen(old(store), final(store)),
         cspace::refcount_sound(old(store)) ==> cspace::refcount_sound(final(store)),
@@ -399,7 +398,7 @@ pub fn wait<S: Store>(store: &mut S, n: ObjId, cur: ObjId) -> (res: Option<u64>)
             cspace::lemma_waiter_chain_unique(
                 store.notif_view(), store.tcb_view(), n,
                 cspace::waiter_seq(store.notif_view(), store.tcb_view(), n), ws0);
-            // D-E1 census: only `nv[n].word` moved (not a census term), `refs`/`tcb` untouched
+            // Census: only `nv[n].word` moved (not a census term), `refs`/`tcb` untouched
             // and the slot/chan/timer views framed, so `waiter_refs(o)` rides through for every
             // `o` (`lemma_waiter_refs_frame_nv`). Refs and census both unchanged ⇒ frozen.
             assert(store.refs_view() == old(store).refs_view());
@@ -478,7 +477,7 @@ pub fn wait<S: Store>(store: &mut S, n: ObjId, cur: ObjId) -> (res: Option<u64>)
         cspace::lemma_waiter_chain_unique(nvf, tvf, n,
             cspace::waiter_seq(nvf, tvf, n), pws);
 
-        // D-E1 census. The block path acquires `refs[n] += 1`, matched by `waiter_refs(n)`
+        // Census. The block path acquires `refs[n] += 1`, matched by `waiter_refs(n)`
         // gaining `cur` (`waiter_seq(n) == ws0.push(cur)`, one longer) — the reverse of
         // `signal`'s wake. Every other census term is framed: `thread_hold` via
         // `lemma_thread_hold_frame` (only `cur`/the tail's queue links moved, never
@@ -535,12 +534,11 @@ pub fn wait<S: Store>(store: &mut S, n: ObjId, cur: ObjId) -> (res: Option<u64>)
 
 /// pre:  refs == 0 — no caps, no bindings, no armed timers, no waiters.
 ///
-/// Verified (plan §4b): a no-op. The no-waiters condition is supplied directly
+/// A no-op. The no-waiters condition is supplied directly
 /// (`wait_head is None`) — exactly what the production `debug_assert` checks. The
-/// "`refs == 0` ⇒ no waiters" justification (a waiter holds a ref) is the refcount
-/// census deferred to the post-phase-5 teardown phase (plan §1.4), so it is *not*
-/// derivable from the structural `notif_wf` here; requiring the empty queue is the
-/// honest scoped contract (doc/results/32).
+/// "`refs == 0` ⇒ no waiters" justification (a waiter holds a ref) lives in the
+/// refcount census rather than the structural `notif_wf` here, so requiring the
+/// empty queue is the honest scoped contract.
 pub fn destroy_notif<S: Store>(store: &mut S, n: ObjId)
     requires
         old(store).notif_view().dom().contains(n),
@@ -558,7 +556,7 @@ pub fn destroy_notif<S: Store>(store: &mut S, n: ObjId)
         final(store).timer_head_view() == old(store).timer_head_view(),
         final(store).cspace_view() == old(store).cspace_view(),
         // A model no-op (the kernel reclaims the object's memory; the abstract views are
-        // untouched), so the cap→object invariant rides through trivially (plan §6d).
+        // untouched), so the cap→object invariant rides through trivially.
         cspace::caps_consistent(final(store)),
         cspace::end_caps_sound(final(store)),
         cspace::census_dom_complete(final(store)),
@@ -569,12 +567,12 @@ pub fn destroy_notif<S: Store>(store: &mut S, n: ObjId)
 
 /// Unlink waiter `t` from notification `n`'s queue (the thread-teardown path).
 ///
-/// Verified (plan §4c, doc/results/33): the mid-queue unlink — the `cdt_unlink` analog
-/// (doc 25) but singly-linked with no re-parenting, so the removal is a plain `Seq`
+/// The mid-queue unlink — the `cdt_unlink` analog
+/// but singly-linked with no re-parenting, so the removal is a plain `Seq`
 /// splice. If `t` is queued on `n` it is spliced out (`waiter_seq(n)` loses exactly the
 /// `t` element, the FIFO order of the rest preserved — `Seq::remove`), its `qnext`/
-/// `wait_notif` are cleared, and the queued ref is released (`refs[n] -= 1`, the second
-/// installment of `refcount_sound`'s waiter term after `signal`'s pop-release); if `t`
+/// `wait_notif` are cleared, and the queued ref is released (`refs[n] -= 1`, the
+/// waiter term of `refcount_sound`'s census alongside `signal`'s pop-release); if `t`
 /// is absent the store is unchanged. `notif_wf(n)` is preserved either way. The walk is
 /// read-only — the only writes are on the found path, which returns. The `refs > 0`
 /// precondition (a non-empty queue ⇒ live) discharges the release `-1`, exactly as in
@@ -592,32 +590,31 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
         final(store).timer_head_view() == old(store).timer_head_view(),
         final(store).notif_view().dom() == old(store).notif_view().dom(),
         final(store).tcb_view().dom() == old(store).tcb_view().dom(),
-        // Every TCB's immutable `bind_slots` survive the splice (plan §6e): a signal-shaped edit
+        // Every TCB's immutable `bind_slots` survive the splice: a signal-shaped edit
         // writes only queue/wait links, never `bind_slots`. `destroy_tcb` reads it off for the
         // `home_views_frozen` stability across its BlockedNotif detach.
         forall|k: ObjId| #[trigger] final(store).tcb_view()[k].bind_slots
             == old(store).tcb_view()[k].bind_slots,
         cspace::notif_wf(final(store).notif_view(), final(store).tcb_view(), n),
-        // The refcount census moves in lockstep (plan §6d body PR, doc 45 §3): the splice
+        // The refcount census moves in lockstep: the splice
         // drops `refs[n]` and `waiter_seq(n)` (losing `t`) together; absent, nothing moves.
         // Unconditional — `destroy_tcb` turns it into `refcount_sound` via
         // `lemma_refcount_sound_from_frozen` (it calls `remove_waiter` where the census is sound).
         cspace::census_delta_frozen(old(store), final(store)),
-        // `refcount_sound` as a system invariant (plan §6f): the frozen delta bridges a sound
-        // census in to a sound census out. Conditional + `requires`-free, so the phase-4 callers
+        // `refcount_sound` as a system invariant: the frozen delta bridges a sound
+        // census in to a sound census out. Conditional + `requires`-free, so the teardown callers
         // keep no obligation; `destroy_tcb` already consumes the frozen delta directly.
         cspace::refcount_sound(old(store)) ==> cspace::refcount_sound(final(store)),
         // Residency is untouched (the splice writes notif head/tail + tcb queue links + `refs`,
-        // never `cspace_view`); `destroy_tcb` carries it to its own `cspace_view` ensures (plan
-        // §6d-final-thread).
+        // never `cspace_view`); `destroy_tcb` carries it to its own `cspace_view` ensures.
         final(store).cspace_view() == old(store).cspace_view(),
         // The teardown system invariants survive the splice (the `signal`→`fire` precedent):
         // it is a signal-shaped edit (only `n`'s notif view + `n`'s waiter TCBs move, every
         // TCB's `bind_slots`/`cspace` fixed), so `lemma_caps_consistent_frame` applies; the
-        // §3.3 endpoint census reads only the framed chan/slot views; and the census only
-        // drops while the refs domain is fixed. Conditional + `requires`-free, so the phase-4
+        // rev0§3.3 endpoint census reads only the framed chan/slot views; and the census only
+        // drops while the refs domain is fixed. Conditional + `requires`-free, so the teardown
         // callers keep no obligation; `destroy_tcb` (the only kcore caller) consumes them for
-        // its bind-slot `delete`s (plan §6d-final-thread).
+        // its bind-slot `delete`s.
         cspace::caps_consistent(old(store)) ==> cspace::caps_consistent(final(store)),
         cspace::end_caps_sound(old(store)) ==> cspace::end_caps_sound(final(store)),
         cspace::census_dom_complete(old(store)) ==> cspace::census_dom_complete(final(store)),
@@ -643,7 +640,7 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
                     // this off across the BlockedNotif detach: it needs `t`'s `cspace`/`aspace`
                     // (to drive `unref_cspace`/`unref_aspace` with their resident-wf precondition)
                     // and `report`/`bind_slots`/`state` (its own structural postconditions) to
-                    // have come through the detach unchanged (plan §6d-final-thread-body-2).
+                    // have come through the detach unchanged.
                     &&& final(store).tcb_view()[t].cspace == old(store).tcb_view()[t].cspace
                     &&& final(store).tcb_view()[t].aspace == old(store).tcb_view()[t].aspace
                     &&& final(store).tcb_view()[t].state == old(store).tcb_view()[t].state
@@ -653,13 +650,13 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
                     &&& final(store).tcb_view()[t].bind_slots == old(store).tcb_view()[t].bind_slots
                 }
         }),
-        // Dead, queue-detached TCBs are frozen across the splice (plan §6d-final-thread-body):
+        // Dead, queue-detached TCBs are frozen across the splice:
         // a signal-shaped edit — only `t` and its chain predecessor (both `wait_notif == Some(n)`)
         // move, and `refs` drops only at `n` (which had a waiter, so `refs[n] > 0`). So a
         // `wait_notif is None`, `refs == 0` object is untouched. `destroy_tcb` reads it off for
         // its own promise about the *other* dead objects (its subject is excepted separately).
         cspace::dead_tcb_frozen(old(store), final(store)),
-        // §6e-dual "dead stays dead": absent ⟹ `refs` unchanged; present ⟹ only `refs[n]` (positive)
+        // "Dead stays dead": absent ⟹ `refs` unchanged; present ⟹ only `refs[n]` (positive)
         // drops, keeping the domain — so a dead object stays dead. `destroy_tcb` composes it.
         cspace::refs_death_persist(old(store), final(store)),
 {
@@ -682,7 +679,7 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
             store.tcb_view() == tv0,
             store.timer_view() == old(store).timer_view(),
             store.timer_head_view() == old(store).timer_head_view(),
-            // residency too (plan §6d-final-thread): the walk never touches `cspace_view`, so
+            // residency too: the walk never touches `cspace_view`, so
             // the absent-path post-state can frame it, and `destroy_tcb` carries it forward.
             store.cspace_view() == old(store).cspace_view(),
             // pin the pre-loop ghosts to the function entry state — a loop body only
@@ -812,14 +809,14 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
                         cspace::lemma_waiter_refs_frame(nv0, tv0, nvf, tvf, n, x);
                     }
                 }
-                // refcount_sound (conditional, plan §6f): the frozen delta just established
+                // refcount_sound (conditional): the frozen delta just established
                 // bridges it.
                 assert(cspace::census_delta_frozen(old(store), store));
                 if cspace::refcount_sound(old(store)) {
                     cspace::lemma_refcount_sound_from_frozen(old(store), store);
                 }
-                // ── Teardown system invariants survive the splice (plan §6d-final-thread,
-                //    the `signal`→`fire` precedent). The splice is signal-shaped: only `n`'s
+                // ── Teardown system invariants survive the splice
+                //    (the `signal`→`fire` precedent). The splice is signal-shaped: only `n`'s
                 //    notif head/tail moved, only `n`'s waiters (`t` + its predecessor) moved,
                 //    and every TCB's `bind_slots`/`cspace` is fixed (the setters struct-update). ──
                 assert(store.slot_view() == old(store).slot_view());
@@ -833,16 +830,16 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
                 assert forall|kk: ObjId| #[trigger] tvf[kk].bind_slots == tv0[kk].bind_slots by {}
                 assert forall|kk: ObjId| #[trigger] tvf[kk].cspace == tv0[kk].cspace by {}
                 // `t`'s remaining non-queue fields are untouched (the splice writes only `t`'s
-                // `qnext`/`wait_notif`), so the field-frame ensures hold (plan §6d-final-thread-body-2).
+                // `qnext`/`wait_notif`), so the field-frame ensures hold.
                 // Single-key asserts (not domain `forall`s) keep the hot loop body under rlimit
-                // (the doc-25 §2 decomposition discipline).
+                // (the decomposition discipline).
                 assert(tvf[t].aspace == tv0[t].aspace);
                 assert(tvf[t].state == tv0[t].state);
                 assert(tvf[t].report == tv0[t].report);
                 assert(tvf[t].retval == tv0[t].retval);
                 assert(tvf[t].bind_bits == tv0[t].bind_bits);
                 // A changed TCB still blocked in the post-state is blocked on `n` (the
-                // waiter-coherence frame, plan §6d-final-thread): the only changed TCBs are `t`
+                // waiter-coherence frame): the only changed TCBs are `t`
                 // (its `wait_notif` cleared to `None`, so not `Some(wn)`) and `t`'s predecessor
                 // (only its `qnext` moved — still `wait_notif == Some(n)`, so `wn == n`).
                 assert forall|kk: ObjId| #[trigger] tvf[kk] != tv0[kk]
@@ -899,7 +896,7 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
                 assert(store.refs_view().dom() =~= old(store).refs_view().dom());
                 assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
                 cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, n);
-                // §6e-dual: the splice drops only `refs[n]` (positive), keeping the domain.
+                // "Dead stays dead": the splice drops only `refs[n]` (positive), keeping the domain.
                 cspace::lemma_refs_death_persist_dec_ref(old(store), store, n);
             }
             return;
@@ -923,13 +920,12 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
         assert(store.cspace_view() == old(store).cspace_view());
         assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o)
             == cspace::obj_census(old(store), o) by {}
-        // refcount_sound (conditional, plan §6f): the store is unchanged, so it carries.
+        // refcount_sound (conditional): the store is unchanged, so it carries.
         assert(cspace::census_delta_frozen(old(store), store));
         if cspace::refcount_sound(old(store)) {
             cspace::lemma_refcount_sound_from_frozen(old(store), store);
         }
-        // The store is unchanged, so the teardown system invariants carry trivially (plan
-        // §6d-final-thread).
+        // The store is unchanged, so the teardown system invariants carry trivially.
         assert(cspace::caps_consistent(old(store)) ==> cspace::caps_consistent(store));
         assert(cspace::end_caps_sound(old(store)) ==> cspace::end_caps_sound(store));
         assert(cspace::census_dom_complete(old(store)) ==> cspace::census_dom_complete(store));
@@ -939,7 +935,7 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
         assert(store.refs_view().dom() =~= old(store).refs_view().dom());
         assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
         cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, n);
-        // §6e-dual (absent): the store is unchanged, so death is trivially preserved.
+        // "Dead stays dead" (absent): the store is unchanged, so death is trivially preserved.
         cspace::lemma_refs_death_persist_from_refs_eq(old(store), store);
     }
 }

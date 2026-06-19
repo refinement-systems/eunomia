@@ -1,4 +1,4 @@
-//! Timer objects (spec §1, §3.6): a cap to program a deadline that signals
+//! Timer objects (spec rev0§1, rev0§3.6): a cap to program a deadline that signals
 //! a bound notification. kcore owns the armed-timer *list* — insert, unlink,
 //! and the expiry sweep — operating on the list head through the [`Store`]
 //! seam; the head itself (`ARMED_HEAD`) is a kernel static, and the
@@ -15,8 +15,8 @@ use crate::notification;
 use crate::store::Store;
 use vstd::prelude::*;
 // `StoreSpec` (the `external_trait_extension`) must be in scope to resolve
-// `store.timer_view()`/`timer_head_view()`/… in the §4e contracts; it erases in a
-// normal build, so it is otherwise unused here (the doc/results/26 §2.3 idiom).
+// `store.timer_view()`/`timer_head_view()`/… in the verified contracts; it erases in a
+// normal build, so it is otherwise unused here.
 #[allow(unused_imports)]
 use crate::cspace::StoreSpec;
 
@@ -48,9 +48,9 @@ impl TimerObj {
 verus! {
 
 /// Disarm a timer: unlink it from the armed list and release the ref it held on
-/// its bound notification (§3.6).
+/// its bound notification (rev0§3.6).
 ///
-/// Verified (plan §4e, doc/results/35): the `remove_waiter` analog (doc 33) over the
+/// Verus proves this the `remove_waiter` analog over the
 /// GLOBAL armed list — singly-linked, head-only (no tail). `!armed` ⇒ a no-op; `armed`
 /// ⇒ `t` is spliced out (`timer_seq` loses `t` — by `timer_wf`'s completeness an armed
 /// timer is always on the list, so the walk is guaranteed to find it), the queued ref is
@@ -60,7 +60,7 @@ verus! {
 /// own ref) discharges the release `-1`. The walk is read-only; the writes are on the
 /// found path, which returns (the `remove_waiter` shape).
 ///
-/// **Refcount census (D-E1).** Exports `census_delta_frozen` + conditional
+/// **Refcount census.** Exports `census_delta_frozen` + conditional
 /// `refcount_sound`, matching `signal`/`remove_waiter`: the `refs[notif] -= 1` release is
 /// matched by `armed_timer_refs(notif)` dropping by one (`lemma_armed_timer_disarm`), so
 /// the per-object `refs - census` delta is frozen. This closes the soundness chain so a
@@ -85,12 +85,12 @@ pub fn disarm<S: Store>(store: &mut S, t: ObjId)
         final(store).cspace_view() == old(store).cspace_view(),
         final(store).timer_view().dom() == old(store).timer_view().dom(),
         cspace::timer_wf(final(store).timer_view(), final(store).timer_head_view()),
-        // The refcount census moves in lockstep (D-E1, the `signal`/`remove_waiter` precedent):
+        // The refcount census moves in lockstep (the `signal`/`remove_waiter` precedent):
         // disarming `t` drops `refs[notif]` by one and `armed_timer_refs(notif)` by one together,
         // every other census term framed (slot/chan/notif/tcb views untouched). Unconditional and
         // `requires`-free, so census-agnostic callers stay undisturbed; `destroy_timer` consumes it.
         cspace::census_delta_frozen(old(store), final(store)),
-        // `refcount_sound` as a per-op contract (D-E1): a sound census in, a sound census out —
+        // `refcount_sound` as a per-op contract: a sound census in, a sound census out —
         // the frozen delta bridged by `lemma_refcount_sound_from_frozen`. Conditional, so the
         // syscall-path caller keeps no obligation while a verified caller can discharge it.
         cspace::refcount_sound(old(store)) ==> cspace::refcount_sound(final(store)),
@@ -179,7 +179,7 @@ pub fn disarm<S: Store>(store: &mut S, t: ObjId)
         let c = cur.unwrap();
         assert(k < ts0.len());
         assert(c == ts0[k]);
-        // `ObjId`'s exec `==` is external (doc 33 §2); compare the tag.
+        // `ObjId`'s exec `==` is external; compare the tag.
         if c.0 == t.0 {
             assert(t == ts0[k]);
             let ghost len = ts0.len() as int;
@@ -244,7 +244,7 @@ pub fn disarm<S: Store>(store: &mut S, t: ObjId)
                         assert(ii != k);
                     }
                 }
-                // D-E1: the census moves in lockstep with `refs`. `disarm` frames the
+                // The census moves in lockstep with `refs`. `disarm` frames the
                 // slot/chan/notif/tcb views, so only `armed_timer_refs` can move;
                 // `lemma_armed_timer_disarm` pins that delta to `-1` at `t`'s bound
                 // notification `n`, matching the `refs[n] -= 1` released above. The additive
@@ -287,13 +287,13 @@ pub fn disarm<S: Store>(store: &mut S, t: ObjId)
 /// Arm (or re-arm) a timer: signal `bits` on `notif` once the counter passes
 /// `deadline`. The armed timer holds a ref on the notification.
 ///
-/// Verified (plan §4e, doc/results/35): the head-push analog of `wait`'s tail-push.
+/// Verus proves this the head-push analog of `wait`'s tail-push.
 /// `disarm` first (idempotent re-arm), `+1` on the notification ref, set the fields, push
 /// onto the armed list head (`timer_seq` prepend). Modeling the ref delta in body order
-/// (`disarm`'s `-1` then `arm`'s `+1`) makes the **same-notif re-arm provably net-zero**
-/// (the `bind_refs_post` precedent, doc 30 §2.2). `timer_wf` is preserved.
+/// (`disarm`'s `-1` then `arm`'s `+1`) makes the **same-notif re-arm provably net-zero**.
+/// `timer_wf` is preserved.
 ///
-/// **Refcount census (D-E1).** Exports `census_delta_frozen` + conditional `refcount_sound`,
+/// **Refcount census.** Exports `census_delta_frozen` + conditional `refcount_sound`,
 /// matching `signal`/`remove_waiter`/`disarm`. Only `t`'s `(armed, notif)` differs between
 /// the entry and exit timer maps (the `disarm` predecessor splice touches only `next`), so
 /// `lemma_armed_timer_retarget` reads the armed-timer census change off that one transition;
@@ -326,7 +326,7 @@ pub fn arm<S: Store>(store: &mut S, t: ObjId, notif: ObjId, bits: u64, deadline:
         final(store).timer_view()[t].notif == Some(notif),
         final(store).timer_view()[t].deadline == deadline,
         final(store).timer_view()[t].bits == bits,
-        // The refcount census moves in lockstep (D-E1): the disarm release and the arm
+        // The refcount census moves in lockstep: the disarm release and the arm
         // acquire cancel against the armed-timer census change at `t`'s notification(s).
         cspace::census_delta_frozen(old(store), final(store)),
         cspace::refcount_sound(old(store)) ==> cspace::refcount_sound(final(store)),
@@ -392,7 +392,7 @@ pub fn arm<S: Store>(store: &mut S, t: ObjId, notif: ObjId, bits: u64, deadline:
         }
         assert(cspace::timer_wf(tmvf, headf));
 
-        // D-E1 census. Arm frames slot/chan/notif/tcb, so the census differs from `old` only
+        // Census. Arm frames slot/chan/notif/tcb, so the census differs from `old` only
         // in `armed_timer_refs`; and only `t`'s `(armed, notif)` changed in the timer map (the
         // `disarm` predecessor splice touches only `next`). `lemma_armed_timer_retarget` reads
         // the armed-timer change off `t`'s transition; it cancels the disarm-`-1`/arm-`+1` refs
@@ -434,11 +434,11 @@ pub fn arm<S: Store>(store: &mut S, t: ObjId, notif: ObjId, bits: u64, deadline:
 
 /// pre:  refs == 0 (last cap gone).
 ///
-/// Verified (plan §4e, doc/results/35): teardown of a timer object — just `disarm`
+/// Verus proves the teardown of a timer object — just `disarm`
 /// (release the notification ref, unlink from the armed list) if it is still armed.
 ///
-/// **Refcount census (plan §6c).** Strengthened to require and preserve
-/// `refcount_sound`, so `obj_unref`'s Timer arm (6c) can conclude the invariant after
+/// **Refcount census.** Requires and preserves
+/// `refcount_sound`, so `obj_unref`'s Timer arm can conclude the invariant after
 /// the dispatch. The only ref `destroy_timer` touches is `disarm`'s release of `t`'s
 /// notification `n`: that `-1` is matched by `armed_timer_refs(n)` dropping by one (`t`
 /// is disarmed, every other timer's `armed`/`notif` framed — `lemma_armed_timer_disarm`),
@@ -472,18 +472,17 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
         // carries (an object with census >= 1 in the post-state had census >= 1 before).
         cspace::census_dom_complete(final(store)),
         // `disarm` keeps the timer domain + `timer_wf` and frames every other object view,
-        // so each live cap's (refs-free) consistency carries over (plan §6d).
+        // so each live cap's (refs-free) consistency carries over.
         cspace::caps_consistent(final(store)),
-        // `disarm` frames chan_view + slot_view, so the endpoint-cap census rides through
-        // (plan §6d body-removal gate).
+        // `disarm` frames chan_view + slot_view, so the endpoint-cap census rides through.
         cspace::end_caps_sound(final(store)),
-        // Dead, queue-detached TCBs are frozen (plan §6d-final-thread-body): `disarm` frames
+        // Dead, queue-detached TCBs are frozen: `disarm` frames
         // `tcb` whole and drops `refs` only at the armed binding's notification (which had
         // `refs > 0`), so a dead, detached object is untouched. `obj_unref`'s Timer arm reads it.
         cspace::dead_tcb_frozen(old(store), final(store)),
-        // §6e-dual "dead stays dead": `disarm` keeps the refs domain and only drops the armed
+        // "Dead stays dead": `disarm` keeps the refs domain and only drops the armed
         // binding's notification ref (which was positive), so a dead object stays dead.
-        // `obj_unref`'s Timer arm composes this for the §6e-dual provenance frame.
+        // `obj_unref`'s Timer arm composes this for the dual provenance frame.
         cspace::refs_death_persist(old(store), final(store)),
 {
     let ghost tmv0 = old(store).timer_view();
@@ -515,7 +514,7 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
             assert(store.refs_view().dom() =~= old(store).refs_view().dom());
             assert(old(store).refs_view()[n] > 0);
             // dead-stays-dead (armed): `refs` moved only at `n` (`refs[n] > 0`), so a dead `x`
-            // is `x != n` and keeps `refs[x] == 0` (plan §6d-final-thread-body).
+            // is `x != n` and keeps `refs[x] == 0`.
             assert forall|x: ObjId|
                 old(store).refs_view().dom().contains(x) && old(store).refs_view()[x] == 0
                 implies #[trigger] store.refs_view()[x] == 0 by { assert(x != n); }
@@ -570,7 +569,7 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
         assert(store.refs_view().dom() =~= old(store).refs_view().dom());
         assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
         cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, t);
-        // §6e-dual "dead stays dead": the refs domain is unchanged, and a dead in-domain object
+        // "Dead stays dead": the refs domain is unchanged, and a dead in-domain object
         // (`refs == 0`) keeps `refs == 0` (the per-branch fact above) — so death is preserved.
         assert forall|o: ObjId| cspace::dead_obj(old(store), o)
             implies #[trigger] cspace::dead_obj(store, o) by {
@@ -582,7 +581,7 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
 }
 
 // `timer_signal_ok` survives a `disarm(c)` + `signal(n)` (n = `c`'s notification) WITHOUT the
-// distinct-notification assumption — the general N-timers→1-notification case (D-E2). For
+// distinct-notification assumption — the general N-timers→1-notification case. For
 // every *other* armed timer `cp` (bound to `np`):
 //   - `np != n`: the fire touches only `n`'s notification view, the woken thread, and `n`'s
 //     refs, so `np`'s liveness/`notif_wf`/refs are framed (`lemma_notif_wf_frame`) and `cp`'s
@@ -649,7 +648,7 @@ proof fn lemma_signal_ok_after_fire<S: Store>(
             assert(tmv_pre[cp].armed && tmv_pre[cp].notif == Some(np));
             assert(cspace::timer_signal_ok_at(tmv_pre, nv_pre, tv_pre, rv_pre, cp));
             if np == n {
-                // Shared notification (D-E2): the census re-establishes the refs facts at `n`.
+                // Shared notification: the census re-establishes the refs facts at `n`.
                 assert(nv2.dom().contains(n));
                 assert(rv2.dom().contains(n));
                 // `cp` is still armed on `n`, so the armed-timer census term is positive.
@@ -676,7 +675,7 @@ proof fn lemma_signal_ok_after_fire<S: Store>(
 
 /// Tick-time expiry sweep. O(armed timers) per tick — fine at MVP scale.
 ///
-/// Verified (plan §4e, doc/results/35): the armed-list walk that `disarm`s + `signal`s
+/// Verus proves the armed-list walk that `disarm`s + `signal`s
 /// every expired timer. `disarm`/`signal` both frame `slot_view`/`chan_view`, so the
 /// sweep does too; `disarm` preserves `timer_wf` and `signal` frames the timer views, so
 /// `timer_wf` survives the whole walk. The walk reads each timer's `next` *before* its
@@ -688,7 +687,7 @@ proof fn lemma_signal_ok_after_fire<S: Store>(
 /// `armed_timer_refs(n) >= 1`, so the sound census forces `refs[n] == obj_census(n) >= 1`
 /// (`>= 2` once a waiter is queued) — `lemma_signal_ok_after_fire` reconstructs the carried
 /// `timer_signal_ok` from the census, covering the general N-timers→1-notification
-/// configuration the spec admits (D-E2), not just one-timer-per-notification.
+/// configuration the spec admits, not just one-timer-per-notification.
 pub fn check_expired<S: Store>(store: &mut S, now: u64)
     requires
         // The timer arena is finite (`disarm`'s precondition, the `cap_consistent(Timer)`
@@ -697,7 +696,7 @@ pub fn check_expired<S: Store>(store: &mut S, now: u64)
         cspace::timer_wf(old(store).timer_view(), old(store).timer_head_view()),
         // The reference census is sound (the standing system invariant the trusted IRQ shell
         // maintains): it is what keeps `timer_signal_ok` across a fire on a shared
-        // notification, replacing the unrealistic distinct-notification assumption (D-E2).
+        // notification, replacing the unrealistic distinct-notification assumption.
         cspace::refcount_sound(old(store)),
         cspace::timer_signal_ok(old(store).timer_view(), old(store).notif_view(),
             old(store).tcb_view(), old(store).refs_view()),
@@ -726,7 +725,7 @@ pub fn check_expired<S: Store>(store: &mut S, now: u64)
             cspace::timer_wf(store.timer_view(), store.timer_head_view()),
             // The census stays sound across each fire (`disarm`/`signal` both export the
             // conditional `refcount_sound`), feeding the next iteration's shared-notification
-            // re-establishment of `timer_signal_ok` (D-E2).
+            // re-establishment of `timer_signal_ok`.
             cspace::refcount_sound(store),
             cspace::timer_signal_ok(store.timer_view(), store.notif_view(),
                 store.tcb_view(), store.refs_view()),
@@ -768,7 +767,7 @@ pub fn check_expired<S: Store>(store: &mut S, now: u64)
 
             let ghost n = notif->Some_0;
             proof {
-                // The §4e census fragment for `c`: `n` is live + `notif_wf`, with refs ≥ 1
+                // The census fragment for `c`: `n` is live + `notif_wf`, with refs ≥ 1
                 // (the timer's ref) and ≥ 2 when a waiter is queued.
                 assert(nv_pre.dom().contains(n) && rv_pre.dom().contains(n) && rv_pre[n] >= 1);
                 assert(cspace::notif_wf(nv_pre, tv_pre, n));
@@ -784,7 +783,7 @@ pub fn check_expired<S: Store>(store: &mut S, now: u64)
                 assert(rv1 == rv_pre.insert(n, (rv_pre[n] - 1) as nat));
                 assert(nv_pre[n].wait_head is Some ==> rv1[n] >= 1);
                 // `disarm` carries the census soundness from the loop invariant (its conditional
-                // `refcount_sound` ensures) — what lets `signal` carry it onward (D-E2).
+                // `refcount_sound` ensures) — what lets `signal` carry it onward.
                 assert(cspace::refcount_sound(store));
             }
 
@@ -816,7 +815,7 @@ pub fn check_expired<S: Store>(store: &mut S, now: u64)
                     assert(cspace::notif_wf(nv2, tv2, n));
                     assert(tmv_pre[c].notif == Some(n));
                     // `timer_signal_ok` survives the fire — for a notification shared by a second
-                    // armed timer, the sound census reconstructs the refs facts (D-E2).
+                    // armed timer, the sound census reconstructs the refs facts.
                     lemma_signal_ok_after_fire(store, tmv_pre, nv_pre, tv_pre, rv_pre, c, n);
                     // The unprocessed suffix `ts0[k+1..]` is untouched: each such node is not
                     // `c` and its `next` was not `Some(c)`, so `disarm` left it whole and

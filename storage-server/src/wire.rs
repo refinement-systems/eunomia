@@ -1,6 +1,6 @@
-//! Wire encoding for the storage protocol (spec §3.7): a fixed
+//! Wire encoding for the storage protocol (spec rev0§3.7): a fixed
 //! hand-defined header (magic, protocol id, version) + a postcard body.
-//! Messages fit the 256-byte inline channel payload (§3.1); bulk data
+//! Messages fit the 256-byte inline channel payload (rev0§3.1); bulk data
 //! rides in bounded Read/Write slices until the shared-memory bulk path
 //! lands. Decoders treat payloads as untrusted and reject bad headers
 //! and trailing bytes.
@@ -10,7 +10,7 @@
 use crate::{Request, Response};
 use alloc::vec::Vec;
 
-/// magic 'E', protocol 0x51 (storage), version 2 (v2 added the M5
+/// magic 'E', protocol 0x51 (storage), version 2 (v2 carries the
 /// history-rewriting/GC opcodes; both peers ship from this tree, so no
 /// multi-version negotiation is implemented yet).
 const HEADER: [u8; 3] = [0x45, 0x51, 0x02];

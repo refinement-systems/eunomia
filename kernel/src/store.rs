@@ -1,13 +1,12 @@
 //! `KernelStore`: the production [`kcore::store::Store`] resolver — the one
-//! sanctioned handle→pointer boundary (plan `doc/plans/3_verus-rewrite.md` §3.2,
-//! replacing the old `KernelEnv`/`Env`). A production `ObjId`/`SlotId` *is* the
+//! sanctioned handle→pointer boundary. A production `ObjId`/`SlotId` *is* the
 //! object's/slot's live address; every accessor casts it back and reads/writes
 //! the field. Zero-sized, so the kcore object machinery monomorphizes against it
 //! with no indirection.
 //!
 //! This is the trusted base, exactly as the TLB/MMIO asm is: kcore is verified
-//! against the *array-backed* `Store` (proofs, phases 2–5), and runs against this
-//! address-backed one. The `unsafe` int→pointer casts live here, never in kcore.
+//! against the *array-backed* `Store` and runs against this address-backed one.
+//! The `unsafe` int→pointer casts live here, never in kcore.
 //!
 //! Concurrency invariant (unchanged): single-core, non-preemptible (IRQs masked
 //! at EL1), so whoever runs kernel code has exclusive access to every object.
@@ -239,7 +238,7 @@ impl Store for KernelStore {
         unsafe { (*obj_ptr::<TimerObj>(t)).next = n }
     }
 
-    // ── hardware / scheduler seam (was KernelEnv) ─────────────────────────
+    // ── hardware / scheduler seam ─────────────────────────────────────────
     fn make_runnable(&mut self, t: ObjId) {
         unsafe { crate::thread::enqueue(obj_ptr::<Tcb>(t)) }
     }

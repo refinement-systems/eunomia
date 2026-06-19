@@ -1,5 +1,5 @@
-//! Capability spaces and the capability derivation tree (spec §2.1–2.3,
-//! §3.4).
+//! Capability spaces and the capability derivation tree (rev0§2.1–2.3,
+//! rev0§3.4).
 //!
 //! Every kernel object is reached through a `Cap` living in a `CapSlot`.
 //! Slots form the CDT: parent/first-child/sibling links threaded through
@@ -14,45 +14,45 @@
 //! executing kernel code has exclusive access to all kernel objects. The
 //! `Store` impl encapsulates whatever unsafe the production handle
 //! resolution needs; the operations below are safe and read as pure
-//! functions over an abstract indexed store (plan §3, the arena rewrite).
+//! functions over an abstract indexed store.
 //!
-//! Verification (plan §4.1): these operations are the centerpiece Kani
-//! target — the executable re-check of the CapRevocation TLA+ invariants on
-//! the real implementation. Each op carries its contract as a pre/post
-//! comment; the proof harnesses turn those into `cdt_wf` assertions.
+//! Verification: these operations are the centerpiece Verus target — the
+//! deductive re-check of the CapRevocation TLA+ invariants on the real
+//! implementation. Each op carries its contract as a pre/post comment; the
+//! proofs turn those into `cdt_wf` assertions.
 
 use crate::id::{ObjId, SlotId};
 use crate::store::{Binding, Store};
 use crate::thread::{Report, ThreadState};
 use vstd::prelude::*;
 
-/// Rights bits — monotone under derivation (§2.3): `derive` may only clear
+/// Rights bits — monotone under derivation (rev0§2.3): `derive` may only clear
 /// bits, never set them.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Rights(pub u8);
 
 // Inside `verus!{}` so the bit consts and `masked` are usable from verified code
-// (the §3c `retype_install` rights-inheritance theorem names `READ`/`WRITE`/`PHYS`/
-// `ALL`/`THREAD_ALL`; doc/results/28 §1). `masked` carries its bit-level `ensures`
-// here rather than via a standalone `assume_specification` — its trivial body is now
-// verified, not assumed.
+// (the `retype_install` rights-inheritance theorem names `READ`/`WRITE`/`PHYS`/
+// `ALL`/`THREAD_ALL`). `masked` carries its bit-level `ensures` here rather than
+// via a standalone `assume_specification` — its trivial body is verified, not
+// assumed.
 verus! {
 impl Rights {
     pub const READ: u8 = 1 << 0; // recv / wait
     pub const WRITE: u8 = 1 << 1; // send / signal
-    /// phys-read (§2.5): gates frame_paddr and device mappings. Granted
+    /// phys-read (rev0§2.5): gates frame_paddr and device mappings. Granted
     /// only on boot-created device/DMA caps — ALL deliberately excludes
     /// it so ordinary derivation chains can never reach a PA.
     pub const PHYS: u8 = 1 << 2;
-    /// bind-reports (§2.3): configure a thread's on-exit/on-fault
-    /// binding slots (§5.1).
+    /// bind-reports (rev0§2.3): configure a thread's on-exit/on-fault
+    /// binding slots (rev0§5.1).
     pub const BIND_REPORTS: u8 = 1 << 3;
-    /// read-report (§2.3): read a thread's terminal report record;
-    /// later also the debugger's register access (deferred, §8).
+    /// read-report (rev0§2.3): read a thread's terminal report record;
+    /// later also the debugger's register access (deferred, rev0§8).
     pub const READ_REPORT: u8 = 1 << 4;
     pub const ALL: Rights = Rights(0b11);
-    /// The creator's thread cap (§2.3 thread bits; kill is deliberately
-    /// not on the list — destruction is resource ancestry, §2.2).
+    /// The creator's thread cap (rev0§2.3 thread bits; kill is deliberately
+    /// not on the list — destruction is resource ancestry, rev0§2.2).
     pub const THREAD_ALL: Rights =
         Rights(Rights::READ | Rights::WRITE | Rights::BIND_REPORTS | Rights::READ_REPORT);
 
@@ -60,7 +60,7 @@ impl Rights {
         self.0 & bits == bits
     }
 
-    // The bit-level spec is what makes monotone derivation (and §3c's
+    // The bit-level spec is what makes monotone derivation (and the
     // sub-untyped-never-PHYS theorem) provable.
     pub fn masked(self, mask: u8) -> (out: Rights)
         ensures out.0 == (self.0 & mask),
@@ -90,7 +90,7 @@ pub enum ChanEnd {
 /// The object a cap designates. Untyped carries its region inline: untyped
 /// caps are never copied (the watermark must have one owner), so the state
 /// needs no shared object. Frames carry their mapping inline too — one
-/// mapping per cap copy, and deleting the cap unmaps it (§2.5). Object
+/// mapping per cap copy, and deleting the cap unmaps it (rev0§2.5). Object
 /// designations are opaque [`ObjId`] handles (was a `*mut Obj`).
 #[derive(Clone, Copy)]
 pub enum CapKind {
@@ -107,8 +107,8 @@ pub enum CapKind {
     },
     Aspace(crate::id::ObjId),
     CSpace(crate::id::ObjId),
-    // The `u8` is the §5.4 maximum-controlled-priority ceiling — a value on the
-    // cap (§2.3), attenuated monotonically by `derive` like rights. spawn gates a
+    // The `u8` is the rev0§5.4 maximum-controlled-priority ceiling — a value on the
+    // cap (rev0§2.3), attenuated monotonically by `derive` like rights. spawn gates a
     // thread's priority on it (`prio <= max_prio`).
     Thread(crate::id::ObjId, u8),
     Channel(crate::id::ObjId, ChanEnd),
@@ -134,7 +134,7 @@ impl Cap {
 }
 
 /// A capability slot, CDT links included. Slots live inside cspace objects
-/// and inside channel message slots — both are CDT-visible (§3.4). The
+/// and inside channel message slots — both are CDT-visible (rev0§3.4). The
 /// links are [`SlotId`] handles ([`crate::id`]) that span containers exactly
 /// as the old `*mut CapSlot` links did, with no special case in the revoke
 /// walk.
@@ -178,7 +178,7 @@ impl CSpaceObj {
         core::mem::size_of::<CSpaceObj>() + num_slots as usize * core::mem::size_of::<CapSlot>()
     }
 
-    /// pre:  self points at a live, initialised cspace object.
+    /// pre: self points at a live, initialised cspace object.
     /// post: returns slot i, or null if i is out of range.
     pub unsafe fn slot(this: *mut CSpaceObj, i: u32) -> *mut CapSlot {
         if i >= (*this).num_slots {
@@ -188,7 +188,7 @@ impl CSpaceObj {
         base.add(i as usize)
     }
 
-    /// pre:  memory at `this` is writable, sized via bytes_for(num_slots).
+    /// pre: memory at `this` is writable, sized via bytes_for(num_slots).
     /// post: every slot is empty with null CDT links; refs = 1 (creator cap).
     pub unsafe fn init(this: *mut CSpaceObj, num_slots: u32) {
         (*this).hdr.refs = 1;
@@ -203,42 +203,39 @@ impl CSpaceObj {
 
 // `obj_ref` is verified — see the `verus!{}` block at the end of this file.
 
-// `obj_unref`, `unref_cspace`, `destroy_cspace`, the helper `dec_ref`, and now `delete`
-// itself are verified — see the `verus!{}` block at the end of this file (plan §6c/§6d,
-// doc/results/43, 50). With `delete`'s body proven, the cspace teardown cycle
+// `obj_unref`, `unref_cspace`, `destroy_cspace`, the helper `dec_ref`, `delete`,
+// `destroy_channel`, and `destroy_tcb` are verified — see the `verus!{}` block at
+// the end of this file. With `delete`'s body proven, the cspace teardown cycle
 // `delete → obj_unref → destroy_cspace → delete` is closed in Verus under the shared
-// lexicographic `decreases (count_nonempty(slot_view), height)`. `destroy_channel`/
-// `destroy_tcb` keep `external_body` contracts (their bodies need new census invariants —
-// the 6d residue, doc 50 §3), so `obj_unref`'s Channel/Thread arms recurse through them as
-// trusted-but-host-checked black boxes. `unref_aspace` (the non-recursive aspace teardown)
-// is likewise in that block (plan §6b, doc/results/42).
+// lexicographic `decreases (count_nonempty(slot_view), height)`. `obj_unref`'s
+// Channel/Thread arms recurse through `destroy_channel`/`destroy_tcb`, whose proven
+// bodies carry the census invariants. `unref_aspace` (the non-recursive aspace
+// teardown) is likewise in that block.
 
 // ── CDT structure ───────────────────────────────────────────────────────
 
 // `cdt_insert_child`, `derive`, `slot_move`, and `cdt_unlink` are verified — see
-// the `verus!{}` block at the end of this file. `slot_move`'s body proof
-// (doc/results/24) shows the move is the identity transposition π=(src dst) and
-// lands exactly the renaming. `cdt_unlink`'s body proof (doc/results/25) shows the
-// sibling-list *merge* lands exactly `unlinked(m0, slot, last)` (children spliced
-// into the parent's list — strictly harder than the transposition): the parent-
-// rank acyclicity witness is reused unchanged, the sibling-rank witness is
-// rescaled to fit the re-parented child band into the `prev..next` gap, so its
-// `external_body` is gone too. Both ops' termination/structure rest on
+// the `verus!{}` block at the end of this file. `slot_move`'s body proof shows the
+// move is the identity transposition π=(src dst) and lands exactly the renaming.
+// `cdt_unlink`'s body proof shows the sibling-list *merge* lands exactly
+// `unlinked(m0, slot, last)` (children spliced into the parent's list — strictly
+// harder than the transposition): the parent-rank acyclicity witness is reused
+// unchanged, the sibling-rank witness is rescaled to fit the re-parented child band
+// into the `prev..next` gap. Both ops' termination/structure rest on
 // sibling-acyclicity (`sib_acyclic`), part of `cspace_wf`.
 //
-// `delete` and `revoke` are likewise in that block: `delete` still carries an
-// assumed teardown-recursion contract (the cross-object destructors are not yet
-// in `verus!{}`, plan phases 3–5), and `revoke`'s termination is proven against
-// it. `delete`'s contract is host-test-checked against the real body (ArrayStore).
+// `delete` and `revoke` are likewise in that block, with proven bodies: the cross-
+// object destructors they invoke are themselves verified, and `revoke`'s termination
+// is proven against `delete`.
 
-// ── Deductive verification (plan doc/plans/3_verus-rewrite.md §4.1) ───────────
+// ── Deductive verification ───────────────────────────────────────────────────
 //
 // The cspace/CDT operations are verified with Verus against an *abstract* model
 // of the `Store` seam: the kernel object store is a finite `Map<SlotId, CapSlot>`
 // (the slot arena) plus a `Map<ObjId, nat>` (object refcounts). The generic
 // `fn op<S: Store>` operations are proven once for **all** stores; the production
 // `KernelStore` (kernel crate, unverified) and any host-test store are trusted to
-// satisfy the trait contract — the seam is the TCB boundary (plan §2, §3.2).
+// satisfy the trait contract — the seam is the TCB boundary.
 //
 // `verus!{}` erases to plain Rust in an ordinary build, so the moved operations
 // below compile and run exactly as the originals did.
@@ -289,7 +286,7 @@ pub struct ExCapSlot(CapSlot);
 // An event binding is plain Rust (`crate::store::Binding`); give it a Verus
 // type-spec so it can live in the `ChanView.bindings` map and be compared with
 // structural `==`. (`allow(dead_code)`: Verus-only scaffolding, erased in a
-// normal build — plan doc/plans/3_verus-rewrite_phase3-detail.md §3b.)
+// normal build.)
 #[verifier::external_type_specification]
 #[verifier::ext_equal]
 #[allow(dead_code)]
@@ -297,7 +294,7 @@ pub struct ExBinding(Binding);
 
 // `ThreadState`/`Report` are plain Rust enums (`crate::thread`); give them Verus
 // type-specs so they can live in `TcbView` and be compared with structural `==`
-// (the phase-4a `tcb_view` analog of `ExChanEnd`, plan §4a). (`allow(dead_code)`:
+// (the `tcb_view` analog of `ExChanEnd`). (`allow(dead_code)`:
 // Verus-only scaffolding, erased in a normal build.)
 #[verifier::external_type_specification]
 #[verifier::ext_equal]
@@ -309,13 +306,13 @@ pub struct ExThreadState(ThreadState);
 #[allow(dead_code)]
 pub struct ExReport(Report);
 
-// ── The channel ghost view (plan §3b) ───────────────────────────────────────
+// ── The channel ghost view ───────────────────────────────────────
 //
 // `ChanView` mirrors a `Channel`'s *mutable* state (`channel.rs`) at the
-// abstraction the §4.3 proofs reason over — **payload bytes abstracted out**:
+// abstraction the channel proofs reason over — **payload bytes abstracted out**:
 // we model message length, cap identity, and order, not the 256 payload bytes.
 //
-// The load-bearing decision (detail §1.1): a ring message slot is a **real
+// The load-bearing decision: a ring message slot is a **real
 // `CapSlot` in the single `slot_view` arena** (moved by the already-verified
 // `slot_move`). So the cap *contents* live in `slot_view`; `ring_cap` here holds
 // only the slot *handles*, which are fixed at channel construction and never
@@ -325,7 +322,7 @@ pub struct ExReport(Report);
 #[verifier::ext_equal]
 pub struct ChanView {
     pub depth: nat,
-    // Per-end live-endpoint-cap counts (peer-closed, §3.3) and per-ring FIFO
+    // Per-end live-endpoint-cap counts (peer-closed, rev0§3.3) and per-ring FIFO
     // cursors. Seqs of length 2 (ring/end ∈ {0,1}).
     pub end_caps: Seq<nat>,
     pub head: Seq<nat>,
@@ -335,13 +332,13 @@ pub struct ChanView {
     // msg_len[(ring, index)] — the queued payload length (bytes abstracted).
     pub msg_len: Map<(int, int), nat>,
     // ring_cap[(ring, index, cap)] — the CapSlot handle for that ring message's
-    // cap slot (cap ∈ {0..4}); the bridge into `slot_view` (the §4.3 coupling).
+    // cap slot (cap ∈ {0..4}); the bridge into `slot_view` (the channel-view/slot-arena coupling).
     pub ring_cap: Map<(int, int, int), SlotId>,
 }
 
-// ── The notification / TCB / timer ghost views (plan §4a) ────────────────────
+// ── The notification / TCB / timer ghost views ────────────────────
 //
-// The phase-4 analogs of `ChanView` (§3b, doc 27): each mirrors an object's
+// The analogs of `ChanView`: each mirrors an object's
 // *mutable* state (the `hdr.refs` count is already in `refs_view`). `word`/
 // `retval`/`bind_bits`/`bits`/`deadline` are `u64` (not `nat`) so 4b's
 // `word | bits` and 4e's `deadline <= now` are expressible directly — the one
@@ -357,7 +354,7 @@ pub struct NotifView {
 // The TCB mutable fields the verified ops read/write. `bind_slots` holds the cap
 // *slot handles* (length-2 `Seq`) — an immutable projection, since `Store` has a
 // `tcb_bind_slot` getter and no setter; the cap *contents* live in `slot_view`,
-// exactly as `ChanView.ring_cap` does (§4a, doc 27 §1) — so the TCB binding caps
+// exactly as `ChanView.ring_cap` does — so the TCB binding caps
 // stay revoke-visible through the single arena.
 #[verifier::ext_equal]
 pub struct TcbView {
@@ -368,10 +365,10 @@ pub struct TcbView {
     pub retval: u64,
     pub cspace: Option<ObjId>,
     pub aspace: Option<ObjId>,
-    // §5.4 run priority. Bounded by the spawner's cap ceiling (`cap_max_prio`) and
-    // written only through the verified `thread::set_priority` (D-B1 Option 2, doc 71):
-    // surfacing it in the view is what lets `set_priority` carry a machine-checked
-    // `priority == prio (≤ ceiling)` instead of the old unverified raw-pointer write.
+    // rev0§5.4 run priority. Bounded by the spawner's cap ceiling (`cap_max_prio`) and
+    // written only through the verified `thread::set_priority`: surfacing it in the
+    // view is what lets `set_priority` carry a machine-checked
+    // `priority == prio (≤ ceiling)`.
     pub priority: u8,
     pub bind_bits: Seq<u64>,     // len 2
     pub bind_slots: Seq<SlotId>, // len 2 — immutable handles into slot_view
@@ -386,10 +383,10 @@ pub struct TimerView {
     pub next: Option<ObjId>,
 }
 
-// Cspace residency (plan §6a) — the slot-handle list a cspace object owns. The
+// Cspace residency — the slot-handle list a cspace object owns. The
 // kernel fixes this at construction (`cspace_num_slots`/`cspace_slot` are getters
 // with no setter), so it is an immutable projection exactly like `ChanView
-// .ring_cap` / `TcbView.bind_slots`: every mutator frames it unchanged. It is the
+//.ring_cap` / `TcbView.bind_slots`: every mutator frames it unchanged. It is the
 // residency `destroy_cspace`'s resident loop (6c) and 6e's revoke-root-survival
 // name "the slots `cs` owns" through. `num_slots` and `slots.len()` agree on a
 // well-formed cspace (the getter contracts require it).
@@ -414,7 +411,7 @@ pub trait ExStore {
     spec fn slot_view(&self) -> Map<SlotId, CapSlot>;
     // Object refcounts: handle → count.
     spec fn refs_view(&self) -> Map<ObjId, nat>;
-    // Cspace residency (plan §6a): handle → the slot-handle list the cspace owns.
+    // Cspace residency: handle → the slot-handle list the cspace owns.
     // Immutable (the residency getters have no setter); every mutator frames it
     // unchanged, so `destroy_cspace`'s resident loop (6c) and revoke-root-survival
     // (6e) reason over a residency that stays stable across the teardown ops'
@@ -423,27 +420,27 @@ pub trait ExStore {
     // are over the slot/chan/notif/tcb/timer views — so the sweep is forward-looking
     // for the resident-walk reasoning, not a census dependency.)
     spec fn cspace_view(&self) -> Map<ObjId, CSpaceView>;
-    // Channel state: handle → ghost view (plan §3b). The third independent view;
+    // Channel state: handle → ghost view. The third independent view;
     // the slot/refs setters frame it unchanged and the channel setters frame
-    // slot/refs unchanged, so the §4.3 ops can reason about one without the others.
+    // slot/refs unchanged, so the channel ops can reason about one without the others.
     spec fn chan_view(&self) -> Map<ObjId, ChanView>;
-    // Notification / TCB / timer state (plan §4a) — three more independent views.
+    // Notification / TCB / timer state — three more independent views.
     // Every setter frames the *other* five views (+ the `timer_head_view` scalar)
-    // unchanged, so a §4.4 op reasons about one without re-establishing the rest
-    // (the mutual-frame discipline, doc 27 §1, extended to a six-view world).
+    // unchanged, so a notification op reasons about one without re-establishing the rest
+    // (the mutual-frame discipline, extended to a six-view world).
     spec fn notif_view(&self) -> Map<ObjId, NotifView>;
     spec fn tcb_view(&self) -> Map<ObjId, TcbView>;
     spec fn timer_view(&self) -> Map<ObjId, TimerView>;
     // The armed-timer list head — a `Store`-seam scalar (the kernel static,
     // store.rs:130); the list *logic* is in `crate::timer` (phase 4e).
     spec fn timer_head_view(&self) -> Option<ObjId>;
-    // The TLBI effect log (plan §5e): the ordered sequence of `(asid, va)` TLB
+    // The TLBI effect log: the ordered sequence of `(asid, va)` TLB
     // invalidations issued through this store. The seventh view — pure hardware
     // effect, not object state — so `aspace::unmap_in` can prove "one TLBI per
     // cleared page, in order" as a real postcondition. Only the three hardware-
     // seam methods below touch it; it is left unconstrained across the object
     // setters (no object op interleaves a setter with a TLBI), so adding it is a
-    // localized seam change, not a per-setter sweep (plan §5e/§1.4).
+    // localized seam change, not a per-setter sweep.
     spec fn tlb_log_view(&self) -> Seq<(u16, u64)>;
 
     fn slot(&self, s: SlotId) -> (r: CapSlot)
@@ -478,7 +475,7 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
-    // ── cspace residents (plan §6a) ─────────────────────────────────────────
+    // ── cspace residents ─────────────────────────────────────────
     //
     // The two residency getters, contracted against `cspace_view` (they are in the
     // plain `Store` trait uncontracted today). Immutable — no setter — so they only
@@ -498,7 +495,7 @@ pub trait ExStore {
             self.cspace_view()[cs].slots.len() == self.cspace_view()[cs].num_slots,
         ensures r == self.cspace_view()[cs].slots[i as int];
 
-    // ── channel accessors (plan §3b) ────────────────────────────────────────
+    // ── channel accessors ────────────────────────────────────────
     //
     // Each relates to `chan_view` exactly as `slot`/`set_slot` relate to
     // `slot_view`: getters project a field; setters update one key and frame the
@@ -664,7 +661,7 @@ pub trait ExStore {
     // `recv` calls it (3b omitted it as frame-only).
     fn chan_msg_read(&self, ch: ObjId, ring: usize, i: u32, len: usize, buf: &mut [u8]);
 
-    // ── notification accessors (plan §4a) ───────────────────────────────────
+    // ── notification accessors ───────────────────────────────────
     //
     // Each relates to `notif_view` exactly as `slot`/`set_slot` relate to
     // `slot_view`: getters project a field; setters update one key and frame the
@@ -720,7 +717,7 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
-    // ── thread (TCB) accessors (plan §4a) ───────────────────────────────────
+    // ── thread (TCB) accessors ───────────────────────────────────
     //
     // Setters update one `tcb_view` field and frame the other five views + the
     // `timer_head_view` scalar unchanged. `tcb_bind_slot` is a getter only — the
@@ -890,7 +887,7 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
-    // ── timer accessors (plan §4a; the armed-list logic is phase 4e) ─────────
+    // ── timer accessors (the armed-list logic) ──────────────────────────────
     //
     // Setters update one `timer_view` field (or the `timer_head_view` scalar) and
     // frame the other five views unchanged.
@@ -993,7 +990,7 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
-    // ── scheduler seam (plan §4a; §1.3) ─────────────────────────────────────
+    // ── scheduler seam ─────────────────────────────────────
     //
     // The single assumed scheduler contract phase 4 adds: `signal`'s body proof
     // (4b) needs to know the wake touches only the woken thread's `state`. The
@@ -1001,7 +998,7 @@ pub trait ExStore {
     // off every kcore queue once Runnable — `signal` sets `qnext = None` before
     // calling this), so modeling it as "state → Runnable, all else fixed" is
     // faithful; host-test-checked against `ArrayStore`. `unqueue_ready`'s contract
-    // lands with the §6d-final-thread `destroy_tcb` body (below).
+    // lands with the final-thread teardown `destroy_tcb` body (below).
     fn make_runnable(&mut self, t: ObjId)
         requires old(self).tcb_view().dom().contains(t),
         ensures
@@ -1015,8 +1012,8 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
-    // `unqueue_ready` — the `destroy_tcb` teardown counterpart of `make_runnable` (plan
-    // §6d-final-thread). The ready queue is scheduler state *below* the abstract `tcb_view`:
+    // `unqueue_ready` — the `destroy_tcb` teardown counterpart of `make_runnable`
+    // The ready queue is scheduler state *below* the abstract `tcb_view`:
     // a thread is Runnable both before and after the unqueue (the kcore model tracks only
     // `state`, which `destroy_tcb` itself sets to `Halted` *afterwards*), so the faithful
     // model is a **total no-op on every object view**. Host-test-checked against `ArrayStore`'s
@@ -1034,7 +1031,7 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
-    // ── aspace hardware seam (plan §1.4; the `aspace::map_in` post-map barrier) ─
+    // ── aspace hardware seam (the `aspace::map_in` post-map barrier) ──────────
     //
     // The barrier carries no object state — it issues a `dsb`/`isb` so the leaf
     // writes are visible before the mapping is used. Modeled as "frames every
@@ -1042,7 +1039,7 @@ pub trait ExStore {
     // `map_in` needs to call it in the verified fragment. Because it takes
     // neither page-table slice, Verus already knows it cannot perturb `l1`/`pool`,
     // so `map_in`'s page-table postcondition is independent of this contract.
-    // It also frames the TLBI log unchanged (plan §5e) — the log only ever grows
+    // It also frames the TLBI log unchanged — the log only ever grows
     // via `tlb_invalidate_page`, so the barrier is a pure ordering fence.
     fn barrier_after_map(&mut self)
         ensures
@@ -1056,12 +1053,12 @@ pub trait ExStore {
             final(self).cspace_view() == old(self).cspace_view(),
             final(self).tlb_log_view() == old(self).tlb_log_view();
 
-    // ── unmap hardware seam (plan §5e; the `aspace::unmap_in` TLBI ordering) ──
+    // ── unmap hardware seam (the `aspace::unmap_in` TLBI ordering) ────────────
     //
     // The two effect-log methods `unmap_in` calls. `tlb_invalidate_page` appends
     // exactly one `(asid, va)` entry — that *append* is what makes "one TLBI per
     // cleared page, in ascending order" a postcondition (the loop invariant tracks
-    // `tlb_log_view() == old ++ cleared-prefix`). Both frame every object view, so
+    // `tlb_log_view== old ++ cleared-prefix`). Both frame every object view, so
     // the page-table postcondition and the log postcondition compose cleanly.
     fn tlb_invalidate_page(&mut self, asid: u16, va: u64)
         ensures
@@ -1090,10 +1087,10 @@ pub trait ExStore {
             final(self).cspace_view() == old(self).cspace_view(),
             final(self).tlb_log_view() == old(self).tlb_log_view();
 
-    // ── aspace teardown seam (plan §6a; the cross-object-teardown phase) ──────
+    // ── aspace teardown seam (the cross-object-teardown seam) ──────
     //
     // Two shell-owned page-table ops kcore never sees the body of (the trusted
-    // base, plan §2). Assumed, host-checked against `ArrayStore` (the
+    // base). Assumed, host-checked against `ArrayStore` (the
     // `make_runnable` precedent). `aspace_unmap` is page-table maintenance — no
     // object state — so it frames every object view + `refs_view` + `cspace_view`
     // (the TLBI log it may touch is left unconstrained, like the other hardware
@@ -1145,7 +1142,7 @@ pub open spec fn cap_obj(c: Cap) -> Option<ObjId> {
 // dead-object lemmas (`lemma_no_live_thread_cap_from_dead` et al.) reason about
 // "is this a thread cap for `t`?" independent of the ceiling `Thread` now carries.
 //
-// `closed` (D-B1 cross-platform headroom): the body unfolds inside `cspace`
+// `closed` (cross-platform headroom): the body unfolds inside `cspace`
 // (where the two dead-object lemmas prove/consume it), but stays opaque to
 // `thread::destroy_tcb`, which only *carries* this predicate from one lemma's
 // `ensures` into the next's `requires` (a syntactic match) and never needs its
@@ -1157,9 +1154,9 @@ pub closed spec fn is_thread_cap_for(c: Cap, t: ObjId) -> bool {
     c.kind matches CapKind::Thread(o, _) && o == t
 }
 
-// The §5.4 maximum-controlled-priority ceiling a cap carries, if it is a thread
+// The rev0§5.4 maximum-controlled-priority ceiling a cap carries, if it is a thread
 // cap (else `None`). Priority attenuates monotonically through `derive` exactly
-// like rights (§2.3) — see `derive`'s ceiling `ensures`.
+// like rights (rev0§2.3) — see `derive`'s ceiling `ensures`.
 pub open spec fn cap_max_prio(c: Cap) -> Option<u8> {
     match c.kind {
         CapKind::Thread(_, mp) => Some(mp),
@@ -1172,7 +1169,7 @@ pub open spec fn is_empty_cap(c: Cap) -> bool {
 }
 
 // The (channel, end-index) a cap designates, if it is a channel cap (else `None`).
-// Narrower than `cap_obj` (which drops the end): the §3.3 per-endpoint census
+// Narrower than `cap_obj` (which drops the end): the rev0§3.3 per-endpoint census
 // `end_cap_count` filters on *which end* a `Channel(o, end)` cap names, since
 // `end_caps[end]` is tracked per end for peer-closed firing.
 pub open spec fn cap_chan_end(c: Cap) -> Option<(ObjId, int)> {
@@ -1183,10 +1180,10 @@ pub open spec fn cap_chan_end(c: Cap) -> Option<(ObjId, int)> {
 }
 
 // The notification a cap names, if it is a notification cap (else `None`). The
-// spec projection `thread::report_terminal`/`thread::bind` (plan §4d) use to talk
+// spec projection `thread::report_terminal`/`thread::bind` use to talk
 // about the notification a TCB bind slot holds — narrower than `cap_obj` (which
 // returns the object for *any* object cap), because a bind slot only ever holds a
-// notification cap and the §4d contracts reason specifically about that case.
+// notification cap and the bind/report contracts reason specifically about that case.
 pub open spec fn cap_notif(c: Cap) -> Option<ObjId> {
     match c.kind {
         CapKind::Notification(o) => Some(o),
@@ -1195,7 +1192,7 @@ pub open spec fn cap_notif(c: Cap) -> Option<ObjId> {
 }
 
 // Exec emptiness check tied to the `is_empty_cap` spec — `Cap::is_empty` is plain
-// Rust (outside `verus!`), so verified exec code (channel `recv`, §3d) uses this.
+// Rust (outside `verus!`), so verified exec code (channel `recv`) uses this.
 pub fn cap_is_empty(c: Cap) -> (r: bool)
     ensures
         r == is_empty_cap(c),
@@ -1205,12 +1202,12 @@ pub fn cap_is_empty(c: Cap) -> (r: bool)
 
 // The kind a derivation produces from `k` under a requested priority ceiling:
 // identical (same object, same channel end), except a Frame copy starts unmapped
-// (§2.5, one mapping per cap copy) and a Thread copy's §5.4 ceiling is reduced to
+// (rev0§2.5, one mapping per cap copy) and a Thread copy's rev0§5.4 ceiling is reduced to
 // `min(parent, prio_ceiling)`. This is the "copy" half of monotone derivation —
 // derivation cannot change the designated object or amplify via the kind, and the
-// priority ceiling can only shrink (§2.3). `prio_ceiling = 0xFF` (the `cap_copy`
+// priority ceiling can only shrink (rev0§2.3). `prio_ceiling = 0xFF` (the `cap_copy`
 // no-reduction sentinel; priorities are `< NUM_PRIOS = 32`) preserves the parent
-// ceiling exactly; a lower value is the §2.3 supervision grant (doc/results/71).
+// ceiling exactly; a lower value is the rev0§2.3 supervision grant.
 pub open spec fn derived_kind(k: CapKind, prio_ceiling: u8) -> CapKind {
     match k {
         CapKind::Frame { base, pages, mapping: _ } => CapKind::Frame { base, pages, mapping: None },
@@ -1219,9 +1216,9 @@ pub open spec fn derived_kind(k: CapKind, prio_ceiling: u8) -> CapKind {
     }
 }
 
-// `Rights::masked` now carries its bit-level `ensures` on the verified method
-// itself (see the `impl Rights` verus block above) — the standalone
-// `assume_specification` it used to need is gone (doc/results/28 §1).
+// `Rights::masked` carries its bit-level `ensures` on the verified method itself
+// (see the `impl Rights` verus block above), so it needs no standalone
+// `assume_specification`.
 
 // `CapSlot::empty` is a plain-Rust const fn (shared with the kernel shell); state
 // what it builds so `slot_move`'s final clear can be verified — an empty cap with
@@ -1235,8 +1232,8 @@ pub assume_specification [ CapSlot::empty ]() -> (r: CapSlot)
         r.prev_sib is None;
 
 // ── Structural well-formedness of the CDT (the executable `TypeOK`, now total
-//    and unbounded). Acyclicity is tracked separately where termination needs
-//    it (plan §4.1); this is the structural invariant the op proofs preserve. ──
+// and unbounded). Acyclicity is tracked separately where termination needs
+// it; this is the structural invariant the op proofs preserve. ──
 
 pub open spec fn link_in_dom(m: Map<SlotId, CapSlot>, o: Option<SlotId>) -> bool {
     match o {
@@ -1266,7 +1263,7 @@ pub open spec fn siblings_doubly_consistent(m: Map<SlotId, CapSlot>) -> bool {
 // Siblings in a next/prev chain share the same parent. Combined with
 // `head_is_first_child` and `siblings_doubly_consistent`, this pins a node's
 // residents to its `first_child → next_sib` chain — the reachability anchor the
-// construction-side acyclicity proofs need (doc/results/21 §9): without it a
+// construction-side acyclicity proofs need: without it a
 // node could name a parent while being absent from that parent's child list.
 pub open spec fn siblings_share_parent(m: Map<SlotId, CapSlot>) -> bool {
     forall|a: SlotId| #[trigger] m.dom().contains(a) ==>
@@ -1294,7 +1291,7 @@ pub open spec fn head_is_first_child(m: Map<SlotId, CapSlot>) -> bool {
 // `Some`. The "no phantom child" anchor — contrapositive: a childless node
 // (`first_child == None`) has no resident naming it parent. That is exactly what
 // lets a fresh detached leaf take the lowest acyclicity rank without a
-// still-lower phantom child needing to exist (doc/results/21 §9).
+// still-lower phantom child needing to exist.
 pub open spec fn parent_has_first_child(m: Map<SlotId, CapSlot>) -> bool {
     forall|k: SlotId| #[trigger] m.dom().contains(k) ==>
         (m[k].parent matches Some(p) ==> m[p].first_child is Some)
@@ -1310,14 +1307,14 @@ pub open spec fn empty_slots_detached(m: Map<SlotId, CapSlot>) -> bool {
     })
 }
 
-// ── CDT descendant reachability (the §3.4 "sees through queues" obligation; D-A3) ────
+// ── CDT descendant reachability (the rev0§3.4 "sees through queues" obligation) ────
 //
 // `revoke` deletes the *whole subtree* of its target, in-flight queue caps included
-// (§3.4: queue slots are ordinary `CapSlot`s carrying the parent edge, so a cap queued
+// (rev0§3.4: queue slots are ordinary `CapSlot`s carrying the parent edge, so a cap queued
 // in a message is a genuine CDT descendant — `slot_move`, what `send` uses, inherits the
 // edge into the ring slot). The structural predicates above pin only the *direct* child
 // relation; these add the transitive closure so `revoke` can export "the subtree is gone"
-// as a named obligation rather than leaving it structurally implied (doc 69, D-A3).
+// as a named obligation rather than leaving it structurally implied.
 
 // `path` is a child→parent walk in `m`: every entry is live and each entry's `parent`
 // points at the next. Length ≥ 1.
@@ -1407,7 +1404,7 @@ pub open spec fn acyclic(m: Map<SlotId, CapSlot>) -> bool {
 // (a ring of `next_sib`/`prev_sib`-consistent nodes, none a `first_child` head,
 // all sharing a parent whose `first_child` points elsewhere) satisfies every
 // structural clause. So sibling termination needs its own ghost rank, layered
-// into `cspace_wf` and preserved by the construction ops (doc/results/22).
+// into `cspace_wf` and preserved by the construction ops.
 pub open spec fn valid_srank(m: Map<SlotId, CapSlot>, s: Map<SlotId, nat>) -> bool {
     &&& s.dom() == m.dom()
     &&& forall|k: SlotId| #[trigger] m.dom().contains(k) ==>
@@ -1424,12 +1421,12 @@ pub open spec fn cspace_wf(m: Map<SlotId, CapSlot>) -> bool {
     cdt_wf(m) && acyclic(m) && sib_acyclic(m)
 }
 
-// ── Channel well-formedness (the §4.3 `chan_wf`; plan §3b) ───────────────────
+// ── Channel well-formedness (`chan_wf`) ──────────────────────────────────
 //
 // Ring index `i` is in channel `c`'s live window for `ring` iff it is one of the
 // `count[ring]` positions starting at `head[ring]` (wrapping mod `depth`) — the
 // FIFO window 3d's `send`/`recv` `Seq` model projects through. Stated as the
-// existential so the modular arithmetic stays out of the predicate (the doc-25 §2
+// existential so the modular arithmetic stays out of the predicate (the
 // discipline: quarantine non-linear `%` into 3d's helpers, not the invariant).
 pub open spec fn in_live_window(c: ChanView, ring: int, i: int) -> bool {
     exists|j: int| #![trigger (c.head[ring] + j) % (c.depth as int)]
@@ -1437,9 +1434,9 @@ pub open spec fn in_live_window(c: ChanView, ring: int, i: int) -> bool {
 }
 
 // `chan_wf(cv, sv, ch)` — channel `ch` is well-formed. Takes **both** views: the
-// detail plan (§3b) lists chan_wf with `(cv, ch)`, but its own clause "ring slots
+// An earlier `chan_wf` signature was `(cv, ch)`, but the clause "ring slots
 // outside the live window are empty (their `SlotId` empty in `slot_view`)" needs
-// the arena, so the signature is `(cv, sv, ch)` (recorded in doc/results/27 §1.1).
+// the arena, so the signature is `(cv, sv, ch)`.
 //
 // Clauses: depth positive; the Seq fields have length 2; the FIFO cursors are in
 // range; `ring_cap`/`msg_len`/`bindings` have their expected domains; every ring
@@ -1469,7 +1466,7 @@ pub open spec fn chan_wf(cv: Map<ObjId, ChanView>, sv: Map<SlotId, CapSlot>, ch:
             (0 <= r < 2 && 0 <= i < cv[ch].depth && 0 <= c < 4 && !in_live_window(cv[ch], r, i))
                 ==> is_empty_cap(sv[#[trigger] cv[ch].ring_cap[(r, i, c)]].cap)
     // Ring-cap injectivity: distinct ring positions map to distinct arena handles
-    // (3b deferred this to 3d; doc 27 §3). Load-bearing for `send`/`recv` — it is
+    // Load-bearing for `send`/`recv` — it is
     // what lets filling the new tail slot (or emptying the head slot) leave every
     // other in-window message untouched.
     &&& forall|r1: int, i1: int, c1: int, r2: int, i2: int, c2: int|
@@ -1490,9 +1487,9 @@ pub open spec fn chan_wf(cv: Map<ObjId, ChanView>, sv: Map<SlotId, CapSlot>, ch:
 // those `ChanView` fields and only **empties** slots (or leaves them) — exactly the window
 // `delete`'s Channel branch lives in: `delete_prepare` clears the deleted cap's slot, then
 // `endpoint_cap_dropped` decrements `end_caps[end]` (a count, not the `.len()`). Quarantined
-// into a deterministic lemma (doc 25 §2): proving the lift inline relied on auto-derivation
+// into a deterministic lemma: proving the lift inline relied on auto-derivation
 // that flakes CI's Z3 once the strengthened `cap_consistent(Thread)` widened the context
-// (the doc 51 §2 / §6d-final-thread trigger-perturbation hazard).
+// (the final-thread teardown trigger-perturbation hazard).
 pub proof fn lemma_chan_wf_frame(
     cv0: Map<ObjId, ChanView>,
     cv1: Map<ObjId, ChanView>,
@@ -1523,9 +1520,9 @@ pub proof fn lemma_chan_wf_frame(
         == in_live_window(cv0[ch], r, i) by {}
 }
 
-// ── The FIFO Seq model (the §4.3 centerpiece; plan §3d) ──────────────────────
+// ── The FIFO Seq model (the channel centerpiece) ─────────────────────────
 //
-// A queued message is `(len, caps)` — payload bytes abstracted (doc 27), so its
+// A queued message is `(len, caps)` — payload bytes abstracted, so its
 // observable content is the length and the four cap *contents*, read from the
 // arena at the ring handles. `ring_fifo` projects a ring's live window
 // `[head, head+count) mod depth` to a `Seq` in FIFO order: `send` appends
@@ -1540,15 +1537,15 @@ pub open spec fn ring_fifo(cv: ChanView, sv: Map<SlotId, CapSlot>, ring: int)
     Seq::new(cv.count[ring], |j: int| ring_msg(cv, sv, ring, (cv.head[ring] + j) % (cv.depth as int)))
 }
 
-// ── Notification waiter-queue well-formedness + the FIFO Seq model (plan §4a) ─
+// ── Notification waiter-queue well-formedness + the FIFO Seq model ─
 //
 // The waiter queue is a SINGLY-linked intrusive list threaded through the TCBs:
 // `NotifView` holds `wait_head`/`wait_tail`, each waiting TCB holds `qnext` (next
 // waiter) + `wait_notif` (its notification). Unlike the CDT sibling list it has no
 // back-pointer, so the doubly-consistent membership trick does not apply — the clean
-// model is an explicit FIFO `Seq` witness (the §3d `ring_fifo` analog). `wait` pushes
+// model is an explicit FIFO `Seq` witness (the `ring_fifo` analog). `wait` pushes
 // the tail (`Seq::push`, 4b), `signal` pops the head (`Seq::drop_first`, 4b),
-// `remove_waiter` splices out one element (4c) — so "wake order = block order" (§4.4)
+// `remove_waiter` splices out one element — so "wake order = block order" 
 // is FIFO-ness of `waiter_seq`.
 
 // A generic singly-linked-list acyclicity rank over an abstract successor map — the
@@ -1593,7 +1590,7 @@ pub open spec fn waiter_chain(
 
 // Notification `n` is well-formed: empty-queue head/tail agreement, and a waiter
 // chain witness exists. No op PROVES this in 4a — defined for 4b/4c, exercised by
-// `notif_wf_exec` (the `chan_wf` discipline, doc 27 §1).
+// `notif_wf_exec` (the `chan_wf` discipline).
 pub open spec fn notif_wf(nv: Map<ObjId, NotifView>, tv: Map<ObjId, TcbView>, n: ObjId) -> bool {
     &&& nv.dom().contains(n)
     &&& (nv[n].wait_head is None <==> nv[n].wait_tail is None)
@@ -1698,7 +1695,7 @@ pub proof fn lemma_waiter_chain_unique(
     assert(ws1 =~= ws2);
 }
 
-// Binding-liveness companion to `chan_wf` (plan §4b, the named-invariant resolution):
+// Binding-liveness companion to `chan_wf`:
 // every bound endpoint event names a *live, well-formed* notification. STRUCTURAL only
 // (`nv` domain + `notif_wf`) — no `refs` clause — which is exactly what makes it
 // preservable across a fire: `signal` preserves `notif_wf` of the notification it
@@ -1707,8 +1704,8 @@ pub proof fn lemma_waiter_chain_unique(
 // in both `requires` and `ensures` (the `chan_wf` discipline), and `fire` discharges
 // `signal`'s `notif_view`-domain + `notif_wf` preconditions from it. The waiter-release
 // `refs[n] > 0` that `signal`'s wake path also needs is NOT here — it is not preservable
-// across the `-1` without the refcount census (deferred to the post-phase-5 teardown
-// phase, plan §1.4), so it rides as a precondition-only clause on the fire-callers.
+// across the `-1` without the refcount census (it belongs to the teardown phase),
+// so it rides as a precondition-only clause on the fire-callers.
 pub open spec fn binding_notif_wf(
     cv: Map<ObjId, ChanView>,
     nv: Map<ObjId, NotifView>,
@@ -1726,7 +1723,7 @@ pub open spec fn binding_notif_wf(
 // `-1`: a queued waiter on binding `(e, v)`'s notification implies that notification has
 // `refs > 0`. PRECONDITION-only on the fire-callers (it is the waiter term of the
 // refcount census, not preservable across the `-1` without the full census deferred to
-// the post-phase-5 teardown phase, plan §1.4) — unlike the structural `binding_notif_wf`.
+// the teardown phase) — unlike the structural `binding_notif_wf`.
 pub open spec fn binding_refs_ok(
     cv: Map<ObjId, ChanView>,
     nv: Map<ObjId, NotifView>,
@@ -1772,11 +1769,11 @@ pub proof fn lemma_notif_wf_frame(
     }
 }
 
-// `signal`'s wake step (plan §4b): popping the head `t == ws0[0]` from a non-empty
-// waiter chain yields `ws0.drop_first()` in the post-state, given the head/tail were
+// `signal`'s wake step: popping the head `t == ws0[0]` from a non-empty
+// waiter chain yields `ws0.drop_first` in the post-state, given the head/tail were
 // re-pointed past `t` (new head = `t`'s old `qnext`; tail dropped to `None` exactly when
 // that is `None`) and only `t`'s TCB moved. Extracted so `signal`'s own body query stays
-// under the solver rlimit (the doc 25 §2 decomposition discipline).
+// under the solver rlimit (the decomposition discipline).
 pub proof fn lemma_drop_first_chain(
     nv0: Map<ObjId, NotifView>,
     tv0: Map<ObjId, TcbView>,
@@ -1859,7 +1856,7 @@ pub proof fn lemma_chain_frame_set(
 // on `n`) meet this: the chain set is preserved (transport both ways via
 // `lemma_chain_frame_set`), so existence agrees and (by uniqueness) the chosen seq agrees;
 // the robust `waiter_refs` keeps the no-chain case at 0 in both. The frame the wake/splice
-// `refcount_sound` preservation rests on (doc 45 §3).
+// `refcount_sound` preservation rests on.
 pub proof fn lemma_waiter_refs_frame(
     nv0: Map<ObjId, NotifView>,
     tv0: Map<ObjId, TcbView>,
@@ -1940,8 +1937,7 @@ pub proof fn lemma_waiter_refs_frame_nv(
 // (`unqueue_ready` leaves `wait_notif` untouched) violates that key yet is off-chain by state;
 // a thread `remove_waiter` just spliced out is off-chain by its cleared `wait_notif`. The
 // off-chain witness on the *changed* threads, set-shaped to cover both the chain in `atv` and
-// the back-transport — the `lemma_chain_frame_set` analog keyed on off-chain-ness (plan
-// §6d-final-thread, doc 51 §3).
+// the back-transport — the `lemma_chain_frame_set` analog keyed on off-chain-ness.
 proof fn lemma_chain_frame_offchain(
     anv: Map<ObjId, NotifView>,
     atv: Map<ObjId, TcbView>,
@@ -2014,7 +2010,7 @@ pub proof fn lemma_waiter_refs_frame_offchain(
 // `o`'s chain in NEITHER state. This is what `remove_waiter`'s *absent* path needs that the
 // state/wait predicate cannot give: `destroy_tcb` clears a stale `wait_notif == Some(o)` on a
 // thread that was provably never queued (`!waiter_seq(o).contains(t)`), and must frame
-// `waiter_refs(o)` across that single-thread edit (plan §6d-final-thread).
+// `waiter_refs(o)` across that single-thread edit.
 pub proof fn lemma_waiter_refs_frame_dequeued(
     nv: Map<ObjId, NotifView>,
     tv0: Map<ObjId, TcbView>,
@@ -2102,7 +2098,7 @@ pub proof fn lemma_waiter_refs_frame_fields(
 // halted thread moves off-chain → off-chain): no notification's chain — hence `notif_wf` —
 // moves, and the strengthened Thread clause carries (a thread still BlockedNotif-on-`wn` in `s1`
 // was unchanged, so its `notif_wf(wn)` is the one from `s0`). The notif-frozen, off-chain
-// analog of `lemma_caps_consistent_frame` (plan §6d-final-thread).
+// analog of `lemma_caps_consistent_frame`.
 pub proof fn lemma_caps_consistent_frame_thread_offchain<S: Store>(s0: &S, s1: &S)
     requires
         caps_consistent(s0),
@@ -2185,7 +2181,7 @@ pub proof fn lemma_caps_consistent_frame_thread_offchain<S: Store>(s0: &S, s1: &
 // absent-`remove_waiter` case: `t` is BlockedNotif with a *stale* `wait_notif` (provably on no
 // chain), so the predicate cannot see it off-chain, but membership can. The edit clears `t`'s
 // wait link (leaving it off-chain by predicate in `s1`), holds every other view fixed, and `t`
-// is on no chain in either state — so no notification's `notif_wf` moves (plan §6d-final-thread).
+// is on no chain in either state — so no notification's `notif_wf` moves.
 pub proof fn lemma_caps_consistent_frame_thread_dequeued<S: Store>(s0: &S, s1: &S, t: ObjId)
     requires
         caps_consistent(s0),
@@ -2273,8 +2269,8 @@ pub proof fn lemma_caps_consistent_frame_thread_dequeued<S: Store>(s0: &S, s1: &
     }
 }
 
-// Halting + hold-clearing the single dead TCB `t` preserves `caps_consistent` (plan
-// §6d-final-thread-body — `destroy_tcb`'s halt + clear-before-unref steps). `t` is designated by
+// Halting + hold-clearing the single dead TCB `t` preserves `caps_consistent`
+// (`destroy_tcb`'s halt + clear-before-unref steps). `t` is designated by
 // no live cap (`refs[t] == 0`), so the only `cap_consistent` clauses reading `t`'s fields — a
 // `Thread(t)` cap's `cspace_resident_wf`/waiter-coherence — are never instantiated; every other
 // clause reads a framed field, and `t` lies on no waiter chain, so its edits break no
@@ -2367,8 +2363,8 @@ pub proof fn lemma_caps_consistent_frame_thread_halt_clear<S: Store>(s0: &S, s1:
     }
 }
 
-// A thread that is not a blocked waiter of any live chain lies on no waiter chain (plan
-// §6d-final-thread-body — `destroy_tcb`'s post-detach state). A `waiter_chain` node is
+// A thread that is not a blocked waiter of any live chain lies on no waiter chain
+// (`destroy_tcb`'s post-detach state). A `waiter_chain` node is
 // `BlockedNotif` and names its notification, so `t` can be a node only of its own
 // `wait_notif`'s chain; if `t` is not `BlockedNotif`, or `wait_notif is None`, or it is
 // `notif_wf`-absent from that one chain, it is on no chain at all.
@@ -2400,7 +2396,7 @@ pub proof fn lemma_thread_off_all_chains<S: Store>(s: &S, t: ObjId)
     }
 }
 
-// `remove_waiter`'s splice step (plan §4c): unlinking `t == ws0[k]` from a waiter
+// `remove_waiter`'s splice step: unlinking `t == ws0[k]` from a waiter
 // chain yields `ws0.remove(k)` in the post-state, given the imperative link fixups —
 // the head re-pointed past `t` when `t` was the head (`k == 0`), the predecessor's
 // `qnext` re-threaded past `t` otherwise (`k > 0`), the tail dropped to the
@@ -2408,7 +2404,7 @@ pub proof fn lemma_thread_off_all_chains<S: Store>(s: &S, t: ObjId)
 // mid-list analog of `lemma_drop_first_chain` (which is the `k == 0` head-pop special
 // case); singly-linked with no re-parenting, so a plain `Seq::remove`, not the
 // rank-rescaled merge `cdt_unlink` needed. Extracted so `remove_waiter`'s own body
-// query stays under the solver rlimit (the doc 25 §2 decomposition discipline).
+// query stays under the solver rlimit (the decomposition discipline).
 pub proof fn lemma_remove_chain(
     nv0: Map<ObjId, NotifView>,
     tv0: Map<ObjId, TcbView>,
@@ -2523,7 +2519,7 @@ pub proof fn lemma_remove_chain(
     }
 }
 
-// ── armed-timer list model (plan §4e) ───────────────────────────────────────
+// ── armed-timer list model ───────────────────────────────────────
 // The armed-timer list is a GLOBAL singly-linked intrusive list: the head is the
 // `timer_head_view` scalar (the kernel static, store.rs:130), threaded through each
 // `TimerView`'s `next`. Unlike the notification waiter queue it has NO tail pointer
@@ -2658,13 +2654,13 @@ pub proof fn lemma_timer_chain_unique(
     assert(ts1 =~= ts2);
 }
 
-// `disarm`'s splice step (plan §4e): unlinking `t == ts0[k]` from the armed list yields
+// `disarm`'s splice step: unlinking `t == ts0[k]` from the armed list yields
 // `ts0.remove(k)`. The `lemma_remove_chain` analog minus the tail fixup (no tail pointer)
 // — the head re-pointed past `t` when `t` was the head (`k == 0`), the predecessor's
 // `next` re-threaded past `t` otherwise (`k > 0`), and `t` itself dropped from the chain
 // (its own post-state fields are irrelevant — it is no longer charted).
 // `Seq::remove(k)` of a duplicate-free seq is duplicate-free. Generic and isolated in its
-// own query — the `no_duplicates` `self[i] != self[j]` is an n² trigger (doc 25 §2 / 35 §2.6),
+// own query — the `no_duplicates` `self[i] != self[j]` is an n² trigger (an n² trigger hazard),
 // so proving it with only `Seq` in context (rather than inside the timer/waiter-chain proofs,
 // whose `Map`/view definitions add instantiation pressure) keeps those proofs well under the
 // rlimit across platforms (Z3's resource counting varies Linux↔macOS, so a borderline proof
@@ -2688,8 +2684,8 @@ pub proof fn lemma_seq_remove_no_dup<A>(s: Seq<A>, k: int)
 }
 
 // `spinoff_prover`: the canonical victim of the `cap_consistent`-strengthening batch
-// contamination (doc 51 §3; commit b091924 gave it a `no_duplicates` offload). Phase
-// §6d-final-thread strengthens `cap_consistent` *further* (two clauses), so its prior headroom
+// contamination (offloaded to a `no_duplicates` lemma).
+// the final-thread teardown strengthens `cap_consistent` *further* (two clauses), so its prior headroom
 // is at elevated risk on a different CI Z3 seed; isolate it alongside its `push_head` sibling.
 #[verifier::spinoff_prover]
 pub proof fn lemma_timer_remove_chain(
@@ -2724,7 +2720,7 @@ pub proof fn lemma_timer_remove_chain(
     ts0.remove_ensures(k);
     // dts.len() == len - 1; dts[i] == ts0[i] for i<k, ts0[i+1] for k<=i<len-1.
 
-    // `timer_chain` gives `ts0.no_duplicates()`; the splice preserves it (offloaded query).
+    // `timer_chain` gives `ts0.no_duplicates`; the splice preserves it (offloaded query).
     assert(ts0.no_duplicates());
     lemma_seq_remove_no_dup(ts0, k);
 
@@ -2800,19 +2796,18 @@ proof fn lemma_push_head_nodup(ts0: Seq<ObjId>, t: ObjId, pts: Seq<ObjId>)
     }
 }
 
-// `arm`'s prepend step (plan §4e): pushing the freshly-armed `t` onto the head yields
+// `arm`'s prepend step: pushing the freshly-armed `t` onto the head yields
 // `pts` (the head-push of `ts0`, i.e. `[t] ++ ts0`). `ts0` is the post-`disarm` chain —
 // `t` is not on it (it was just unarmed), and `arm` touches only `t`'s fields and the
 // head scalar, so every prior node is intact. The lighter analog of `wait`'s tail-push.
 //
-// **`spinoff_prover` (cross-platform headroom, plan §6d-final-thread).** This borderline
+// **`spinoff_prover` (cross-platform headroom).** This borderline
 // `Seq`/chain proof flakes the rlimit on CI's Linux Z3 (resource counting varies
-// Linux↔macOS — the doc-2376 note) once `cap_consistent` is strengthened: Verus batches a
+// Linux↔macOS) when `cap_consistent` is strengthened: Verus batches a
 // module's goals in a shared SMT context, so the new clauses' axioms shift Z3's resource
-// accounting for *unrelated* functions — exactly the "strengthening `cap_consistent`
-// destabilized an unrelated timer proof's rlimit" effect doc 51 §3 recorded (and commit
-// b091924 patched for `lemma_timer_remove_chain` by offloading its `no_duplicates`). Its
-// own `no_duplicates` is already offloaded (`lemma_push_head_nodup`), so the remaining
+// accounting for *unrelated* functions — strengthening `cap_consistent` can
+// destabilize an unrelated timer proof's rlimit. Its
+// own `no_duplicates` is offloaded (`lemma_push_head_nodup`), so the remaining
 // headroom comes from isolating it into a dedicated Z3 instance, immune to the batch
 // contamination — the standard Verus flakiness fix.
 #[verifier::spinoff_prover]
@@ -2902,7 +2897,7 @@ pub proof fn lemma_seq_remove_keeps(ts0: Seq<ObjId>, k: int, j: ObjId)
     }
 }
 
-// Per-armed-timer signal-precondition supply (plan §4e, the census fragment): an armed
+// Per-armed-timer signal-precondition supply (the census fragment): an armed
 // timer's bound notification is live and well-formed, holds the timer's own ref
 // (`refs >= 1`), and — when it has a blocked waiter — the waiter's ref too (`refs >= 2`),
 // so after `disarm` releases the timer's `-1` the waiter's survives and `signal`'s
@@ -2947,7 +2942,7 @@ pub open spec fn is_ring_cap_of(cv: ChanView, s: SlotId) -> bool {
         0 <= r < 2 && 0 <= i < cv.depth && 0 <= c < 4 && cv.ring_cap[(r, i, c)] == s
 }
 
-// Modular helpers (doc 25 §2: quarantine `%` reasoning in tiny lemmas so the big
+// Modular helpers (quarantine `%` reasoning in tiny lemmas so the big
 // send/recv case analyses stay first-order). `lemma_window_index_distinct`: the
 // new tail offset `b = count` (< depth) lands on a different ring index than any
 // in-window offset `a < count` — the fact that lets a `send` leave every prior
@@ -3019,7 +3014,7 @@ pub open spec fn count_nonempty(m: Map<SlotId, CapSlot>) -> nat {
     m.dom().filter(|k: SlotId| !is_empty_cap(m[k].cap)).len()
 }
 
-// Teardown only ever *empties* slots, it never fills an empty one (plan §6d): `cdt_unlink`
+// Teardown only ever *empties* slots, it never fills an empty one: `cdt_unlink`
 // moves links not caps, `set_slot` only clears, and the recursive destructors only delete.
 // This is the frame `delete`'s own `is_empty_cap(final[slot])` ensures rests on (`obj_unref`
 // must leave the just-cleared slot empty) and that `destroy_channel`'s ring-cap loop carries
@@ -3051,21 +3046,21 @@ pub proof fn lemma_only_empties_trans(
 }
 
 // ── Refcount census: the stored refcount equals the count of designating slots
-//    (cspace residents; channel-queue and TCB-bind homes ride the same arena),
-//    plus the non-slot references (bindings/waiters/armed timers) the later
-//    phases add. For phase 2 the census is the slot count; the cross-home and
-//    non-slot terms land with channel/notification/thread (plan §4.3–§4.4). ──
+// (cspace residents; channel-queue and TCB-bind homes ride the same arena),
+// plus the non-slot references (bindings/waiters/armed timers) the later
+// phases add. For phase 2 the census is the slot count; the cross-home and
+// non-slot terms land with channel/notification/thread. ──
 
 pub open spec fn slot_refs(m: Map<SlotId, CapSlot>, obj: ObjId) -> nat {
     m.dom().filter(|k: SlotId| cap_obj(m[k].cap) == Some(obj)).len()
 }
 
-// The §3.3 per-endpoint cap census: the number of live `Channel(ch, e)` caps in
+// The rev0§3.3 per-endpoint cap census: the number of live `Channel(ch, e)` caps in
 // the slot arena. The kernel keeps `chan_view[ch].end_caps[e]` exactly equal to
 // this (maintained by `endpoint_cap_added`/`_dropped`), so peer-closed fires when
 // the *last* endpoint cap is gone. `end_caps_sound` (below) makes that equality a
 // theorem — the invariant `delete`'s body needs to re-prove `caps_consistent`'s
-// `end_caps[end] > 0` for any sibling channel cap after dropping one (doc 45 §2).
+// `end_caps[end] > 0` for any sibling channel cap after dropping one.
 pub open spec fn end_cap_count(m: Map<SlotId, CapSlot>, ch: ObjId, e: int) -> nat {
     m.dom().filter(|k: SlotId| cap_chan_end(m[k].cap) == Some((ch, e))).len()
 }
@@ -3107,7 +3102,7 @@ pub proof fn lemma_slot_refs_positive(m: Map<SlotId, CapSlot>, s: SlotId, o: Obj
     }
 }
 
-// No live cap designates a dead object (plan §6d-final-thread-body-2): `refs[o] == 0` forces
+// No live cap designates a dead object: `refs[o] == 0` forces
 // `obj_census(o) == 0` (refcount_sound), so `slot_refs(o) == 0` — no live cap has `cap_obj ==
 // Some(o)`. `destroy_tcb` reads the `Thread(t)` instance off to discharge
 // `lemma_caps_consistent_frame_thread_halt_clear`'s "no live `Thread(t)` cap" precondition (its
@@ -3320,12 +3315,12 @@ proof fn lemma_designation_bump(
     assert(slot_refs(m, obj) == f1.len());
 }
 
-// ── The full refcount census (plan §6a). `refs[o]` must equal `obj_census(o)` —
-//    the recount over *every* reference to `o`: slot designations (`slot_refs`)
-//    plus the five non-slot terms phases 3/4/5 landed as per-op deltas, here
-//    assembled. Each term is a `slot_refs`-style filter/length (or a `waiter_seq`
-//    length). `refcount_sound` is the system invariant the teardown family (6c/6d)
-//    and the ref-touching construction ops (6f) preserve. ──
+// ── The full refcount census. `refs[o]` must equal `obj_census(o)` —
+// the recount over *every* reference to `o`: slot designations (`slot_refs`)
+// plus the five non-slot terms phases 3/4/5 landed as per-op deltas, here
+// assembled. Each term is a `slot_refs`-style filter/length (or a `waiter_seq`
+// length). `refcount_sound` is the system invariant the teardown family (6c/6d)
+// and the ref-touching construction ops (6f) preserve. ──
 
 // The aspace a mapped Frame cap holds a (non-cap) reference on — the mapping's
 // target. `None` for an unmapped frame or any non-Frame cap. A mapped frame holds
@@ -3341,7 +3336,7 @@ pub open spec fn cap_frame_aspace(c: Cap) -> Option<ObjId> {
 
 // Channel bindings naming `o`: the `(ch, end, ev)` triples whose binding's notif is
 // `Some(o)` (end ∈ {0,1}, ev ∈ {0,1,2}). A subset of `cv.dom() × {0,1} × {0,1,2}`,
-// finite when `cv.dom()` is. The §3.6 binding term (the `binding_refs_ok` companion).
+// finite when `cv.dom()` is. The rev0§3.6 binding term (the `binding_refs_ok` companion).
 pub open spec fn binding_refs(cv: Map<ObjId, ChanView>, o: ObjId) -> nat {
     Set::new(
         |t: (ObjId, int, int)|
@@ -3377,12 +3372,12 @@ pub proof fn lemma_binding_refs_frame(cv0: Map<ObjId, ChanView>, cvf: Map<ObjId,
 // op (teardown clears bindings and `end_caps`, `send`/`recv` move head/count, but the
 // layout never moves). `chan_struct_frame` is the teardown-wide frame that says exactly
 // this survives: it is what lets `destroy_channel`'s ring-cap loop read
-// `old.chan_view()[ch].ring_cap` across the recursive `delete`s (the channel `ch` is not
+// `old.chan_view[ch].ring_cap` across the recursive `delete`s (the channel `ch` is not
 // re-homed, its slot handles do not move) and conclude every *old* ring slot ends empty.
 // Threaded through the SCC members (`delete`/`obj_unref`/`destroy_cspace`/`unref_cspace`/
 // `destroy_channel`/`destroy_tcb`); the non-recursive callees (`endpoint_cap_dropped`,
 // `set_chan_binding`, `destroy_notif`/`destroy_timer`'s full `chan_view` frame) supply it
-// for free (plan §6d body PR).
+// for free.
 pub open spec fn chan_struct_frame(cv0: Map<ObjId, ChanView>, cvf: Map<ObjId, ChanView>) -> bool {
     &&& cvf.dom() == cv0.dom()
     &&& forall|ch: ObjId| #[trigger] cv0.dom().contains(ch)
@@ -3407,7 +3402,7 @@ pub proof fn lemma_chan_struct_frame_trans(
 // Updating a single channel `ch` to a view that keeps its `ring_cap`/`depth` preserves the
 // skeleton. The exact shape `endpoint_cap_dropped` (`end_caps`-only, `..old[ch]`) and
 // `set_chan_binding` (`bindings`-only, `..old[ch]`) land, so `delete`/`destroy_channel` read
-// `chan_struct_frame` off their ensures with this one lemma (plan §6d body PR).
+// `chan_struct_frame` off their ensures with this one lemma.
 pub proof fn lemma_chan_field_update_struct_frame(cv: Map<ObjId, ChanView>, ch: ObjId, v: ChanView)
     requires
         cv.dom().contains(ch),
@@ -3420,7 +3415,7 @@ pub proof fn lemma_chan_field_update_struct_frame(cv: Map<ObjId, ChanView>, ch: 
 }
 
 // Blocked waiters on `o`: the length of `o`'s FIFO waiter chain — each blocked TCB
-// holds one queued ref (the phase-4 waiter term, plan §4b/§4c). **Robust** when no
+// holds one queued ref (the waiter term). **Robust** when no
 // waiter chain exists (`o` is not a well-formed notification): then the term is 0, not
 // the `choose`-garbage `waiter_seq` would otherwise yield. This matches the exec mirror
 // (`waiter_count_exec` returns 0 for a non-notification `o`) and is what lets `signal`
@@ -3429,7 +3424,7 @@ pub proof fn lemma_chan_field_update_struct_frame(cv: Map<ObjId, ChanView>, ch: 
 // (`lemma_waiter_refs_frame`) — and an `x` with no chain stays at 0 in both states,
 // which the bare `waiter_seq(x).len()` could not guarantee across the edit. Where a
 // chain provably exists (every `notif_wf` notification), the `if` reduces to the plain
-// length, so the phase-4 contracts and the `obj_unref` Notification arm are unaffected.
+// length, so the notification contracts and the `obj_unref` Notification arm are unaffected.
 pub open spec fn waiter_refs(nv: Map<ObjId, NotifView>, tv: Map<ObjId, TcbView>, o: ObjId) -> nat {
     if exists|ws: Seq<ObjId>| waiter_chain(nv, tv, o, ws) {
         waiter_seq(nv, tv, o).len()
@@ -3459,7 +3454,7 @@ pub proof fn lemma_waiter_refs_pos_from_head(
 }
 
 // Armed timers naming `o`: each armed timer bound to `o` holds one queued ref while
-// armed (the phase-4e armed-timer term, plan §4e).
+// armed (the armed-timer term).
 pub open spec fn armed_timer_refs(tmv: Map<ObjId, TimerView>, o: ObjId) -> nat {
     tmv.dom().filter(|k: ObjId| tmv[k].armed && tmv[k].notif == Some(o)).len()
 }
@@ -3501,13 +3496,13 @@ pub proof fn lemma_refs_pos_from_off_by_one<S: Store>(store: &S, z: ObjId, n: Ob
 }
 
 // Frame mappings naming `o`: each mapped frame cap holds one ref on its target
-// aspace via the mapping field (the new phase-5-enabled aspace term, plan §6a).
+// aspace via the mapping field (the aspace term).
 pub open spec fn frame_map_refs(sv: Map<SlotId, CapSlot>, o: ObjId) -> nat {
     sv.dom().filter(|k: SlotId| cap_frame_aspace(sv[k].cap) == Some(o)).len()
 }
 
 // Thread holds on `o`: a bound thread holds one ref on its cspace and one on its
-// aspace — released by `destroy_tcb`'s `unref_cspace`/`unref_aspace` (plan §6a).
+// aspace — released by `destroy_tcb`'s `unref_cspace`/`unref_aspace`.
 pub open spec fn thread_hold_refs(tv: Map<ObjId, TcbView>, o: ObjId) -> nat {
     tv.dom().filter(|k: ObjId| tv[k].cspace == Some(o)).len()
         + tv.dom().filter(|k: ObjId| tv[k].aspace == Some(o)).len()
@@ -3517,7 +3512,7 @@ pub open spec fn thread_hold_refs(tv: Map<ObjId, TcbView>, o: ObjId) -> nat {
 // that leaves those two fields untouched (whatever else it changes — state, qnext,
 // wait_notif, retval) frames the term. The frame `signal`/`remove_waiter`'s
 // `refcount_sound` preservation needs: they move a TCB's queue/wait fields but never its
-// cspace/aspace (plan §6d body PR).
+// cspace/aspace.
 pub proof fn lemma_thread_hold_frame(tv0: Map<ObjId, TcbView>, tvf: Map<ObjId, TcbView>, o: ObjId)
     requires
         tvf.dom() == tv0.dom(),
@@ -3543,7 +3538,7 @@ pub open spec fn obj_census<S: Store>(store: &S, o: ObjId) -> nat {
 }
 
 // Every live object's stored refcount equals its census. The teardown family
-// assumes this at entry and re-establishes it at exit (the §4.1 obligation).
+// assumes this at entry and re-establishes it at exit (the verification obligation).
 pub open spec fn refcount_sound<S: Store>(store: &S) -> bool {
     forall|o: ObjId|
         store.refs_view().dom().contains(o) ==> store.refs_view()[o] == #[trigger] obj_census(
@@ -3554,18 +3549,18 @@ pub open spec fn refcount_sound<S: Store>(store: &S) -> bool {
 
 // The refs domain *covers* every referenced object: anything with a positive census (a
 // designating slot, a binding, a waiter, an armed timer, a frame mapping, or a thread hold)
-// is in `refs_view().dom()`. `refcount_sound` only constrains objects *already* in the domain;
+// is in `refs_view.dom()`. `refcount_sound` only constrains objects *already* in the domain;
 // this is the missing coverage `delete`'s body needs — its deleted cap's object `o` has
-// `slot_refs(o) >= 1`, so `o ∈ refs.dom`, which `obj_unref`/`unref_aspace` require and which
+// `slot_refs(o) >= 1`, so `o ∈ refs.dom()`, which `obj_unref`/`unref_aspace` require and which
 // `census_off_by_one(·, o)` itself presupposes. Preserved by teardown: an object only leaves
-// `refs.dom` when its `refs` (hence, by `refcount_sound`, its census) is already zero.
+// `refs.dom()` when its `refs` (hence, by `refcount_sound`, its census) is already zero.
 pub open spec fn census_dom_complete<S: Store>(store: &S) -> bool {
     forall|o: ObjId| #[trigger] obj_census(store, o) >= 1 ==> store.refs_view().dom().contains(o)
 }
 
 // A positive census witness is in the refs domain — the `census_dom_complete` consequence
 // `delete` reads off to place its deleted cap's object (and the notifications its branches
-// reference) into `refs.dom` from the census.
+// reference) into `refs.dom()` from the census.
 pub proof fn lemma_in_refs_from_census<S: Store>(store: &S, o: ObjId)
     requires
         census_dom_complete(store),
@@ -3606,8 +3601,8 @@ pub open spec fn census_off_by_one<S: Store>(store: &S, z: ObjId) -> bool {
             ==> store.refs_view()[x] == obj_census(store, x)
 }
 
-// A teardown-stable frame for "dead, queue-detached" TCBs (plan §6d-final-thread-body, doc 52
-// §3 — the `tcb_view` frame the cross-object recursion lacked). An object `x` with
+// A teardown-stable frame for "dead, queue-detached" TCBs (the `tcb_view` frame the
+// cross-object recursion needs). An object `x` with
 // `refs[x] == 0` whose TCB entry is off every waiter queue (`wait_notif is None`) is untouched
 // by any teardown op: `refs[x] == 0` ⟹ no cap designates it (so no `dec_ref`/`destroy_*`
 // targets it, hence no `set_tcb_*` runs on it), and `wait_notif is None` ⟹ it sits on no
@@ -3620,7 +3615,7 @@ pub open spec fn census_off_by_one<S: Store>(store: &S, z: ObjId) -> bool {
 // then re-qualifies `t` — halted with `wait_notif` cleared — to read `t`'s own postconditions
 // off the recursive `unref_cspace`/`delete`).
 // The per-object kernel of `dead_tcb_frozen` (a clean predicate so the system quantifier triggers
-// on `dead_tcb_frozen_at(s0, s1, x)`, not the fragile `s1.tcb_view()[x]` map index).
+// on `dead_tcb_frozen_at(s0, s1, x)`, not the fragile `s1.tcb_view[x]` map index).
 pub open spec fn dead_tcb_frozen_at<S: Store>(s0: &S, s1: &S, x: ObjId) -> bool {
     (s0.tcb_view().dom().contains(x) && s0.refs_view().dom().contains(x)
         && s0.refs_view()[x] == 0 && s0.tcb_view()[x].wait_notif is None)
@@ -3634,7 +3629,7 @@ pub open spec fn dead_tcb_frozen<S: Store>(s0: &S, s1: &S) -> bool {
 
 // `dead_tcb_frozen` composes (the antecedent is self-preserving): the building block
 // `destroy_cspace`'s resident loop and `delete`/`destroy_tcb`'s sequential teardown steps use to
-// thread the frame across each sub-call (plan §6d-final-thread-body).
+// thread the frame across each sub-call.
 pub proof fn lemma_dead_tcb_frozen_trans<S: Store>(s0: &S, s1: &S, s2: &S)
     requires
         dead_tcb_frozen(s0, s1),
@@ -3656,7 +3651,7 @@ pub proof fn lemma_dead_tcb_frozen_trans<S: Store>(s0: &S, s1: &S, s2: &S)
     }
 }
 
-// Derive `dead_tcb_frozen` from a **signal-shaped** edit (plan §6d-final-thread-body): only TCBs
+// Derive `dead_tcb_frozen` from a **signal-shaped** edit: only TCBs
 // waiting on `n` move (the woken/spliced waiter), and `refs` keeps already-dead objects dead. A
 // dead (`refs 0`), detached (`wait_notif is None`) `x` is not waiting on `n`, so its TCB is
 // frozen, and it stays dead. `signal`/`fire`/`endpoint_cap_dropped`/`remove_waiter` feed this
@@ -3685,7 +3680,7 @@ pub proof fn lemma_dead_tcb_frozen_signal_shaped<S: Store>(s0: &S, s1: &S, n: Ob
 
 // `dec_ref(o)` (with `refs[o] > 0`) is dead-tcb-frozen: it frames `tcb` whole and drops only
 // `refs[o]` (a positive object, so never a dead one). `obj_unref`'s arms read it off after the
-// `dec_ref` before composing with the at-zero destructor (plan §6d-final-thread-body).
+// `dec_ref` before composing with the at-zero destructor.
 pub proof fn lemma_dead_tcb_frozen_dec_ref<S: Store>(s0: &S, s1: &S, o: ObjId)
     requires
         s0.refs_view().dom().contains(o),
@@ -3718,7 +3713,7 @@ pub proof fn lemma_dead_tcb_frozen_refl<S: Store>(s0: &S, s1: &S)
     assert forall|x: ObjId| #[trigger] dead_tcb_frozen_at(s0, s1, x) by {}
 }
 
-// ── The except-`t` frame for `destroy_tcb`'s body (plan §6d-final-thread-body-2). ──
+// ── The except-`t` frame for `destroy_tcb`'s body. ──
 //
 // `destroy_tcb` rewrites its own halted subject `t` (halts it, clears its holds), so the *full*
 // `dead_tcb_frozen` cannot hold across its body — but the frame `obj_unref`'s Thread arm needs
@@ -3764,7 +3759,7 @@ pub proof fn lemma_dead_tcb_frozen_except_trans<S: Store>(s0: &S, s1: &S, s2: &S
     }
 }
 
-// ── §6e: slot "home" residency + the structured-emptying provenance frame. ──────────────
+// ── Home frame: slot "home" residency + the structured-emptying provenance frame. ──────────────
 //
 // A teardown op clears a slot's cap only for (a) the directly-deleted target or (b) a slot that
 // is an internal **home handle** of some object it tore down: a `cspace` resident, a channel
@@ -3804,7 +3799,7 @@ pub open spec fn is_homed<S: Store>(s: &S, x: SlotId) -> bool {
     homed_in_cspace(s, x) || homed_in_chan(s, x) || homed_in_tcb(s, x)
 }
 
-// Every un-homed slot other than `target` keeps its exact cap — the §6e provenance frame for an
+// Every un-homed slot other than `target` keeps its exact cap — the Home-frame provenance for an
 // op with a single directly-deleted `target` (`delete`).
 pub open spec fn unhomed_frozen<S: Store>(s0: &S, s1: &S, target: SlotId) -> bool {
     forall|x: SlotId|
@@ -3820,7 +3815,7 @@ pub open spec fn unhomed_frozen_free<S: Store>(s0: &S, s1: &S) -> bool {
             ==> #[trigger] s1.slot_view()[x].cap == s0.slot_view()[x].cap
 }
 
-// ── §6e-dual: the **provenance** frame — *which* homing object died when a homed slot is emptied.
+// ── Death-provenance: the **provenance** frame — *which* homing object died when a homed slot is emptied.
 //
 // `unhomed_frozen` is the contrapositive-floor: un-homed slots are never emptied. Its dual, here,
 // is the *positive* witness for a **homed** slot: when a non-target slot `x` *is* emptied by the
@@ -3828,10 +3823,10 @@ pub open spec fn unhomed_frozen_free<S: Store>(s0: &S, s1: &S) -> bool {
 // object that, having lost its last cap, ran the destructor that cleared its home handle `x`).
 // `revoke` reads this off to prove its root survives when *all* of the root's homing objects keep
 // a live external reference: a homing object never reaches `refs == 0`, so by contraposition the
-// root is never emptied. (Doc 55 §3, the recorded resident-with-external-reference residue.)
+// root is never emptied (the resident-with-external-reference case).
 //
-// **Death model** (codebase reality, doc 55 §3 — *not* dom-removal): a cspace/channel/TCB
-// destructor leaves its object in `refs.dom` with `refs == 0` (only `aspace_destroy` removes from
+// **Death model** (codebase reality — *not* dom-removal): a cspace/channel/TCB
+// destructor leaves its object in `refs.dom()` with `refs == 0` (only `aspace_destroy` removes from
 // the domain, and an aspace homes nothing). So `dead_obj` is the *disjunction* — out of the
 // domain, or in it with zero refs — which (a) covers both seams and (b) is **monotone** across the
 // whole teardown cluster (no teardown op ever re-refs or re-adds a dead object), the property
@@ -3955,8 +3950,8 @@ pub proof fn lemma_homes_stable<S: Store>(s0: &S, s1: &S, o: ObjId, x: SlotId)
     }
 }
 
-// An object is **dead** iff its last cap is gone: it left `refs.dom` (`aspace_destroy`) *or* it
-// sits in `refs.dom` at `refs == 0` (every other destructor leaves its object so). Either way no
+// An object is **dead** iff its last cap is gone: it left `refs.dom()` (`aspace_destroy`) *or* it
+// sits in `refs.dom()` at `refs == 0` (every other destructor leaves its object so). Either way no
 // live cap designates it.
 pub open spec fn dead_obj<S: Store>(s: &S, o: ObjId) -> bool {
     !s.refs_view().dom().contains(o) || s.refs_view()[o] == 0
@@ -3965,7 +3960,7 @@ pub open spec fn dead_obj<S: Store>(s: &S, o: ObjId) -> bool {
 // "Dead stays dead": a teardown op never re-refs or re-adds a dead object. Monotone across the
 // whole cluster (the ops only decrement / remove / leave-equal `refs`), so a death witnessed at an
 // inner step persists to the outer final state — the refs-monotone fact `revoke`'s composition
-// needs (doc 55 §3).
+// needs.
 pub open spec fn refs_death_persist<S: Store>(s0: &S, s1: &S) -> bool {
     forall|o: ObjId| #[trigger] dead_obj(s1, o) || !dead_obj(s0, o)
 }
@@ -3992,7 +3987,7 @@ pub proof fn lemma_refs_death_persist_trans<S: Store>(a: &S, b: &S, c: &S)
     }
 }
 
-// `refs_death_persist` across a `dec_ref(o)` step: `refs.dom` is preserved and only `refs[o]`
+// `refs_death_persist` across a `dec_ref(o)` step: `refs.dom()` is preserved and only `refs[o]`
 // drops (by one), so any object dead at `s0` (`refs[y] == 0` ⟹ `y != o`, since `dec_ref` requires
 // `refs[o] > 0`) stays dead.
 pub proof fn lemma_refs_death_persist_dec_ref<S: Store>(s0: &S, s1: &S, o: ObjId)
@@ -4073,7 +4068,7 @@ pub proof fn lemma_emptied_via_dead_home_free_from_homed<S: Store>(
 
 // `emptied_via_dead_home_free` composes across a sub-call. Requires (a) the home maps framed
 // (`homes` stable, so a witness at `b` re-homes at `a`), (b) the slot domain preserved, and (c)
-// refs-death-persistence `b → c` (so a death witnessed at `b` survives to `c`). The §6e-dual analog
+// refs-death-persistence `b → c` (so a death witnessed at `b` survives to `c`). The death-provenance analog
 // of `lemma_unhomed_frozen_free_trans`.
 pub proof fn lemma_emptied_via_dead_home_free_trans<S: Store>(a: &S, b: &S, c: &S)
     requires
@@ -4108,7 +4103,7 @@ pub proof fn lemma_emptied_via_dead_home_free_trans<S: Store>(a: &S, b: &S, c: &
     }
 }
 
-// Compose `delete`'s target-aware frame with a following target-free step — the §6e-dual analog of
+// Compose `delete`'s target-aware frame with a following target-free step — the death-provenance analog of
 // `lemma_unhomed_frozen_compose`.
 pub proof fn lemma_emptied_via_dead_home_compose<S: Store>(a: &S, b: &S, c: &S, target: SlotId)
     requires
@@ -4139,7 +4134,7 @@ pub proof fn lemma_emptied_via_dead_home_compose<S: Store>(a: &S, b: &S, c: &S, 
     }
 }
 
-// The three home maps are framed — the stability `is_homed` (hence the §6e frame) composes on.
+// The three home maps are framed — the stability `is_homed` (hence the home frame) composes on.
 // `cspace_view` equal + `ring_cap`/depth equal (`chan_struct_frame`) + the TCB domain and every
 // TCB's immutable `bind_slots` fixed. Every teardown member ensures this (the leaves frame the
 // views whole; the recursive members compose it).
@@ -4171,7 +4166,7 @@ pub proof fn lemma_home_views_frozen_trans<S: Store>(s0: &S, s1: &S, s2: &S)
     lemma_chan_struct_frame_trans(s0.chan_view(), s1.chan_view(), s2.chan_view());
 }
 
-// `is_homed` is stable across a home-frame edit (plan §6e). `cspace_view` is equal, so the cspace
+// `is_homed` is stable across a home-frame edit. `cspace_view` is equal, so the cspace
 // disjunct is identical; the channel/TCB disjuncts transfer their witnesses through the per-key
 // `ring_cap`/`bind_slots` equalities.
 pub proof fn lemma_is_homed_stable<S: Store>(s0: &S, s1: &S, x: SlotId)
@@ -4241,7 +4236,7 @@ pub proof fn lemma_unhomed_frozen_free_from_homed<S: Store>(s0: &S, s1: &S, targ
 }
 
 // `unhomed_frozen_free` composes across a sub-call (homes immutable, slot dom preserved) — the
-// §6e analog of `lemma_only_empties_trans`.
+// home-frame analog of `lemma_only_empties_trans`.
 pub proof fn lemma_unhomed_frozen_free_trans<S: Store>(a: &S, b: &S, c: &S)
     requires
         unhomed_frozen_free(a, b),
@@ -4294,7 +4289,7 @@ pub proof fn lemma_refcount_sound_from_frozen<S: Store>(s0: &S, s1: &S)
 
 // The four teardown system invariants ride an edit that frames every object view + `refs`
 // (a no-op step, or one whose only effect is scheduler-side like `unqueue_ready`). Plan
-// §6d-final-thread-body-2: `destroy_tcb`'s detach branches use it where the store is unchanged.
+// the final-thread teardown `destroy_tcb`'s detach branches use it where the store is unchanged.
 pub proof fn lemma_sysinv_frame_equal_views<S: Store>(s0: &S, s1: &S)
     requires
         refcount_sound(s0),
@@ -4334,7 +4329,7 @@ pub proof fn lemma_sysinv_frame_equal_views<S: Store>(s0: &S, s1: &S)
 
 // `refcount_sound` rides an edit that holds `refs` fixed and every object's census fixed — the
 // `destroy_tcb` halt step (`lemma_census_frame_thread_halt` supplies the census equality, the
-// `set_tcb_*` setters frame `refs`). Plan §6d-final-thread-body-2.
+// `set_tcb_*` setters frame `refs`). Plan the final-thread teardown
 pub proof fn lemma_refcount_sound_from_census_eq<S: Store>(s0: &S, s1: &S)
     requires
         refcount_sound(s0),
@@ -4372,12 +4367,12 @@ pub proof fn lemma_off_by_one_frozen<S: Store>(s0: &S, s1: &S, z: ObjId)
     }
 }
 
-// Cspace residency well-formedness (plan §6c): `cs` is a known cspace, its residency
+// Cspace residency well-formedness: `cs` is a known cspace, its residency
 // `Seq` agrees with `num_slots` (the getter contracts' precondition), and every resident
 // slot handle is live in the arena. `destroy_cspace`'s loop reads `cspace_slot(cs, i)`
 // and then `slot(sid)`, so it needs both the getter bounds and the residents-live fact;
 // `obj_unref`/`unref_cspace` thread it to that loop. The kernel maintains it by
-// construction (residency is fixed when the cspace is carved, §3.2).
+// construction (residency is fixed when the cspace is carved).
 pub open spec fn cspace_resident_wf<S: Store>(store: &S, cs: ObjId) -> bool {
     &&& store.cspace_view().dom().contains(cs)
     &&& store.cspace_view()[cs].slots.len() == store.cspace_view()[cs].num_slots
@@ -4385,19 +4380,19 @@ pub open spec fn cspace_resident_wf<S: Store>(store: &S, cs: ObjId) -> bool {
             ==> #[trigger] store.slot_view().dom().contains(store.cspace_view()[cs].slots[i])
 }
 
-// ── Cap→object consistency (plan §6d foundation, `doc/results/44`). The teardown
-//    *body* proofs (the follow-on §6d PR) cannot run from `cspace_wf` + `refcount_sound`
-//    alone: `delete`'s body calls `endpoint_cap_dropped` (Channel branch) and `obj_unref`,
-//    both of which demand the *designated object's* well-formedness — `chan_wf`/`notif_wf`/
-//    `cspace_resident_wf`/the tcb-bind facts/`timer_wf` — none of which `cspace_wf` carries.
-//    Because the teardown recursion deletes *arbitrary-kind* caps (`destroy_cspace` over
-//    residents, `revoke` over descendants, `destroy_channel` over ring caps), each caller
-//    needs that wf for caps it doesn't statically know — so it must be a *system* invariant
-//    over every live cap, not a per-call precondition. This foundation states it; the body
-//    PR consumes it. Preservation across teardown rests on `refcount_sound`: a last-ref
-//    destroy leaves no cap designating the freed object, so no surviving cap's consistency
-//    can depend on it (the refs-coupled clauses below — the Channel `end_caps`/`binding_refs_ok`
-//    and the Timer armed-notif-live — are exactly that entanglement). ──
+// ── Cap→object consistency. The teardown
+// *body* proofs (the follow-on teardown) cannot run from `cspace_wf` + `refcount_sound`
+// alone: `delete`'s body calls `endpoint_cap_dropped` (Channel branch) and `obj_unref`,
+// both of which demand the *designated object's* well-formedness — `chan_wf`/`notif_wf`/
+// `cspace_resident_wf`/the tcb-bind facts/`timer_wf` — none of which `cspace_wf` carries.
+// Because the teardown recursion deletes *arbitrary-kind* caps (`destroy_cspace` over
+// residents, `revoke` over descendants, `destroy_channel` over ring caps), each caller
+// needs that wf for caps it doesn't statically know — so it must be a *system* invariant
+// over every live cap, not a per-call precondition. This foundation states it; the body
+// PR consumes it. Preservation across teardown rests on `refcount_sound`: a last-ref
+// destroy leaves no cap designating the freed object, so no surviving cap's consistency
+// can depend on it (the refs-coupled clauses below — the Channel `end_caps`/`binding_refs_ok`
+// and the Timer armed-notif-live — are exactly that entanglement). ──
 
 // One cap's designated-object consistency, kind by kind. The clauses mirror `obj_unref`'s
 // per-`CapKind` `requires` (so the body proof maps `caps_consistent` to it mechanically),
@@ -4427,7 +4422,7 @@ pub open spec fn cap_consistent<S: Store>(store: &S, c: Cap) -> bool {
             &&& store.tcb_view()[o].bind_slots.len() == 2
             &&& store.slot_view().dom().contains(store.tcb_view()[o].bind_slots[0])
             &&& store.slot_view().dom().contains(store.tcb_view()[o].bind_slots[1])
-            // The bound cspace is resident-wf (plan §6d-final-thread, doc 51 §3 — the fifth
+            // The bound cspace is resident-wf (the final-thread teardown — the fifth
             // system invariant). `destroy_tcb`'s `unref_cspace` needs `cspace_resident_wf(cs)`
             // to drive the at-zero `destroy_cspace`, but by the time the destructor runs the
             // TCB's own cap is gone — so only the *live* Thread cap can witness it, supplied
@@ -4435,7 +4430,7 @@ pub open spec fn cap_consistent<S: Store>(store: &S, c: Cap) -> bool {
             // `cspace_resident_wf` reads only `cspace_view` + `slot_view` dom + `tcb_view`, all
             // framed through teardown, so the `dec_ref` `-1` preserves it.
             &&& (store.tcb_view()[o].cspace matches Some(cs) ==> cspace_resident_wf(store, cs))
-            // Waiter-coherence (plan §6d-final-thread, the sixth system invariant): a
+            // Waiter-coherence (the final-thread teardown, the sixth system invariant): a
             // BlockedNotif thread's `wait_notif` names a `notif_wf` notification — exactly the
             // precondition `destroy_tcb`'s `remove_waiter(wn, t)` needs (the refs side-condition
             // it then wants rides `refcount_sound`). The `notif_wf`-only form (no chain
@@ -4464,12 +4459,12 @@ pub open spec fn cap_consistent<S: Store>(store: &S, c: Cap) -> bool {
 // arena is finite — the `obj_unref` CSpace/Thread/Timer arms' standing precondition).
 pub open spec fn caps_consistent<S: Store>(store: &S) -> bool {
     &&& store.slot_view().dom().finite()
-    // The channel arena is finite too (the §6d binding-census recount `lemma_binding_drop`
+    // The channel arena is finite too (the binding-census recount `lemma_binding_drop`
     // needs it — its triple set is a subset of `chan_view.dom() × {0,1} × {0,1,2}`). Refs-free
     // and structural like the slot-finiteness companion; every mutator frames `chan_view` or
     // `insert`s one channel, both finiteness-preserving.
     &&& store.chan_view().dom().finite()
-    // The TCB arena is finite too (the §6d body PR's `destroy_tcb` needs it for the
+    // The TCB arena is finite too (the `destroy_tcb` needs it for the
     // `thread_hold_refs` recount when it clears `tcb.cspace`/`tcb.aspace`). Refs-free and
     // structural like the slot/chan companions; every mutator frames `tcb_view` or `insert`s
     // one TCB, both finiteness-preserving.
@@ -4486,7 +4481,7 @@ pub open spec fn caps_consistent<S: Store>(store: &S) -> bool {
 // Notification + Channel-binding `notif_wf` carries from `s0` (the fired `n` by hypothesis,
 // every other notification by `lemma_notif_wf_frame` — its waiters all name `m != n`, so they
 // were untouched); Thread off the framed slot dom + fixed `bind_slots`. The frame `fire`'s
-// `caps_consistent` preservation rests on (doc 48 §3).
+// `caps_consistent` preservation rests on.
 pub proof fn lemma_caps_consistent_frame<S: Store>(s0: &S, s1: &S, n: ObjId)
     requires
         caps_consistent(s0),
@@ -4501,7 +4496,7 @@ pub proof fn lemma_caps_consistent_frame<S: Store>(s0: &S, s1: &S, n: ObjId)
         forall|k: ObjId| #[trigger] s0.tcb_view()[k].wait_notif != Some(n)
             ==> s1.tcb_view()[k] == s0.tcb_view()[k],
         forall|k: ObjId| #[trigger] s1.tcb_view()[k].bind_slots == s0.tcb_view()[k].bind_slots,
-        // Every TCB's bound cspace is framed too (plan §6d-final-thread): the strengthened
+        // Every TCB's bound cspace is framed too: the strengthened
         // `cap_consistent(Thread)` clause carries `cspace_resident_wf` of the bound cspace, and
         // a signal-shaped edit moves a waiter's queue/wait/retval fields but never its cspace —
         // so which `cs` a Thread cap's TCB names is unchanged, and `cspace_resident_wf(cs)`
@@ -4510,7 +4505,7 @@ pub proof fn lemma_caps_consistent_frame<S: Store>(s0: &S, s1: &S, n: ObjId)
         // A TCB the edit *changes* that is still blocked in `s1` is blocked on `n` — `signal`
         // wakes its head to `Runnable` (not blocked), `remove_waiter` either clears the spliced
         // thread's `wait_notif` (→ `None`) or only re-threads a predecessor still blocked on `n`.
-        // This carries the waiter-coherence clause (plan §6d-final-thread): a thread still
+        // This carries the waiter-coherence clause: a thread still
         // BlockedNotif-on-`wn` in `s1` was either *unchanged* (so BlockedNotif-on-`wn` in `s0`,
         // where `caps_consistent(s0)` gave `notif_wf(wn)`) or changed with `wn == n` (where
         // `notif_wf(s1, n)` is a hypothesis); either way `notif_wf(s1, wn)` holds.
@@ -4586,12 +4581,12 @@ pub proof fn lemma_caps_consistent_frame<S: Store>(s0: &S, s1: &S, n: ObjId)
     }
 }
 
-// The §3.3 per-endpoint cap census as a system invariant (the `caps_consistent`
-// analog for channel endpoint counts; plan §6d body-removal gate, doc 45 §2):
+// The rev0§3.3 per-endpoint cap census as a system invariant (the `caps_consistent`
+// analog for channel endpoint counts; the body-removal census gate):
 // every live channel's `end_caps[e]` equals the count of `Channel(ch, e)` caps in
 // the arena. Refs-free (reads only `chan_view`/`slot_view`), so a `dec_ref` `-1`
 // and any chan+slot-framing op preserve it for free — the same shallowness that
-// makes `caps_consistent` cheap (doc 44 §2). This is the missing equality
+// makes `caps_consistent` cheap. This is the missing equality
 // `cap_consistent`'s Channel arm (`end_caps[end] > 0`, a lower bound) never
 // captured: with it, deleting one of several `(co, end)` caps provably leaves the
 // siblings with `end_caps[end] >= 1`, so `delete`'s body re-proves `caps_consistent`.
@@ -4623,18 +4618,18 @@ pub open spec fn end_caps_off_by_one<S: Store>(store: &S, co: ObjId, e0: int) ->
         ) + (if ch == co && e == e0 { 1nat } else { 0nat })
 }
 
-// ── Per-term recount lemmas (plan §6a). The single-key bump/drop building blocks
-//    6b–6f compose: a one-key view edit raises/lowers exactly one census term by
-//    one, the others fixed. Each is the `lemma_designation_bump` shape over a
-//    different view (`slot_refs` already has its bump above); the drops are its
-//    `remove`-mirror, and the thread-hold pair frames the untouched half at `k`.
-//    The five single-domain terms (slot, frame-mapping, armed-timer, thread-hold
-//    ×2) are settled here. The sixth, `binding_refs`, counts over a *nested*
-//    domain (`(ch, end, ev)` triples), so its single-edit recount needs the triple
-//    set's finiteness (a subset of `cv.dom() × {0,1} × {0,1,2}`) — the doc-35 §2.6
-//    trigger hazard the plan flags (§3). It lands with `destroy_channel`'s binding
-//    release, the op that consumes it (6d), per the "count steps single-purpose,
-//    where consumed" discipline — recorded, not dropped. ──
+// ── Per-term recount lemmas. The single-key bump/drop building blocks
+// 6b–6f compose: a one-key view edit raises/lowers exactly one census term by
+// one, the others fixed. Each is the `lemma_designation_bump` shape over a
+// different view (`slot_refs` already has its bump above); the drops are its
+// `remove`-mirror, and the thread-hold pair frames the untouched half at `k`.
+// The five single-domain terms (slot, frame-mapping, armed-timer, thread-hold
+// ×2) are settled here. The sixth, `binding_refs`, counts over a *nested*
+// domain (`(ch, end, ev)` triples), so its single-edit recount needs the triple
+// set's finiteness (a subset of `cv.dom() × {0,1} × {0,1,2}`) — the n²
+// trigger hazard. It lands with `destroy_channel`'s binding
+// release, the op that consumes it (6d), per the "count steps single-purpose,
+// where consumed" discipline — recorded, not dropped. ──
 
 // Slot drop: clearing one slot's designation of `obj` lowers `obj`'s slot census.
 proof fn lemma_designation_drop(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot, obj: ObjId)
@@ -4794,7 +4789,7 @@ proof fn lemma_clear_drops_count(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot)
 }
 
 // The full `obj_census` drop for a slot clear, isolated as a per-`x` query so `delete_prepare`'s
-// forall instantiates it in a context-light SMT call (doc 25 §2). `s_new` is `s_old` with `slot`
+// forall instantiates it in a context-light SMT call. `s_new` is `s_old` with `slot`
 // cleared after a link-only edit (`cdt_unlink`, preserving caps via `sv_mid`); the four non-slot
 // terms are framed and a cap is either an object cap or a frame cap (never both), so the census
 // drops by exactly one — at `cap_obj(cap)`, else at `cap_frame_aspace(cap)`.
@@ -4861,7 +4856,7 @@ pub proof fn lemma_clear_slot_obj_census<S: Store>(
     // `cap_obj(cap)`/`cap_frame_aspace(cap)`; the four view terms read framed views (equal args).
 }
 
-// The dual of `lemma_clear_slot_census` (plan §6f): *installing* a cap into a previously EMPTY
+// The dual of `lemma_clear_slot_census`: *installing* a cap into a previously EMPTY
 // slot raises the two slot-dependent census terms by one at the new cap's designated object /
 // mapped aspace (the EMPTY old cap added to no filter). `derive`/`retype_install` compose this
 // with `set_slot`'s frames of the four non-slot census terms to get the +1 (or no) census shift.
@@ -4928,9 +4923,9 @@ proof fn lemma_set_slot_census(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot, x
     }
 }
 
-// The dual of `lemma_clear_slot_obj_census` (plan §6f): the full `obj_census` *rise* for
+// The dual of `lemma_clear_slot_obj_census`: the full `obj_census` *rise* for
 // installing a designating cap `v` into a previously EMPTY slot after a link-only edit
-// (`sv_mid` is `s_old.slot_view()` with `slot` set to `v`; `s_new.slot_view()` is a cap-equal
+// (`sv_mid` is `s_old.slot_view` with `slot` set to `v`; `s_new.slot_view` is a cap-equal
 // re-link of `sv_mid` — `cdt_insert_child`). A cap is either an object cap or a frame cap (never
 // both), so the census rises by exactly one — at `cap_obj(v.cap)`, else at `cap_frame_aspace(v.cap)`.
 pub proof fn lemma_set_slot_obj_census<S: Store>(
@@ -4975,7 +4970,7 @@ pub proof fn lemma_set_slot_obj_census<S: Store>(
     // The four view terms read framed views (equal args).
 }
 
-// §3.3 endpoint-cap census drop: clearing a `Channel(ch, e)` slot to a non-channel
+// rev0§3.3 endpoint-cap census drop: clearing a `Channel(ch, e)` slot to a non-channel
 // cap lowers `end_cap_count(ch, e)` by one and leaves every other `(ch2, e2)` fixed.
 // The `lemma_designation_drop` shape over the `cap_chan_end` filter; `delete`'s body
 // (PR2) consumes it when it empties a deleted channel cap's slot.
@@ -5125,7 +5120,7 @@ proof fn lemma_armed_timer_drop(m: Map<ObjId, TimerView>, k: ObjId, v: TimerView
     assert(f1.finite());
 }
 
-// Armed-timer drop, **disarm-shaped** (plan §6c). `disarm` (`timer.rs`) edits *two*
+// Armed-timer drop, **disarm-shaped**. `disarm` (`timer.rs`) edits *two*
 // keys — it disarms `t` *and* re-points the predecessor's `next` to splice `t` out —
 // so the post-state is not a single-key `insert` and `lemma_armed_timer_drop` does not
 // apply directly. But `armed_timer_refs` reads only `armed`/`notif`, and those are
@@ -5385,7 +5380,7 @@ pub(crate) proof fn lemma_thread_hold_aspace_drop(m: Map<ObjId, TcbView>, k: Obj
     assert(c2 =~= c1);
 }
 
-// ── `destroy_tcb`'s clear-before-unref census lemmas (plan §6d-final-thread-body-2). ──
+// ── `destroy_tcb`'s clear-before-unref census lemmas. ──
 //
 // `destroy_tcb` releases its halted subject's cspace/aspace holds by **clearing the field
 // first, then `unref_cspace`/`unref_aspace`** — so at the unref call the census has already
@@ -5574,7 +5569,7 @@ pub proof fn lemma_census_after_hold_clear_aspace<S: Store>(s0: &S, s1: &S, t: O
 }
 
 // `destroy_tcb`'s halt edit (clear `qnext`/`wait_notif`, set `state = Halted`; holds unchanged)
-// of an off-chain thread `t` leaves every object's census fixed (plan §6d-final-thread-body-2):
+// of an off-chain thread `t` leaves every object's census fixed:
 // the four non-tcb terms are framed (the halt setters touch only `tcb_view`), `thread_hold_refs`
 // is framed (`t`'s cspace/aspace unchanged), and `waiter_refs` is framed because `t` is off every
 // chain in both states (`lemma_waiter_refs_frame_offchain` — only `t` moved). So `refcount_sound`
@@ -5613,13 +5608,12 @@ pub proof fn lemma_census_frame_thread_halt<S: Store>(s0: &S, s1: &S, t: ObjId)
     }
 }
 
-// ── `delete`'s frame-unmap-branch census lemma (plan §6b, doc/results/42). ──
+// ── `delete`'s frame-unmap-branch census lemma. ──
 //
 // `delete` clears a deleted cap's slot (`cspace.rs`'s `s.cap = EMPTY; set_slot`)
 // then, for a mapped Frame, calls `aspace_unmap` + `unref_aspace`. The census side
-// of that branch — landed here, consumed by 6d's `delete` body (the op stays
-// `external_body` this sub-phase): clearing a mapped Frame slot lowers exactly the
-// target aspace's `frame_map_refs` by one and leaves *every* object's `slot_refs`
+// of that branch, consumed by `delete`'s body: clearing a mapped Frame slot lowers
+// exactly the target aspace's `frame_map_refs` by one and leaves *every* object's `slot_refs`
 // (a Frame designates no object) and every *other* aspace's `frame_map_refs` fixed.
 // The matching `-1` is `unref_aspace`'s; the four non-slot census terms ride
 // `set_slot`'s view-frame at the call site. Two "unchanged" helpers (the
@@ -5712,7 +5706,7 @@ proof fn lemma_frame_clear_census(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot
     }
 }
 
-// ── `destroy_channel`'s binding-release census lemma (plan §6d, doc/results/45). ──
+// ── `destroy_channel`'s binding-release census lemma. ──
 //
 // The sixth census term, `binding_refs`, was quarantined by 6a (the comment above
 // `lemma_designation_drop`): unlike the five single-domain terms it counts over the
@@ -5870,11 +5864,11 @@ pub(crate) proof fn lemma_binding_drop(
     }
 }
 
-// Replacing a single binding at `(ch, e, ev)` with `b` (the §6f generalization of
+// Replacing a single binding at `(ch, e, ev)` with `b` (the generalization of
 // `lemma_binding_drop`, which only cleared): the per-object binding census moves by at most one
 // — down at the *old* notif, up at `b`'s notif. Stated in additive form (no `nat` underflow) so
 // it composes with `bind_refs_post`'s matching refs delta to give `channel::bind`'s
-// `refcount_sound` preservation (the lockstep the binding term was landed for, plan §3e/§6f).
+// `refcount_sound` preservation (the lockstep the binding term was landed for).
 pub proof fn lemma_binding_replace(
     cv: Map<ObjId, ChanView>,
     ch: ObjId,
@@ -5976,10 +5970,10 @@ pub proof fn lemma_binding_refs_pos(cv: Map<ObjId, ChanView>, ch: ObjId, e: int,
     }
 }
 
-// ── Construction-side acyclicity preservation (doc/results/21 §9). ──
+// ── Construction-side acyclicity preservation. ──
 //
 // Re-parenting one **detached, childless** slot `child` under `parent` in an
-// acyclic store keeps it acyclic — this is the witness *construction* the §9
+// acyclic store keeps it acyclic — this is the witness *construction* the acyclicity-rank
 // "Key design discovery" identified as the blocker (acyclicity is easy to use,
 // hard to re-exhibit after a mutation). The witness: shift every old rank up by
 // one and seat `child` at the bottom (rank 0). The shift makes room below
@@ -6096,10 +6090,9 @@ proof fn lemma_insert_preserves_sib_acyclic(
 // non-empty slot empty preserves `cspace_wf`. Every structural clause and both
 // acyclicity ranks read only links (identical here) and per-slot emptiness (only
 // ever relaxed, empty→non-empty), so the witnesses transfer unchanged. The reuse
-// `retype_install` (plan §3c) leans on for its three `set_slot`s — the untyped's
+// `retype_install` leans on for its three `set_slot`s — the untyped's
 // watermark bump (links + emptiness both fixed) and the two detached dst/dst2
-// fills (an empty, hence detached, slot gains a cap with its links still null;
-// doc/results/28 §1).
+// fills (an empty, hence detached, slot gains a cap with its links still null).
 pub(crate) proof fn lemma_local_cap_edit_preserves_cspace_wf(
     m0: Map<SlotId, CapSlot>,
     k: SlotId,
@@ -6156,7 +6149,7 @@ pub(crate) proof fn lemma_local_cap_edit_preserves_cspace_wf(
 // detached cap preserves `cspace_wf`. The non-empty→empty direction `lemma_local_cap_edit`
 // forbids (it could strand a child) is safe here precisely because `k` is isolated: the
 // link clauses read identical (null) links, and `empty_slots_detached` holds because `k`'s
-// new (empty) cap is detached. `delete` (§6d) uses it on the `cdt_unlink`-detached slot.
+// new (empty) cap is detached. `delete` uses it on the `cdt_unlink`-detached slot.
 pub(crate) proof fn lemma_clear_detached_preserves_cspace_wf(
     m0: Map<SlotId, CapSlot>,
     k: SlotId,
@@ -6212,7 +6205,7 @@ pub(crate) proof fn lemma_clear_detached_preserves_cspace_wf(
     assert(sib_acyclic(m1));
 }
 
-// ── slot_move as an identity transposition (doc/results/23 §A) ──
+// ── slot_move as an identity transposition ──
 //
 // `slot_move` relabels identity `src` onto the previously-isolated empty slot
 // `dst`. Because nothing in a well-formed store references an empty/detached slot
@@ -6425,9 +6418,9 @@ proof fn lemma_transpose_preserves_cspace_wf(m: Map<SlotId, CapSlot>, src: SlotI
     lemma_transpose_sib(m, src, dst);
 }
 
-// ── Child-chain reachability (doc/results/23 §B): the keystone for the
-//    children-walk loops' *completeness* — every child of a node lies on its
-//    `first_child → next_sib` chain, so a walk re-parents all of them. ──
+// ── Child-chain reachability: the keystone for the
+// children-walk loops' *completeness* — every child of a node lies on its
+// `first_child → next_sib` chain, so a walk re-parents all of them. ──
 
 // `k` is reachable from `from` by 0+ `next_sib` steps. Well-founded on a sibling
 // rank `s` (the walk strictly lowers it), so this terminates.
@@ -6517,7 +6510,7 @@ proof fn lemma_child_on_chain(m: Map<SlotId, CapSlot>, src: SlotId, k: SlotId, s
         assert(m.dom().contains(j) && m[j].next_sib == Some(k));
         assert(m[j].parent == Some(src));
         assert(s[k] < s[j]);
-        // measure: {child : s > s[j]} ⊊ {child : s > s[k]} (j is in the latter, not
+        // measure: {child: s > s[j]} ⊊ {child: s > s[k]} (j is in the latter, not
         // the former), so the recursive call's count is strictly smaller.
         let f_k = m.dom().filter(|x: SlotId| m[x].parent == Some(src) && s[x] > s[k]);
         let f_j = m.dom().filter(|x: SlotId| m[x].parent == Some(src) && s[x] > s[j]);
@@ -6536,7 +6529,7 @@ proof fn lemma_child_on_chain(m: Map<SlotId, CapSlot>, src: SlotId, k: SlotId, s
 
 // Replacing a slot's empty cap with another empty cap of the *same links* is
 // invisible to `cspace_wf` (which reads only link structure + `is_empty_cap`).
-// `slot_move` clears `src` to `CapSlot::empty()` where the transposition leaves
+// `slot_move` clears `src` to `CapSlot::empty` where the transposition leaves
 // `m0[dst]` — same (None) links, both empty, possibly different rights bits.
 proof fn lemma_replace_empty_cap(mf: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot)
     requires
@@ -6603,11 +6596,11 @@ proof fn lemma_move_count(m0: Map<SlotId, CapSlot>, mfin: Map<SlotId, CapSlot>, 
     assert(count_nonempty(m0) == ne0.len());
 }
 
-// ── slot_move body-match support (doc/results/24 §A): the classification facts
-//    that turn the imperative neighbour-fixups into the transposition's renaming.
-//    All follow from `cspace_wf(m0)` + `dst` empty/detached; kept as small
-//    lemmas so each SMT call starts with a tiny context (the doc/results/23 §2
-//    per-clause discipline). ──
+// ── slot_move body-match support: the classification facts
+// that turn the imperative neighbour-fixups into the transposition's renaming.
+// All follow from `cspace_wf(m0)` + `dst` empty/detached; kept as small
+// lemmas so each SMT call starts with a tiny context (the
+// per-clause discipline). ──
 
 // Nothing in a well-formed store references a detached empty slot `e`. So the
 // transposition's `ren(·, src, e)` only ever rewrites `src → e`, never `e → src`
@@ -6779,7 +6772,7 @@ pub open spec fn set_prev_sib(s: CapSlot, p: Option<SlotId>) -> CapSlot {
 // The transposition value at `dst`: exactly `m[src]` (unrenamed). `src`'s links
 // avoid both `src` (self-link) and `dst` (detached empty), so the rename is the
 // identity on them — which is why the body copying `src`'s links into `dst`
-// *verbatim* still lands the transposition. (doc/results/24 §A, fact 2.)
+// *verbatim* still lands the transposition.
 proof fn lemma_dst_relabeled(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId)
     requires
         cspace_wf(m),
@@ -6802,7 +6795,7 @@ proof fn lemma_dst_relabeled(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId)
 // The transposition value at a generic `k ∉ {src, dst}`: `m[k]` with every link
 // that named `src` redirected to `dst` (no link names `dst` to begin with —
 // lemma_nothing_points_to_empty — so the swap is one-directional). The
-// neighbour-fixup case analysis reads each field off this. (doc/results/24 §A.)
+// neighbour-fixup case analysis reads each field off this.
 proof fn lemma_generic_relabeled(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId, k: SlotId)
     requires
         cdt_wf(m),
@@ -6840,14 +6833,14 @@ proof fn lemma_generic_relabeled(m: Map<SlotId, CapSlot>, src: SlotId, dst: Slot
         == (if m[k].prev_sib == Some(src) { Some(dst) } else { m[k].prev_sib }));
 }
 
-// ── cdt_unlink body-match support (doc/results/25): the sibling-list *merge*.
-//    Unlike slot_move's transposition, unlink grafts `slot`'s child chain into
-//    `slot`'s former sibling position one level up. `unlinked(m, slot, last)` is
-//    the closed-form result; `lemma_unlink_preserves_cspace_wf` proves it keeps
-//    `cspace_wf`. The structural clauses are factored per-clause (the per-clause
-//    SMT discipline of the transpose family); the sibling-acyclicity witness is
-//    the crux (a constant additive shift fails — the child band must be rescaled
-//    into the `prev..next` gap). ──
+// ── cdt_unlink body-match support: the sibling-list *merge*.
+// Unlike slot_move's transposition, unlink grafts `slot`'s child chain into
+// `slot`'s former sibling position one level up. `unlinked(m, slot, last)` is
+// the closed-form result; `lemma_unlink_preserves_cspace_wf` proves it keeps
+// `cspace_wf`. The structural clauses are factored per-clause (the per-clause
+// SMT discipline of the transpose family); the sibling-acyclicity witness is
+// the crux (a constant additive shift fails — the child band must be rescaled
+// into the `prev..next` gap). ──
 
 // A rank map over a finite domain has a strict upper bound. The sib-acyclicity
 // splice witness scales non-children by `b+1` to open a gap wide enough to drop
@@ -7006,7 +6999,7 @@ proof fn lemma_band_below(d: nat, e: nat, r: nat, w: nat)
 // children sit in the band just above `next`'s scaled rank,
 // `(D+1)*(B+1) + s0[k] + 1` (D = s0[next] or 0) — `B`'s bound keeps that band
 // strictly inside the gap below `prev`. A constant additive shift cannot do this
-// (the child chain's rank span can exceed the `prev..next` gap). (doc/results/25.)
+// (the child chain's rank span can exceed the `prev..next` gap).
 proof fn lemma_unlink_sib(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<SlotId>)
     requires
         cdt_wf(m),
@@ -7611,15 +7604,15 @@ proof fn lemma_unique_tail(m: Map<SlotId, CapSlot>, slot: SlotId, x: SlotId, y: 
 }
 
 // ── Verified operations (moved here from plain Rust; bodies are unchanged
-//    modulo verus-friendly control flow). ──
+// modulo verus-friendly control flow). ──
 
 /// Bump the refcount of the object a cap designates (no-op for bare caps).
 ///
-/// pre:  if the cap designates an object, that object is live and its refcount
-///       is below `u32::MAX` (the overflow guard Verus makes explicit — an
-///       unchecked refcount bump is a known kernel vulnerability class).
+/// pre: if the cap designates an object, that object is live and its refcount
+/// is below `u32::MAX` (the overflow guard Verus makes explicit — an
+/// unchecked refcount bump is a known kernel vulnerability class).
 /// post: that object's refcount is +1, all others unchanged; the slot arena is
-///       untouched.
+/// untouched.
 pub fn obj_ref<S: Store>(store: &mut S, cap: Cap)
     requires
         cap_obj(cap) matches Some(o) ==> old(store).refs_view().dom().contains(o)
@@ -7630,7 +7623,7 @@ pub fn obj_ref<S: Store>(store: &mut S, cap: Cap)
             =~= old(store).refs_view().insert(o, (old(store).refs_view()[o] + 1) as nat),
         cap_obj(cap) is None ==> final(store).refs_view() == old(store).refs_view(),
         // The non-refs views are framed (the body is a single `set_obj_refs`, or nothing) — the
-        // frame `derive`'s §6f census reasoning composes to carry the four census-bearing views
+        // frame `derive`'s census reasoning composes to carry the four census-bearing views
         // (chan/notif/tcb/timer) across the bump.
         final(store).chan_view() == old(store).chan_view(),
         final(store).notif_view() == old(store).notif_view(),
@@ -7656,14 +7649,14 @@ pub fn obj_ref<S: Store>(store: &mut S, cap: Cap)
 /// Insert `child` as the first child of `parent` (the CDT link surgery `derive`
 /// and `retype` use).
 ///
-/// pre:  the cspace is well-formed; `parent` and `child` are distinct live
-///       slots; `child` is detached (all four links null) and non-empty;
-///       `parent` is non-empty.
+/// pre: the cspace is well-formed; `parent` and `child` are distinct live
+/// slots; `child` is detached (all four links null) and non-empty;
+/// `parent` is non-empty.
 /// post: `child` is `parent`'s first child and the previous children follow it
-///       in order (the sibling list is spliced in unchanged); caps and refcounts
-///       are untouched; the cspace stays well-formed **and acyclic** (the
-///       construction-side acyclicity preservation — `child` is seated as a fresh
-///       leaf, so a rank witness is re-exhibited; doc/results/21 §9).
+/// in order (the sibling list is spliced in unchanged); caps and refcounts
+/// are untouched; the cspace stays well-formed **and acyclic** (the
+/// construction-side acyclicity preservation — `child` is seated as a fresh
+/// leaf, so a rank witness is re-exhibited).
 pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
     requires
         cspace_wf(old(store).slot_view()),
@@ -7681,11 +7674,11 @@ pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
         final(store).refs_view() == old(store).refs_view(),
         // The CDT surgery is pure `set_slot` (which frames `chan_view`), so the
         // channel ghost view is untouched — the frame `retype_install`'s channel arm
-        // (plan §3c) needs to carry `chan_view` across the two inserts it threads
-        // between `endpoint_cap_added(A)` and `endpoint_cap_added(B)` (doc 28).
+        // needs to carry `chan_view` across the two inserts it threads
+        // between `endpoint_cap_added(A)` and `endpoint_cap_added(B)`.
         final(store).chan_view() == old(store).chan_view(),
         // The other four object views are framed too (the surgery is pure `set_slot`) — the
-        // §6f frame `derive` carries the census-bearing notif/tcb/timer views across the splice.
+        // frame `derive` carries the census-bearing notif/tcb/timer views across the splice.
         final(store).notif_view() == old(store).notif_view(),
         final(store).tcb_view() == old(store).tcb_view(),
         final(store).timer_view() == old(store).timer_view(),
@@ -7706,7 +7699,7 @@ pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
         // The old first child keeps its parent and cap (only its prev_sib was
         // rewritten) — so a second insert under the same parent (retype's channel
         // arm: dst then dst2) leaves the first-inserted child still parented at
-        // `parent`, holding its cap (doc 28). These per-slot frames spare callers the
+        // `parent`, holding its cap. These per-slot frames spare callers the
         // `forall` caps-unchanged instantiation for the parent / old first child.
         final(store).slot_view()[parent].cap == old(store).slot_view()[parent].cap,
         old(store).slot_view()[parent].first_child matches Some(f)
@@ -7768,26 +7761,25 @@ pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
     }
 }
 
-/// Derive a child cap (§2.3): copy with rights intersected — the only
+/// Derive a child cap (rev0§2.3): copy with rights intersected — the only
 /// derivation; there is no amplification path.
 ///
-/// pre:  the cspace is well-formed; `src`/`dst` are live; if `src` designates an
-///       object, that object is live (in the refcount table).
+/// pre: the cspace is well-formed; `src`/`dst` are live; if `src` designates an
+/// object, that object is live (in the refcount table).
 /// post: on `Ok`, `dst` holds a faithful copy of `src`'s cap — same kind and
-///       designated object (a fresh Frame copy starts unmapped, §2.5) — with
-///       rights ∩ `mask`, so its rights are a **subset** of `src`'s for every
-///       `mask` (the load-bearing monotone-derivation theorem, proven ∀ rather
-///       than sampled). For a thread cap the §5.4 maximum-controlled-priority
-///       ceiling rides along and so attenuates monotonically too (`child.max_prio
-///       <= parent.max_prio`, §2.3) — the priority axis of the lattice, here
-///       realized as ceiling-preservation (a strictly-reducing parameter is the
-///       doc-70 follow-on). `dst` is `src`'s first child; the object's refcount and
-///       slot census both rise by exactly one; the cspace stays well-formed
-///       **and acyclic** (`cspace_wf` — `dst` is seated as a fresh leaf).
-///       On `Err` (empty/Untyped src, occupied dst, or a refcount already at
-///       `u32::MAX`) the store is unchanged. Refusing at the ceiling makes the
-///       refcount bump overflow-free for **all** inputs — no unchecked `+ 1`
-///       wrap-to-zero (a UAF class); the production `CapCopy` path inherits this.
+/// designated object (a fresh Frame copy starts unmapped, rev0§2.5) — with
+/// rights ∩ `mask`, so its rights are a **subset** of `src`'s for every
+/// `mask` (the load-bearing monotone-derivation theorem, proven ∀ rather
+/// than sampled). For a thread cap the rev0§5.4 maximum-controlled-priority
+/// ceiling rides along and so attenuates monotonically too (`child.max_prio
+/// <= parent.max_prio`, rev0§2.3) — the priority axis of the lattice, here
+/// realized as ceiling-preservation. `dst` is `src`'s first child; the object's refcount and
+/// slot census both rise by exactly one; the cspace stays well-formed
+/// **and acyclic** (`cspace_wf` — `dst` is seated as a fresh leaf).
+/// On `Err` (empty/Untyped src, occupied dst, or a refcount already at
+/// `u32::MAX`) the store is unchanged. Refusing at the ceiling makes the
+/// refcount bump overflow-free for **all** inputs — no unchecked `+ 1`
+/// wrap-to-zero (a UAF class); the production `CapCopy` path inherits this.
 pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_ceiling: u8) -> (res: Result<(), ()>)
     requires
         cspace_wf(old(store).slot_view()),
@@ -7810,14 +7802,14 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_
             &&& (final(store).slot_view()[dst].cap.rights.0
                   & old(store).slot_view()[src].cap.rights.0)
                   == final(store).slot_view()[dst].cap.rights.0
-            // §5.4/§2.3 monotone priority ceiling, now *reducing*: a derived thread
+            // rev0§5.4/rev0§2.3 monotone priority ceiling, now *reducing*: a derived thread
             // cap's maximum-controlled-priority ceiling is exactly `min(parent,
             // prio_ceiling)` — never above the parent's (the priority axis of the
             // derivation lattice, ∀) and never above the requested `prio_ceiling`
-            // (the §2.3 supervision grant, F-70-9). Discharged from the
+            // (the rev0§2.3 supervision grant). Discharged from the
             // `derived_kind` equality above (the ceiling rides the kind). With the
             // `cap_copy` sentinel `prio_ceiling = 0xFF` this collapses to exact
-            // preservation, the pre-Option-2 behaviour.
+            // preservation.
             &&& (cap_max_prio(old(store).slot_view()[src].cap) matches Some(p_mp) ==>
                   cap_max_prio(final(store).slot_view()[dst].cap) matches Some(c_mp)
                     && c_mp == (if p_mp <= prio_ceiling { p_mp } else { prio_ceiling })
@@ -7842,7 +7834,7 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_
             &&& final(store).slot_view() == old(store).slot_view()
             &&& final(store).refs_view() == old(store).refs_view()
         },
-        // `refcount_sound` as a system invariant (plan §6f): a designating copy raises `refs[o]`
+        // `refcount_sound` as a system invariant: a designating copy raises `refs[o]`
         // and the slot census by one in lockstep, so a sound census in yields a sound census out
         // (the Err paths are pure no-ops). Conditional + `requires`-free — the syscall shell, the
         // only caller, is undisturbed.
@@ -7864,8 +7856,8 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_
     assert(m0[dst].parent is None && m0[dst].first_child is None
         && m0[dst].next_sib is None && m0[dst].prev_sib is None);
 
-    // One mapping per cap copy (§2.5): a fresh frame copy starts unmapped. A thread
-    // copy's §5.4 ceiling is attenuated to `min(parent, prio_ceiling)` (§2.3).
+    // One mapping per cap copy (rev0§2.5): a fresh frame copy starts unmapped. A thread
+    // copy's rev0§5.4 ceiling is attenuated to `min(parent, prio_ceiling)` (rev0§2.3).
     let kind = match s.cap.kind {
         CapKind::Frame { base, pages, mapping: _ } => CapKind::Frame { base, pages, mapping: None },
         CapKind::Thread(o, mp) => CapKind::Thread(o, if mp <= prio_ceiling { mp } else { prio_ceiling }),
@@ -7877,7 +7869,7 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_
     assert(!is_empty_cap(cap));
 
     // Refuse rather than wrap: an unchecked refcount bump is a UAF class
-    // (doc/results/21). Checking here (before any mutation) discharges obj_ref's
+    //. Checking here (before any mutation) discharges obj_ref's
     // overflow precondition without trusting the caller, so the bump below is
     // provably total — and the Err path leaves the store untouched.
     let obj_opt = match cap.kind {
@@ -7960,7 +7952,7 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_
             }
             None => {}
         }
-        // refcount_sound (conditional, plan §6f): the full census rises by one exactly at the
+        // refcount_sound (conditional): the full census rises by one exactly at the
         // newly-designated object (`lemma_set_slot_obj_census` composes the slot delta with the
         // four framed non-slot terms), matched by `obj_ref`'s `refs[o] + 1`; a bare/unmapped-frame
         // copy moves neither. So `refs` and the census stay in lockstep ⇒ `refcount_sound` carries.
@@ -8000,9 +7992,9 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_
     Ok(())
 }
 
-/// Unlink `slot` from the CDT, re-parenting its children one level up (§2.3).
+/// Unlink `slot` from the CDT, re-parenting its children one level up (rev0§2.3).
 ///
-/// **Verified** (doc/results/25, the full body proof). Unlike `slot_move` (a
+/// **Verified** (full body proof). Unlike `slot_move` (a
 /// transposition), this is a sibling-list *merge*: a `first_child→next_sib`
 /// children walk re-parents each child to `slot`'s parent, then the child chain
 /// is spliced into `slot`'s former sibling position and `slot` is detached. The
@@ -8035,12 +8027,12 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
         count_nonempty(final(store).slot_view()) == count_nonempty(old(store).slot_view()),
         // Unlink moves links, never caps: every slot's cap rides through unchanged (the
         // closed form `unlinked` rebuilds each entry's `cap` from `m0`). This is the
-        // cap-frame `delete`'s "teardown only empties slots" reasoning rests on (§6d).
+        // cap-frame `delete`'s "teardown only empties slots" reasoning rests on.
         forall|x: SlotId| old(store).slot_view().dom().contains(x)
             ==> #[trigger] final(store).slot_view()[x].cap == old(store).slot_view()[x].cap,
         // Unlink edits only CDT links in `slot_view`; every object view is framed (each
         // `set_slot` frames them). `delete`'s census/`end_caps`/`caps_consistent` proofs
-        // (§6d body PR) read these across the `cdt_unlink` that precedes the teardown.
+        // (the teardown body) read these across the `cdt_unlink` that precedes the teardown.
         final(store).chan_view() == old(store).chan_view(),
         final(store).notif_view() == old(store).notif_view(),
         final(store).tcb_view() == old(store).tcb_view(),
@@ -8323,16 +8315,16 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
     }
 }
 
-/// Move a cap between slots, preserving its CDT position (§3.4: send and receive
+/// Move a cap between slots, preserving its CDT position (rev0§3.4: send and receive
 /// move caps; a move is the same cap relocating, not a derivation).
 ///
-/// **Verified** (doc/results/24, the full body proof). The body's whole effect is
+/// **Verified** (full body proof). The body's whole effect is
 /// the identity transposition π=(src dst): because nothing references the isolated
 /// empty `dst` (`lemma_nothing_points_to_empty`), copying `src`'s slot onto `dst`
 /// verbatim and redirecting `src`'s four neighbour classes (parent / prev / next /
 /// children) is exactly the renaming `relabeled(m0, src, dst)`, followed by
 /// clearing `src`. The proof shows the final arena equals
-/// `relabeled(m0, src, dst).insert(src, CapSlot::empty())`, then reads off
+/// `relabeled(m0, src, dst).insert(src, CapSlot::empty)`, then reads off
 /// `cspace_wf` from `lemma_transpose_preserves_cspace_wf` + `lemma_replace_empty_cap`
 /// and the count from `lemma_move_count`. The children-walk re-parents *every*
 /// child (`lemma_child_on_chain` completeness; `next_reach` for per-iteration
@@ -8353,9 +8345,9 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
         final(store).refs_view() == old(store).refs_view(),
         // The channel view is untouched: the body mutates only via `set_slot`,
         // which frames `chan_view` unchanged. 3d's `send`/`recv` rely on this —
-        // without it a `slot_move` call havocs every channel cursor (detail §1.1).
+        // without it a `slot_move` call havocs every channel cursor.
         final(store).chan_view() == old(store).chan_view(),
-        // Likewise the notification/TCB/timer views (plan §4b): `set_slot` frames all of
+        // Likewise the notification/TCB/timer views: `set_slot` frames all of
         // them, so a queued-cap move preserves `binding_notif_wf` for `send`/`recv`.
         final(store).notif_view() == old(store).notif_view(),
         final(store).tcb_view() == old(store).tcb_view(),
@@ -8440,7 +8432,7 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
         }
         let mut pas = store.slot(pa);
         // Compare via the u64 tag: `SlotId`/`Option` are external types, so the
-        // exec `==` operator carries no spec — but `.0 == .0` is native u64 eq.
+        // exec `==` operator carries no spec — but `.0 ==.0` is native u64 eq.
         let fc_is_src = match pas.first_child {
             Some(c) => c.0 == src.0,
             None => false,
@@ -8695,27 +8687,26 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
     }
 }
 
-// ── Cross-object teardown: the refcount plumbing (plan §6c/§6d, doc/results/43, 50) ──
+// ── Cross-object teardown: the refcount plumbing ──
 //
 // `obj_unref`/`unref_cspace`/`destroy_cspace`, the shared `dec_ref` helper, and `delete`
-// (below) — the teardown cycle. With `delete`'s body now proven (§6d), the cspace cycle
+// (below) — the teardown cycle. With `delete`'s body proven, the cspace cycle
 // `delete → obj_unref → destroy_cspace → delete` is closed under the shared lexicographic
 // `decreases (count_nonempty(slot_view), height)` (`delete = 0 < destroy_cspace = 1 <
 // unref_cspace = 2 < obj_unref = 4`); `delete`'s `delete_prepare` empties its slot before
-// recursing, the one count-dropping edge, so the cycle strictly descends. `destroy_channel`/
-// `destroy_tcb` keep `external_body` contracts (the 6d residue, doc 50 §3), so `obj_unref`'s
-// Channel/Thread arms recurse through them as host-checked black boxes. The load-bearing
-// invariant is `refcount_sound`: the underflow gate for every `refs - 1` (§1.3) and, at the
-// zero point, its census pins the *structural* emptiness each destructor's `requires` needs
-// (no waiters, no armed timers, …) — the §6c headline.
+// recursing, the one count-dropping edge, so the cycle strictly descends. `obj_unref`'s
+// Channel/Thread arms recurse through `destroy_channel`/`destroy_tcb`, whose proven bodies
+// carry the recursion. The load-bearing invariant is `refcount_sound`: the underflow gate
+// for every `refs - 1` and, at the zero point, its census pins the *structural* emptiness
+// each destructor's `requires` needs (no waiters, no armed timers, …).
 
-/// Drop one reference to object `o` and restore the census (plan §6c). The shared
+/// Drop one reference to object `o` and restore the census. The shared
 /// decrement step `obj_unref`/`unref_cspace` factor out: the caller hands an **off-by-one**
 /// state — `refs[o] == census(o) + 1`, sound everywhere else (it already cleared the
 /// reference that named `o`) — and the `-1` lands the matching decrement, restoring the
 /// full `refcount_sound` invariant. Census-transparent (every object view framed), so the
 /// caller can dispatch the at-zero destructor against an unmoved census. The `unref_aspace`
-/// proof shape (doc/results/42), minus the aspace-specific last-ref `aspace_destroy`.
+/// proof shape, minus the aspace-specific last-ref `aspace_destroy`.
 pub(crate) fn dec_ref<S: Store>(store: &mut S, o: ObjId)
     requires
         old(store).refs_view().dom().contains(o),
@@ -8724,13 +8715,13 @@ pub(crate) fn dec_ref<S: Store>(store: &mut S, o: ObjId)
         forall|x: ObjId| x != o && old(store).refs_view().dom().contains(x)
             ==> #[trigger] old(store).refs_view()[x] == obj_census(old(store), x),
         // The cap→object invariant rides through unchanged — it reads only object views, all
-        // framed by `set_obj_refs` (plan §6d foundation).
+        // framed by `set_obj_refs`.
         caps_consistent(old(store)),
-        // The §3.3 endpoint-cap census is likewise refs-free (chan_view + slot_view, both
-        // framed by `set_obj_refs`), so it rides through too (plan §6d body-removal gate).
+        // The rev0§3.3 endpoint-cap census is likewise refs-free (chan_view + slot_view, both
+        // framed by `set_obj_refs`), so it rides through too.
         end_caps_sound(old(store)),
         // Refs-domain completeness rides through: the census is framed and `set_obj_refs`
-        // keeps the domain (insert at an existing key), so the coverage carries (plan §6d).
+        // keeps the domain (insert at an existing key), so the coverage carries.
         census_dom_complete(old(store)),
     ensures
         refcount_sound(final(store)),
@@ -8774,14 +8765,13 @@ pub(crate) fn dec_ref<S: Store>(store: &mut S, o: ObjId)
 }
 
 /// Tear a cspace down once its last cap is gone (`refs == 0`): delete every cap it still
-/// holds (its residents), each through the ordinary CDT cleanup (plan §6c). The loop reads
-/// residency through the immutable `cspace_view` and re-reads each slot's emptiness, so a
-/// resident already emptied by a sibling's teardown is skipped.
+/// holds (its residents), each through the ordinary CDT cleanup. The loop reads residency
+/// through the immutable `cspace_view` and re-reads each slot's emptiness, so a resident
+/// already emptied by a sibling's teardown is skipped.
 ///
-/// `delete` is **opaque** here (`external_body`), so there is no visible recursion: the loop
-/// `decreases` is the resident-index countdown, and `delete`'s contract re-establishes
-/// `cspace_wf`/`refcount_sound`/dom (and frames residency) each iteration. The loop invariant
-/// is designed so 6d's visible-`delete` re-verification reuses it unchanged.
+/// The recursion into `delete` is bounded by the shared lexicographic `decreases`: the loop
+/// itself `decreases` on the resident-index countdown, and `delete`'s contract re-establishes
+/// `cspace_wf`/`refcount_sound`/dom (and frames residency) each iteration.
 ///
 /// `pub(crate)` so the proof harness can drive the resident loop directly
 /// (`check_destroy_cspace`); it has no callers outside this crate.
@@ -8807,29 +8797,29 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
         census_dom_complete(final(store)),
         only_empties(old(store).slot_view(), final(store).slot_view()),
         // Residency is immutable: the resident `delete`s frame `cspace_view`, and emptying a
-        // resident never re-homes it, so the residency map rides through (plan §6d body PR).
+        // resident never re-homes it, so the residency map rides through.
         final(store).cspace_view() == old(store).cspace_view(),
-        // The channel skeleton rides through every resident `delete` (plan §6d body PR).
+        // The channel skeleton rides through every resident `delete`.
         chan_struct_frame(old(store).chan_view(), final(store).chan_view()),
-        // Dead, queue-detached TCBs are frozen across the resident loop (plan
-        // §6d-final-thread-body): each `delete` carries `dead_tcb_frozen`, and the loop invariant
+        // Dead, queue-detached TCBs are frozen across the resident loop: each `delete`
+        // carries `dead_tcb_frozen`, and the loop invariant
         // threads it (the antecedent is self-preserving). `unref_cspace`/`obj_unref` read it off;
         // `destroy_tcb` consumes it for its halted subject across its `unref_cspace`.
         dead_tcb_frozen(old(store), final(store)),
-        // The home maps are framed (plan §6e): the residency is immutable, the channel skeleton
+        // The home maps are framed: the residency is immutable, the channel skeleton
         // rides through, and each resident `delete` keeps the TCB domain + every `bind_slots`.
         home_views_frozen(old(store), final(store)),
-        // §6e provenance: this destructor empties only homed slots (its residents — each itself a
+        // Home-frame provenance: this destructor empties only homed slots (its residents — each itself a
         // resident of `cs` — and their recursive closure), so every un-homed slot keeps its cap.
         unhomed_frozen_free(old(store), final(store)),
-        // §6e-dual provenance: every emptied slot was a home handle of a dead object. A resident
+        // Death-provenance: every emptied slot was a home handle of a dead object. A resident
         // `sid` emptied by a `delete` is homed by `cs` (it is `cs`'s resident `i`), and `cs` is dead
         // throughout (its `refs == 0` at entry, monotone-preserved); the recursive closure each
         // `delete` clears carries its own witness via the target-aware frame.
         emptied_via_dead_home_free(old(store), final(store)),
         // "Dead stays dead" across the resident loop (each `delete` only decrements/removes objects).
         refs_death_persist(old(store), final(store)),
-    // SCC measure (plan §6d, doc 44 §3): `destroy_cspace` sits above `delete` (1 > 0); its
+    // SCC measure: `destroy_cspace` sits above `delete` (1 > 0); its
     // resident-loop `delete` calls are count-flat on the first iteration, so the height drops.
     decreases count_nonempty(old(store).slot_view()), 1int
 {
@@ -8844,28 +8834,28 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
             store.slot_view().dom().finite(),
             count_nonempty(store.slot_view()) <= count_nonempty(old(store).slot_view()),
             refcount_sound(store),
-            // `delete` (assumed `external_body`) preserves the cap→object invariant, so the
-            // resident-walk maintains it for the next iteration's `delete` (plan §6d).
+            // `delete` preserves the cap→object invariant, so the resident-walk
+            // maintains it for the next iteration's `delete`.
             caps_consistent(store),
-            // …and the §3.3 endpoint-cap census (plan §6d body-removal gate).
+            // …and the rev0§3.3 endpoint-cap census.
             end_caps_sound(store),
             // …and refs-domain completeness (each `delete` requires + re-establishes it).
             census_dom_complete(store),
-            // Teardown only empties slots (plan §6d) — composes across the resident deletes.
+            // Teardown only empties slots — composes across the resident deletes.
             only_empties(old(store).slot_view(), store.slot_view()),
             // Residency is immutable — `delete` frames `cspace_view`, and dom is preserved,
             // so `cs`'s residents stay live and the getters stay in-bounds across the loop.
             store.cspace_view() == old(store).cspace_view(),
-            // The channel skeleton composes across the resident deletes (plan §6d body PR).
+            // The channel skeleton composes across the resident deletes.
             chan_struct_frame(old(store).chan_view(), store.chan_view()),
-            // Dead, queue-detached TCBs are frozen across the resident deletes so far (plan
-            // §6d-final-thread-body) — `lemma_dead_tcb_frozen_trans` extends it past each `delete`.
+            // Dead, queue-detached TCBs are frozen across the resident deletes so far
+            // — `lemma_dead_tcb_frozen_trans` extends it past each `delete`.
             dead_tcb_frozen(old(store), store),
-            // The home maps stay framed across the resident deletes (plan §6e).
+            // The home maps stay framed across the resident deletes.
             home_views_frozen(old(store), store),
-            // §6e provenance composes across the resident deletes: only homed slots emptied.
+            // Home-frame provenance composes across the resident deletes: only homed slots emptied.
             unhomed_frozen_free(old(store), store),
-            // §6e-dual provenance composes across the resident deletes (plan §6e-dual).
+            // Death-provenance composes across the resident deletes.
             emptied_via_dead_home_free(old(store), store),
             refs_death_persist(old(store), store),
             // `cs` is dead throughout: `refs[cs] == 0` at entry, monotone-preserved by the
@@ -8884,7 +8874,7 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
                 lemma_only_empties_trans(old(store).slot_view(), sv_before, store.slot_view());
                 lemma_chan_struct_frame_trans(old(store).chan_view(), cv_before, store.chan_view());
                 lemma_dead_tcb_frozen_trans(old(store), &st_before, store);
-                // §6e: `sid` is a resident of `cs` (the loop index `i` witnesses it), so it is
+                // Home frame: `sid` is a resident of `cs` (the loop index `i` witnesses it), so it is
                 // homed — lifting `delete`'s target-aware frame to the free frame this destructor
                 // exports, then composing across the loop.
                 assert(st_before.cspace_view()[cs].slots[i as int] == sid);
@@ -8892,7 +8882,7 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
                 lemma_unhomed_frozen_free_from_homed(&st_before, store, sid);
                 lemma_unhomed_frozen_free_trans(old(store), &st_before, store);
                 lemma_home_views_frozen_trans(old(store), &st_before, store);
-                // §6e-dual: `cs` homes `sid` (resident `i`) at `st_before`, and `cs` stays dead
+                // Death-provenance: `cs` homes `sid` (resident `i`) at `st_before`, and `cs` stays dead
                 // (`refs[cs] == 0` is monotone-preserved by `delete`'s `refs_death_persist`), so the
                 // directly-deleted `sid` carries the death witness `cs`. Lift `delete`'s
                 // target-aware frame to the free frame and compose across the loop.
@@ -8913,11 +8903,11 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
         i += 1;
     }
     // Memory returns to the donor untyped only via revoke of the untyped cap; no
-    // allocator hands it back early (§3.2).
+    // allocator hands it back early.
 }
 
 /// Drop the refcount a cap holds on its object; at zero, run the type-specific teardown
-/// (plan §6c). The shared decrement (`dec_ref`) carries the off-by-one census; at the zero
+///. The shared decrement (`dec_ref`) carries the off-by-one census; at the zero
 /// point `refcount_sound` ⟹ `census(o) == 0`, which discharges each destructor's structural
 /// precondition (no waiters for `destroy_notif`; no self-bound armed timer for
 /// `destroy_timer`; …). The per-`CapKind` `requires` carry the well-formedness each
@@ -8954,12 +8944,11 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             &&& old(store).slot_view().dom().contains(old(store).tcb_view()[o].bind_slots[1])
             // The bound cspace is resident-wf — `destroy_tcb`'s `unref_cspace` needs it to drive
             // the at-zero `destroy_cspace`, and by then the TCB's own cap is gone. `delete`
-            // supplies it from `caps_consistent`'s strengthened Thread clause (plan
-            // §6d-final-thread).
+            // supplies it from `caps_consistent`'s strengthened Thread clause.
             &&& (old(store).tcb_view()[o].cspace matches Some(cs) ==>
                     cspace_resident_wf(old(store), cs))
             // Waiter-coherence — `destroy_tcb`'s BlockedNotif branch `remove_waiter` needs
-            // `notif_wf(wn)`; same provenance (plan §6d-final-thread).
+            // `notif_wf(wn)`; same provenance.
             &&& (old(store).tcb_view()[o].state == ThreadState::BlockedNotif ==>
                     (old(store).tcb_view()[o].wait_notif matches Some(wn) ==>
                         notif_wf(old(store).notif_view(), old(store).tcb_view(), wn)))
@@ -8979,13 +8968,13 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                         old(store).refs_view().dom().contains(n)
                         && old(store).refs_view()[n] > 0))
         },
-        // The system cap→object invariant (plan §6d): needed for the `destroy_channel`/
+        // The system cap→object invariant: needed for the `destroy_channel`/
         // `destroy_tcb` arms (which delete arbitrary caps) and preserved through the `-1`.
         caps_consistent(old(store)),
-        // The §3.3 endpoint-cap census (plan §6d body-removal gate): the recursive
+        // The rev0§3.3 endpoint-cap census: the recursive
         // destructors delete arbitrary channel caps, so it threads through here too.
         end_caps_sound(old(store)),
-        // Refs-domain completeness (plan §6d body-removal): threaded so the destructors keep
+        // Refs-domain completeness: threaded so the destructors keep
         // it for their recursive `delete`s; the at-zero teardown only ever removes an object
         // whose census is already 0, so coverage carries.
         census_dom_complete(old(store)),
@@ -8997,35 +8986,35 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
         caps_consistent(final(store)),
         end_caps_sound(final(store)),
         census_dom_complete(final(store)),
-        // Teardown only empties slots (plan §6d): `dec_ref` frames `slot_view`, so the
+        // Teardown only empties slots: `dec_ref` frames `slot_view`, so the
         // dispatched destructor's `only_empties` carries straight through.
         only_empties(old(store).slot_view(), final(store).slot_view()),
         // Residency is immutable across every arm: `dec_ref`/`unref_aspace` frame
         // `cspace_view`, and each at-zero destructor frames it too (a destroyed cspace keeps
         // its residency map). `delete` reads it off to discharge its own residency frame
-        // (plan §6d body PR).
+        //.
         final(store).cspace_view() == old(store).cspace_view(),
         // The channel skeleton survives every arm (each destructor preserves it — the
         // recursive ones carry it, `destroy_notif`/`destroy_timer` frame `chan_view` whole);
-        // `delete` reads it off (plan §6d body PR).
+        // `delete` reads it off.
         chan_struct_frame(old(store).chan_view(), final(store).chan_view()),
-        // Dead, queue-detached TCBs are frozen (plan §6d-final-thread-body): `dec_ref` frames
+        // Dead, queue-detached TCBs are frozen: `dec_ref` frames
         // `tcb`/`refs` whole except the unref'd `o` (which had `refs[o] > 0`, so it is not in the
         // dead set), and each at-zero destructor carries `dead_tcb_frozen` (its Thread arm with
         // its own subject excepted — but that subject is `o`, again refs-positive at entry). So
-        // `delete` reads it off (plan §6d body PR).
+        // `delete` reads it off.
         dead_tcb_frozen(old(store), final(store)),
-        // The home maps are framed (plan §6e): `dec_ref` frames them whole, every destructor
+        // The home maps are framed: `dec_ref` frames them whole, every destructor
         // carries them. `delete` reads it off for its own `home_views_frozen`.
         home_views_frozen(old(store), final(store)),
-        // §6e provenance: the dispatched destructor empties only homed slots (`dec_ref` frames
+        // Home-frame provenance: the dispatched destructor empties only homed slots (`dec_ref` frames
         // `slot_view`), so every un-homed slot keeps its cap. `delete` composes it onto `slot`.
         unhomed_frozen_free(old(store), final(store)),
-        // §6e-dual provenance: every slot the dispatched destructor empties was a home handle of a
+        // Death-provenance: every slot the dispatched destructor empties was a home handle of a
         // dead object (the object whose `refs` reached zero). `delete` composes it onto `slot`.
         emptied_via_dead_home_free(old(store), final(store)),
         // "Dead stays dead" across this op (its decrement/destructor never re-refs an object) — the
-        // refs-monotone fact the §6e-dual composition needs.
+        // refs-monotone fact the death-provenance composition needs.
         refs_death_persist(old(store), final(store)),
         // Non-designating caps: the store is untouched (the frame `delete` reads off for a
         // Frame cap — its frame-mapping release rode the frame-unmap branch, not here).
@@ -9042,7 +9031,7 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
         // Dropping a **notification** cap is robustly clean: `dec_ref` drops only `refs[n]`,
         // and at zero `destroy_notif` is a model view no-op, so every object view *and* every
         // slot's cap survive (only `refs[n]` moves). This is the additive enabling clause
-        // `delete`'s notification frame (and `thread::bind`) reads off (plan §4d/§6d body PR).
+        // `delete`'s notification frame (and `thread::bind`) reads off.
         cap_notif(cap) is Some ==> {
             &&& final(store).slot_view() == old(store).slot_view()
             &&& final(store).chan_view() == old(store).chan_view()
@@ -9051,7 +9040,7 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             &&& final(store).timer_view() == old(store).timer_view()
             &&& final(store).timer_head_view() == old(store).timer_head_view()
         },
-    // SCC measure (plan §6d, doc 44 §3): `obj_unref` is the top of the height order — its
+    // SCC measure: `obj_unref` is the top of the height order — its
     // `dec_ref`-then-destructor calls are count-flat, so the descent to the destructors is by height.
     decreases count_nonempty(old(store).slot_view()), 4int
 {
@@ -9062,11 +9051,11 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             let ghost st1 = *store;
             proof {
                 lemma_dead_tcb_frozen_dec_ref(&st0, store, o);
-                // §6e: `dec_ref` frames `slot_view` + every object view (so the home maps are
+                // Home frame: `dec_ref` frames `slot_view` + every object view (so the home maps are
                 // framed and no slot is emptied) — the base the at-zero destructor composes onto.
                 lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
                 lemma_home_views_frozen_refl(&st0, store);
-                // §6e-dual: `dec_ref` empties no slot (free frame refl) and only drops `refs[o]` by
+                // Death-provenance: `dec_ref` empties no slot (free frame refl) and only drops `refs[o]` by
                 // one from a positive count (death persists).
                 lemma_emptied_via_dead_home_free_from_slot_eq(&st0, store);
                 lemma_refs_death_persist_dec_ref(&st0, store, o);
@@ -9075,10 +9064,10 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                 destroy_cspace(store, o);
                 proof {
                     lemma_dead_tcb_frozen_trans(&st0, &st1, store);
-                    // §6e: `destroy_cspace` exports the free + home frames; compose with `dec_ref`.
+                    // Home frame: `destroy_cspace` exports the free + home frames; compose with `dec_ref`.
                     lemma_unhomed_frozen_free_trans(&st0, &st1, store);
                     lemma_home_views_frozen_trans(&st0, &st1, store);
-                    // §6e-dual: compose `dec_ref`'s frame with `destroy_cspace`'s exported frame.
+                    // Death-provenance: compose `dec_ref`'s frame with `destroy_cspace`'s exported frame.
                     lemma_emptied_via_dead_home_free_trans(&st0, &st1, store);
                     lemma_refs_death_persist_trans(&st0, &st1, store);
                 }
@@ -9089,11 +9078,11 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             let ghost st1 = *store;
             proof {
                 lemma_dead_tcb_frozen_dec_ref(&st0, store, o);
-                // §6e: `dec_ref` frames `slot_view` + every object view (so the home maps are
+                // Home frame: `dec_ref` frames `slot_view` + every object view (so the home maps are
                 // framed and no slot is emptied) — the base the at-zero destructor composes onto.
                 lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
                 lemma_home_views_frozen_refl(&st0, store);
-                // §6e-dual: `dec_ref` empties no slot and only drops a positive `refs[o]`.
+                // Death-provenance: `dec_ref` empties no slot and only drops a positive `refs[o]`.
                 lemma_emptied_via_dead_home_free_from_slot_eq(&st0, store);
                 lemma_refs_death_persist_dec_ref(&st0, store, o);
             }
@@ -9115,10 +9104,10 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                             assert(st1.tcb_view()[x] == st0.tcb_view()[x]);
                         }
                     }
-                    // §6e: `destroy_tcb` exports the free + home frames; compose with `dec_ref`.
+                    // Home frame: `destroy_tcb` exports the free + home frames; compose with `dec_ref`.
                     lemma_unhomed_frozen_free_trans(&st0, &st1, store);
                     lemma_home_views_frozen_trans(&st0, &st1, store);
-                    // §6e-dual: compose `dec_ref`'s frame with `destroy_tcb`'s exported frame.
+                    // Death-provenance: compose `dec_ref`'s frame with `destroy_tcb`'s exported frame.
                     lemma_emptied_via_dead_home_free_trans(&st0, &st1, store);
                     lemma_refs_death_persist_trans(&st0, &st1, store);
                 }
@@ -9129,25 +9118,25 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             let ghost st1 = *store;
             proof {
                 lemma_dead_tcb_frozen_dec_ref(&st0, store, o);
-                // §6e: `dec_ref` frames `slot_view` + every object view (so the home maps are
+                // Home frame: `dec_ref` frames `slot_view` + every object view (so the home maps are
                 // framed and no slot is emptied) — the base the at-zero destructor composes onto.
                 lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
                 lemma_home_views_frozen_refl(&st0, store);
-                // §6e-dual: `dec_ref` empties no slot and only drops a positive `refs[o]`.
+                // Death-provenance: `dec_ref` empties no slot and only drops a positive `refs[o]`.
                 lemma_emptied_via_dead_home_free_from_slot_eq(&st0, store);
                 lemma_refs_death_persist_dec_ref(&st0, store, o);
             }
             if store.obj_refs(o) == 0 {
-                // §6e-dual: `o` is in `refs.dom` (dec_ref preserved it) at `refs == 0`, so it is
+                // Death-provenance: `o` is in `refs.dom()` (dec_ref preserved it) at `refs == 0`, so it is
                 // dead — `destroy_channel`'s death-witness precondition.
                 proof { assert(dead_obj(store, o)); }
                 crate::channel::destroy_channel(store, o);
                 proof {
                     lemma_dead_tcb_frozen_trans(&st0, &st1, store);
-                    // §6e: `destroy_channel` exports the free + home frames; compose with `dec_ref`.
+                    // Home frame: `destroy_channel` exports the free + home frames; compose with `dec_ref`.
                     lemma_unhomed_frozen_free_trans(&st0, &st1, store);
                     lemma_home_views_frozen_trans(&st0, &st1, store);
-                    // §6e-dual: compose `dec_ref`'s frame with `destroy_channel`'s exported frame.
+                    // Death-provenance: compose `dec_ref`'s frame with `destroy_channel`'s exported frame.
                     lemma_emptied_via_dead_home_free_trans(&st0, &st1, store);
                     lemma_refs_death_persist_trans(&st0, &st1, store);
                 }
@@ -9158,11 +9147,11 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             let ghost st1 = *store;
             proof {
                 lemma_dead_tcb_frozen_dec_ref(&st0, store, o);
-                // §6e: `dec_ref` frames `slot_view` + every object view (so the home maps are
+                // Home frame: `dec_ref` frames `slot_view` + every object view (so the home maps are
                 // framed and no slot is emptied) — the base the at-zero destructor composes onto.
                 lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
                 lemma_home_views_frozen_refl(&st0, store);
-                // §6e-dual: `dec_ref` empties no slot and only drops a positive `refs[o]`.
+                // Death-provenance: `dec_ref` empties no slot and only drops a positive `refs[o]`.
                 lemma_emptied_via_dead_home_free_from_slot_eq(&st0, store);
                 lemma_refs_death_persist_dec_ref(&st0, store, o);
             }
@@ -9180,12 +9169,12 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                     // `destroy_notif` frames every view (a model no-op), so `store == st1`.
                     lemma_dead_tcb_frozen_refl(&st1, store);
                     lemma_dead_tcb_frozen_trans(&st0, &st1, store);
-                    // §6e: model no-op — free + home refl, composed onto `dec_ref`.
+                    // Home frame: model no-op — free + home refl, composed onto `dec_ref`.
                     lemma_unhomed_frozen_free_from_slot_eq(&st1, store);
                     lemma_unhomed_frozen_free_trans(&st0, &st1, store);
                     lemma_home_views_frozen_refl(&st1, store);
                     lemma_home_views_frozen_trans(&st0, &st1, store);
-                    // §6e-dual: model no-op — free + death-persist refl (refs framed equal),
+                    // Death-provenance: model no-op — free + death-persist refl (refs framed equal),
                     // composed onto `dec_ref`.
                     lemma_emptied_via_dead_home_free_from_slot_eq(&st1, store);
                     lemma_emptied_via_dead_home_free_trans(&st0, &st1, store);
@@ -9199,11 +9188,11 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             let ghost st1 = *store;
             proof {
                 lemma_dead_tcb_frozen_dec_ref(&st0, store, o);
-                // §6e: `dec_ref` frames `slot_view` + every object view (so the home maps are
+                // Home frame: `dec_ref` frames `slot_view` + every object view (so the home maps are
                 // framed and no slot is emptied) — the base the at-zero destructor composes onto.
                 lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
                 lemma_home_views_frozen_refl(&st0, store);
-                // §6e-dual: `dec_ref` empties no slot and only drops a positive `refs[o]`.
+                // Death-provenance: `dec_ref` empties no slot and only drops a positive `refs[o]`.
                 lemma_emptied_via_dead_home_free_from_slot_eq(&st0, store);
                 lemma_refs_death_persist_dec_ref(&st0, store, o);
             }
@@ -9229,12 +9218,12 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                 crate::timer::destroy_timer(store, o);
                 proof {
                     lemma_dead_tcb_frozen_trans(&st0, &st1, store);
-                    // §6e: `destroy_timer` frames `slot_view` + every object view — free + home refl.
+                    // Home frame: `destroy_timer` frames `slot_view` + every object view — free + home refl.
                     lemma_unhomed_frozen_free_from_slot_eq(&st1, store);
                     lemma_unhomed_frozen_free_trans(&st0, &st1, store);
                     lemma_home_views_frozen_refl(&st1, store);
                     lemma_home_views_frozen_trans(&st0, &st1, store);
-                    // §6e-dual: `destroy_timer` frames `slot_view` (free refl) and exports
+                    // Death-provenance: `destroy_timer` frames `slot_view` (free refl) and exports
                     // `refs_death_persist`; compose onto `dec_ref`.
                     lemma_emptied_via_dead_home_free_from_slot_eq(&st1, store);
                     lemma_emptied_via_dead_home_free_trans(&st0, &st1, store);
@@ -9254,10 +9243,10 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                         assert(x != o);
                     }
                 }
-                // §6e: `unref_aspace` frames `slot_view` + every object view — free + home refl.
+                // Home frame: `unref_aspace` frames `slot_view` + every object view — free + home refl.
                 lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
                 lemma_home_views_frozen_refl(&st0, store);
-                // §6e-dual: `unref_aspace` frames `slot_view` (free refl) and exports
+                // Death-provenance: `unref_aspace` frames `slot_view` (free refl) and exports
                 // `refs_death_persist` (it only drops/removes `o`, never re-refs an object).
                 lemma_emptied_via_dead_home_free_from_slot_eq(&st0, store);
             }
@@ -9265,10 +9254,10 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
         CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => {
             proof {
                 lemma_dead_tcb_frozen_refl(&st0, store);
-                // §6e: a no-op (store untouched) — free + home refl.
+                // Home frame: a no-op (store untouched) — free + home refl.
                 lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
                 lemma_home_views_frozen_refl(&st0, store);
-                // §6e-dual: a no-op — free refl + death-persist refl (refs framed equal).
+                // Death-provenance: a no-op — free refl + death-persist refl (refs framed equal).
                 lemma_emptied_via_dead_home_free_from_slot_eq(&st0, store);
                 lemma_refs_death_persist_from_refs_eq(&st0, store);
             }
@@ -9277,7 +9266,7 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
 }
 
 /// Drop one reference to cspace `cs` (a bound thread holds one — released by
-/// `destroy_tcb`); at zero, tear it down (plan §6c). `obj_unref`'s CSpace arm in isolation,
+/// `destroy_tcb`); at zero, tear it down. `obj_unref`'s CSpace arm in isolation,
 /// for the non-cap holder path: the off-by-one decrement (`dec_ref`) then the at-zero
 /// `destroy_cspace`.
 pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId)
@@ -9303,27 +9292,27 @@ pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId)
         census_dom_complete(final(store)),
         only_empties(old(store).slot_view(), final(store).slot_view()),
         // Residency is immutable: `dec_ref` and `destroy_cspace` both frame `cspace_view`, so
-        // `destroy_tcb`'s cspace release carries it (plan §6d body PR).
+        // `destroy_tcb`'s cspace release carries it.
         final(store).cspace_view() == old(store).cspace_view(),
         // The channel skeleton rides through (`dec_ref` frames `chan_view`; `destroy_cspace`
-        // carries the skeleton) — `destroy_tcb`'s cspace release reads it (plan §6d body PR).
+        // carries the skeleton) — `destroy_tcb`'s cspace release reads it.
         chan_struct_frame(old(store).chan_view(), final(store).chan_view()),
-        // Dead, queue-detached TCBs are frozen (plan §6d-final-thread-body): `dec_ref` frames
+        // Dead, queue-detached TCBs are frozen: `dec_ref` frames
         // `tcb` whole (and `refs` except `cs`, which is refs-positive at entry so not in the dead
         // set), and `destroy_cspace` carries it. `destroy_tcb`'s cspace release reads it off to
         // preserve its own halted subject.
         dead_tcb_frozen(old(store), final(store)),
-        // The home maps are framed (plan §6e): `dec_ref` frames them whole, `destroy_cspace`
+        // The home maps are framed: `dec_ref` frames them whole, `destroy_cspace`
         // carries them. `destroy_tcb`'s cspace release reads it off.
         home_views_frozen(old(store), final(store)),
-        // §6e provenance: `dec_ref` frames `slot_view` and `destroy_cspace` empties only homed
+        // Home-frame provenance: `dec_ref` frames `slot_view` and `destroy_cspace` empties only homed
         // residents — so every un-homed slot keeps its cap. `destroy_tcb` reads it off.
         unhomed_frozen_free(old(store), final(store)),
-        // §6e-dual provenance: every emptied slot was a home handle of a dead object; "dead stays
+        // Death-provenance: every emptied slot was a home handle of a dead object; "dead stays
         // dead" across the op. `destroy_tcb` reads these off (and composes onto its own subject).
         emptied_via_dead_home_free(old(store), final(store)),
         refs_death_persist(old(store), final(store)),
-    // SCC measure (plan §6d-final-thread-body-2): once `destroy_tcb` is a proven body the cycle
+    // SCC measure: once `destroy_tcb` is a proven body the cycle
     // `destroy_tcb → unref_cspace → destroy_cspace → delete → obj_unref → destroy_tcb` is visible,
     // so `unref_cspace` joins the SCC and needs the shared lexicographic measure. Height 2 (above
     // `destroy_cspace`=1/`delete`=0, below `destroy_tcb`=3): its `dec_ref`-then-`destroy_cspace`
@@ -9336,10 +9325,10 @@ pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId)
     proof {
         // `dec_ref` froze `tcb` whole and only dropped `refs[cs]` (cs ∉ dead set: `refs[cs] > 0`).
         lemma_dead_tcb_frozen_dec_ref(&st0, store, cs);
-        // §6e base: `dec_ref` frames `slot_view` + every object view (free + home refl).
+        // Home-frame base: `dec_ref` frames `slot_view` + every object view (free + home refl).
         lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
         lemma_home_views_frozen_refl(&st0, store);
-        // §6e-dual base: `dec_ref` empties no slot and only drops a positive `refs[cs]`.
+        // Death-provenance base: `dec_ref` empties no slot and only drops a positive `refs[cs]`.
         lemma_emptied_via_dead_home_free_from_slot_eq(&st0, store);
         lemma_refs_death_persist_dec_ref(&st0, store, cs);
     }
@@ -9347,10 +9336,10 @@ pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId)
         destroy_cspace(store, cs);
         proof {
             lemma_dead_tcb_frozen_trans(&st0, &st1, store);
-            // §6e: `destroy_cspace` exports the free + home frames; compose with `dec_ref`.
+            // Home frame: `destroy_cspace` exports the free + home frames; compose with `dec_ref`.
             lemma_unhomed_frozen_free_trans(&st0, &st1, store);
             lemma_home_views_frozen_trans(&st0, &st1, store);
-            // §6e-dual: compose `dec_ref`'s frame with `destroy_cspace`'s exported frame.
+            // Death-provenance: compose `dec_ref`'s frame with `destroy_cspace`'s exported frame.
             lemma_emptied_via_dead_home_free_trans(&st0, &st1, store);
             lemma_refs_death_persist_trans(&st0, &st1, store);
         }
@@ -9358,7 +9347,7 @@ pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId)
 }
 
 /// Drop a non-cap reference to an aspace — mapped frames and bound threads hold
-/// these so the aspace can't die under them (plan §6b, doc/results/42). The first
+/// these so the aspace can't die under them. The first
 /// teardown op into `verus!{}`: non-recursive (`aspace_destroy` is a seam black box;
 /// an aspace owns page tables, not caps), so it closes without the cross-module
 /// cluster (6c/6d).
@@ -9369,7 +9358,7 @@ pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId)
 /// not: `refs[a] == census(a) + 1`, sound everywhere else. The `-1` here lands the
 /// matching decrement, restoring the full `refcount_sound` invariant. At zero,
 /// `aspace_destroy` fires and `a` leaves the live set (the trusted page-table free,
-/// plan §2). `refs[a] > 0` is the underflow gate for `obj_refs(a) - 1` (§1.3).
+/// the seam contract). `refs[a] > 0` is the underflow gate for `obj_refs(a) - 1`.
 ///
 /// The proof is light: `obj_census` reads only the seven object views (never
 /// `refs_view`), and both `set_obj_refs` and `aspace_destroy` frame those views, so
@@ -9402,16 +9391,16 @@ pub fn unref_aspace<S: Store>(store: &mut S, a: ObjId)
         final(store).timer_head_view() == old(store).timer_head_view(),
         final(store).cspace_view() == old(store).cspace_view(),
         // Aspaces appear in no `cap_consistent` arm and every object view is framed, so the
-        // invariant is preserved (plan §6d).
+        // invariant is preserved.
         caps_consistent(final(store)),
         // The endpoint-cap census reads only chan_view + slot_view (both framed by
-        // `set_obj_refs`/`aspace_destroy`), so it rides through (plan §6d body-removal gate).
+        // `set_obj_refs`/`aspace_destroy`), so it rides through.
         end_caps_sound(final(store)),
         // Refs-domain completeness: `a` only leaves the domain when its census is 0 (it was
         // last-ref, `refs[a] == 0 ⟹ census(a) == 0`); every other object's census and domain
-        // membership are framed, so the coverage carries (plan §6d).
+        // membership are framed, so the coverage carries.
         census_dom_complete(final(store)),
-        // §6e-dual: `unref_aspace` frames `slot_view`, so it empties no slot (the free frame is
+        // Death-provenance: `unref_aspace` frames `slot_view`, so it empties no slot (the free frame is
         // vacuously true), and it only drops/removes `a` (never re-refs an object), so a dead
         // object stays dead. `obj_unref`'s Aspace arm reads these off.
         emptied_via_dead_home_free(old(store), final(store)),
@@ -9448,9 +9437,9 @@ pub fn unref_aspace<S: Store>(store: &mut S, a: ObjId)
             implies final(store).refs_view().dom().contains(o) by {
             assert(obj_census(old(store), o) >= 1);
         }
-        // §6e-dual: `slot_view` is framed equal, so no slot is emptied (free frame trivial).
+        // Death-provenance: `slot_view` is framed equal, so no slot is emptied (free frame trivial).
         lemma_emptied_via_dead_home_free_from_slot_eq(old(store), store);
-        // §6e-dual "dead stays dead": `refs` only dropped/removed `a` (which had `refs[a] > 0`),
+        // Death-provenance "dead stays dead": `refs` only dropped/removed `a` (which had `refs[a] > 0`),
         // so a dead object `o != a` keeps its status, and `a` (now removed or 0) is itself dead.
         assert forall|o: ObjId| dead_obj(old(store), o) implies #[trigger] dead_obj(store, o) by {
             if old(store).refs_view().dom().contains(o) && old(store).refs_view()[o] == 0 {
@@ -9462,7 +9451,7 @@ pub fn unref_aspace<S: Store>(store: &mut S, a: ObjId)
 
 /// `delete`'s first half — `cdt_unlink` + clear the slot — split out so its (heavy) census/
 /// `end_caps`/`caps_consistent` off-by-one proof is a self-contained SMT query, keeping
-/// `delete`'s body (the teardown branches + `obj_unref`) under the rlimit (doc 25 §2: split
+/// `delete`'s body (the teardown branches + `obj_unref`) under the rlimit (split
 /// the query, don't bump the limit). Non-recursive, so it carries no `decreases`. Returns the
 /// deleted cap; leaves the store in the off-by-one window the teardown branches consume:
 /// the deleted designating slot is cleared (census/`end_caps` off by one at its object/aspace/
@@ -9648,32 +9637,29 @@ fn delete_prepare<S: Store>(store: &mut S, slot: SlotId) -> (cap: Cap)
 
 /// Delete one cap (children survive, re-parented one level up).
 ///
-/// **Proven body (plan §6d).** No longer `external_body`: the real teardown —
-/// `delete_prepare` (`cdt_unlink` + clear) → per-end channel `peer_closed` →
-/// frame unmap → `obj_unref` — is verified against the full contract
-/// (`cspace_wf`/`refcount_sound`/`caps_consistent`/`end_caps_sound`/
-/// `census_dom_complete`/the `count_nonempty` drop/residency frame). The
-/// cross-object recursion `delete → obj_unref → destroy_cspace → delete`
-/// (the seL4-zombie cycle) terminates under the shared lexicographic measure
-/// `(count_nonempty(slot_view), height)` with `delete = 0` (`delete`'s
+/// **Proven body.** The real teardown — `delete_prepare` (`cdt_unlink` + clear)
+/// → per-end channel `peer_closed` → frame unmap → `obj_unref` — is verified
+/// against the full contract (`cspace_wf`/`refcount_sound`/`caps_consistent`/
+/// `end_caps_sound`/`census_dom_complete`/the `count_nonempty` drop/residency
+/// frame). The cross-object recursion `delete → obj_unref → destroy_cspace →
+/// delete` (the seL4-zombie cycle) terminates under the shared lexicographic
+/// measure `(count_nonempty(slot_view), height)` with `delete = 0` (`delete`'s
 /// `delete_prepare` empties its slot before recursing, the one count-dropping
-/// edge). `destroy_channel`/`destroy_tcb` keep `external_body` contracts (their
-/// bodies need new thread-state/binding-release census invariants — the
-/// recorded 6d residue, doc 50 §3), so `obj_unref`'s Channel/Thread arms recurse
-/// through trusted-but-host-checked destructors; the visible cspace cycle is
-/// closed in Verus.
+/// edge). `obj_unref`'s Channel/Thread arms recurse through the proven
+/// `destroy_channel`/`destroy_tcb` bodies, which carry the thread-state /
+/// binding-release census invariants.
 ///
 /// The contract is stated for the **general** (possibly non-leaf) case on
 /// purpose: `revoke` only ever passes a leaf, but `destroy_cspace` deletes
 /// non-leaf residents, so the body handles `cdt_unlink`'s re-parenting — the
 /// harder `cdt_wf`-preservation case.
 ///
-/// **Refcount census (plan §6a).** The deleted cap lowers exactly its object's
+/// **Refcount census.** The deleted cap lowers exactly its object's
 /// `slot_refs`/`frame_map_refs`, matched by the `obj_unref`/`unref_aspace` `-1`
 /// (and the per-end `endpoint_cap_dropped` by its `binding_refs` drop); the
-/// `requires` census is the underflow gate (`refs[o] - 1` needs `refs[o] ≥ 1`,
-/// §1.3). The verified callers (`bind`, `revoke`, `destroy_cspace`) carry the
-/// four system invariants in.
+/// `requires` census is the underflow gate (`refs[o] - 1` needs `refs[o] ≥ 1`).
+/// The verified callers (`bind`, `revoke`, `destroy_cspace`) carry the four
+/// system invariants in.
 pub fn delete<S: Store>(store: &mut S, slot: SlotId)
     requires
         cspace_wf(old(store).slot_view()),
@@ -9681,18 +9667,18 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         old(store).slot_view().dom().contains(slot),
         !is_empty_cap(old(store).slot_view()[slot].cap),
         refcount_sound(old(store)),
-        // Cap→object consistency (plan §6d foundation): the body's `endpoint_cap_dropped`
+        // Cap→object consistency: the body's `endpoint_cap_dropped`
         // and `obj_unref` calls need the deleted cap's object well-formed, which only this
         // system invariant supplies (discharged by the now-proven body). The verified callers
         // (`bind`, `revoke`, `destroy_cspace`) carry it like 6a's `refcount_sound`.
         caps_consistent(old(store)),
-        // The §3.3 endpoint-cap census (plan §6d body-removal gate, doc 45 §2): the body's
+        // The rev0§3.3 endpoint-cap census (the body-removal census gate): the body's
         // Channel branch deletes one of possibly several `(co, end)` caps; this equality is
         // what lets it re-prove `caps_consistent`'s `end_caps[end] > 0` for the surviving
         // siblings. The verified callers carry it like `refcount_sound`.
         end_caps_sound(old(store)),
-        // Refs-domain completeness (plan §6d body-removal): the body reads the deleted cap's
-        // object into `refs.dom` from the census via it (`delete_prepare` + `obj_unref`).
+        // Refs-domain completeness: the body reads the deleted cap's
+        // object into `refs.dom()` from the census via it (`delete_prepare` + `obj_unref`).
         // The verified callers carry it.
         census_dom_complete(old(store)),
     ensures
@@ -9705,7 +9691,7 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         caps_consistent(final(store)),
         end_caps_sound(final(store)),
         census_dom_complete(final(store)),
-        // Teardown only empties slots, never fills one (plan §6d): the just-cleared `slot`
+        // Teardown only empties slots, never fills one: the just-cleared `slot`
         // and every already-empty slot stay empty through the recursive `obj_unref`. The
         // frame `destroy_channel`'s ring-cap loop carries; host-checked (`check_delete`).
         only_empties(old(store).slot_view(), final(store).slot_view()),
@@ -9720,9 +9706,9 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         // recursive `obj_unref` only clears bindings / drops `end_caps` / deletes ring caps,
         // never re-homing a channel or moving its slot handles. This is the frame
         // `destroy_channel`'s ring-cap loop reads off to keep `old.ring_cap[ch]` valid across
-        // its `delete`s (plan §6d body PR).
+        // its `delete`s.
         chan_struct_frame(old(store).chan_view(), final(store).chan_view()),
-        // Dead, queue-detached TCBs are frozen across the teardown (plan §6d-final-thread-body):
+        // Dead, queue-detached TCBs are frozen across the teardown:
         // `delete_prepare` frames `tcb`/`refs` whole, the teardown branches touch only `chan`/
         // `aspace`/`refs[asp]` (a dead `x ≠ asp`, since a mapping made `refs[asp] > 0`) or fire a
         // peer-closed notification (which wakes only `wait_notif`-bearing waiters, never a
@@ -9730,23 +9716,23 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         // `destroy_tcb` reads off to preserve its halted subject's `report`/`state`/`qnext`
         // across the recursive `unref_cspace`/`destroy_cspace`.
         dead_tcb_frozen(old(store), final(store)),
-        // The home maps are framed (plan §6e) — residency immutable, channel skeleton fixed, TCB
+        // The home maps are framed — residency immutable, channel skeleton fixed, TCB
         // domain + every `bind_slots` preserved across the teardown.
         home_views_frozen(old(store), final(store)),
-        // §6e provenance frame: `delete` empties its own `slot` plus the homed slots `obj_unref`'s
+        // Home-frame provenance: `delete` empties its own `slot` plus the homed slots `obj_unref`'s
         // destructors clear (and their recursive closure), so every **un-homed** slot other than
         // `slot` keeps its cap. This is the frame `revoke` reads off for root-survival, and the
         // recursive destructors compose to their own target-free frame.
         unhomed_frozen(old(store), final(store), slot),
-        // §6e-dual provenance frame: every emptied slot *other than* the directly-deleted `slot`
+        // Death-provenance frame: every emptied slot *other than* the directly-deleted `slot`
         // was a home handle of a dead object (the object `obj_unref`'s destructors tore down). The
         // direct `slot` is exempt (it is cleared by the CDT delete, not a home-handle teardown).
         // `revoke` reads this off for the faithful resident-with-external-reference theorem.
         emptied_via_dead_home(old(store), final(store), slot),
         // "Dead stays dead" across the whole teardown (its `obj_unref` only decrements/removes
-        // objects) — the refs-monotone fact the §6e-dual composition needs (doc 55 §3).
+        // objects) — the refs-monotone fact the death-provenance composition needs.
         refs_death_persist(old(store), final(store)),
-        // Conditional-on-notification frame (plan §4d): deleting a **notification**
+        // Conditional-on-notification frame: deleting a **notification**
         // cap is robustly clean — `delete_prepare` frames every object view, the
         // `Channel`/mapped-`Frame` teardown branches don't fire, and `obj_unref`'s
         // Notification arm only drops `refs[n]` (and at zero calls the view no-op
@@ -9764,22 +9750,22 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
             &&& forall|x: SlotId| old(store).slot_view().dom().contains(x) && x != slot
                     ==> #[trigger] final(store).slot_view()[x].cap == old(store).slot_view()[x].cap
         },
-    // SCC measure (plan §6d, doc 44 §3): `delete` is the bottom of the height order — the only
+    // SCC measure: `delete` is the bottom of the height order — the only
     // edge that drops `count_nonempty` (it empties its slot before recursing into `obj_unref`).
     decreases count_nonempty(old(store).slot_view()), 0int
 {
     let ghost cv0 = store.chan_view();
     let ghost st0 = *store;
     // `cdt_unlink` + clear the slot, leaving the off-by-one census/`end_caps` window the
-    // teardown branches consume (its proof is isolated in `delete_prepare`, doc 25 §2).
+    // teardown branches consume (its proof is isolated in `delete_prepare`).
     let cap = delete_prepare(store, slot);
     let ghost o_opt = cap_obj(cap);
     let ghost asp_opt = cap_frame_aspace(cap);
-    // `delete_prepare` framed `refs` + `tcb` whole, so it is dead-tcb-frozen (plan
-    // §6d-final-thread-body) — the base the teardown branches + `obj_unref` compose onto.
+    // `delete_prepare` framed `refs` + `tcb` whole, so it is dead-tcb-frozen
+    // — the base the teardown branches + `obj_unref` compose onto.
     proof { lemma_dead_tcb_frozen_refl(&st0, store); }
     let ghost st_prep = *store;
-    // Channel endpoint liveness is tracked per end for peer-closed (§3.3).
+    // Channel endpoint liveness is tracked per end for peer-closed (rev0§3.3).
     if let CapKind::Channel(ch, end) = cap.kind {
         proof {
             assert(cap_consistent(old(store), cap));
@@ -9791,7 +9777,7 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
                 if store.notif_view()[m].wait_head is Some {
                     lemma_waiter_refs_pos_from_head(store.notif_view(), store.tcb_view(), m);
                     // A queued waiter makes `census(m) >= 1`, so refs-domain completeness
-                    // (delete_prepare's `ensures`) places `m` in `refs.dom`; the off-by-one
+                    // (delete_prepare's `ensures`) places `m` in `refs.dom()`; the off-by-one
                     // then makes `refs[m] > 0` — `endpoint_cap_dropped`'s `binding_refs_ok`.
                     assert(obj_census(store, m) >= 1);
                     lemma_in_refs_from_census(store, m);
@@ -9809,7 +9795,7 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
     }
     let ghost st_chan = *store;
     // Deleting a mapped frame cap unmaps it — the one revocation story
-    // for shared memory (§2.5).
+    // for shared memory (rev0§2.5).
     if let CapKind::Frame { pages, mapping: Some((asp, va)), .. } = cap.kind {
         let ghost s_pre = *store;
         store.aspace_unmap(asp, va, pages);
@@ -9837,7 +9823,7 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
                 }
             }
             lemma_dead_tcb_frozen_trans(&st_chan, &st_unmap, store);
-            // §6e-dual: `aspace_unmap` frames `refs` (st_chan → st_unmap refl); `unref_aspace`
+            // Death-provenance: `aspace_unmap` frames `refs` (st_chan → st_unmap refl); `unref_aspace`
             // exports `refs_death_persist`; compose `st_chan → st_unmap → final`.
             lemma_refs_death_persist_from_refs_eq(&st_chan, &st_unmap);
             lemma_refs_death_persist_trans(&st_chan, &st_unmap, store);
@@ -9853,7 +9839,7 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         // Compose the dead-tcb-frozen segments so far: prepare → channel → frame-unmap.
         lemma_dead_tcb_frozen_trans(&st0, &st_prep, &st_chan);
         lemma_dead_tcb_frozen_trans(&st0, &st_chan, &st_frame);
-        // §6e-dual: compose the death-persist segments: prepare (`refs` framed) → channel →
+        // Death-provenance: compose the death-persist segments: prepare (`refs` framed) → channel →
         // frame-unmap, giving `refs_death_persist(st0, st_frame)`.
         lemma_refs_death_persist_from_refs_eq(&st0, &st_prep);
         lemma_refs_death_persist_trans(&st0, &st_prep, &st_chan);
@@ -9869,7 +9855,7 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
     let ghost cv_pre_unref = store.chan_view();
     proof {
         // Discharge `obj_unref`'s Thread arm's bound-cspace-resident precondition from
-        // `caps_consistent` (plan §6d-final-thread). The deleted cap is the live Thread cap, so
+        // `caps_consistent`. The deleted cap is the live Thread cap, so
         // `caps_consistent(old)` ⟹ `cap_consistent(old, cap)` ⟹ the bound cspace is
         // resident-wf. `cspace_resident_wf` reads only `cspace_view` + `slot_view` dom (both
         // framed by `delete_prepare`) and `tcb_view[o].cspace` (framed), and no Thread-cap
@@ -9884,8 +9870,7 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
             // Waiter-coherence rides through identically (`delete_prepare` frames `notif_view`
             // and `tcb_view`, no Thread-cap teardown branch ran): if `o` is blocked, its
             // `wait_notif` names a `notif_wf` notification — `obj_unref`'s Thread arm needs it
-            // to discharge `destroy_tcb`'s BlockedNotif-branch `remove_waiter` (plan
-            // §6d-final-thread).
+            // to discharge `destroy_tcb`'s BlockedNotif-branch `remove_waiter`.
             if store.tcb_view()[o].state == ThreadState::BlockedNotif {
                 if let Some(wn) = store.tcb_view()[o].wait_notif {
                     assert(notif_wf(old(store).notif_view(), old(store).tcb_view(), wn));
@@ -9894,7 +9879,7 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
             }
         }
         // Re-establish `obj_unref`'s Channel-arm `chan_wf` precondition **deterministically**
-        // (the doc 51 §2 / §6d-final-thread hazard — a plain `assert` here relied on
+        // (the final-thread teardown hazard — a plain `assert` here relied on
         // auto-derivation that flakes CI's Z3 once the strengthened `cap_consistent` widened the
         // context). `cap_consistent(old, cap)` gives `chan_wf(cv0, old.slot_view, o)`;
         // `delete_prepare` only emptied the deleted cap's slot and `endpoint_cap_dropped` only
@@ -9915,7 +9900,7 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
                 if let Some(nn) = store.timer_view()[o].notif {
                     lemma_armed_timer_refs_pos(store.timer_view(), o, nn);
                     // The armed binding makes `census(nn) >= 1`, so refs-domain completeness
-                    // places `nn` in `refs.dom`; the off-by-one then makes `refs[nn] > 0`.
+                    // places `nn` in `refs.dom()`; the off-by-one then makes `refs[nn] > 0`.
                     assert(obj_census(store, nn) >= 1);
                     lemma_in_refs_from_census(store, nn);
                     lemma_refs_pos_from_off_by_one(store, o, nn);
@@ -9928,9 +9913,9 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         // `obj_unref` preserves the skeleton; compose with the pre-unref preservation.
         lemma_chan_struct_frame_trans(cv0, cv_pre_unref, store.chan_view());
         // dead_tcb_frozen: compose the pre-`obj_unref` segments (`st0 → st_frame`) with
-        // `obj_unref`'s own frame (`st_frame → final`). Plan §6d-final-thread-body.
+        // `obj_unref`'s own frame (`st_frame → final`). Plan the final-thread teardown
         lemma_dead_tcb_frozen_trans(&st0, &st_frame, store);
-        // §6e provenance + home frame. Up to `obj_unref` only `slot` changed in the arena
+        // Home-frame provenance + home frame. Up to `obj_unref` only `slot` changed in the arena
         // (`delete_prepare` cleared it; `endpoint_cap_dropped`/`aspace_unmap`/`unref_aspace`
         // frame `slot_view`), and the home maps are framed (`cspace_view`/`chan_struct_frame`/the
         // TCB domain + `bind_slots`). `obj_unref` exports the target-free frame, composed onto `slot`.
@@ -9948,7 +9933,7 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         }
         lemma_unhomed_frozen_compose(&st0, &st_frame, store, slot);
         lemma_home_views_frozen_trans(&st0, &st_frame, store);
-        // §6e-dual: up to `st_frame` only the target `slot` was cleared (the teardown branches
+        // Death-provenance: up to `st_frame` only the target `slot` was cleared (the teardown branches
         // frame `slot_view`), so `emptied_via_dead_home(st0, st_frame, slot)` holds vacuously (no
         // *non-target* slot is emptied). Compose with `obj_unref`'s exported free frame; the
         // death-persist segments above bridge `st0 → st_frame`, and `obj_unref` carries
@@ -9970,9 +9955,8 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
 /// Descend from `start` to a leaf of its subtree (the inner walk of `revoke`).
 ///
 /// **Terminates** (`decreases prank[leaf]`): each step follows `first_child`,
-/// and the child's parent rank is strictly below the leaf's (acyclicity) — the
-/// headline gain over the old `debug_assert`, here proven unbounded for all tree
-/// shapes by *using* the acyclicity witness.
+/// and the child's parent rank is strictly below the leaf's (acyclicity) —
+/// proven unbounded for all tree shapes by *using* the acyclicity witness.
 pub fn descend_to_leaf<S: Store>(store: &S, start: SlotId) -> (leaf: SlotId)
     requires
         cdt_wf(store.slot_view()),
@@ -10007,52 +9991,44 @@ pub fn descend_to_leaf<S: Store>(store: &S, start: SlotId) -> (leaf: SlotId)
 }
 
 /// Revoke: delete every CDT descendant of `slot` — cspace residents and
-/// in-flight queue slots alike, unconditionally (§2.2).
+/// in-flight queue slots alike, unconditionally (rev0§2.2).
 ///
 /// **Terminates** (`decreases count_nonempty`): each iteration descends to a
-/// leaf and deletes it, and `delete` strictly lowers the live-slot count. This
-/// is the revocation-walk termination the plan calls the headline gain over
-/// Kani's `debug_assert` — proven here for all shapes, modulo `delete`'s assumed
+/// leaf and deletes it, and `delete` strictly lowers the live-slot count — the
+/// revocation-walk termination, proven here for all shapes against `delete`'s
 /// teardown contract (above).
 ///
-/// **Descendant-deletion is unconditional — and reachable from the real call path (doc 70,
-/// D-A1).** The `ensures` `first_child is None` + `cspace_wf` hold for *any* live `slot`,
-/// with **no homing precondition**: they ride `delete`'s unconditional teardown contract and
-/// the loop `decreases`, independent of whether `slot` is some object's home handle. This is
-/// the §2.2 spec guarantee ("deletes all descendants … unconditional"), and it is now
-/// provable for the `homed_in_cspace` target every `Sys::CapRevoke` actually supplies
-/// (`cur_slot` is a cell of the caller's cspace) — *not* only for the un-homed inputs the
-/// kernel never sends. Earlier this whole contract sat behind a `requires !is_homed`, which is
-/// **false for every real syscall target**, so the proven guarantee was vacuous over the
-/// implementation's actual inputs (doc 69, D-A1); the precondition is now dropped.
+/// **Descendant-deletion is unconditional — and reachable from the real call path.** The
+/// `ensures` `first_child is None` + `cspace_wf` hold for *any* live `slot`, with **no homing
+/// precondition**: they ride `delete`'s unconditional teardown contract and the loop
+/// `decreases`, independent of whether `slot` is some object's home handle. This is the
+/// rev0§2.2 spec guarantee ("deletes all descendants … unconditional"), provable for the
+/// `homed_in_cspace` target every `Sys::CapRevoke` actually supplies (`cur_slot` is a cell of
+/// the caller's cspace) — not only for un-homed inputs the kernel never sends.
 ///
-/// **Root-survival is conditional (the §6e theorem, demoted to an implication).** `revoke`
-/// deletes only descendants of `slot`, never `slot` itself, so the *only* way `slot`'s cap can
-/// be emptied is the **cross-object** teardown: deleting the last cap to some object that
-/// **homes** `slot` (a cspace whose resident is `slot`, a channel whose ring cap is `slot`, a
-/// TCB whose bind slot is `slot`) fires that object's destructor, which clears `slot`. The
-/// provenance frame `unhomed_frozen` (plan §6e) makes the contrapositive a theorem: a teardown
-/// clears a non-target slot only if it is **homed**, so when `slot` is un-homed (a top-level /
-/// donated-untyped cap) no cross-object teardown can reach it and `slot` survives — exported as
-/// the `ensures !is_homed(old(store), slot) ==> !is_empty_cap(final …[slot].cap)`. A **homed**
-/// root is the seL4-zombie (`revoke_can_empty_its_own_root_zombie`): `slot` is a resident of a
-/// cspace whose last live cap lies in `slot`'s own subtree, so revoking the subtree destroys
-/// the cspace and empties `slot` — the implication's antecedent is false there, so the contract
-/// admissibly says nothing (doc 70, D-A2). Host-checked both ways
-/// (`check_revoke_root_survives` / the zombie negative witness).
+/// **Root-survival is conditional (an implication).** `revoke` deletes only descendants of
+/// `slot`, never `slot` itself, so the *only* way `slot`'s cap can be emptied is the
+/// **cross-object** teardown: deleting the last cap to some object that **homes** `slot` (a
+/// cspace whose resident is `slot`, a channel whose ring cap is `slot`, a TCB whose bind slot
+/// is `slot`) fires that object's destructor, which clears `slot`. The provenance frame
+/// `unhomed_frozen` makes the contrapositive a theorem: a teardown clears a non-target slot
+/// only if it is **homed**, so when `slot` is un-homed (a top-level / donated-untyped cap) no
+/// cross-object teardown can reach it and `slot` survives — exported as the `ensures
+/// !is_homed(old(store), slot) ==> !is_empty_cap(final …[slot].cap)`. A **homed** root is the
+/// seL4-zombie (`revoke_can_empty_its_own_root_zombie`): `slot` is a resident of a cspace whose
+/// last live cap lies in `slot`'s own subtree, so revoking the subtree destroys the cspace and
+/// empties `slot` — the implication's antecedent is false there, so the contract admissibly
+/// says nothing. Host-checked both ways (`check_revoke_root_survives` / the zombie negative
+/// witness).
 ///
 /// **Residue (the resident-with-external-reference case).** A `slot` that *is* a cspace
 /// resident but whose homing cspace keeps a live reference outside `slot`'s subtree also
-/// survives, but proving *that* needs the stronger "emptied ⟹ a homing object was
-/// destroyed" frame (refs-monotone, the §3 cascade), recorded as the explicit follow-on in
-/// `doc/results/55`. `unhomed_frozen` (this PR) is its foundation.
+/// survives, but proving *that* needs the stronger "emptied ⟹ a homing object was destroyed"
+/// frame (refs-monotone, the refcount cascade). `unhomed_frozen` is its foundation.
 ///
-/// **Sees through queues — now a named obligation (D-A3, doc 69/73).** §3.4 / the M1 exit
-/// criterion demand that `revoke` destroy descendants *including a cap queued in an in-flight
-/// message* "like any other descendant, no special case." That subtree-deletion was previously
-/// only *structurally implied* — `first_child is None` (above) pins the **direct** child clause,
-/// and the transitive reach was inferred from `cdt_wf` + `slot_move`'s body with no failing
-/// obligation if either drifted. It is now exported: `ensures no_live_descendant(final, slot)`
+/// **Sees through queues — a named obligation.** rev0§3.4 / the M1 exit criterion demand that
+/// `revoke` destroy descendants *including a cap queued in an in-flight message* "like any
+/// other descendant, no special case." It is exported: `ensures no_live_descendant(final, slot)`
 /// (no live slot — resident or in-flight ring cap — is a CDT descendant of `slot` afterward),
 /// discharged at loop exit by `lemma_childless_no_descendant` from `first_child is None` +
 /// `cspace_wf`, paired with `only_empties(old, final)` (the walk destroys, never relabels). A
@@ -10061,12 +10037,12 @@ pub fn descend_to_leaf<S: Store>(store: &S, start: SlotId) -> (leaf: SlotId)
 /// by the real `revoke` is `revoke_sees_through_queued_descendant`. The fully ∀-quantified
 /// "every slot that was a descendant in the *initial* state is empty in the final state" is the
 /// remaining follow-on — it is entangled with the cross-object teardown cascade (`delete` is
-/// recursive and exports no per-slot parent-edge frame, so it would need the deliberately-deferred
-/// subtree induction), and is **not** a regression risk given the two facts above.
+/// recursive and exports no per-slot parent-edge frame, so it would need the deferred subtree
+/// induction), and is **not** a regression risk given the two facts above.
 ///
-/// pre:  the cspace is well-formed (and finite); `slot` is live and non-empty.
+/// pre: the cspace is well-formed (and finite); `slot` is live and non-empty.
 /// post: `slot` has no children (its subtree is gone) and the cspace stays well-formed
-///       (unconditional); its cap **survives** when `slot` started **un-homed** (conditional).
+/// (unconditional); its cap **survives** when `slot` started **un-homed** (conditional).
 pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
     requires
         cspace_wf(old(store).slot_view()),
@@ -10078,24 +10054,24 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
         end_caps_sound(old(store)),
         census_dom_complete(old(store)),
     ensures
-        // Descendant-deletion and well-formedness are **unconditional** (doc 70, D-A1): they
+        // Descendant-deletion and well-formedness are **unconditional**: they
         // hold for *any* target, including the `homed_in_cspace` slot every `Sys::CapRevoke`
-        // supplies — so the spec-mandated guarantee (§2.2) is reachable from the real call path.
+        // supplies — so the spec-mandated guarantee (rev0§2.2) is reachable from the real call path.
         cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom().contains(slot),
         final(store).slot_view()[slot].first_child is None,
-        // Root-survival is **conditional** on the target being un-homed (the §6e headline,
-        // demoted from a whole-function precondition to this implication — doc 70, D-A1/D-A2):
+        // Root-survival is **conditional** on the target being un-homed (the home-frame headline,
+        // expressed as this implication rather than a whole-function precondition):
         // an un-homed (e.g. donated-untyped) root survives the cross-object teardown, while a
         // homed root may be self-emptied (the seL4-zombie case), which this `ensures` admissibly
         // leaves unconstrained.
         !is_homed(old(store), slot) ==> !is_empty_cap(final(store).slot_view()[slot].cap),
-        // **The faithful resident-with-external-reference theorem (§6e-dual, doc 55 §3).** If the
-        // revoked root `slot` *was* emptied, then some object that **homed** it in the initial state
-        // was **destroyed** — `dead_obj`: gone from `refs.dom` (the aspace seam) *or* sitting there
-        // at `refs == 0` (every cspace/channel/TCB destructor, which leaves its object in the domain
-        // — see `dead_obj`/doc 55 §3; the brief's literal `o ∉ refs.dom` is unprovable for these,
-        // the *dominant* homing case, and is corrected here to the sound disjunction). `revoke`
+        // **The faithful resident-with-external-reference theorem.** If the revoked root `slot`
+        // *was* emptied, then some object that **homed** it in the initial state was **destroyed**
+        // — `dead_obj`: gone from `refs.dom()` (the aspace seam) *or* sitting there at `refs == 0`
+        // (every cspace/channel/TCB destructor, which leaves its object in the domain — see
+        // `dead_obj`; `o ∉ refs.dom()` alone is unprovable for these, the *dominant* homing case, so
+        // the predicate is the sound disjunction). `revoke`
         // deletes only descendants — never `slot` itself (`slot != leaf` each step) — so the only
         // way `slot` empties is the cross-object teardown of a homing object whose last cap lay in
         // the revoked subtree. Caller-completable: a caller who knows all of `slot`'s homing objects
@@ -10104,8 +10080,8 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
         // subtree predicate, by design); the witness is the initial-state home + its destruction.
         is_empty_cap(final(store).slot_view()[slot].cap)
             ==> exists|o: ObjId| homes(old(store), o, slot) && dead_obj(final(store), o),
-        // **Sees through queues — the §3.4 / M1 subtree-deletion obligation, now named (D-A3,
-        // doc 69/73).** After `revoke`, no live slot anywhere — cspace resident *or* in-flight
+        // **Sees through queues — the rev0§3.4 / M1 subtree-deletion obligation, named.** After
+        // `revoke`, no live slot anywhere — cspace resident *or* in-flight
         // channel ring cap — is a CDT descendant of `slot`. The transitive closure (not just the
         // `first_child is None` direct-child clause above) is what makes "revoke finds and deletes
         // in-flight caps like any other descendant" a *failing obligation* if a future change to
@@ -10118,8 +10094,8 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
         only_empties(old(store).slot_view(), final(store).slot_view()),
 {
     // `refcount_sound`, `caps_consistent`, the endpoint-cap census, and refs-domain
-    // completeness ride the loop as `delete`'s preconditions (§6a/§6d): each `delete`
-    // requires them (held by the invariant) and re-establishes them.
+    // completeness ride the loop as `delete`'s preconditions: each `delete` requires them
+    // (held by the invariant) and re-establishes them.
     while store.slot(slot).first_child.is_some()
         invariant
             cspace_wf(store.slot_view()),
@@ -10128,7 +10104,7 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
             // The slot domain is fixed across the walk (`delete` frames it) — the equality
             // `only_empties`'s transitivity reads off to compose the per-step frame.
             store.slot_view().dom() == old(store).slot_view().dom(),
-            // Teardown monotonicity so far: every slot empty at entry is still empty (D-A3 / §3.4).
+            // Teardown monotonicity so far: every slot empty at entry is still empty (rev0§3.4).
             only_empties(old(store).slot_view(), store.slot_view()),
             refcount_sound(store),
             caps_consistent(store),
@@ -10138,13 +10114,13 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
             // `lemma_is_homed_stable`), so the `old` homing carries through the loop unchanged.
             is_homed(store, slot) == is_homed(old(store), slot),
             // Conditional root-survival rides the loop only when the target started un-homed; the
-            // homed (seL4-zombie) case is left unconstrained (doc 70, D-A1/D-A2).
+            // homed (seL4-zombie) case is left unconstrained.
             !is_homed(old(store), slot) ==> !is_empty_cap(store.slot_view()[slot].cap),
-            // §6e-dual: the home maps are framed and death persists across the whole walk so far —
+            // The home maps are framed and death persists across the whole walk so far —
             // the stability the slot-specific witness invariant below rides.
             home_views_frozen(old(store), store),
             refs_death_persist(old(store), store),
-            // §6e-dual root provenance: if `slot` has been emptied, some object that homed it in the
+            // Root provenance: if `slot` has been emptied, some object that homed it in the
             // *initial* state was destroyed (dead at the current step). Each `delete` step covers a
             // freshly-emptied `slot` via its target-aware frame (`slot != leaf`), and a death once
             // witnessed persists (`refs_death_persist`); `homes` is stable (`home_views_frozen`).
@@ -10178,14 +10154,14 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
             if !is_homed(old(store), slot) {
                 assert(store.slot_view()[slot].cap == pre.slot_view()[slot].cap);
             }
-            // §6e-dual: compose the home + death frames across this `delete` step (`old → pre` from
+            // Compose the home + death frames across this `delete` step (`old → pre` from
             // the loop invariant, `pre → store` from `delete`'s ensures).
             lemma_home_views_frozen_trans(old(store), &pre, store);
             lemma_refs_death_persist_trans(old(store), &pre, store);
-            // D-A3: compose `only_empties` across this `delete` step (`old → pre` from the loop
+            // Compose `only_empties` across this `delete` step (`old → pre` from the loop
             // invariant, `pre → store` from `delete`'s ensures); domains agree (the dom frame).
             lemma_only_empties_trans(old(store).slot_view(), pre.slot_view(), store.slot_view());
-            // §6e-dual root provenance: maintain the slot-specific witness invariant.
+            // Root provenance: maintain the slot-specific witness invariant.
             if is_empty_cap(store.slot_view()[slot].cap) {
                 if is_empty_cap(pre.slot_view()[slot].cap) {
                     // `slot` was already empty at `pre`: the loop invariant's witness `o` (dead at
@@ -10205,7 +10181,7 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
         }
     }
     // The loop exited with `slot` childless; `cspace_wf` (hence `parent_has_first_child`) holds,
-    // so the whole subtree — in-flight queued caps included — is provably gone (D-A3 / §3.4).
+    // so the whole subtree — in-flight queued caps included — is provably gone (rev0§3.4).
     proof {
         lemma_childless_no_descendant(store.slot_view(), slot);
     }

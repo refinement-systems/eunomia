@@ -1,11 +1,11 @@
-//! Fuzz/test support for the wire codec (§5.4): a representative *boring* body
+//! Fuzz/test support for the wire codec: a representative *boring* body
 //! type and the round-trip oracle, shared by the cargo-fuzz target
 //! (`ipc/fuzz/fuzz_targets/wire_decode.rs`), the corpus-replay test
 //! (`tests/fuzz_corpus.rs`), and the seed generator
 //! (`examples/gen_ipc_corpus.rs`).
 //!
 //! `fuzzing`-feature-gated — not part of the production API. There is no real
-//! server body type until the session/protocol work (§4.6, phase 6); until then
+//! server body type until the session/protocol work; until then
 //! this stand-in exercises the codec over scalars, a string, a byte vector, and
 //! several enum variants.
 
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::header::Header;
 use crate::wire::{self, WireError};
 
-/// A deliberately boring message body (§3.7): owned fields, no borrows, an
+/// A deliberately boring message body (rev0§3.7): owned fields, no borrows, an
 /// externally-tagged enum, no `flatten`/untagged/non-string-keyed maps — the
 /// subset that maps 1:1 onto any IDL.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
