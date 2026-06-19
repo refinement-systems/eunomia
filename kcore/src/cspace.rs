@@ -2907,10 +2907,10 @@ pub proof fn lemma_seq_remove_keeps(ts0: Seq<ObjId>, k: int, j: ObjId)
 // (`refs >= 1`), and — when it has a blocked waiter — the waiter's ref too (`refs >= 2`),
 // so after `disarm` releases the timer's `-1` the waiter's survives and `signal`'s
 // wake-release precondition (`wait_head is Some ⇒ refs > 0`) still holds. The armed-timer
-// analog of `binding_notif_wf` + `binding_refs_ok`; precondition-only — the `refs`
-// fractions are not preservable without the full refcount census (the post-phase-5
-// teardown phase, plan §1.4) — but `check_expired` preserves it across a fire because the
-// armed notifications are pairwise distinct (`timer_notif_injective`).
+// analog of `binding_notif_wf` + `binding_refs_ok`. `check_expired` preserves it across a
+// fire by reconstructing the per-notification `refs` fractions from the full refcount census
+// (`refcount_sound`): a notification shared by a second armed timer keeps `refs == census >=
+// armed_timer_refs (+ waiter_refs)`, covering the general shared-notification case (D-E2).
 pub open spec fn timer_signal_ok_at(
     tmv: Map<ObjId, TimerView>,
     nv: Map<ObjId, NotifView>,
@@ -2935,17 +2935,6 @@ pub open spec fn timer_signal_ok(
     rv: Map<ObjId, nat>,
 ) -> bool {
     forall|c: ObjId| #[trigger] tmv.dom().contains(c) ==> timer_signal_ok_at(tmv, nv, tv, rv, c)
-}
-
-// Armed timers bind pairwise-distinct notifications — what makes `check_expired`'s sweep
-// non-interfering: a `disarm`+`signal` on one armed timer's notification leaves every
-// other armed timer's notification (and its refs) untouched, so `timer_signal_ok` and
-// `timer_wf` survive across the fire. Realistic at MVP scale (one timer per notification);
-// the general (shared-notification) case rides forward to the census phase (plan §1.4).
-pub open spec fn timer_notif_injective(tmv: Map<ObjId, TimerView>) -> bool {
-    forall|c1: ObjId, c2: ObjId| #![trigger tmv[c1], tmv[c2]]
-        (tmv.dom().contains(c1) && tmv.dom().contains(c2)
-            && tmv[c1].armed && tmv[c2].armed && tmv[c1].notif == tmv[c2].notif) ==> c1 == c2
 }
 
 // `s` is one of channel-view `cv`'s ring cap slots. `send`/`recv` require the
