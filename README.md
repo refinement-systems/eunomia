@@ -20,8 +20,6 @@ kernel knows about untyped memory, address spaces, threads, async IPC
 channels, notifications, and capability spaces with a derivation tree.
 Everything else — the storage server, the virtio-blk driver, the ELF
 loader, the shell — is unprivileged userspace Rust holding capabilities.
-The full design rationale lives in [`doc/spec/3_spec_rev3.md`](doc/spec/3_spec_rev3.md);
-the post-MVP retrospective in [`doc/retrospective/0_mvp.md`](doc/retrospective/0_mvp.md).
 
 All MVP milestones (M0–M5) are complete: boot → capabilities/IPC →
 storage stack → real processes → snapshot/rollback demo → GC + history
@@ -196,6 +194,5 @@ mkfs/            Host tool: build a bootable versioned disk image
 shell/           Host-side placeholder (the real shell is user/shell)
 tla/             TLA+ models; tools/tla/ has the check scripts
 doc/spec/        The design document — read this first
-doc/retrospective/  What happened when the spec met reality
 scripts/         run-demo.sh
 ```
