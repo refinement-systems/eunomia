@@ -254,8 +254,13 @@ pub fn set_priority<S: Store>(store: &mut S, t: ObjId, prio: u8, ceiling: u8)
 /// `cspace::delete` (the §4d-strengthened notification-cap frame) + the verified
 /// `cspace::slot_move`. The bind slot ends holding the moved cap (or empty on a `None`
 /// src); `bind_bits[which]` is updated; the object views are framed; `cspace_wf` is
-/// preserved. The displaced-notif refs `-1` rides the host test (`check_thread_bind`),
-/// not the verified contract (`delete` omits `refs_view`).
+/// preserved.
+///
+/// **Refcount census (D-F2).** Exports `refcount_sound(final)` (the contract previously
+/// dropped it, weaker than the code's own guarantee). The displaced-notification `-1` is
+/// proven inside `delete` (which re-establishes `refcount_sound`); `set_tcb_bind_bits` writes
+/// a non-census field and `slot_move` relocates a cap without changing any object's census,
+/// so soundness carries to the exit.
 pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<SlotId>, bits: u64)
     requires
         cspace::cspace_wf(old(store).slot_view()),
@@ -297,6 +302,10 @@ pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<S
         final(store).notif_view() == old(store).notif_view(),
         final(store).timer_view() == old(store).timer_view(),
         final(store).timer_head_view() == old(store).timer_head_view(),
+        // Refcount soundness is preserved (D-F2): the displaced-cap `delete` re-establishes it
+        // (and proves the `-1`), `set_tcb_bind_bits` writes a non-census field, and the
+        // notification-cap `slot_move` relocates a cap without changing any object's census.
+        cspace::refcount_sound(final(store)),
         // The slot effect, split on `notif_src` (read off `delete` + `slot_move`).
         notif_src matches Some(src) ==> {
             &&& final(store).slot_view()[old(store).tcb_view()[t].bind_slots[which as int]].cap
@@ -317,9 +326,44 @@ pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<S
     if !cspace::cap_is_empty(store.slot(slot).cap) {
         crate::cspace::delete(store, slot);
     }
+    proof {
+        // `refcount_sound` holds here: `delete` re-establishes it (its `ensures`), and the
+        // empty-slot path is a no-op that leaves the entry census untouched.
+        assert(cspace::refcount_sound(store));
+    }
+    let ghost st1 = *store;
     store.set_tcb_bind_bits(t, which, bits);
+    proof {
+        // `bind_bits` is no census term: it preserves every thread's chain fields
+        // (`waiter_refs`, via `lemma_waiter_refs_frame_fields`) and cspace/aspace
+        // (`thread_hold`, via `lemma_thread_hold_frame`), and frames slot/chan/notif/timer.
+        assert(st1.tcb_view().dom().contains(t));
+        assert(store.tcb_view().dom() == st1.tcb_view().dom());
+        assert forall|x: ObjId| #[trigger] cspace::obj_census(store, x)
+            == cspace::obj_census(&st1, x) by {
+            cspace::lemma_waiter_refs_frame_fields(st1.notif_view(), st1.tcb_view(),
+                store.tcb_view(), x);
+            cspace::lemma_thread_hold_frame(st1.tcb_view(), store.tcb_view(), x);
+        }
+        cspace::lemma_refcount_sound_from_census_eq(&st1, store);
+    }
     if let Some(src) = notif_src {
+        let ghost st2 = *store;
         crate::cspace::slot_move(store, src, slot);
+        proof {
+            // The cap relocates `src` → `slot`, so `slot_refs`/`frame_map_refs` are preserved
+            // (`lemma_cap_move_census`); `slot_move` frames chan/notif/tcb/timer, so the other
+            // four census terms are unchanged. Hence the census — and `refcount_sound` — carries.
+            assert(store.chan_view() == st2.chan_view());
+            assert(store.notif_view() == st2.notif_view());
+            assert(store.tcb_view() == st2.tcb_view());
+            assert(store.timer_view() == st2.timer_view());
+            assert forall|x: ObjId| #[trigger] cspace::obj_census(store, x)
+                == cspace::obj_census(&st2, x) by {
+                cspace::lemma_cap_move_census(st2.slot_view(), store.slot_view(), src, slot, x);
+            }
+            cspace::lemma_refcount_sound_from_census_eq(&st2, store);
+        }
     }
 }
 
