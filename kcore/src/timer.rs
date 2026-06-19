@@ -581,73 +581,66 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
     }
 }
 
-// `timer_notif_injective` survives `disarm(c)`: `c` is unarmed and every other timer keeps
-// its `armed`/`notif` (disarm's four-field frame), so the armed set shrinks while its
-// notifications are unchanged — still pairwise-distinct.
-proof fn lemma_inj_after_disarm(
-    pre: Map<ObjId, cspace::TimerView>,
-    post: Map<ObjId, cspace::TimerView>,
-    c: ObjId,
-)
-    requires
-        cspace::timer_notif_injective(pre),
-        post.dom() == pre.dom(),
-        !post[c].armed,
-        forall|j: ObjId| #![trigger post[j]]
-            j != c ==> post[j].armed == pre[j].armed && post[j].notif == pre[j].notif,
-    ensures
-        cspace::timer_notif_injective(post),
-{
-    assert forall|c1: ObjId, c2: ObjId|
-        post.dom().contains(c1) && post.dom().contains(c2)
-            && post[c1].armed && post[c2].armed && post[c1].notif == post[c2].notif
-        implies c1 == c2 by {
-        assert(c1 != c && c2 != c);
-        assert(pre[c1].armed && pre[c2].armed && pre[c1].notif == pre[c2].notif);
-    }
-}
-
-// `timer_signal_ok` survives a `disarm(c)` + `signal(n)` (n = `c`'s notification) when the
-// armed notifications are pairwise-distinct (`timer_notif_injective` on the pre-state):
-// every *other* armed timer's notification `np != n` (injectivity), so the fire — which
-// touches only `n`'s notification view, the woken thread, and `n`'s refs — leaves `np`'s
-// liveness/`notif_wf`/refs intact (the `np`-`notif_wf` via `lemma_notif_wf_frame`).
-proof fn lemma_signal_ok_after_fire(
+// `timer_signal_ok` survives a `disarm(c)` + `signal(n)` (n = `c`'s notification) WITHOUT the
+// distinct-notification assumption — the general N-timers→1-notification case (D-E2). For
+// every *other* armed timer `cp` (bound to `np`):
+//   - `np != n`: the fire touches only `n`'s notification view, the woken thread, and `n`'s
+//     refs, so `np`'s liveness/`notif_wf`/refs are framed (`lemma_notif_wf_frame`) and `cp`'s
+//     `timer_signal_ok_at` carries from the pre-state — the old injectivity path.
+//   - `np == n` (shared notification): `cp` is still armed on `n` after the fire, so the
+//     armed-timer census term `armed_timer_refs(n) >= 1`; `signal` keeps `n` well-formed; and
+//     `refcount_sound` pins `refs[n] == obj_census(n)`, whose nat summands include
+//     `armed_timer_refs(n)` (⇒ `refs[n] >= 1`) and, when a waiter is queued, `waiter_refs(n)`
+//     (⇒ `refs[n] >= 2`). The census reconstructs exactly the refs facts injectivity used to
+//     give for free — the census phase that replaces the injectivity precondition.
+proof fn lemma_signal_ok_after_fire<S: Store>(
+    store2: &S,
     tmv_pre: Map<ObjId, cspace::TimerView>,
     nv_pre: Map<ObjId, cspace::NotifView>,
     tv_pre: Map<ObjId, cspace::TcbView>,
     rv_pre: Map<ObjId, nat>,
-    tmv2: Map<ObjId, cspace::TimerView>,
-    nv2: Map<ObjId, cspace::NotifView>,
-    tv2: Map<ObjId, cspace::TcbView>,
-    rv2: Map<ObjId, nat>,
     c: ObjId,
     n: ObjId,
 )
     requires
         cspace::timer_signal_ok(tmv_pre, nv_pre, tv_pre, rv_pre),
-        cspace::timer_notif_injective(tmv_pre),
+        // The census is sound in the post-fire state (a maintained sweep invariant); it is what
+        // reconstructs the refs facts for a notification shared by a second armed timer.
+        cspace::refcount_sound(store2),
         tmv_pre.dom().contains(c),
         tmv_pre[c].armed,
         tmv_pre[c].notif == Some(n),
-        // post-fire timer view: `c` unarmed, every other timer keeps armed/notif.
-        tmv2.dom() == tmv_pre.dom(),
-        !tmv2[c].armed,
-        forall|j: ObjId| #![trigger tmv2[j]]
-            j != c ==> tmv2[j].armed == tmv_pre[j].armed && tmv2[j].notif == tmv_pre[j].notif,
+        // post-fire timer view: `c` unarmed, every other timer keeps armed/notif; finite (the
+        // gate of the `armed_timer_refs` witness count).
+        store2.timer_view().dom() == tmv_pre.dom(),
+        store2.timer_view().dom().finite(),
+        !store2.timer_view()[c].armed,
+        forall|j: ObjId| #![trigger store2.timer_view()[j]]
+            j != c ==> store2.timer_view()[j].armed == tmv_pre[j].armed
+                && store2.timer_view()[j].notif == tmv_pre[j].notif,
         // notif/tcb/refs differ from the pre-state only at `n` (disarm frames notif/tcb and
         // touches refs[n]; signal touches `n`'s view, the threads waiting on `n`, refs[n]).
-        nv2.dom() == nv_pre.dom(),
-        forall|m: ObjId| #![trigger nv2[m]] m != n ==> nv2[m] == nv_pre[m],
-        tv2.dom() == tv_pre.dom(),
-        forall|th: ObjId| #![trigger tv2[th]]
-            tv_pre[th].wait_notif != Some(n) ==> tv2[th] == tv_pre[th],
+        store2.notif_view().dom() == nv_pre.dom(),
+        forall|m: ObjId| #![trigger store2.notif_view()[m]]
+            m != n ==> store2.notif_view()[m] == nv_pre[m],
+        store2.tcb_view().dom() == tv_pre.dom(),
+        forall|th: ObjId| #![trigger store2.tcb_view()[th]]
+            tv_pre[th].wait_notif != Some(n) ==> store2.tcb_view()[th] == tv_pre[th],
         rv_pre.dom().contains(n),
-        rv2.dom() == rv_pre.dom(),
-        forall|m: ObjId| #![trigger rv2[m]] m != n ==> rv2[m] == rv_pre[m],
+        store2.refs_view().dom() == rv_pre.dom(),
+        forall|m: ObjId| #![trigger store2.refs_view()[m]]
+            m != n ==> store2.refs_view()[m] == rv_pre[m],
+        // `n` stays well-formed across the fire (`signal` ensures it) — the well-formedness
+        // half of `timer_signal_ok_at` for the shared-notification case.
+        cspace::notif_wf(store2.notif_view(), store2.tcb_view(), n),
     ensures
-        cspace::timer_signal_ok(tmv2, nv2, tv2, rv2),
+        cspace::timer_signal_ok(store2.timer_view(), store2.notif_view(),
+            store2.tcb_view(), store2.refs_view()),
 {
+    let tmv2 = store2.timer_view();
+    let nv2 = store2.notif_view();
+    let tv2 = store2.tcb_view();
+    let rv2 = store2.refs_view();
     assert forall|cp: ObjId| #[trigger] tmv2.dom().contains(cp)
         implies cspace::timer_signal_ok_at(tmv2, nv2, tv2, rv2, cp) by {
         if tmv2[cp].armed && tmv2[cp].notif is Some {
@@ -655,15 +648,28 @@ proof fn lemma_signal_ok_after_fire(
             let np = tmv2[cp].notif->Some_0;
             assert(tmv_pre[cp].armed && tmv_pre[cp].notif == Some(np));
             assert(cspace::timer_signal_ok_at(tmv_pre, nv_pre, tv_pre, rv_pre, cp));
-            // `np != n`: both `cp` and `c` armed with these notifs ⇒ injectivity.
-            assert(np != n) by {
-                if np == n {
-                    assert(tmv_pre[cp].notif == tmv_pre[c].notif);
+            if np == n {
+                // Shared notification (D-E2): the census re-establishes the refs facts at `n`.
+                assert(nv2.dom().contains(n));
+                assert(rv2.dom().contains(n));
+                // `cp` is still armed on `n`, so the armed-timer census term is positive.
+                cspace::lemma_armed_timer_refs_pos(tmv2, cp, n);
+                // `refcount_sound` pins refs[n] to its census; drop the four framed nat
+                // summands to bound it below by the armed-timer (+ waiter) terms.
+                assert(rv2[n] == cspace::obj_census(store2, n));
+                assert(cspace::obj_census(store2, n)
+                    >= cspace::armed_timer_refs(tmv2, n) + cspace::waiter_refs(nv2, tv2, n));
+                assert(rv2[n] >= 1);
+                if nv2[n].wait_head is Some {
+                    cspace::lemma_waiter_refs_pos_from_head(nv2, tv2, n);
+                    assert(rv2[n] >= 2);
                 }
+            } else {
+                // Distinct notification: the fire framed `np`'s view and refs.
+                assert(nv2[np] == nv_pre[np]);
+                assert(rv2[np] == rv_pre[np]);
+                cspace::lemma_notif_wf_frame(nv_pre, tv_pre, nv2, tv2, np);
             }
-            assert(nv2[np] == nv_pre[np]);
-            assert(rv2[np] == rv_pre[np]);
-            cspace::lemma_notif_wf_frame(nv_pre, tv_pre, nv2, tv2, np);
         }
     }
 }
@@ -677,18 +683,22 @@ proof fn lemma_signal_ok_after_fire(
 /// `disarm`, so it continues from a node still on the (mutated) list — the cursor tracks
 /// the entry snapshot `ts0`, whose unprocessed suffix `disarm`/`signal` provably leave
 /// intact. The census tension (`signal`'s `wait_head ⇒ refs > 0` across multiple fires)
-/// is resolved by the **distinct-notification** precondition (`timer_notif_injective`):
-/// each fire touches one notification's refs/queue, so the carried `timer_signal_ok`
-/// (the armed-timer census fragment, supplied by the trusted shell) survives every fire
-/// via `lemma_notif_wf_frame`. The general shared-notification case rides forward to the
-/// census phase (plan §1.4).
+/// is resolved by the **refcount-soundness** precondition (`refcount_sound`): a fire on
+/// notification `n` shared by a second armed timer `cp` perturbs `n`'s refs, but `cp` keeps
+/// `armed_timer_refs(n) >= 1`, so the sound census forces `refs[n] == obj_census(n) >= 1`
+/// (`>= 2` once a waiter is queued) — `lemma_signal_ok_after_fire` reconstructs the carried
+/// `timer_signal_ok` from the census, covering the general N-timers→1-notification
+/// configuration the spec admits (D-E2), not just one-timer-per-notification.
 pub fn check_expired<S: Store>(store: &mut S, now: u64)
     requires
         // The timer arena is finite (`disarm`'s precondition, the `cap_consistent(Timer)`
         // standing fact); the trusted IRQ shell that drives `check_expired` supplies it.
         old(store).timer_view().dom().finite(),
         cspace::timer_wf(old(store).timer_view(), old(store).timer_head_view()),
-        cspace::timer_notif_injective(old(store).timer_view()),
+        // The reference census is sound (the standing system invariant the trusted IRQ shell
+        // maintains): it is what keeps `timer_signal_ok` across a fire on a shared
+        // notification, replacing the unrealistic distinct-notification assumption (D-E2).
+        cspace::refcount_sound(old(store)),
         cspace::timer_signal_ok(old(store).timer_view(), old(store).notif_view(),
             old(store).tcb_view(), old(store).refs_view()),
     ensures
@@ -714,7 +724,10 @@ pub fn check_expired<S: Store>(store: &mut S, now: u64)
             // is the standing precondition the in-loop `disarm` needs.
             store.timer_view().dom().finite(),
             cspace::timer_wf(store.timer_view(), store.timer_head_view()),
-            cspace::timer_notif_injective(store.timer_view()),
+            // The census stays sound across each fire (`disarm`/`signal` both export the
+            // conditional `refcount_sound`), feeding the next iteration's shared-notification
+            // re-establishment of `timer_signal_ok` (D-E2).
+            cspace::refcount_sound(store),
             cspace::timer_signal_ok(store.timer_view(), store.notif_view(),
                 store.tcb_view(), store.refs_view()),
             tmv0 == old(store).timer_view(),
@@ -770,6 +783,9 @@ pub fn check_expired<S: Store>(store: &mut S, now: u64)
                 assert(store.tcb_view() == tv_pre);
                 assert(rv1 == rv_pre.insert(n, (rv_pre[n] - 1) as nat));
                 assert(nv_pre[n].wait_head is Some ==> rv1[n] >= 1);
+                // `disarm` carries the census soundness from the loop invariant (its conditional
+                // `refcount_sound` ensures) — what lets `signal` carry it onward (D-E2).
+                assert(cspace::refcount_sound(store));
             }
 
             if let Some(nn) = notif {
@@ -784,12 +800,24 @@ pub fn check_expired<S: Store>(store: &mut S, now: u64)
                     // signal touches notif/tcb/refs only at `n` (over the post-disarm state).
                     assert(nv2.dom() == nv_pre.dom());
                     assert(forall|m: ObjId| #![trigger nv2[m]] m != n ==> nv2[m] == nv_pre[m]);
+                    assert(tv2.dom() == tv_pre.dom());
+                    assert(forall|th: ObjId| #![trigger tv2[th]]
+                        tv_pre[th].wait_notif != Some(n) ==> tv2[th] == tv_pre[th]);
                     assert(rv2.dom() == rv_pre.dom());
                     assert(forall|m: ObjId| #![trigger rv2[m]] m != n ==> rv2[m] == rv_pre[m]);
-                    // injectivity + signal_ok survive the fire (distinct notifications).
-                    lemma_inj_after_disarm(tmv_pre, tmv2, c);
-                    lemma_signal_ok_after_fire(tmv_pre, nv_pre, tv_pre, rv_pre,
-                        tmv2, nv2, tv2, rv2, c, n);
+                    // `signal` carries the census soundness from the post-disarm state (its
+                    // conditional `refcount_sound` ensures) — the census the shared-notification
+                    // re-establishment of `timer_signal_ok` rides on, and the maintained invariant.
+                    assert(cspace::refcount_sound(store));
+                    // `c` ends unarmed and `n` stays well-formed (signal's ensures); the timer
+                    // arena is finite + unchanged in domain across the fire.
+                    assert(store.timer_view().dom() == tmv_pre.dom());
+                    assert(store.timer_view().dom().finite());
+                    assert(cspace::notif_wf(nv2, tv2, n));
+                    assert(tmv_pre[c].notif == Some(n));
+                    // `timer_signal_ok` survives the fire — for a notification shared by a second
+                    // armed timer, the sound census reconstructs the refs facts (D-E2).
+                    lemma_signal_ok_after_fire(store, tmv_pre, nv_pre, tv_pre, rv_pre, c, n);
                     // The unprocessed suffix `ts0[k+1..]` is untouched: each such node is not
                     // `c` and its `next` was not `Some(c)`, so `disarm` left it whole and
                     // `signal` frames `timer_view`.
