@@ -1,7 +1,7 @@
 //! The non-blocking IPC primitives — "what every server sees": a typed `Message`
-//! (256-byte payload + 4 cap slots, rev0§3.1) and an `Endpoint` that bundles a
+//! (256-byte payload + 4 cap slots, rev1§3.1) and an `Endpoint` that bundles a
 //! channel handle with a `Transport`, with cap marshalling and null-slot
-//! tolerance (rev0§3.4).
+//! tolerance (rev1§3.4).
 //!
 //! This is the typed layer over the byte-level `Transport` seam (`transport.rs`).
 //! It is generic over `T: Transport`, so production drives `SyscallTransport` and
@@ -16,20 +16,20 @@ use crate::reactor::{Reactor, Signals};
 use crate::sys::SLOT_NONE;
 use crate::transport::{Chan, Notif, RecvErr, SendErr, Transport};
 
-/// Maximum inline payload, in bytes (rev0§3.1). Larger data travels through a
-/// per-session bulk window (rev0§3.1), out of scope for these primitives.
+/// Maximum inline payload, in bytes (rev1§3.1). Larger data travels through a
+/// per-session bulk window (rev1§3.1), out of scope for these primitives.
 pub const MAX_PAYLOAD: usize = 256;
 
-/// A fixed-format IPC message: inline payload + up to 4 capability slots (rev0§3.1).
+/// A fixed-format IPC message: inline payload + up to 4 capability slots (rev1§3.1).
 ///
 /// `caps[i]` is a cspace **slot index** (`u32`), or `None` for an empty slot:
-/// - on **send**, `Some(slot)` moves that cap out of the sender's cspace (rev0§3.4);
+/// - on **send**, `Some(slot)` moves that cap out of the sender's cspace (rev1§3.4);
 /// - on **recv**, the caller pre-sets `Some(dest)` for each slot it is willing
 ///   to receive a cap into, and after the call `caps[i]` is `Some(dest)` iff a
 ///   cap actually arrived there, `None` otherwise.
 ///
 /// Receivers must **tolerate `None`** even where they expected a cap: a sender
-/// can lie, and revocation may have emptied a queued slot in flight (rev0§3.4).
+/// can lie, and revocation may have emptied a queued slot in flight (rev1§3.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Message {
     pub payload: [u8; MAX_PAYLOAD],
@@ -99,21 +99,21 @@ impl<'t, T: Transport> Endpoint<'t, T> {
         self.chan
     }
 
-    /// Non-blocking send (rev0§3.3): `Err(SendErr::Full)` when the queue is full —
-    /// the message is never dropped (a dropped message could carry a cap, rev0§3.4).
+    /// Non-blocking send (rev1§3.3): `Err(SendErr::Full)` when the queue is full —
+    /// the message is never dropped (a dropped message could carry a cap, rev1§3.4).
     /// Any `caps` move out of the sender's cspace on success.
     pub fn send_nb(&self, msg: &Message) -> Result<(), SendErr> {
         let slots = msg.cap_slots();
         self.transport.send_nb(self.chan, msg.payload(), slots.as_ref())
     }
 
-    /// Non-blocking receive (rev0§3.3) into `msg`. `Err(RecvErr::Empty)` when the
+    /// Non-blocking receive (rev1§3.3) into `msg`. `Err(RecvErr::Empty)` when the
     /// queue is empty; `Err(RecvErr::NoSlot)` when the receiver lacks a free
-    /// cspace slot — the message **stays queued**, so make room and retry (rev0§3.4).
+    /// cspace slot — the message **stays queued**, so make room and retry (rev1§3.4).
     ///
     /// On input, `msg.caps[i] = Some(dest)` offers a dest slot for an incoming
     /// cap; on success each `caps[i]` is left `Some(dest)` iff a cap landed
-    /// there and set to `None` otherwise (null-slot tolerance, rev0§3.4).
+    /// there and set to `None` otherwise (null-slot tolerance, rev1§3.4).
     pub fn recv_nb(&self, msg: &mut Message) -> Result<(), RecvErr> {
         let dests = msg.cap_slots();
         let ok = self.transport.recv_nb(self.chan, &mut msg.payload, dests.as_ref())?;
@@ -180,12 +180,12 @@ impl<'t, T: Transport> Endpoint<'t, T> {
         }
     }
 
-    /// Sender half of the **valuable-cap ack protocol** (rev0§3.4): send `msg`
+    /// Sender half of the **valuable-cap ack protocol** (rev1§3.4): send `msg`
     /// (which may carry a valuable cap), then block on `ack_notif` until the
     /// receiver confirms it has the cap in its cspace. Returns `Ok` only once
     /// acked — at which point the handoff is durable and the channel is safe to
     /// tear down. A bare send-then-destroy would let channel destruction shred
-    /// the still-queued cap (rev0§3.4: "cash in a shredded envelope"); this gate is
+    /// the still-queued cap (rev1§3.4: "cash in a shredded envelope"); this gate is
     /// what prevents that, in pure userspace (no kernel reverse-path).
     ///
     /// `Full`/`Closed` from the send propagate (combine with [`send_blocking`]
@@ -194,7 +194,7 @@ impl<'t, T: Transport> Endpoint<'t, T> {
     /// protocol's — this carries only the no-loss obligation.
     pub fn send_acked(&self, msg: &Message, ack_notif: Notif) -> Result<(), SendErr> {
         self.send_nb(msg)?;
-        // The ack is an event (rev0§3.6): notif_wait checks the accumulated word
+        // The ack is an event (rev1§3.6): notif_wait checks the accumulated word
         // before sleeping, so a receiver that acks before this wait is never
         // slept through (the lost-wakeup guard the reactor provides).
         let _ = self.transport.notif_wait(ack_notif);

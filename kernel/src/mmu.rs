@@ -10,7 +10,7 @@
 //
 // The user window hosts the embedded EL0 test program and its stacks.
 // Proper per-process address-space objects are created from donated untyped
-// (pool-at-creation, rev0§2.5); threads without one run in this single
+// (pool-at-creation, rev1§2.5); threads without one run in this single
 // identity map.
 //
 // MAIR_EL1:

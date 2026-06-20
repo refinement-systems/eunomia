@@ -1,8 +1,12 @@
 # Eunomia OS — Development Guide
 
-Full design specification: `doc/spec/spec_rev0.md`. Read the spec before
+Full design specification: `doc/spec/spec_rev1.md`. Read the spec before
 touching any component. Section numbers below refer to that document.
-All spec references must contain the revision number, like "rev0§6" or "rev0§3.1".
+All spec references must contain the revision number, like "rev1§6" or "rev1§3.1".
+
+The trusted base is exactly the seams enumerated in
+`doc/guidelines/verus_trusted-base.md` (the ledger), kept honest by
+`doc/guidelines/verus.md`.
 
 ---
 
@@ -13,18 +17,18 @@ kernel/          AArch64 bare-metal microkernel (aarch64-unknown-none) —
                  the architectural shell over kcore (boot, MMU, GIC, sched)
 kcore/           Host-buildable kernel object core: cspace/CDT, untyped,
                  channels, notifications, thread/timer objects, aspace data;
-                 Verus-verified (rev0§6, doc/plans/3_verus-rewrite.md). no_std,
+                 Verus-verified (rev1§6, doc/guidelines/verus.md). no_std,
                  zero deps; the kernel links it, hardware + objects behind the
                  handle/Store seam
-ipc/             Async IPC crate — shared by all userspace servers (rev0§3.5)
-dma-pool/        DMA buffer pool — the only place PAs are visible (rev0§2.5)
-cas/             CAS primitives: chunker, prolly tree, commit protocol (rev0§4)
-storage-server/  Userspace storage server process (rev0§4)
-virtio-blk/      Virtio-blk driver, written against dma-pool (rev0§2.5)
-loader/          ELF loader / program spawner (rev0§5)
+ipc/             Async IPC crate — shared by all userspace servers (rev1§3.5)
+dma-pool/        DMA buffer pool — the only place PAs are visible (rev1§2.5)
+cas/             CAS primitives: chunker, prolly tree, commit protocol (rev1§4)
+storage-server/  Userspace storage server process (rev1§4)
+virtio-blk/      Virtio-blk driver, written against dma-pool (rev1§2.5)
+loader/          ELF loader / program spawner (rev1§5)
 user/            Real userspace binaries (init, shell, storaged, …) — own
-                 mini-workspaces, built by kernel/build.rs (rev0§5, rev0§7)
-mkfs/            Host-side disk image builder; reuses cas crate (rev0§7)
+                 mini-workspaces, built by kernel/build.rs (rev1§5, rev1§7)
+mkfs/            Host-side disk image builder; reuses cas crate (rev1§7)
 tla/             TLA+ formal specifications (must check before M2)
 tools/tla/       Scripts: tla-check.sh (SANY), tla-model-check.sh (TLC)
 doc/spec/        Design documents

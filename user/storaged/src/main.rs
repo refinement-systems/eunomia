@@ -1,13 +1,13 @@
-//! storaged — the storage server on Eunomia (spec rev0§4): mounts the
+//! storaged — the storage server on Eunomia (spec rev1§4): mounts the
 //! versioned store over virtio-blk and serves the handle-relative session
 //! protocol to the shell over a channel.
 //!
-//! World (built by init, rev0§5.1): slot 0 = bootstrap channel whose first
+//! World (built by init, rev1§5.1): slot 0 = bootstrap channel whose first
 //! message is the config block; slot 1 = the shell's session channel.
 //! The MMIO window, DMA region, and time page are pre-mapped by init;
 //! their addresses arrive in the config block (the DMA device address
-//! via frame_paddr — the phys-read path, rev0§2.5; the time page under the
-//! `"time"` grant, rev0§2.6/rev0§5.1).
+//! via frame_paddr — the phys-read path, rev1§2.5; the time page under the
+//! `"time"` grant, rev1§2.6/rev1§5.1).
 
 #![no_std]
 #![no_main]
@@ -30,7 +30,7 @@ const WAKE_NOTIF: u32 = 2;
 // The reactor source key for the session channel. storaged multiplexes one
 // source today; the key is what a second session (a future connect) would
 // add alongside — the reactor returns it from `wait`, so the dispatch below
-// never names a notification bit (rev0§3.6: the API hides the bit shape).
+// never names a notification bit (rev1§3.6: the API hides the bit shape).
 const SESSION_KEY: ipc::Key = 0;
 
 struct MmioWindow {
@@ -67,7 +67,7 @@ unsafe impl DmaBacking for DmaRegion {
     }
 }
 
-/// The server clock: UTC nanoseconds from the time page (rev0§2.6). One
+/// The server clock: UTC nanoseconds from the time page (rev1§2.6). One
 /// value feeds snapshot timestamps, file mtimes, and ticket TTLs. The
 /// spec representation is signed 64-bit; init refuses an insane RTC at
 /// boot, so the value is positive and the u64 cast at the storage API
@@ -87,7 +87,7 @@ fn recv_blocking(chan: u32, buf: &mut [u8; 256]) -> usize {
 }
 
 /// Send one response message, retrying on backpressure. Responses are
-/// message-bounded (`encode_response` refuses > 256 bytes, rev0§3.1), so a single
+/// message-bounded (`encode_response` refuses > 256 bytes, rev1§3.1), so a single
 /// `Message` always suffices; `Full` means the shell hasn't drained its reply
 /// ring yet (it reads one reply per request), so a yield-retry drains promptly.
 /// `Closed` ends the loop — the peer is gone.
@@ -161,7 +161,7 @@ pub extern "C" fn _start() -> ! {
     let session = server.open_session(alloc::vec![grant]);
     sys::debug_write(b"[storaged] serving\n");
 
-    // The IPC reactor (rev0§3.6) — storaged is its first production consumer.
+    // The IPC reactor (rev1§3.6) — storaged is its first production consumer.
     // `register` binds the session channel's readable event to WAKE_NOTIF and
     // self-signals (poll once), so the first `wait` drains anything already
     // queued and the bind-poll-wait lost-wakeup discipline lives in the crate,
@@ -201,7 +201,7 @@ pub extern "C" fn _start() -> ! {
                     send_response(&ep, &wire::encode_response(&e).unwrap());
                 }
             }
-            // Drain a pending GC trigger (rev0§4.6: post-rewrite or
+            // Drain a pending GC trigger (rev1§4.6: post-rewrite or
             // watermark) after replying: the foreground op stays fast,
             // reclamation follows promptly.
             if server.gc_requested() {

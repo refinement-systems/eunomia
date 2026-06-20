@@ -1,4 +1,4 @@
-//! mkfs — host-side tool to build the initial disk image (rev0§7).
+//! mkfs — host-side tool to build the initial disk image (rev1§7).
 //!
 //! Reuses the cas storage engine: format the device, create the `main`
 //! ref, populate it from a host directory tree, take snapshot #1. The
@@ -35,7 +35,7 @@ fn populate(
             eprintln!("skipping non-UTF-8 name: {:?}", name);
             continue;
         };
-        // Tooling enforces the printable-ASCII convention (rev0§4.9); the
+        // Tooling enforces the printable-ASCII convention (rev1§4.9); the
         // format itself only excludes NUL and '/'.
         if !name_str.bytes().all(|b| (0x20..0x7F).contains(&b)) || name_str.contains('/') {
             eprintln!("skipping non-printable name: {:?}", name);

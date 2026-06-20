@@ -1,4 +1,4 @@
-//! Thread objects and their terminal reports (spec rev0§5.1, rev0§5.3).
+//! Thread objects and their terminal reports (spec rev1§5.1, rev1§5.3).
 //!
 //! kcore owns the thread *object*: the TCB layout, the trap frame (plain
 //! data), the report state machine, the on-exit/on-fault binding slots, and
@@ -20,8 +20,8 @@ use vstd::prelude::*;
 #[allow(unused_imports)]
 use crate::cspace::{StoreSpec, TcbView};
 
-/// The terminal report record (rev0§5.1), preallocated in the TCB so death
-/// delivery never allocates (rev0§3.6). One transition ever: Running →
+/// The terminal report record (rev1§5.1), preallocated in the TCB so death
+/// delivery never allocates (rev1§3.6). One transition ever: Running →
 /// Exited | Faulted — suspend-on-fault means no second fault, and a
 /// halted thread never runs again, but `report_terminal` guards anyway
 /// so the state machine doesn't depend on scheduler invariants.
@@ -58,11 +58,11 @@ pub enum ThreadState {
     Runnable,
     /// The current thread.
     Running,
-    /// Waiting on a notification word (rev0§3.6).
+    /// Waiting on a notification word (rev1§3.6).
     BlockedNotif,
     /// Exited or killed; never scheduled again.
     Halted,
-    /// Took an unhandled fault; suspended, not destroyed (rev0§5.3).
+    /// Took an unhandled fault; suspended, not destroyed (rev1§5.3).
     Faulted,
 }
 
@@ -81,7 +81,7 @@ pub struct Tcb {
     pub qnext: Option<ObjId>,
     pub wait_notif: Option<ObjId>,
     pub report: Report,
-    /// on-exit / on-fault binding slots (rev0§5.1): real, CDT-visible cap
+    /// on-exit / on-fault binding slots (rev1§5.1): real, CDT-visible cap
     /// slots holding moved-in notification caps, exactly like channel
     /// queue slots — so revoking the notification's lineage sees through
     /// the TCB and empties the slot, and a thread-death firing can only
@@ -120,16 +120,16 @@ verus! {
 pub const BIND_EXIT: usize = 0;
 pub const BIND_FAULT: usize = 1;
 
-/// Record the terminal report and fire the matching binding (rev0§5.1).
+/// Record the terminal report and fire the matching binding (rev1§5.1).
 /// pre:  r is Exited or Faulted; the caller has already moved t out of
 ///       Running (Halted / Faulted).
 /// post: first call wins — the record holds r and the binding fired
 ///       exactly once; later calls are no-ops. An empty binding slot is
 ///       one the holder never configured or one revoke already cleared:
-///       signaling nothing is a no-op (rev0§5.1). A non-empty slot's cap
+///       signaling nothing is a no-op (rev1§5.1). A non-empty slot's cap
 ///       holds a ref, so the notification it names is necessarily live.
 ///
-/// Verus proves the two rev0§5.1 properties.
+/// Verus proves the two rev1§5.1 properties.
 /// **ReportMonotone** — the `report != Running` guard makes the transition
 /// Running → Exited|Faulted happen **at most once** and terminal states absorbing
 /// (a later call is a no-op, the store untouched). **FireSafe** — discharged *by the
@@ -204,9 +204,9 @@ pub fn report_terminal<S: Store>(store: &mut S, t: ObjId, r: Report)
     }
 }
 
-/// Set a thread's rev0§5.4 run priority, bounded by the spawner's cap ceiling.
+/// Set a thread's rev1§5.4 run priority, bounded by the spawner's cap ceiling.
 /// The spawn path passes `ceiling = cap_max_prio(thread_cap)`, so the verified
-/// `requires prio <= ceiling` carries the rev0§5.4 cap-attenuation into the model
+/// `requires prio <= ceiling` carries the rev1§5.4 cap-attenuation into the model
 /// and the post-state priority is exactly `prio` (hence `<= ceiling`). This makes
 /// the priority *write* a machine-checked step against the `tcb_view` seam: only
 /// the trusted `Store`-trait realization of `set_tcb_priority` remains, the
@@ -237,8 +237,8 @@ pub fn set_priority<S: Store>(store: &mut S, t: ObjId, prio: u8, ceiling: u8)
     store.set_tcb_priority(t, prio);
 }
 
-/// Configure a binding slot (holder-configured, rev0§3.6): the caller's
-/// notification cap MOVES into the TCB slot (rev0§3.4 — duplicate first to
+/// Configure a binding slot (holder-configured, rev1§3.6): the caller's
+/// notification cap MOVES into the TCB slot (rev1§3.4 — duplicate first to
 /// keep access), preserving its CDT position so revocation sees it.
 /// Rebinding deletes the displaced cap; a `None` src just unbinds.
 ///
@@ -374,7 +374,7 @@ verus! {
 ///
 /// Destroying a still-running thread produces NO report and fires
 /// nothing: destruction is the parent acting, not the thread dying, and
-/// the parent needs no letter about its own revoke (rev0§5.1). The record
+/// the parent needs no letter about its own revoke (rev1§5.1). The record
 /// only ever transitions on the thread's own exit or fault.
 ///
 /// The unqueue split: a Runnable thread is removed from the
@@ -385,7 +385,7 @@ verus! {
 /// The teardown (detach → halt → bind-slot `delete`s → clear-before-unref cspace/aspace)
 /// has a fully proven Verus body verified against the full contract. The contract's
 /// structural core: `t` ends `Halted` with its queue link and both binding slots cleared,
-/// **its report UNCHANGED** (destruction fires no report, rev0§5.1), and `cspace_wf`
+/// **its report UNCHANGED** (destruction fires no report, rev1§5.1), and `cspace_wf`
 /// preserved. `unqueue_ready` needs no Verus contract (its body is unverified).
 //
 // **Refcount census.** The contract requires and preserves `refcount_sound` and states the
@@ -400,7 +400,7 @@ verus! {
 // `dead_tcb_frozen` frame fixes its TCB; the census rides the **clear-before-unref** discipline
 // (`lemma_census_after_hold_clear` opens the off-by-one window `unref_cspace`/`unref_aspace`
 // consume).
-// `spinoff_prover`: giving `CapKind::Thread` its rev0§5.4 `max_prio` ceiling adds a datatype
+// `spinoff_prover`: giving `CapKind::Thread` its rev1§5.4 `max_prio` ceiling adds a datatype
 // field + the `is_thread_cap_for`/`cap_max_prio` axioms to this module's shared SMT batch,
 // shifting Z3's resource accounting for this borderline body. Isolating `destroy_tcb` into its
 // own Z3 instance is the standard Verus headroom fix.
@@ -468,7 +468,7 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         final(store).tcb_view()[t].state == ThreadState::Halted,
         final(store).tcb_view()[t].qnext is None,
         // The report is untouched — destruction is the parent acting, not the thread
-        // dying, so the record never transitions here (rev0§5.1).
+        // dying, so the record never transitions here (rev1§5.1).
         final(store).tcb_view()[t].report == old(store).tcb_view()[t].report,
         // Both binding slots emptied (their caps die with the TCB by CDT cleanup).
         cspace::is_empty_cap(
@@ -593,7 +593,7 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         cspace::lemma_emptied_via_dead_home_free_from_slot_eq(&st0, store);
     }
 
-    // ── 2. Halt: clear `t`'s queue/wait links and mark it Halted (report untouched — rev0§5.1).
+    // ── 2. Halt: clear `t`'s queue/wait links and mark it Halted (report untouched — rev1§5.1).
     //    This makes `t` *dead and queue-detached* (`refs[t] == 0` ∧ `wait_notif is None`), so the
     //    `dead_tcb_frozen` frame fixes `t`'s TCB across every recursive teardown call below. ──
     store.set_tcb_qnext(t, None);
@@ -646,7 +646,7 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
     }
 
     // ── 3. Delete the two binding caps (they die with the TCB by ordinary CDT cleanup, exactly
-    //    as queued caps die with their channel, rev0§3.4). Each `delete` is a visible cluster member;
+    //    as queued caps die with their channel, rev1§3.4). Each `delete` is a visible cluster member;
     //    `t` (dead + detached) is frozen across it, so its TCB survives. ──
     // The bind-slot `delete`s carry the **full** `dead_tcb_frozen(st_halt, ·)` (a `delete` ensures
     // it), composed across the two by `_trans`; this fixes the dead+detached subject `t` itself,

@@ -1,4 +1,4 @@
-//! Userspace virtio-blk driver (rev0§2.5): virtio-mmio (modern,
+//! Userspace virtio-blk driver (rev1§2.5): virtio-mmio (modern,
 //! version 2) split virtqueue, written exclusively against DmaPool —
 //! the driver never sees a physical address, only opaque
 //! `DeviceAddress`es.
@@ -10,7 +10,7 @@
 //!
 //! MVP shape: one queue, one synchronous in-flight request, completion
 //! by polling the used ring. On the OS the device interrupt binds to a
-//! notification (rev0§3.6) and the poll loop becomes a wait; the driver
+//! notification (rev1§3.6) and the poll loop becomes a wait; the driver
 //! exposes `complete()` so the caller owns the waiting strategy.
 //! QEMU note: modern MMIO needs `-global virtio-mmio.force-legacy=false`.
 
@@ -298,7 +298,7 @@ impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
     }
 
     /// VIRTIO_BLK_T_FLUSH — the fsync barrier the storage stack trusts
-    /// (rev0§4.8: stated axiom; QEMU honors FLUSH with cache=writeback).
+    /// (rev1§4.8: stated axiom; QEMU honors FLUSH with cache=writeback).
     pub fn flush(&mut self) -> Result<(), VirtioError> {
         self.request(REQ_FLUSH, 0, 0, false)
     }

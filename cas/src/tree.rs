@@ -1,4 +1,4 @@
-//! Nested directory operations (spec rev0§4.9): every operation is
+//! Nested directory operations (spec rev1§4.9): every operation is
 //! openat-shaped — relative to an explicitly named root, taking component
 //! lists. `/` is shell presentation, not a format concept. There is no
 //! global root anywhere in this module's API.

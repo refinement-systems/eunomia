@@ -1,4 +1,4 @@
-//! Kernel-side scheduler (spec rev0§1, rev0§5.4). The thread *object* — TCB layout,
+//! Kernel-side scheduler (spec rev1§1, rev1§5.4). The thread *object* — TCB layout,
 //! trap frame, report state machine, binding slots — lives in
 //! [`kcore::thread`] (re-exported below); this module keeps the
 //! architectural half: ready queues, the context switch, `CURRENT`, the
@@ -48,7 +48,7 @@ pub unsafe fn bind(t: *mut Tcb, which: usize, notif_src: *mut CapSlot, bits: u64
 }
 
 /// See [`kcore::thread::set_priority`]. Routes spawn's priority write through the
-/// verified setter: the rev0§5.4 ceiling-bounded `prio` lands in the TCB under a
+/// verified setter: the rev1§5.4 ceiling-bounded `prio` lands in the TCB under a
 /// machine-checked `priority == prio (<= ceiling)` instead of a raw `(*tp).priority`
 /// store. The caller gates `prio <= ceiling`.
 pub unsafe fn set_priority(t: *mut Tcb, prio: u8, ceiling: u8) {

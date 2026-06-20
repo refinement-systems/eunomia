@@ -1,13 +1,12 @@
 # Verus
 
 Verus is the kernel core's **deductive-verification tier**: it proves the `kcore`
-object model and the rev0§4.7/rev0§4.8 host chokepoints meet functional `ensures`,
+object model and the rev1§4.7/rev1§4.8 host chokepoints meet functional `ensures`,
 **terminate**, and preserve their `wf` invariants **for all inputs**, with no
-bound to pick — the proofs hold over the unbounded input space. The authoritative plan
-is `../plans/3_verus-rewrite.md`; the enumerated trusted base is
-`../results/68_verus-findings.md`; the dated technique record is the series of 47
-findings docs, `../results/21_verus-findings.md` through `…/67_verus-findings.md`,
-which this note distills so a contributor need not read them.
+bound to pick — the proofs hold over the unbounded input space. The enumerated trusted
+base is the ledger `../results/68_verus-findings.md`. (The Verus-rewrite plan and the
+dated 21…67 findings series this note distills are historical and not retained
+in-tree.)
 
 Two parts: **Part A** is the working discipline (pin, CI, structure, trusted
 base, scope); **Part B** is the technique harvested from the rewrite, written to
@@ -101,8 +100,8 @@ reason and a test is a finding, not a boundary.
 
 ## When Verus is not the tool
 
-The plan's best-tool table (`../plans/3_verus-rewrite.md` §2) is authoritative;
-the short form:
+The best-tool routing (rev1§6's verification tiering) is authoritative; the short
+form:
 
 - **Concurrency interleavings** (lost-wakeup, seqlock torn reads) → Loom/Shuttle +
   TLA+. Verus *can* do tokenized concurrency, but it is a research-grade lift and
@@ -825,8 +824,8 @@ with opaque errors:
 
 ---
 
-*This guideline distills the technique; the dated source of record stays the
-findings docs `../results/21…67_verus-findings.md` and the trusted-base ledger
-`../results/68_verus-findings.md`. When a snippet here and the live code disagree,
-the code is authoritative — this note is code-independent by design and is not
+*This guideline distills the technique; the enumerated source of record is the
+trusted-base ledger `../results/68_verus-findings.md` (the dated 21…67 findings series
+it distills is historical, not retained in-tree). When a snippet here and the live code
+disagree, the code is authoritative — this note is code-independent by design and is not
 updated for every refactor.*

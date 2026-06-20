@@ -1,11 +1,11 @@
 ---- MODULE IpcReactor ----
-\* Userspace IPC reactor: the lost-wakeup + backpressure protocol (spec rev0§3.3,
-\* rev0§3.6).
+\* Userspace IPC reactor: the lost-wakeup + backpressure protocol (spec rev1§3.3,
+\* rev1§3.6).
 \*
 \* Models one channel between a sender and a receiver: the bounded FIFO queue,
 \* and the kernel notification word (faithful to kcore::notification — signal
 \* ORs a bit in and either wakes the FIFO waiter or accumulates; wait consumes
-\* the word if non-zero, else blocks). The receiver runs the rev0§3.6 "bind, poll
+\* the word if non-zero, else blocks). The receiver runs the rev1§3.6 "bind, poll
 \* once, then wait" discipline: it blocks only when the queue is empty AND the
 \* notification word is clear, and every enqueue fires the persistent on-readable
 \* binding, which wakes a blocked receiver or accumulates for a polling one.
@@ -27,8 +27,8 @@
 \*       message, no set notification bit. A lost wakeup is exactly a blocked
 \*       receiver with work waiting and no pending signal to deliver it.
 \*     - NoDrop: every offered message is accounted for (received or still
-\*       queued) — Full is the only refusal, never a silent drop (rev0§3.3).
-\*     - FifoPerChannel: receive order = send order (rev0§3.3).
+\*       queued) — Full is the only refusal, never a silent drop (rev1§3.3).
+\*     - FifoPerChannel: receive order = send order (rev1§3.3).
 \*   Liveness (TLC-only; a bounded randomized search cannot establish it):
 \*     - EventuallyDelivered: under weak fairness, every offered message is
 \*       eventually received — no lost wakeup strands delivery forever.
@@ -42,7 +42,7 @@ EXTENDS Naturals, Sequences
 
 CONSTANTS
     MaxMsgs,     \* messages the sender offers — bounds the state space
-    QueueDepth   \* channel queue capacity (rev0§3.2)
+    QueueDepth   \* channel queue capacity (rev1§3.2)
 
 VARIABLES
     nextSend,    \* count of messages enqueued so far (ids 1..nextSend)
@@ -64,7 +64,7 @@ Init ==
 
 \* The sender enqueues the next message; backpressure disables it when the queue
 \* is full (Full, never a drop). The enqueue fires the persistent on-readable
-\* binding (rev0§3.6): a blocked receiver is woken and receives the word (clearing
+\* binding (rev1§3.6): a blocked receiver is woken and receives the word (clearing
 \* it); a polling receiver just sees the word accumulate.
 Send ==
     /\ nextSend < MaxMsgs
@@ -133,17 +133,17 @@ TypeOK ==
     /\ \A i \in 1..Len(recvd) : recvd[i] \in 1..MaxMsgs
 
 \* No lost wakeup: a blocked receiver has nothing pending. Blocked with a queued
-\* message or a set word would mean a wakeup was lost (rev0§3.6).
+\* message or a set word would mean a wakeup was lost (rev1§3.6).
 NoLostWakeup ==
     (recv = "blocked") => (Len(queue) = 0 /\ word = 0)
 
 \* No drop: every offered message is either received or still queued — Full is
-\* the only refusal (rev0§3.3). With FIFO contiguity this is a counting identity.
+\* the only refusal (rev1§3.3). With FIFO contiguity this is a counting identity.
 NoDrop ==
     nextSend = Len(recvd) + Len(queue)
 
 \* FIFO per channel: received in send order, with the queue holding the next
-\* contiguous run (rev0§3.3).
+\* contiguous run (rev1§3.3).
 FifoPerChannel ==
     /\ \A i \in 1..Len(recvd) : recvd[i] = i
     /\ \A i \in 1..Len(queue) : queue[i] = Len(recvd) + i

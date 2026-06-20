@@ -1,4 +1,4 @@
-//! Untyped memory and retype (rev0§1, rev0§2.5, rev0§3.2).
+//! Untyped memory and retype (rev1§1, rev1§2.5, rev1§3.2).
 //!
 //! An untyped cap names a physical range and carries a watermark; retype
 //! carves the next object out of the range and installs the new cap as a
@@ -12,7 +12,7 @@
 //! arithmetic and the CDT install ([`retype_install`]); the `kernel` crate's
 //! `retype` composes them and performs the `start as *mut T` object
 //! construction in between, outside the verified core. Every kernel object is
-//! created this way: the kernel has no global pool (rev0§3.2). The one exception
+//! created this way: the kernel has no global pool (rev1§3.2). The one exception
 //! is the statically allocated root cspace, which is morally init's memory
 //! baked into the image.
 
@@ -45,14 +45,14 @@ pub enum ObjType {
     Timer,
     /// param = page count; 4 KiB-aligned, zeroed at retype.
     Frame,
-    /// param = table-pool pages (pool-at-creation, rev0§2.5).
+    /// param = table-pool pages (pool-at-creation, rev1§2.5).
     Aspace,
-    /// A sub-range untyped (rev0§2.3: untyped derivations are page-aligned
+    /// A sub-range untyped (rev1§2.3: untyped derivations are page-aligned
     /// sub-ranges). param = bytes, rounded up to a page. The carved cap
     /// is a CDT child of the parent untyped with its own watermark, so a
     /// whole subtree of objects can be retyped from it and reclaimed as a
     /// unit by `revoke(child) + reset(child)` — the per-spawn donation a
-    /// parent funds for one child (rev0§5.1).
+    /// parent funds for one child (rev1§5.1).
     Untyped,
 }
 
@@ -418,7 +418,7 @@ pub fn carve(
         }
         ObjType::Untyped => {
             // param is bytes; round up to a page so the carved range is
-            // page-aligned at both ends (rev0§2.3). 0 is meaningless; a param
+            // page-aligned at both ends (rev1§2.3). 0 is meaningless; a param
             // within a page of the address space top has no rounded size.
             if param == 0 {
                 return Err(RetypeError::BadArg);
@@ -449,7 +449,7 @@ verus! {
 /// per the inheritance table, link it as a CDT child, and run the channel
 /// two-endpoint dance. All checks already passed; this is infallible.
 ///
-/// The rev0§2.5 rights-inheritance table is proven as theorems: a Frame inherits the
+/// The rev1§2.5 rights-inheritance table is proven as theorems: a Frame inherits the
 /// untyped's rights (so phys-read flows only along boot untypeds); a Thread carries
 /// `THREAD_ALL`; a carved sub-Untyped is masked to `READ|WRITE` and so **provably
 /// never carries `PHYS`** — phys stays off ordinary derivation chains by
@@ -506,7 +506,7 @@ pub fn retype_install<S: Store>(
         // `dst` holds the new cap as a CDT child of `ut_slot`.
         final(store).slot_view()[dst].cap.kind == kind,
         final(store).slot_view()[dst].parent == Some(ut_slot),
-        // rev0§2.5 rights-inheritance table, as theorems keyed on `ty`.
+        // rev1§2.5 rights-inheritance table, as theorems keyed on `ty`.
         (ty == ObjType::Frame ==> final(store).slot_view()[dst].cap.rights.0
             == old(store).slot_view()[ut_slot].cap.rights.0),
         (ty == ObjType::Thread ==> final(store).slot_view()[dst].cap.rights.0 == Rights::THREAD_ALL.0),
@@ -564,7 +564,7 @@ pub fn retype_install<S: Store>(
         _ => Rights::ALL,
     };
     proof {
-        // rev0§2.5 sub-untyped-never-PHYS: masking to READ|WRITE clears the PHYS bit for
+        // rev1§2.5 sub-untyped-never-PHYS: masking to READ|WRITE clears the PHYS bit for
         // every possible rights value — the theorem, ∀, not a sampled assert. (The
         // bit-vector tactic needs a plain `u8`, so bind `ut_rights.0` to `b` first.)
         assert(Rights::READ | Rights::WRITE == 3u8) by (compute);
@@ -679,9 +679,9 @@ pub open spec fn reset_slot(s: crate::cspace::CapSlot) -> crate::cspace::CapSlot
 }
 
 /// Reset the watermark once exclusivity is proven — the second half of the
-/// reclaim primitive (rev0§2.5: "reclaiming the range is revoke(untyped) then
+/// reclaim primitive (rev1§2.5: "reclaiming the range is revoke(untyped) then
 /// watermark reset"). A parent reuses one child-sized donation across many
-/// spawns this way (rev0§5.1); the next retype re-zeroes the frames it carves.
+/// spawns this way (rev1§5.1); the next retype re-zeroes the frames it carves.
 ///
 /// pre:  ut_slot holds an Untyped cap with no CDT children (caller revoked).
 /// post: watermark = 0; the whole range is reusable.

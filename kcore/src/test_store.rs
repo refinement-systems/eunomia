@@ -714,7 +714,7 @@ fn caps_consistent_exec(st: &ArrayStore) -> bool {
 }
 
 // Exec mirror of `cspace::end_caps_sound`: every live channel's `end_caps[e]` equals the
-// count of `Channel(ch, e)` caps in the arena (the rev0§3.3 per-endpoint census). Host-checks
+// count of `Channel(ch, e)` caps in the arena (the rev1§3.3 per-endpoint census). Host-checks
 // that clause against the real `ArrayStore` bodies (`end_caps_sound_exec_has_teeth` proves
 // it is not vacuous).
 fn end_caps_sound_exec(st: &ArrayStore) -> bool {
@@ -1012,7 +1012,7 @@ fn cap_kind_eq(a: CapKind, b: CapKind) -> bool {
 }
 
 // Assert `retype_install`'s contract against the real body: the watermark bump,
-// the rev0§2.5 rights-inheritance table (incl. PHYS cleared for a sub-Untyped), the new
+// the rev1§2.5 rights-inheritance table (incl. PHYS cleared for a sub-Untyped), the new
 // cap as a CDT child of `ut`, `cspace_wf` preserved, and the refcount/end_caps
 // deltas (non-channel: refs/chan untouched — the object's `init` pre-counts `dst`;
 // channel: refs 2, both ends accounted, `dst2` = endpoint B, other channels intact).
@@ -1041,7 +1041,7 @@ fn check_retype_install(
     assert!(cap_kind_eq(st.at(dst).cap.kind, kind), "dst holds the carved kind");
     // SlotId is not Debug (see `fingerprint`), so compare with `assert!(==)`.
     assert!(st.at(dst).parent == Some(ut), "dst is a CDT child of ut");
-    // rev0§2.5 rights-inheritance table.
+    // rev1§2.5 rights-inheritance table.
     let expect_rights = match ty {
         ObjType::Frame => ut_rights,
         ObjType::Thread => Rights::THREAD_ALL.0,
@@ -1479,7 +1479,7 @@ fn check_check_expired(st: &mut ArrayStore, now: u64) {
 
 // `destroy_tcb`'s structural contract against the real body: `t` ends Halted with its
 // queue link and both binding slots cleared, its report UNCHANGED (destruction fires no
-// report, rev0§5.1), and `cspace_wf` preserved.
+// report, rev1§5.1), and `cspace_wf` preserved.
 fn check_destroy_tcb(st: &mut ArrayStore, t: ObjId) {
     assert!(cspace_wf_exec(st), "destroy_tcb pre: cspace_wf");
     let n = st.n();
@@ -1694,7 +1694,7 @@ fn cdt_unlink_middle_sibling() {
 
 #[test]
 fn derive_preserves_thread_priority_ceiling() {
-    // rev0§5.4/rev0§2.3 monotone priority axis: with the no-reduction sentinel
+    // rev1§5.4/rev1§2.3 monotone priority axis: with the no-reduction sentinel
     // (`prio_ceiling = 0xFF`), a derived thread cap carries the same — hence `<=` —
     // max-controlled-priority ceiling as its parent. This is the executable witness
     // of `derive`'s ceiling `ensures` on the real body for the default `cap_copy`,
@@ -1707,7 +1707,7 @@ fn derive_preserves_thread_priority_ceiling() {
         (CapKind::Thread(po, pmp), CapKind::Thread(co, cmp)) => {
             assert!(co.0 == po.0, "derived thread cap designates the same TCB");
             assert_eq!(cmp, pmp, "ceiling preserved across derivation (no-reduction sentinel)");
-            assert!(cmp <= pmp, "§5.4 ceiling attenuates monotonically (child <= parent)");
+            assert!(cmp <= pmp, "rev1§5.4 ceiling attenuates monotonically (child <= parent)");
         }
         _ => panic!("derived cap is not a thread cap"),
     }
@@ -1715,7 +1715,7 @@ fn derive_preserves_thread_priority_ceiling() {
 
 #[test]
 fn derive_attenuates_thread_priority_ceiling() {
-    // rev0§2.3 supervision grant: a thread-cap copy can carry a *strictly lower*
+    // rev1§2.3 supervision grant: a thread-cap copy can carry a *strictly lower*
     // ceiling — `min(parent, prio_ceiling)`. Executable witness of
     // `derived_kind`'s reducing `Thread` arm + `derive`'s strengthened ceiling
     // `ensures` on the real body.
@@ -1729,7 +1729,7 @@ fn derive_attenuates_thread_priority_ceiling() {
             assert!(co.0 == po.0, "derived thread cap designates the same TCB");
             assert_eq!(pmp, 19, "parent ceiling unchanged by the copy");
             assert_eq!(cmp, 5, "child ceiling = min(parent, prio_ceiling) = 5");
-            assert!(cmp <= pmp, "§5.4 ceiling still monotone (child <= parent)");
+            assert!(cmp <= pmp, "rev1§5.4 ceiling still monotone (child <= parent)");
         }
         _ => panic!("derived cap is not a thread cap"),
     }
@@ -2978,7 +2978,7 @@ fn check_revoke_root_survives_homed_external_ref() {
 
 #[test]
 fn revoke_sees_through_queued_descendant() {
-    // **Sees through queues (rev0§3.4).** A cap *queued in an in-flight message* is an
+    // **Sees through queues (rev1§3.4).** A cap *queued in an in-flight message* is an
     // ordinary CDT descendant — its ring slot carries the parent edge that `slot_move` (the op
     // `send` uses) inherited from the source — so the real `revoke` walk finds and empties it
     // like any other descendant, with no special case. This drives the **real** `revoke` through
@@ -2989,7 +2989,7 @@ fn revoke_sees_through_queued_descendant() {
     //
     // The arena holds the channel's 8 ring-cap slots (1..=8); the queued cap lives at slot 1, the
     // other 7 ring slots are empty (a one-cap message; ring 1 idle). revoke(slot 0) descends to
-    // the queued ring cap and deletes it: the ring slot is left empty — the rev0§3.4 "receivers
+    // the queued ring cap and deletes it: the ring slot is left empty — the rev1§3.4 "receivers
     // must tolerate null cap slots" outcome — while the un-homed target survives.
     let mut st = ArrayStore::new(9);
     st.slots[0] = CapSlot {
@@ -3042,7 +3042,7 @@ fn revoke_sees_through_queued_descendant() {
     assert!(st.at(SlotId(0)).first_child.is_none(), "revoke: subtree empty");
     // The headline: the real revoke walk reached *through the queue* and destroyed the in-flight cap.
     assert!(st.at(SlotId(1)).cap.is_empty(), "revoke sees through the queue: the queued cap is destroyed");
-    // The ring_cap handle still points at the now-empty slot — the rev0§3.4 null-cap-slot a receiver tolerates.
+    // The ring_cap handle still points at the now-empty slot — the rev1§3.4 null-cap-slot a receiver tolerates.
     assert!(st.chan_ring_cap(ObjId(7), 0, 0, 0) == SlotId(1), "the ring handle is unchanged (now null)");
     // The un-homed target survives (no homing object of slot 0 was destroyed).
     assert!(!st.at(SlotId(0)).cap.is_empty(), "the un-homed revoke target survives");
@@ -3164,7 +3164,7 @@ fn recv_nocapslot_atomic() {
 #[test]
 fn recv_null_slot_tolerance() {
     // A sends a cap; revocation empties the queued ring cap in flight; B's recv
-    // delivers it as absent (mask bit clear) — never a panic (rev0§3.4 null slots).
+    // delivers it as absent (mask bit clear) — never a panic (rev1§3.4 null slots).
     let (mut st, ch, scratch0) = chan_fixture(1, 2);
     let send_cap = SlotId(scratch0 as u64);
     st.slots[scratch0] = detached(frame_cap(7));

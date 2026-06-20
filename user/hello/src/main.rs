@@ -1,5 +1,5 @@
 //! The first program ever spawned by another Eunomia process. Its whole
-//! world arrives via the startup convention (rev0§5.1): a bootstrap channel
+//! world arrives via the startup convention (rev1§5.1): a bootstrap channel
 //! cap in cspace slot 0 with the startup block as the first queued
 //! message. It reads the block, replies, exits.
 

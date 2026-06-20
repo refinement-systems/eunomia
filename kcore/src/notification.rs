@@ -1,4 +1,4 @@
-//! Notification objects (spec rev0§3.6): a machine word of signal bits plus a
+//! Notification objects (spec rev1§3.6): a machine word of signal bits plus a
 //! FIFO waiter queue. Signalers OR bits in; a waiter receives the whole
 //! accumulated word, which clears. Event delivery never allocates — the
 //! waiter queue is intrusive through the TCBs.
@@ -611,7 +611,7 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
         // The teardown system invariants survive the splice (the `signal`→`fire` precedent):
         // it is a signal-shaped edit (only `n`'s notif view + `n`'s waiter TCBs move, every
         // TCB's `bind_slots`/`cspace` fixed), so `lemma_caps_consistent_frame` applies; the
-        // rev0§3.3 endpoint census reads only the framed chan/slot views; and the census only
+        // rev1§3.3 endpoint census reads only the framed chan/slot views; and the census only
         // drops while the refs domain is fixed. Conditional + `requires`-free, so the teardown
         // callers keep no obligation; `destroy_tcb` (the only kcore caller) consumes them for
         // its bind-slot `delete`s.

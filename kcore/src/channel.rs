@@ -1,16 +1,16 @@
-//! Asynchronous IPC channels (spec rev0§3.1-3.4, rev0§3.6).
+//! Asynchronous IPC channels (spec rev1§3.1-3.4, rev1§3.6).
 //!
 //! A channel is two endpoints (A, B) over two fixed-depth rings of message
 //! slots — ring 0 carries A→B, ring 1 carries B→A. A message slot is a
 //! 256-byte inline payload plus 4 real `CapSlot`s: queued caps are
 //! CDT-visible and owned by the channel, so revocation sees through queues
-//! (rev0§3.4) with no special case.
+//! (rev1§3.4) with no special case.
 //!
 //! Queue memory comes from the untyped donated at retype; capacity is the
-//! creator-chosen depth (rev0§3.2). Send is non-blocking and returns FULL;
+//! creator-chosen depth (rev1§3.2). Send is non-blocking and returns FULL;
 //! messages are never dropped. Each endpoint carries fixed binding slots
 //! (on-readable / on-writable / on-peer-closed → notification, bits);
-//! event delivery never allocates (rev0§3.6).
+//! event delivery never allocates (rev1§3.6).
 //!
 //! The channel is addressed by an opaque
 //! [`ObjId`](crate::id::ObjId) and all of its state is reached through the
@@ -53,7 +53,7 @@ pub struct MsgSlot {
 pub struct Channel {
     pub hdr: ObjHeader,
     pub depth: u32,
-    /// Live endpoint caps per end, for peer-closed (rev0§3.3).
+    /// Live endpoint caps per end, for peer-closed (rev1§3.3).
     pub end_caps: [u32; 2],
     pub head: [u32; 2],
     pub count: [u32; 2],
@@ -175,7 +175,7 @@ impl Channel {
 
 verus! {
 
-/// Account a newly installed endpoint cap (retype's channel arm, rev0§2.5; rev0§3.3
+/// Account a newly installed endpoint cap (retype's channel arm, rev1§2.5; rev1§3.3
 /// peer-closed accounting).
 ///
 /// Bumps `end_caps[end]` by one, leaving `slot_view`/
@@ -224,7 +224,7 @@ pub fn endpoint_cap_added<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
 }
 
 /// Called on every endpoint-cap deletion; the last cap of an end raises
-/// the other end's peer-closed event (rev0§3.3, session cleanup rev0§2.4).
+/// the other end's peer-closed event (rev1§3.3, session cleanup rev1§2.4).
 ///
 /// Decrements `end_caps[end]`, then — only when that count
 /// reaches zero — fires the *other* end's peer-closed event through the verified
@@ -243,7 +243,7 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
             old(store).tcb_view(), ch),
         cspace::binding_refs_ok(old(store).chan_view(), old(store).notif_view(),
             old(store).refs_view(), ch, 1 - end_idx_spec(end), EV_PEER_CLOSED as int),
-        // The cap→object invariant + the rev0§3.3 endpoint census, both off by one at `(ch, end)`:
+        // The cap→object invariant + the rev1§3.3 endpoint census, both off by one at `(ch, end)`:
         // `delete` cleared the deleted cap's slot before this call, so
         // `end_caps[ch][end]` over-counts the arena by one. The decrement here restores
         // `end_caps_sound` and re-establishes `caps_consistent` (no sibling stranded — a live
@@ -413,7 +413,7 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
     }
 }
 
-/// Raise an endpoint's event into its bound notification, if bound (rev0§3.6).
+/// Raise an endpoint's event into its bound notification, if bound (rev1§3.6).
 ///
 /// Reads a binding (a getter) and
 /// conditionally calls `signal` (a proven body). `signal`'s
@@ -608,9 +608,9 @@ proof fn lemma_bind_refs_post_at(
     }
 }
 
-/// Configure an endpoint's event binding (holder-configured, rev0§3.6).
+/// Configure an endpoint's event binding (holder-configured, rev1§3.6).
 /// Replacing a binding releases the old notification's ref and adds the new
-/// one's (rev0§3.6 binding-refcount discipline).
+/// one's (rev1§3.6 binding-refcount discipline).
 ///
 /// Installs `Binding { notif, bits }` at `(end, event)`,
 /// leaving `slot_view` and every other channel field untouched; the `refs_view`
@@ -698,7 +698,7 @@ pub fn bind<S: Store>(
 }
 
 /// Send: copy the payload into the ring and move caps from the sender's
-/// slots into the message's CDT-visible slots (rev0§3.4 move semantics).
+/// slots into the message's CDT-visible slots (rev1§3.4 move semantics).
 ///
 /// On `Ok` the message is enqueued FIFO at the tail —
 /// `ring_fifo` of the sending ring grows by `Seq::push`, the other ring is
@@ -1056,9 +1056,9 @@ verus! {
 
 /// Receive into `buf`, installing caps into `dests`. If any arriving cap
 /// has no free destination the receive fails and the message stays queued
-/// (rev0§3.3) — receive-side exhaustion is the receiver's own problem.
+/// (rev1§3.3) — receive-side exhaustion is the receiver's own problem.
 /// Revocation may have emptied queued slots in flight; receivers see those
-/// as absent caps (rev0§3.4 null slots).
+/// as absent caps (rev1§3.4 null slots).
 ///
 /// Two-pass atomicity — pass 1 is read-only, so `Empty`/
 /// `NoCapSlot` leave the store (and the queued message) unchanged; pass 2 moves
@@ -1712,7 +1712,7 @@ fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
 
 /// Tear a channel down once its last endpoint cap is gone (`refs == 0`): delete
 /// every queued cap with ordinary CDT cleanup — cashing a shredded envelope
-/// (rev0§3.4) — and release every event binding's notification ref.
+/// (rev1§3.4) — and release every event binding's notification ref.
 ///
 /// The teardown verifies against the full contract, closing the channel arm of the
 /// cross-object SCC `obj_unref → destroy_channel → delete → obj_unref` under the
@@ -1730,7 +1730,7 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
         // Cap→object consistency: the body deletes ring caps of
         // arbitrary kind, so it needs each one's object well-formed.
         cspace::caps_consistent(old(store)),
-        // The rev0§3.3 endpoint-cap census: ring caps may be
+        // The rev1§3.3 endpoint-cap census: ring caps may be
         // channel caps, so the body's `delete`s thread it.
         cspace::end_caps_sound(old(store)),
         // Refs-domain completeness: the body's `delete`s thread it.

@@ -186,7 +186,7 @@ document and can be drafted together, but are separated by theme for review.
   dangling), the absent trusted-base ledger, audit §8 follow-up (8); establishes the
   `rev1§` reference rule.
 - **Work:**
-  - Recreate the **trusted-base ledger** (the absent `doc/results/68_verus-findings.md`
+  - Recreate the **trusted-base ledger** (the absent `doc/guidelines/verus_trusted-base.md`
     successor) from audit §4.1 — the four `kcore` `external_body` items + three
     `assume_specification`s, the two CAS BLAKE3 seams, the `urt` debug-assert hatch —
     as the authoritative enumeration `verus.md` and CLAUDE.md point at.

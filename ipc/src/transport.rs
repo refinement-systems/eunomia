@@ -8,7 +8,7 @@
 //!   over it (the IPC analogue of `kcore`'s `Env`/`Hal` seam).
 //!
 //! Move semantics, FIFO delivery, and the accumulate-and-clear notification
-//! word are all the *kernel's* behavior (rev0§3.3, rev0§3.4, rev0§3.6); this trait only
+//! word are all the *kernel's* behavior (rev1§3.3, rev1§3.4, rev1§3.6); this trait only
 //! names the surface so the reactor's discipline can be checked over a model.
 
 use crate::sys;
@@ -18,7 +18,7 @@ pub type Chan = u32;
 /// A notification cap handle (a cspace slot index).
 pub type Notif = u32;
 
-/// The channel events a binding can target (rev0§3.3, rev0§3.6).
+/// The channel events a binding can target (rev1§3.3, rev1§3.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
     Readable,
@@ -37,7 +37,7 @@ impl Event {
     }
 }
 
-/// `send_nb` failure (rev0§3.3): `Full` is backpressure (retry when writable), not
+/// `send_nb` failure (rev1§3.3): `Full` is backpressure (retry when writable), not
 /// a drop. `Closed` is peer-closed. A message is never silently lost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendErr {
@@ -46,9 +46,9 @@ pub enum SendErr {
     Other(i64),
 }
 
-/// `recv_nb` failure (rev0§3.3): `Empty` (wait for readable), `NoSlot` (receiver
+/// `recv_nb` failure (rev1§3.3): `Empty` (wait for readable), `NoSlot` (receiver
 /// has no free cspace slot — the message stays queued, make room and retry,
-/// rev0§3.4), `Closed` (peer-closed).
+/// rev1§3.4), `Closed` (peer-closed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecvErr {
     Empty,
@@ -57,30 +57,30 @@ pub enum RecvErr {
     Other(i64),
 }
 
-/// A successful receive: payload length and the cap-present mask (rev0§3.3).
+/// A successful receive: payload length and the cap-present mask (rev1§3.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecvOk {
     pub len: usize,
     pub cap_mask: u64,
 }
 
-/// The kernel IPC surface the reactor needs, 1:1 with `sys.rs` / rev0§3.3, rev0§3.6.
+/// The kernel IPC surface the reactor needs, 1:1 with `sys.rs` / rev1§3.3, rev1§3.6.
 pub trait Transport {
-    /// Non-blocking send (rev0§3.3): `Full` when the queue is full, never a drop.
+    /// Non-blocking send (rev1§3.3): `Full` when the queue is full, never a drop.
     fn send_nb(&self, ch: Chan, data: &[u8], caps: Option<&[u32; 4]>) -> Result<(), SendErr>;
 
-    /// Non-blocking receive (rev0§3.3): caps land in `dests`; `Empty`/`NoSlot` per
-    /// `RecvErr`. `buf` must hold a full inline payload (256 bytes, rev0§3.1).
+    /// Non-blocking receive (rev1§3.3): caps land in `dests`; `Empty`/`NoSlot` per
+    /// `RecvErr`. `buf` must hold a full inline payload (256 bytes, rev1§3.1).
     fn recv_nb(&self, ch: Chan, buf: &mut [u8], dests: Option<&[u32; 4]>) -> Result<RecvOk, RecvErr>;
 
-    /// Bind a channel event to `(notif, bits)` (rev0§3.6). Persistent: a later
+    /// Bind a channel event to `(notif, bits)` (rev1§3.6). Persistent: a later
     /// event ORs `bits` into the notification word.
     fn bind(&self, ch: Chan, ev: Event, notif: Notif, bits: u64) -> Result<(), i64>;
 
-    /// OR `bits` into a notification word, waking a waiter or accumulating (rev0§3.6).
+    /// OR `bits` into a notification word, waking a waiter or accumulating (rev1§3.6).
     fn notif_signal(&self, n: Notif, bits: u64);
 
-    /// Consume the accumulated word if non-zero, else block (rev0§3.6). Returns the
+    /// Consume the accumulated word if non-zero, else block (rev1§3.6). Returns the
     /// word (which is cleared). This is the "wait" half of the lost-wakeup
     /// discipline — it checks the word before sleeping.
     fn notif_wait(&self, n: Notif) -> u64;

@@ -1,8 +1,8 @@
-//! Program loader (rev0§5): ELF64 parsing (host-testable) and
+//! Program loader (rev1§5): ELF64 parsing (host-testable) and
 //! spawn-with-explicit-cspace (target-only, over ipc::sys).
 //!
 //! The loader maps programs fully — no demand paging, fixed-size stacks
-//! with unmapped guard regions below them (rev0§5.3: every fault is a bug).
+//! with unmapped guard regions below them (rev1§5.3: every fault is a bug).
 
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 

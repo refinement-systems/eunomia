@@ -9,7 +9,7 @@
 //!     into the word and wakes a waiter or accumulates; `wait` consumes the
 //!     word if non-zero, **else blocks** (the `while word == 0` check below is
 //!     the lost-wakeup guard the harnesses exercise);
-//!   - a send fires the persistent on-readable binding (rev0§3.6).
+//!   - a send fires the persistent on-readable binding (rev1§3.6).
 //!
 //! Compiled only for the model/harnesses; built on `crate::sync` so the same
 //! code runs under std (smoke), loom (exhaustive), and shuttle (randomized).
@@ -25,7 +25,7 @@ struct ModelMsg {
     caps: [u32; 4],
 }
 
-/// One channel: a bounded FIFO ring plus its event bindings (rev0§3.3, rev0§3.6).
+/// One channel: a bounded FIFO ring plus its event bindings (rev1§3.3, rev1§3.6).
 struct Ring {
     msgs: VecDeque<ModelMsg>,
     peer_closed: bool,
@@ -34,7 +34,7 @@ struct Ring {
     on_peer_closed: Option<(Notif, u64)>,
 }
 
-/// One notification object: a word + a condvar (rev0§3.6). The `Mutex<u64>` word is
+/// One notification object: a word + a condvar (rev1§3.6). The `Mutex<u64>` word is
 /// the source of truth; the condvar is only the wake mechanism, so a notify
 /// that races ahead of a waiter is harmless — the waiter re-checks the word.
 struct Notification {
@@ -64,7 +64,7 @@ fn fresh_ring() -> Ring {
 }
 
 impl ModelTransport {
-    /// A single channel of capacity `cap` slots (rev0§3.2) and `num_notifs`
+    /// A single channel of capacity `cap` slots (rev1§3.2) and `num_notifs`
     /// notifications — the shape the single-channel harnesses use (`Chan` 0).
     pub fn new(cap: usize, num_notifs: usize) -> ModelTransport {
         ModelTransport::with_channels(1, cap, num_notifs)
@@ -101,7 +101,7 @@ impl ModelTransport {
         &self.rings[ch as usize]
     }
 
-    /// Destroy the channel (rev0§3.4): queued messages — and their caps — are
+    /// Destroy the channel (rev1§3.4): queued messages — and their caps — are
     /// **gone**, the peer is marked closed, and the on-peer-closed binding
     /// fires. Models the kernel reclaiming the channel's backing untyped (in
     /// production a cspace `cap_delete`/`revoke`, not a `Transport` op). After
@@ -113,7 +113,7 @@ impl ModelTransport {
         self.destroy_chan(0);
     }
 
-    /// Destroy a specific channel (rev0§3.4) — see [`destroy`](Self::destroy).
+    /// Destroy a specific channel (rev1§3.4) — see [`destroy`](Self::destroy).
     pub fn destroy_chan(&self, ch: Chan) {
         let binding = {
             let mut ring = self.ring(ch).lock().unwrap();
@@ -164,7 +164,7 @@ impl Transport for ModelTransport {
                             cap_mask |= 1 << i;
                         }
                     }
-                    // A slot freed up: fire the on-writable binding (rev0§3.3) so a
+                    // A slot freed up: fire the on-writable binding (rev1§3.3) so a
                     // sender blocked on backpressure is woken.
                     (Ok(RecvOk { len, cap_mask }), ring.on_writable)
                 }
@@ -263,7 +263,7 @@ mod tests {
     // hand-inlined poll-then-wait that proves the rig is drivable by both tools.
     fn rig_smoke() {
         let t = ModelTransport::shared(2, 1);
-        // Bind on-readable -> (notif 0, bit 1) before the race (the rev0§3.6 "bind
+        // Bind on-readable -> (notif 0, bit 1) before the race (the rev1§3.6 "bind
         // first" half of the discipline).
         t.bind(0, Event::Readable, 0, 1).unwrap();
 
@@ -368,7 +368,7 @@ mod tests {
         assert_eq!(sorted, expected, "every id received exactly once (no drop, no dup)");
 
         // Per-sender FIFO: each sender's ids arrive in increasing (send) order,
-        // since the channel is FIFO (rev0§3.3).
+        // since the channel is FIFO (rev1§3.3).
         let a: std::vec::Vec<u8> = got.iter().copied().filter(|&x| x <= per_sender).collect();
         assert!(a.windows(2).all(|w| w[0] < w[1]), "sender A not FIFO: {:?}", a);
         let b: std::vec::Vec<u8> = got.iter().copied().filter(|&x| x > 100).collect();
@@ -586,7 +586,7 @@ mod tests {
     // polls its reply channel. One server process runs a single Reactor (one
     // notification) registering *every* request channel for readable, then
     // wait()-dispatches and services each connect via `admit_connect` under a
-    // `budget`-bounded `Admission` — the rev0§3.5 single admission point. The
+    // `budget`-bounded `Admission` — the rev1§3.5 single admission point. The
     // threads race (a connect
     // may land before or after its bind); poll-once + the notif word-check make
     // the reactor surface every client (no lost wakeup at N sources).
@@ -704,7 +704,7 @@ mod tests {
         check_pinned(|| fairness_smoke(3, 2));
     }
 
-    // `register_bound` dispatch — the rev0§5.1 thread-source path the shell's
+    // `register_bound` dispatch — the rev1§5.1 thread-source path the shell's
     // spawn/reap loop uses (`user/shell/src/main.rs`): two externally-bound,
     // edge-triggered sources on one notification, each dispatched to its key.
     // Unlike `register`, `register_bound` does NOT poll-once; the test proves it

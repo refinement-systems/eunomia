@@ -1,7 +1,7 @@
 //! Block-device abstraction for the storage engine.
 //!
 //! `flush` is the fsync barrier — the single trusted axiom of the storage
-//! stack (rev0§4.8): after `flush` returns, every prior write is durable.
+//! stack (rev1§4.8): after `flush` returns, every prior write is durable.
 //!
 //! `CrashDev` models exactly the volatile/durable split the CommitProtocol
 //! TLA+ model checks: writes land in a volatile log; `flush` promotes them;

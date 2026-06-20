@@ -79,10 +79,10 @@ be mechanically rev0-prefixed.
 
 - **24 files** reference `doc/plans/*` (e.g. `doc/plans/3_verus-rewrite.md`,
   `doc/plans/2_ipc.md`, `doc/plans/3_verus-rewrite_phase7-detail.md`).
-- **16 files** reference `doc/results/*` (e.g. `doc/results/68_verus-findings.md`,
+- **16 files** reference `doc/results/*` (e.g. `doc/guidelines/verus_trusted-base.md`,
   `doc/results/1_fuzzing-findings.md`, `doc/results/35`).
 - `doc/guidelines/verus.md` references the entire `doc/results/21…67_verus-findings.md`
-  series **and** the trusted-base ledger `doc/results/68_verus-findings.md`, which it
+  series **and** the trusted-base ledger `doc/guidelines/verus_trusted-base.md`, which it
   calls *"the source of truth for CLAUDE.md's 'the trusted base is exactly …' claim"*
   — a claim that is itself **not present** in the current `CLAUDE.md`.
 

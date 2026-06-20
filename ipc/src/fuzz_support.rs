@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use crate::header::Header;
 use crate::wire::{self, WireError};
 
-/// A deliberately boring message body (rev0§3.7): owned fields, no borrows, an
+/// A deliberately boring message body (rev1§3.7): owned fields, no borrows, an
 /// externally-tagged enum, no `flatten`/untagged/non-string-keyed maps — the
 /// subset that maps 1:1 onto any IDL.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

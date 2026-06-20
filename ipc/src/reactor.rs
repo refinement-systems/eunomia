@@ -1,8 +1,8 @@
-//! The IPC reactor (spec rev0§3.6) — the lost-wakeup core. An epoll-shaped
+//! The IPC reactor (spec rev1§3.6) — the lost-wakeup core. An epoll-shaped
 //! `register(source, signals, key)` / `wait() -> (key, signals)` API over a
 //! notification word's **bit-groups**.
 //! It **owns the "bind, poll once, then wait" discipline**, so no server reaches
-//! for a notification bit, and the rev0§3.6 wait-set kernel object is a future
+//! for a notification bit, and the rev1§3.6 wait-set kernel object is a future
 //! O(1) drop-in behind this same API.
 //!
 //! Lost-wakeup safety has two halves, both modeled by `tla/ipc_reactor` and
@@ -20,7 +20,7 @@
 //! and is **level-triggered**: it `bind`s the channel's events and self-signals
 //! a poll-once so a message queued before the bind still surfaces.
 //! [`Reactor::register_bound`] takes an **externally-bound, edge-triggered**
-//! source — a thread on-exit/on-fault binding (`thread_bind`, rev0§5.1), a timer, an
+//! source — a thread on-exit/on-fault binding (`thread_bind`, rev1§5.1), a timer, an
 //! IRQ — already wired to a caller-chosen bit; it neither binds nor self-signals
 //! (a poll-once would fabricate a one-shot event), so lost-wakeup safety there
 //! rests on the caller binding before the source can fire plus `wait`'s
@@ -35,7 +35,7 @@ use core::ops::BitOr;
 
 use crate::transport::{Chan, Event, Notif, Transport};
 
-/// The events a source can be registered for / reported ready on (rev0§3.3, rev0§3.6).
+/// The events a source can be registered for / reported ready on (rev1§3.3, rev1§3.6).
 /// A set of bits; combine with `|`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Signals(u8);
@@ -78,7 +78,7 @@ pub enum RegisterErr {
     Taken,
 }
 
-/// Width of the notification word — the MVP per-thread source limit (rev0§3.6).
+/// Width of the notification word — the MVP per-thread source limit (rev1§3.6).
 const WORD_BITS: usize = 64;
 
 #[derive(Debug, Clone, Copy)]
@@ -146,7 +146,7 @@ impl<'t, T: Transport> Reactor<'t, T> {
 
     /// Register a source whose events are bound to `mask` **outside** the reactor
     /// and are **edge-triggered**: a thread on-exit/on-fault binding (a
-    /// `thread_bind` into the TCB, rev0§5.1), a timer (armed via `sys::timer_arm`),
+    /// `thread_bind` into the TCB, rev1§5.1), a timer (armed via `sys::timer_arm`),
     /// or an IRQ — anything the kernel signals into this notification at a bit
     /// the caller controls. Each set bit in `mask` dispatches to `key`.
     ///

@@ -1,4 +1,4 @@
-//! FastCDC chunker (spec rev0§4.1): gear-hash content-defined chunking,
+//! FastCDC chunker (spec rev1§4.1): gear-hash content-defined chunking,
 //! target chunk size 16–64 KiB, with normalized chunking (a stricter
 //! boundary mask below the target size, a looser one above it).
 //!
@@ -42,7 +42,7 @@ pub struct ChunkerParams {
 }
 
 impl ChunkerParams {
-    /// Production parameters (spec rev0§4.1: target ~16–64 KiB).
+    /// Production parameters (spec rev1§4.1: target ~16–64 KiB).
     pub const DEFAULT: ChunkerParams = ChunkerParams {
         min: 16 * 1024,
         avg: 32 * 1024,

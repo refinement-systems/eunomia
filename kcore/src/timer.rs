@@ -1,4 +1,4 @@
-//! Timer objects (spec rev0§1, rev0§3.6): a cap to program a deadline that signals
+//! Timer objects (spec rev1§1, rev1§3.6): a cap to program a deadline that signals
 //! a bound notification. kcore owns the armed-timer *list* — insert, unlink,
 //! and the expiry sweep — operating on the list head through the [`Store`]
 //! seam; the head itself (`ARMED_HEAD`) is a kernel static, and the
@@ -48,7 +48,7 @@ impl TimerObj {
 verus! {
 
 /// Disarm a timer: unlink it from the armed list and release the ref it held on
-/// its bound notification (rev0§3.6).
+/// its bound notification (rev1§3.6).
 ///
 /// Verus proves this the `remove_waiter` analog over the
 /// GLOBAL armed list — singly-linked, head-only (no tail). `!armed` ⇒ a no-op; `armed`

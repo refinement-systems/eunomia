@@ -1,4 +1,4 @@
-//! Syscall ABI decode + validation (rev0§3.7). The pure half of
+//! Syscall ABI decode + validation (rev1§3.7). The pure half of
 //! `kernel/src/syscall.rs`: turn the raw register file `(nr, a[0..6])` into a
 //! typed [`Sys`] value, performing every check that needs **no** capability or
 //! thread state — `ObjType` totality, the message-length cap before
@@ -9,7 +9,7 @@
 //!
 //! `decode` is **total**: for any `(nr, a) : u64⁷` it returns `Ok(Sys)` or
 //! `Err(SysError)`, never panics, never overflows, never UB — an unknown
-//! `nr` is an error, never a crash (rev0§3.7). This makes "no
+//! `nr` is an error, never a crash (rev1§3.7). This makes "no
 //! user-controlled value reaches kernel arithmetic unvalidated" a checked
 //! property (`kcore::proofs::sysabi`) rather than a review convention.
 //!
@@ -28,7 +28,7 @@ verus! {
 /// so the `kernel::thread` re-export and the aarch64 build are unchanged.
 pub const NUM_PRIOS: usize = 32;
 
-/// `cap_copy`'s "no priority-ceiling reduction" sentinel (rev0§2.3/rev0§5.4):
+/// `cap_copy`'s "no priority-ceiling reduction" sentinel (rev1§2.3/rev1§5.4):
 /// a thread-cap copy passing this leaves the parent's ceiling unchanged. Any value
 /// `>= NUM_PRIOS - 1` would do (priorities are `< NUM_PRIOS = 32`); `0xFF` is the
 /// canonical one. A lower `prio_ceiling` strictly attenuates (`derived_kind`).
@@ -94,11 +94,11 @@ fn decode_prio(raw: u64) -> (result: Result<u8, SysError>)
     Ok(prio)
 }
 
-/// Decode the register file into a typed syscall (rev0§3.7). `nr` is x7;
+/// Decode the register file into a typed syscall (rev1§3.7). `nr` is x7;
 /// `a` is x0..x5 (the kernel's trap-frame read — six argument registers).
 ///
 /// Verified **total**: for any `(nr, a) : (u64, [u64;6])` it returns
-/// `Ok`/`Err`, never panics, overflows, or UBs (the rev0§3.7 "unknown `nr` is
+/// `Ok`/`Err`, never panics, overflows, or UBs (the rev1§3.7 "unknown `nr` is
 /// an error, never a crash" as a theorem, not a review convention). The
 /// `ensures` pin the shape-validation: the `ChanSend` length cap that precedes
 /// `channel::send`'s
@@ -109,12 +109,12 @@ fn decode_prio(raw: u64) -> (result: Result<u8, SysError>)
 /// in the verified fragment.
 pub fn decode(nr: u64, a: [u64; 6]) -> (result: Result<Sys, SysError>)
     ensures
-        // rev0§3.7: every `nr` outside the defined 0..=23 range is `UnknownCall`.
+        // rev1§3.7: every `nr` outside the defined 0..=23 range is `UnknownCall`.
         nr >= 24 ==> result matches Err(SysError::UnknownCall),
         // Retype with an out-of-range `ObjType` discriminant is `BadObjType`
         // (via `ObjType::from_u64`'s `None`-iff-`v >= 8` characterization).
         (nr == 3 && a@[1] >= 8) ==> result matches Err(SysError::BadObjType),
-        // The load-bearing rev0§3.1 cap: a decoded send length never exceeds the
+        // The load-bearing rev1§3.1 cap: a decoded send length never exceeds the
         // payload bound, so the downstream `as u16` truncation is lossless and
         // `channel::send`'s `data.len() <= MSG_PAYLOAD` precondition holds.
         result matches Ok(Sys::ChanSend { len, .. }) ==> len <= MSG_PAYLOAD as u64,
@@ -136,7 +136,7 @@ pub fn decode(nr: u64, a: [u64; 6]) -> (result: Result<Sys, SysError>)
                 None => return Err(SysError::BadObjType),
             }
         }
-        // a[3] is the rev0§5.4 priority-ceiling cap on a thread-cap copy (rev0§2.3
+        // a[3] is the rev1§5.4 priority-ceiling cap on a thread-cap copy (rev1§2.3
         // supervision grant); `NO_PRIO_CEILING` (0xFF) means "no reduction". Carried
         // raw (it only ever *shrinks* an existing ceiling in `derive`, so no decode
         // validation is needed — see `derived_kind`).

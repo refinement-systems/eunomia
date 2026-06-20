@@ -15,15 +15,15 @@ wire = ["dep:serde", "dep:postcard"]
 fuzzing = ["wire"]
 
 [dependencies]
-# The wire codec (§3.7): a postcard body behind a module-private trait. no_std +
+# The wire codec (rev1§3.7): a postcard body behind a module-private trait. no_std +
 # alloc (same as storage-server); the aarch64 build links these over urt's heap.
 # Optional — only the `wire` feature pulls them, so the codec is opt-in.
 serde = { version = "1", default-features = false, features = ["derive", "alloc"], optional = true }
 postcard = { version = "1", default-features = false, features = ["alloc"], optional = true }
 
-# vstd is the *Verus* dependency (plan doc/plans/3_verus-rewrite.md phase 7a):
-# the `verus!{}` macro + ghost vocabulary for the §4.7 host-chokepoint proofs
-# (the §3.7 message header in `header.rs`). `default-features = false` ⇒ no_std,
+# vstd is the *Verus* dependency (see doc/guidelines/verus.md):
+# the `verus!{}` macro + ghost vocabulary for the rev1§4.7 host-chokepoint proofs
+# (the rev1§3.7 message header in `header.rs`). `default-features = false` ⇒ no_std,
 # no alloc, so it rides into the minimal alloc-free user binaries unchanged. In an
 # ordinary build (host `cargo test` *and* the aarch64 userspace cross-build via
 # kernel/build.rs) the `feature(..)` flags are gated on `verus_keep_ghost` — set

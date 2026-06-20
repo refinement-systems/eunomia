@@ -65,8 +65,8 @@ pub extern "C" fn kernel_main() -> ! {
         let (untyped_base, init_aspace) = setup_init(root, init, &mut out);
 
         // Slot 0: all remaining free DRAM below the EL0 window as init's
-        // untyped — the root of every grant in the system (rev0§1, rev0§2.5).
-        // Boot untypeds carry phys-read (rev0§2.5): frames retyped from them
+        // untyped — the root of every grant in the system (rev1§1, rev1§2.5).
+        // Boot untypeds carry phys-read (rev1§2.5): frames retyped from them
         // inherit it, and init alone decides where it propagates.
         let slot0 = CSpaceObj::slot(root, 0);
         (*slot0).cap = Cap {
@@ -100,7 +100,7 @@ pub extern "C" fn kernel_main() -> ! {
         // Slot 3: the virtio-mmio window (32 transports × 0x200 at
         // 0x0a00_0000 on QEMU virt) as a phys-capable device frame.
         // Init delegates it (or an attenuated copy) to the one DMA
-        // driver; phys-read never enters ordinary derivation (rev0§2.5).
+        // driver; phys-read never enters ordinary derivation (rev1§2.5).
         let slot3 = CSpaceObj::slot(root, 3);
         (*slot3).cap = Cap {
             kind: CapKind::Frame { base: 0x0a00_0000, pages: 4, mapping: None },
@@ -108,7 +108,7 @@ pub extern "C" fn kernel_main() -> ! {
         };
 
         // Slot 4: the PL031 RTC frame (QEMU virt), read-only — init reads
-        // RTCDR once at boot to seed the time page (rev0§2.6) and the device
+        // RTCDR once at boot to seed the time page (rev1§2.6) and the device
         // is never touched again; no write authority exists anywhere.
         let slot4 = CSpaceObj::slot(root, 4);
         (*slot4).cap = Cap {
@@ -118,7 +118,7 @@ pub extern "C" fn kernel_main() -> ! {
 
         // Slot 5: init's own address space. Init is the one process that
         // maps things into itself (the PL031 window for the boot-time RTC
-        // read, rev0§2.6); children never hold their own aspace caps.
+        // read, rev1§2.6); children never hold their own aspace caps.
         if !init_aspace.is_null() {
             let slot5 = CSpaceObj::slot(root, 5);
             (*slot5).cap = Cap {
@@ -128,7 +128,7 @@ pub extern "C" fn kernel_main() -> ! {
             (*init_aspace).hdr.refs += 1;
         }
 
-        // Slot 1: init's own thread cap (creator-grade: the rev0§2.3 thread
+        // Slot 1: init's own thread cap (creator-grade: the rev1§2.3 thread
         // bits, like any retyped TCB's first cap).
         (*init).cspace = Some(ObjId(root as u64));
         (*root).hdr.refs += 1;
@@ -136,7 +136,7 @@ pub extern "C" fn kernel_main() -> ! {
         (*init).state = ThreadState::Running;
         let slot1 = CSpaceObj::slot(root, 1);
         (*slot1).cap = Cap {
-            // rev0§5.4 ceiling = init's own priority: init is the root of the
+            // rev1§5.4 ceiling = init's own priority: init is the root of the
             // priority lattice; every retyped descendant cap is capped at its
             // retyper's priority (kernel/src/untyped.rs), so the lattice is
             // rooted here.
@@ -144,7 +144,7 @@ pub extern "C" fn kernel_main() -> ! {
             rights: Rights::THREAD_ALL,
         };
 
-        // Idle: EL0 WFI loop in the identity window, priority 0 (rev0§5.4).
+        // Idle: EL0 WFI loop in the identity window, priority 0 (rev1§5.4).
         let idle = addr_of_mut!(IDLE_TCB);
         (*idle).priority = 0;
         (*idle).frame = TrapFrame::zeroed();
@@ -178,7 +178,7 @@ unsafe fn setup_init(
     )
 }
 
-/// Real boot (rev0§1): construct exactly one process — init — by loading the
+/// Real boot (rev1§1): construct exactly one process — init — by loading the
 /// embedded init ELF into a fresh address space. Everything not carved
 /// here becomes init's untyped.
 #[cfg(not(feature = "m1-test"))]

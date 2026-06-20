@@ -1,4 +1,4 @@
-//! The fixed, hand-defined message header (spec rev0§3.7). Every IPC message is
+//! The fixed, hand-defined message header (spec rev1§3.7). Every IPC message is
 //! this header followed by a postcard-encoded body. The header layout **never
 //! migrates** — it is the layer that makes every other layer migratable — so
 //! it is a byte-exact, hand-written codec (no serde), 10 bytes, little-endian:
@@ -13,7 +13,7 @@
 //!
 //! `decode` is a *total bijection* on exactly `HEADER_SIZE` bytes: it does no
 //! field-value validation (a server validates `proto`/`version`/`opcode`
-//! against what it speaks — spec rev0§3.7's "unknown opcode yields an error" is a
+//! against what it speaks — spec rev1§3.7's "unknown opcode yields an error" is a
 //! dispatch concern, not the header layer's), which keeps `encode`∘`decode`
 //! the identity.
 //!

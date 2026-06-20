@@ -1,4 +1,4 @@
-//! File content storage (spec rev0§4.1, rev0§4.9): content ≤ INLINE_MAX lives
+//! File content storage (spec rev1§4.1, rev1§4.9): content ≤ INLINE_MAX lives
 //! inline in the directory entry; larger content is FastCDC-chunked and
 //! referenced through a chunk-list object. The inline rule is a pure
 //! function of content, preserving canonical form.
@@ -70,7 +70,7 @@ pub fn read_file(
 }
 
 /// Parse a chunk-list object into (chunk hash, chunk length) pairs.
-/// Shared by the read path and the GC mark walk (rev0§4.6).
+/// Shared by the read path and the GC mark walk (rev1§4.6).
 pub fn chunk_list_entries(list: &[u8]) -> Result<Vec<(Hash, u32)>, FormatError> {
     if list.len() < 5 || list[0] != CHUNK_LIST_MAGIC {
         return Err(FormatError::BadNode("not a chunk list"));

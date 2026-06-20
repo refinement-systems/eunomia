@@ -1,5 +1,5 @@
 //! DmaPool — the single place in the system where physical addresses are
-//! visible (rev0§2.5).
+//! visible (rev1§2.5).
 //!
 //! Drivers are written against this crate and never see a PA: buffers are
 //! labeled with opaque `DeviceAddress`es (what the device dereferences)
@@ -8,7 +8,7 @@
 //! the `phys-read` rights bit (init grants that bit only to the pool's
 //! holder); on the host it is plain memory with a fake device base.
 //!
-//! When the IO-space object lands (rev0§2.5 committed upgrade), the backing
+//! When the IO-space object lands (rev1§2.5 committed upgrade), the backing
 //! swaps to IOVA-labeled mappings and no driver changes.
 //!
 //! MVP allocator: first-fit free list with merge-on-free. The pool is
@@ -1276,7 +1276,7 @@ impl<B: DmaBacking> DmaPool<B> {
     /// CPU access; drivers never hold raw pointers into DMA memory.
     pub fn bytes(&self, buf: &DmaBuf) -> &[u8] {
         // Volatile-correctness note: QEMU DMA is host memcpy and
-        // cache-coherent (rev0§2.5 real-hardware debt: cache maintenance owed
+        // cache-coherent (rev1§2.5 real-hardware debt: cache maintenance owed
         // with real hardware, alongside barriers tighter than these).
         unsafe { core::slice::from_raw_parts(self.backing.cpu_base().add(buf.offset), buf.len) }
     }

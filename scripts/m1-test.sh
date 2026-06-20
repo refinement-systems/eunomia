@@ -1,8 +1,8 @@
 #!/bin/bash
-# QEMU boot test — the M1 exit criterion (§10), the kernel's cap-mechanism
+# QEMU boot test — the M1 exit criterion (rev1§1), the kernel's cap-mechanism
 # regression. Builds the embedded EL0 test program (`cargo build --features
 # m1-test`, kernel/src/user.rs) and boots it. The program walks the whole
-# M1/§5.1 surface and prints a marker per stage:
+# M1/rev1§5.1 surface and prints a marker per stage:
 #
 #   1  thread 1 alive at EL0
 #   2  a derived (signal-only) cap arrived over a channel and was used
@@ -10,7 +10,7 @@
 #   4  a timer object signalled a bound notification
 #   5  the child's on-exit report fired, read exited(42), and the report
 #      surface is gated by the bind-reports / read-report rights bits
-#   6  channel whole-object teardown (§3.3): revoking a channel's backing
+#   6  channel whole-object teardown (rev1§3.3): revoking a channel's backing
 #      sub-untyped fired every endpoint's peer-closed binding before
 #      reclamation, into a separately-funded notification that survived
 #
@@ -67,5 +67,5 @@ fi
 
 echo "M1 TEST PASS:"
 echo "  123456M1 PASS — caps/CDT, revoke-through-queue + cspace, timer,"
-echo "  thread reports (exit(42), rights gating), and §3.3 channel"
+echo "  thread reports (exit(42), rights gating), and rev1§3.3 channel"
 echo "  whole-object teardown firing every peer-closed binding"

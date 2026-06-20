@@ -1,5 +1,5 @@
 #![no_main]
-//! ELF64 parse on arbitrary bytes (rev0§5). Program images are data in the
+//! ELF64 parse on arbitrary bytes (rev1§5). Program images are data in the
 //! versioned store, so any holder of write access to a path feeds bytes to
 //! this parser — it is untrusted input. Property set: never panic; every
 //! segment range the parser reports is bounds-checked against the input

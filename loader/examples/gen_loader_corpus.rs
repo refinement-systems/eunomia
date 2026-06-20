@@ -54,7 +54,7 @@ fn main() {
     one.extend_from_slice(b"codecode");
     write_seed("one_segment", &one);
 
-    // Two PT_LOADs: R+X text then R+W data, each page-aligned per rev0§5.
+    // Two PT_LOADs: R+X text then R+W data, each page-aligned per rev1§5.
     let mut two = header(2);
     two.extend_from_slice(&phdr(PF_R | PF_X, 0x1000, 0x8000_0000, 0x20, 0x20));
     two.extend_from_slice(&phdr(PF_R | PF_W, 0x2000, 0x8001_0000, 0x10, 0x40));

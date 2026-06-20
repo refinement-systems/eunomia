@@ -72,7 +72,7 @@ pub fn parse(bytes: &[u8]) -> Result<Image<'_>, ElfError> {
     }
     let e_type = u16le(bytes, 16)?;
     if e_type != 2 {
-        // ET_EXEC: userspace is statically linked at fixed VAs (rev0§5).
+        // ET_EXEC: userspace is statically linked at fixed VAs (rev1§5).
         return Err(ElfError::NotExecutable);
     }
     if u16le(bytes, 18)? != 183 {

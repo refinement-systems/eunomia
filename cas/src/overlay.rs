@@ -1,13 +1,13 @@
-//! Per-ref in-memory overlay — the memtable (spec rev0§4.3–4.4).
+//! Per-ref in-memory overlay — the memtable (spec rev1§4.3–4.4).
 //!
 //! Writes land here first, keyed by path with per-file interval maps;
 //! reads consult the overlay and fall through to the immutable tree — an
 //! LSM read path whose bottom level is the prolly tree. Bounds are
-//! denominated in bytes of dirty overlay (rev0§4.4); the store enforces the
+//! denominated in bytes of dirty overlay (rev1§4.4); the store enforces the
 //! budget with backpressure-by-flush, never eviction.
 //!
 //! Paths key the overlay directly: rename support (and with it the
-//! ephemeral file-id indirection of rev0§4.9) is deferred until a rename
+//! ephemeral file-id indirection of rev1§4.9) is deferred until a rename
 //! operation exists.
 
 use alloc::collections::{BTreeMap, BTreeSet};
@@ -50,7 +50,7 @@ impl FileOverlay {
     }
 
     /// Insert an interval, trimming whatever it overlaps (last-write-wins,
-    /// rev0§4.4). Returns the change in dirty bytes.
+    /// rev1§4.4). Returns the change in dirty bytes.
     fn insert(&mut self, off: u64, data: Vec<u8>) -> isize {
         let end = off + data.len() as u64;
         let mut delta = data.len() as isize;

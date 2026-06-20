@@ -1,7 +1,7 @@
 //! Minimal GICv3 bring-up for QEMU virt (single core, group-1 only).
 //!
 //! Just enough to take the virtual-timer PPI (INTID 27) at EL1. Userspace
-//! IRQ-handler caps (rev0§1) are introduced by the userspace drivers.
+//! IRQ-handler caps (rev1§1) are introduced by the userspace drivers.
 
 use core::arch::asm;
 

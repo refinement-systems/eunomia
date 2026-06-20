@@ -1,4 +1,4 @@
-//! Storage server core: sessions, handles, tickets (spec rev0§2.2-2.4).
+//! Storage server core: sessions, handles, tickets (spec rev1§2.2-2.4).
 //!
 //! A storage cap at the boundary is a small integer handle, meaningful
 //! only relative to its session. The server keeps, per session:
@@ -7,7 +7,7 @@
 //!
 //! The wire protocol is handle-relative: every operation names a handle
 //! plus a component-list path resolved *under* the handle's subtree —
-//! confinement by unreachability, not checked policy (rev0§2.3). Raw hashes
+//! confinement by unreachability, not checked policy (rev1§2.3). Raw hashes
 //! never appear as request parameters.
 //!
 //! This module is transport-agnostic and host-testable: `Server::handle`
@@ -32,13 +32,13 @@ use cas::overlay::Path as TreePath;
 use cas::prolly::{Content, Entry, EntryKind};
 use cas::store::{Store, StoreError};
 
-// ── Rights (rev0§2.3) ───────────────────────────────────────────────────
+// ── Rights (rev1§2.3) ───────────────────────────────────────────────────
 
 pub const R_READ: u8 = 1 << 0;
 pub const R_WRITE: u8 = 1 << 1;
 pub const R_SNAPSHOT: u8 = 1 << 2;
-/// Destructive enough to deserve its own bit (rev0§2.3); also gates mass
-/// revocation (generation bump, rev0§2.2).
+/// Destructive enough to deserve its own bit (rev1§2.3); also gates mass
+/// revocation (generation bump, rev1§2.2).
 pub const R_REWRITE_HISTORY: u8 = 1 << 3;
 pub const R_ENUMERATE: u8 = 1 << 4;
 pub const R_ALL: u8 = 0b1_1111;
@@ -51,7 +51,7 @@ pub enum HandleTarget {
     /// Immutable subtree, denoted by its node hash (internal only — the
     /// hash never crosses the boundary).
     Snapshot { root: Hash },
-    /// Live ref, subtree-scoped by server-side path resolution (rev0§2.3).
+    /// Live ref, subtree-scoped by server-side path resolution (rev1§2.3).
     Ref {
         name: Vec<u8>,
         subtree: TreePath,
@@ -82,7 +82,7 @@ impl Session {
 
 // ── Protocol ────────────────────────────────────────────────────────────
 
-/// Handle-relative requests (rev0§2.4). Paths are component lists; `/` is
+/// Handle-relative requests (rev1§2.4). Paths are component lists; `/` is
 /// shell presentation. Capability-bearing results are handle ids; tickets
 /// are the only bearer tokens and are one-shot with a TTL.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,7 +93,7 @@ pub enum Request {
     Write { handle: HandleId, path: TreePath, offset: u64, data: Vec<u8> },
     Unlink { handle: HandleId, path: TreePath },
     List { handle: HandleId, path: TreePath },
-    /// Attenuate: sub-subtree + rights mask, in one step (rev0§2.4 delegation).
+    /// Attenuate: sub-subtree + rights mask, in one step (rev1§2.4 delegation).
     OpenChild { handle: HandleId, path: TreePath, rights_mask: u8 },
     Close { handle: HandleId },
     Sync { handle: HandleId },
@@ -103,14 +103,14 @@ pub enum Request {
     OpenSnapshot { handle: HandleId, snap_id: u64, path: TreePath, rights_mask: u8 },
     Rollback { handle: HandleId, snap_id: u64 },
     /// Mass revocation: bump the ref's generation; every outstanding
-    /// handle on it (all sessions) goes stale on next use (rev0§2.2).
+    /// handle on it (all sessions) goes stale on next use (rev1§2.2).
     RevokeRef { handle: HandleId },
     MintTicket { handle: HandleId, ttl_nanos: u64 },
     RedeemTicket { ticket: [u8; 16] },
     /// Size of a file (None response = absent).
     Stat { handle: HandleId, path: TreePath },
     EnumerateSession,
-    /// History rewriting (rev0§4.6-4.7): drop one snapshot row. Sets the
+    /// History rewriting (rev1§4.6-4.7): drop one snapshot row. Sets the
     /// post-rewrite GC trigger; the reclamation itself is asynchronous.
     DeleteSnapshot { handle: HandleId, snap_id: u64 },
     /// Edit a snapshot's retention class (the "mark survivors keep" flow).
@@ -159,7 +159,7 @@ pub enum Response {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ErrorCode {
     BadHandle,
-    /// Generation mismatch: the handle was mass-revoked (rev0§2.2).
+    /// Generation mismatch: the handle was mass-revoked (rev1§2.2).
     Stale,
     Denied,
     BadPath,
@@ -168,7 +168,7 @@ pub enum ErrorCode {
     NoSuchSnapshot,
     BadTicket,
     Internal,
-    /// The snapshot is a tag target; tags are keep-strength pins (rev0§4.7).
+    /// The snapshot is a tag target; tags are keep-strength pins (rev1§4.7).
     Pinned,
     /// Write offset/length out of range (overflow or beyond store capacity).
     BadOffset,
@@ -188,7 +188,7 @@ pub struct Server<D: BlockDev> {
     tickets: BTreeMap<[u8; 16], PendingTicket>,
     ticket_seq: u64,
     ticket_seed: u64,
-    /// GC requested by a trigger (rev0§4.6): a history-rewriting op, or the
+    /// GC requested by a trigger (rev1§4.6): a history-rewriting op, or the
     /// space watermark. The transport drains it after replying, so the
     /// foreground op stays O(small) and reclamation follows promptly.
     gc_requested: bool,
@@ -229,7 +229,7 @@ impl<D: BlockDev> Server<D> {
     }
 
     /// Open a session pre-populated with grants — the delegation-along-
-    /// spawn path (rev0§2.4): the parent names handles + attenuation, the
+    /// spawn path (rev1§2.4): the parent names handles + attenuation, the
     /// child gets a fresh session. Grant construction is the caller's
     /// (init's / the parent's) authority; there is no other way to get a
     /// first handle.
@@ -244,7 +244,7 @@ impl<D: BlockDev> Server<D> {
         id
     }
 
-    /// Transport's peer-closed path (rev0§2.4 cleanup): drop the whole table.
+    /// Transport's peer-closed path (rev1§2.4 cleanup): drop the whole table.
     pub fn close_session(&mut self, id: SessionId) {
         self.sessions.remove(&id);
     }
@@ -274,7 +274,7 @@ impl<D: BlockDev> Server<D> {
             Ok(resp) => resp,
             Err(e) => Response::Err(e),
         };
-        // The crude space watermark (rev0§4.6): below ~20% free, request a
+        // The crude space watermark (rev1§4.6): below ~20% free, request a
         // cycle — unless GC already ran at this generation and this is
         // simply how full the store is.
         let sp = self.store.space();
@@ -285,7 +285,7 @@ impl<D: BlockDev> Server<D> {
     }
 
     /// Validate handle liveness (generation check — lazy mass revocation,
-    /// rev0§2.2) and the rights needed for the op.
+    /// rev1§2.2) and the rights needed for the op.
     fn lookup(
         &self,
         session: SessionId,
@@ -319,7 +319,7 @@ impl<D: BlockDev> Server<D> {
     }
 
     /// "." and ".." are path syntax for shells, never sent to the server
-    /// (rev0§4.9); reject them and any malformed component up front.
+    /// (rev1§4.9); reject them and any malformed component up front.
     fn validate_path(path: &TreePath) -> Result<(), ErrorCode> {
         for c in path {
             cas::prolly::validate_name(c).map_err(|_| ErrorCode::BadPath)?;
@@ -406,7 +406,7 @@ impl<D: BlockDev> Server<D> {
             }
             Request::OpenChild { handle, path, rights_mask } => {
                 let e = self.lookup(session, handle, 0)?;
-                // Monotone derivation (rev0§2.3): intersection only.
+                // Monotone derivation (rev1§2.3): intersection only.
                 let rights = e.rights & rights_mask;
                 let entry = match &e.target {
                     HandleTarget::Ref { name, subtree, gen_at_grant } => {
@@ -451,7 +451,7 @@ impl<D: BlockDev> Server<D> {
                 let HandleTarget::Ref { name, .. } = &e.target else {
                     return Err(ErrorCode::ReadOnly);
                 };
-                // Provenance is server-filled (rev0§4.7), never client-supplied.
+                // Provenance is server-filled (rev1§4.7), never client-supplied.
                 let prov = format!("session={session}");
                 let id = self
                     .store
@@ -517,7 +517,7 @@ impl<D: BlockDev> Server<D> {
                 self.store
                     .rollback(&name.clone(), snap_id)
                     .map_err(store_err)?;
-                // Post-rewrite trigger (rev0§4.6): the abandoned head (unless
+                // Post-rewrite trigger (rev1§4.6): the abandoned head (unless
                 // snapshotted) just became garbage.
                 self.gc_requested = true;
                 Ok(Response::Ok)
@@ -592,7 +592,7 @@ impl<D: BlockDev> Server<D> {
             Request::DeleteSnapshot { handle, snap_id } => {
                 let name = self.rewrite_target(session, handle)?;
                 self.store.delete_snapshot(&name, snap_id).map_err(store_err)?;
-                // Post-rewrite trigger (rev0§4.6): reclamation follows
+                // Post-rewrite trigger (rev1§4.6): reclamation follows
                 // promptly while this op stays O(small).
                 self.gc_requested = true;
                 Ok(Response::Ok)

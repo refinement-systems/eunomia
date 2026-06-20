@@ -1,10 +1,10 @@
-//! Sessions and connect (spec rev0§3.5) — the **admission** layer. A client
-//! funds the channel (retypes it from its own untyped, rev0§3.2) and sends a
+//! Sessions and connect (spec rev1§3.5) — the **admission** layer. A client
+//! funds the channel (retypes it from its own untyped, rev1§3.2) and sends a
 //! `ConnectReq` naming a requested **bulk-window size**; the server grants or
 //! refuses at a **single admission point**, bounded by its per-server window
 //! quota. Queue memory is the connector's; window memory is the server's, capped
 //! by the quota it enforces here — so an anonymous connect cannot drain the
-//! server (rev0§3.5, "fund by failure mode").
+//! server (rev1§3.5, "fund by failure mode").
 //!
 //! The genuinely-new, safety-bearing logic is [`Admission`]: it never grants
 //! past its budget (the quota invariant) and returns the quota on session
@@ -42,7 +42,7 @@ pub const REQ_LEN: usize = 5; // tag + u32
 pub const GRANT_LEN: usize = 9; // tag + u32 window + u32 size
 pub const REFUSED_LEN: usize = 1; // tag
 
-/// A granted bulk window (rev0§3.1): which window and how many bytes. The MVP
+/// A granted bulk window (rev1§3.1): which window and how many bytes. The MVP
 /// grants a single window, so `window` is always 0; it exists so the descriptor
 /// ABI is grow-only when multi-window lands (out of scope).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,12 +67,12 @@ pub enum GrantReply {
 
 /// Why a connect failed. Today the only failure is the server refusing under its
 /// window quota (`admit`'s sole error); the client-side connect *mechanism* (the
-/// endpoint-cap handshake, rev0§3.5) is deferred, so its richer errors — a
+/// endpoint-cap handshake, rev1§3.5) is deferred, so its richer errors — a
 /// peer-closed session channel, a reply that does not decode, a transport error
 /// — are not yet constructed. They return when that mechanism lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectErr {
-    /// The server refused under its quota (rev0§3.5).
+    /// The server refused under its quota (rev1§3.5).
     Refused,
 }
 
@@ -236,7 +236,7 @@ impl GrantReply {
     }
 }
 
-/// The per-server bulk-window quota (rev0§3.5): the **single admission point**.
+/// The per-server bulk-window quota (rev1§3.5): the **single admission point**.
 /// Tracks a fixed `budget` of window bytes and how much is currently `granted`;
 /// `admit` hands out a window iff it fits the remainder (it **never** over-grants
 /// — the quota invariant a malicious flood of connects cannot break), and
@@ -284,7 +284,7 @@ impl Admission {
         self.budget - self.granted
     }
 
-    /// The single admission decision (rev0§3.5): grant `requested` bytes iff they fit
+    /// The single admission decision (rev1§3.5): grant `requested` bytes iff they fit
     /// the remaining quota, accounting for them; otherwise refuse and leave the
     /// quota untouched. **Never grants past budget** — [`Admission::well_formed`]
     /// holds after every call, for *any* `requested`, so a flood of connects can

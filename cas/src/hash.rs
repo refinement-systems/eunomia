@@ -1,5 +1,5 @@
-//! BLAKE3 content addressing (spec rev0§4.1).
-//! Hash = address internally; never authority at the boundary (spec rev0§2.4).
+//! BLAKE3 content addressing (spec rev1§4.1).
+//! Hash = address internally; never authority at the boundary (spec rev1§2.4).
 
 /// A 32-byte BLAKE3 hash — the internal address of a chunk or tree node.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

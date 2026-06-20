@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 # "std" enables host testing; "no_std" for embedded use is planned but
-# not yet wired — all algorithms are host-testable (spec §1).
+# not yet wired — all algorithms are host-testable (spec rev1§1).
 [features]
 default = ["std"]
 std = ["blake3/std"]
@@ -15,10 +15,10 @@ fuzzing = []
 [dependencies]
 blake3 = { version = "1", default-features = false, features = ["pure"] }
 
-# vstd is the *Verus* dependency (plan doc/plans/3_verus-rewrite.md phase 7f/7g):
-# the `verus!{}` macro + ghost vocabulary for the §4.7 host-chokepoint proofs —
+# vstd is the *Verus* dependency (see doc/guidelines/verus.md):
+# the `verus!{}` macro + ghost vocabulary for the rev1§4.7 host-chokepoint proofs —
 # the on-disk superblock chokepoint (`validate_geometry`/`decode_checked` in
-# disk.rs, 7f) and the §4.9 directory-entry TLV codec (`decode_raw`/`encode_raw`
+# disk.rs, 7f) and the rev1§4.9 directory-entry TLV codec (`decode_raw`/`encode_raw`
 # in prolly.rs, 7g — full exec-level canonical-form round-trip + decode totality).
 # The `alloc` feature (added in 7g) enables vstd's `Vec` specs, which the
 # `Vec`-building TLV encoder needs (7f's fixed-size superblock was Vec-free). It

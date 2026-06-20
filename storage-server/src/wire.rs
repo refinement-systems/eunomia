@@ -1,6 +1,6 @@
-//! Wire encoding for the storage protocol (spec rev0§3.7): a fixed
+//! Wire encoding for the storage protocol (spec rev1§3.7): a fixed
 //! hand-defined header (magic, protocol id, version) + a postcard body.
-//! Messages fit the 256-byte inline channel payload (rev0§3.1); bulk data
+//! Messages fit the 256-byte inline channel payload (rev1§3.1); bulk data
 //! rides in bounded Read/Write slices until the shared-memory bulk path
 //! lands. Decoders treat payloads as untrusted and reject bad headers
 //! and trailing bytes.

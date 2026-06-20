@@ -1,6 +1,6 @@
-//! On-disk formats (rev0§4.2): superblocks, WAL records, the ref table,
+//! On-disk formats (rev1§4.2): superblocks, WAL records, the ref table,
 //! and the chunk index. All hand-defined and little-endian — nothing
-//! persistent speaks postcard (rev0§3.7). Decoders are strict and reject
+//! persistent speaks postcard (rev1§3.7). Decoders are strict and reject
 //! trailing bytes.
 //!
 //! Device layout:
@@ -11,11 +11,11 @@
 //!
 //! Format v2: the superblock references a durable index object — the
 //! hash → (offset, length, birth generation) map plus the free-extent
-//! list (rev0§4.2 items 3 and 4) — written as an ordinary self-verifying
+//! list (rev1§4.2 items 3 and 4) — written as an ordinary self-verifying
 //! frame. v1 rebuilt the index by scanning an append-only region; a scan
 //! cannot represent holes, and GC exists to make holes.
 //!
-//! Format v3 (time page, rev0§2.6): snapshot timestamps and file mtimes are
+//! Format v3 (time page, rev1§2.6): snapshot timestamps and file mtimes are
 //! UTC nanoseconds since the Unix epoch. The layout did not change — a
 //! tick field and a nanosecond field are structurally identical — which
 //! is exactly why the version had to: pre-v3 images (whose on-OS rows
@@ -23,7 +23,7 @@
 //! with mkfs, never silently misread as dates in 1970.
 //!
 //! The generation-checksummed A/B superblock flip is the single atomicity
-//! mechanism for the entire system (rev0§4.2).
+//! mechanism for the entire system (rev1§4.2).
 
 use crate::hash::Hash;
 use crate::prolly::{FormatError, Reader};
@@ -95,7 +95,7 @@ impl Superblock {
         )
     }
 
-    /// None = unusable for any reason; recovery discards it (rev0§4.5).
+    /// None = unusable for any reason; recovery discards it (rev1§4.5).
     pub fn decode(buf: &[u8]) -> Option<Superblock> {
         Self::decode_checked(buf).ok()
     }
@@ -104,7 +104,7 @@ impl Superblock {
     /// slot is recovery's business (discard, try the other slot), while an
     /// intact slot from another format version must surface as a version
     /// error — tick-era (pre-v3) timestamp fields are structurally
-    /// identical to nanosecond fields, so misreading is silent (rev0§2.6).
+    /// identical to nanosecond fields, so misreading is silent (rev1§2.6).
     ///
     /// Thin assembly wrapper over the Verus-verified [`decode_checked_fields`]:
     /// that function proves the parse is **total** ∀ buffer bytes (no panic —
@@ -134,7 +134,7 @@ verus! {
 pub const SB_SIZE: usize = 4096;
 /// First byte of the WAL region (after the two 4 KiB superblock slots).
 pub const WAL_OFF: u64 = 8192;
-/// On-disk format version (format v3, rev0§2.6). Inside the macro for the version
+/// On-disk format version (format v3, rev1§2.6). Inside the macro for the version
 /// gate in `decode_checked_fields`.
 pub(crate) const SB_VERSION: u32 = 3;
 /// Chunk frame header size (magic + len + birth gen + hash). Inside the macro
@@ -166,7 +166,7 @@ pub open spec fn geometry_ok(
     &&& (index_off as int + CHUNK_HEADER as int <= chunk_tail as int)
 }
 
-/// The rev0§4.5 mount geometry chokepoint, verified ∀. Total over all
+/// The rev1§4.5 mount geometry chokepoint, verified ∀. Total over all
 /// field values and `dev_len` (it is all `checked_add`); accepts iff
 /// [`geometry_ok`]; and on `Ok` the committed chunk region provably fits the
 /// device.
@@ -228,7 +228,7 @@ pub enum SbError {
     /// Torn, unwritten, or not a superblock at all.
     Invalid,
     /// Intact (magic and checksum verify) but written by another format
-    /// version — refuse, never reinterpret (rev0§2.6).
+    /// version — refuse, never reinterpret (rev1§2.6).
     WrongVersion(u32),
 }
 
@@ -379,14 +379,14 @@ pub fn decode_checked_fields(buf: &[u8]) -> (r: Result<RawSuperblock, SbError>) 
 
 } // verus!
 
-// ── Chunk index object (rev0§4.2 items 3–4, durable since format v2) ───────
+// ── Chunk index object (rev1§4.2 items 3–4, durable since format v2) ───────
 
 const INDEX_MAGIC: &[u8; 4] = b"CIDX";
 
 /// One indexed object: `off` is the *data* offset within the chunk region
 /// (the frame header sits CHUNK_HEADER bytes before it). `birth` is the
 /// superblock generation the object was appended under — the GC epoch
-/// hook (rev0§4.2, rev0§4.6).
+/// hook (rev1§4.2, rev1§4.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexEntry {
     pub off: u64,
@@ -578,7 +578,7 @@ impl WalOp {
 
     /// Parse one record at the start of `buf`. Returns (seq, op, record
     /// length). None = no valid record here (torn tail or end of log —
-    /// either way replay stops, rev0§4.5: such records were never acked).
+    /// either way replay stops, rev1§4.5: such records were never acked).
     pub fn decode_record(buf: &[u8]) -> Option<(u64, WalOp, usize)> {
         if buf.len() < WAL_HEADER || &buf[0..4] != WAL_MAGIC {
             return None;
@@ -597,7 +597,7 @@ impl WalOp {
     }
 }
 
-// ── Ref table (rev0§4.1, rev0§4.7) ──────────────────────────────────────────────
+// ── Ref table (rev1§4.1, rev1§4.7) ──────────────────────────────────────────────
 
 const REFT_MAGIC: &[u8; 4] = b"REFT";
 
@@ -608,7 +608,7 @@ pub const CLASS_EPHEMERAL: u8 = 2;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefEntry {
     pub root: Hash,
-    /// Storage-cap revocation generation (rev0§2.2) — not the superblock
+    /// Storage-cap revocation generation (rev1§2.2) — not the superblock
     /// generation. Bumping it lazily invalidates all outstanding handles.
     pub generation: u64,
     pub next_snap_id: u64,
@@ -619,9 +619,9 @@ pub struct SnapRow {
     pub id: u64,
     pub root: Hash,
     /// UTC nanoseconds since the Unix epoch (format v3; the spec-level
-    /// representation is signed 64-bit, rev0§2.6 — positive in practice, so
+    /// representation is signed 64-bit, rev1§2.6 — positive in practice, so
     /// the u64 carries identical bytes). Server-assigned, strictly
-    /// increasing per ref (rev0§4.7).
+    /// increasing per ref (rev1§4.7).
     pub timestamp: u64,
     pub provenance: Vec<u8>,
     pub parent: Option<u64>,
@@ -633,7 +633,7 @@ pub struct SnapRow {
 pub struct RefTable {
     pub refs: BTreeMap<Vec<u8>, RefEntry>,
     /// (ref name, snapshot id) → row. Snapshot identity is the per-ref
-    /// sequence number, never a hash (rev0§4.7).
+    /// sequence number, never a hash (rev1§4.7).
     pub snaps: BTreeMap<(Vec<u8>, u64), SnapRow>,
     pub tags: BTreeMap<Vec<u8>, (Vec<u8>, u64)>,
 }
@@ -742,7 +742,7 @@ pub const CHUNK_MAGIC: &[u8; 4] = b"CHNK";
 // it); it erases to the same `pub const CHUNK_HEADER: usize = 48`.
 
 /// Frame a chunk for the append-only store: magic, length, birth
-/// generation (rev0§4.2 — the GC epoch hook), content hash, data.
+/// generation (rev1§4.2 — the GC epoch hook), content hash, data.
 pub fn encode_chunk_frame(data: &[u8], birth_gen: u64, hash: &Hash) -> Vec<u8> {
     let mut out = Vec::with_capacity(CHUNK_HEADER + data.len());
     out.extend_from_slice(CHUNK_MAGIC);

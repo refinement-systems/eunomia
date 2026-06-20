@@ -1,4 +1,4 @@
-//! Address spaces and the page-table walker (rev0§2.5).
+//! Address spaces and the page-table walker (rev1§2.5).
 //!
 //! The AArch64 translation-table walk lives here as **safe Rust over the table
 //! pool as an indexed slice**: `map_in`/`unmap_in`/`range_mapped_in`
@@ -13,7 +13,7 @@
 //! sanctioned int→pointer boundary), holds the ASID allocator and the boot
 //! kernel-L1 copy, and implements the TLBI/barrier `Env` hooks the walker calls.
 //!
-//! Mapping state lives in the frame cap, not here (rev0§2.5): one mapping per cap
+//! Mapping state lives in the frame cap, not here (rev1§2.5): one mapping per cap
 //! copy, and deleting or revoking the cap unmaps it (via [`unmap_in`] behind
 //! [`crate::store::Store::aspace_unmap`]).
 
@@ -84,7 +84,7 @@ verus! {
 pub enum MapError {
     BadVa,
     AlreadyMapped,
-    /// Table pool exhausted — donate a bigger pool (rev0§2.5: one error path).
+    /// Table pool exhausted — donate a bigger pool (rev1§2.5: one error path).
     NeedMemory,
 }
 
@@ -172,9 +172,9 @@ pub fn va_range_ok(va: u64, pages: u64) -> (ok: bool)
 /// Build a leaf (L3 page) descriptor. AF and PXN are unconditional (user pages
 /// are never EL1-executable); a writable perm grants `AP_EL0_RW`, else RO;
 /// **device memory is never executable** — `PERM_X` is ignored when
-/// `PERM_DEVICE` is set (rev0§2.5). The output address is masked to bits [47:12].
+/// `PERM_DEVICE` is set (rev1§2.5). The output address is masked to bits [47:12].
 ///
-/// Verified — the rev0§2.5 **isolation theorem**, ∀ `(pa, perms)`: AF + PXN
+/// Verified — the rev1§2.5 **isolation theorem**, ∀ `(pa, perms)`: AF + PXN
 /// always set; `AP` grants EL0 write iff `PERM_W`; device is non-executable
 /// (`UXN`) + `SH_NONE` + `ATTR_DEVICE` even when `PERM_X` is set;
 /// a non-device non-`X` page is `UXN`; the address field round-trips. The

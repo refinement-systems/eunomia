@@ -1,5 +1,5 @@
-//! Capability spaces and the capability derivation tree (rev0§2.1–2.3,
-//! rev0§3.4).
+//! Capability spaces and the capability derivation tree (rev1§2.1–2.3,
+//! rev1§3.4).
 //!
 //! Every kernel object is reached through a `Cap` living in a `CapSlot`.
 //! Slots form the CDT: parent/first-child/sibling links threaded through
@@ -26,7 +26,7 @@ use crate::store::{Binding, Store};
 use crate::thread::{Report, ThreadState};
 use vstd::prelude::*;
 
-/// Rights bits — monotone under derivation (rev0§2.3): `derive` may only clear
+/// Rights bits — monotone under derivation (rev1§2.3): `derive` may only clear
 /// bits, never set them.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Rights(pub u8);
@@ -40,19 +40,19 @@ verus! {
 impl Rights {
     pub const READ: u8 = 1 << 0; // recv / wait
     pub const WRITE: u8 = 1 << 1; // send / signal
-    /// phys-read (rev0§2.5): gates frame_paddr and device mappings. Granted
+    /// phys-read (rev1§2.5): gates frame_paddr and device mappings. Granted
     /// only on boot-created device/DMA caps — ALL deliberately excludes
     /// it so ordinary derivation chains can never reach a PA.
     pub const PHYS: u8 = 1 << 2;
-    /// bind-reports (rev0§2.3): configure a thread's on-exit/on-fault
-    /// binding slots (rev0§5.1).
+    /// bind-reports (rev1§2.3): configure a thread's on-exit/on-fault
+    /// binding slots (rev1§5.1).
     pub const BIND_REPORTS: u8 = 1 << 3;
-    /// read-report (rev0§2.3): read a thread's terminal report record;
-    /// later also the debugger's register access (deferred, rev0§8).
+    /// read-report (rev1§2.3): read a thread's terminal report record;
+    /// later also the debugger's register access (deferred, rev1§8).
     pub const READ_REPORT: u8 = 1 << 4;
     pub const ALL: Rights = Rights(0b11);
-    /// The creator's thread cap (rev0§2.3 thread bits; kill is deliberately
-    /// not on the list — destruction is resource ancestry, rev0§2.2).
+    /// The creator's thread cap (rev1§2.3 thread bits; kill is deliberately
+    /// not on the list — destruction is resource ancestry, rev1§2.2).
     pub const THREAD_ALL: Rights =
         Rights(Rights::READ | Rights::WRITE | Rights::BIND_REPORTS | Rights::READ_REPORT);
 
@@ -90,7 +90,7 @@ pub enum ChanEnd {
 /// The object a cap designates. Untyped carries its region inline: untyped
 /// caps are never copied (the watermark must have one owner), so the state
 /// needs no shared object. Frames carry their mapping inline too — one
-/// mapping per cap copy, and deleting the cap unmaps it (rev0§2.5). Object
+/// mapping per cap copy, and deleting the cap unmaps it (rev1§2.5). Object
 /// designations are opaque [`ObjId`] handles (was a `*mut Obj`).
 #[derive(Clone, Copy)]
 pub enum CapKind {
@@ -107,8 +107,8 @@ pub enum CapKind {
     },
     Aspace(crate::id::ObjId),
     CSpace(crate::id::ObjId),
-    // The `u8` is the rev0§5.4 maximum-controlled-priority ceiling — a value on the
-    // cap (rev0§2.3), attenuated monotonically by `derive` like rights. spawn gates a
+    // The `u8` is the rev1§5.4 maximum-controlled-priority ceiling — a value on the
+    // cap (rev1§2.3), attenuated monotonically by `derive` like rights. spawn gates a
     // thread's priority on it (`prio <= max_prio`).
     Thread(crate::id::ObjId, u8),
     Channel(crate::id::ObjId, ChanEnd),
@@ -134,7 +134,7 @@ impl Cap {
 }
 
 /// A capability slot, CDT links included. Slots live inside cspace objects
-/// and inside channel message slots — both are CDT-visible (rev0§3.4). The
+/// and inside channel message slots — both are CDT-visible (rev1§3.4). The
 /// links are [`SlotId`] handles ([`crate::id`]) that span containers exactly
 /// as the old `*mut CapSlot` links did, with no special case in the revoke
 /// walk.
@@ -322,7 +322,7 @@ pub struct ExReport(Report);
 #[verifier::ext_equal]
 pub struct ChanView {
     pub depth: nat,
-    // Per-end live-endpoint-cap counts (peer-closed, rev0§3.3) and per-ring FIFO
+    // Per-end live-endpoint-cap counts (peer-closed, rev1§3.3) and per-ring FIFO
     // cursors. Seqs of length 2 (ring/end ∈ {0,1}).
     pub end_caps: Seq<nat>,
     pub head: Seq<nat>,
@@ -365,7 +365,7 @@ pub struct TcbView {
     pub retval: u64,
     pub cspace: Option<ObjId>,
     pub aspace: Option<ObjId>,
-    // rev0§5.4 run priority. Bounded by the spawner's cap ceiling (`cap_max_prio`) and
+    // rev1§5.4 run priority. Bounded by the spawner's cap ceiling (`cap_max_prio`) and
     // written only through the verified `thread::set_priority`: surfacing it in the
     // view is what lets `set_priority` carry a machine-checked
     // `priority == prio (≤ ceiling)`.
@@ -1154,9 +1154,9 @@ pub closed spec fn is_thread_cap_for(c: Cap, t: ObjId) -> bool {
     c.kind matches CapKind::Thread(o, _) && o == t
 }
 
-// The rev0§5.4 maximum-controlled-priority ceiling a cap carries, if it is a thread
+// The rev1§5.4 maximum-controlled-priority ceiling a cap carries, if it is a thread
 // cap (else `None`). Priority attenuates monotonically through `derive` exactly
-// like rights (rev0§2.3) — see `derive`'s ceiling `ensures`.
+// like rights (rev1§2.3) — see `derive`'s ceiling `ensures`.
 pub open spec fn cap_max_prio(c: Cap) -> Option<u8> {
     match c.kind {
         CapKind::Thread(_, mp) => Some(mp),
@@ -1169,7 +1169,7 @@ pub open spec fn is_empty_cap(c: Cap) -> bool {
 }
 
 // The (channel, end-index) a cap designates, if it is a channel cap (else `None`).
-// Narrower than `cap_obj` (which drops the end): the rev0§3.3 per-endpoint census
+// Narrower than `cap_obj` (which drops the end): the rev1§3.3 per-endpoint census
 // `end_cap_count` filters on *which end* a `Channel(o, end)` cap names, since
 // `end_caps[end]` is tracked per end for peer-closed firing.
 pub open spec fn cap_chan_end(c: Cap) -> Option<(ObjId, int)> {
@@ -1202,12 +1202,12 @@ pub fn cap_is_empty(c: Cap) -> (r: bool)
 
 // The kind a derivation produces from `k` under a requested priority ceiling:
 // identical (same object, same channel end), except a Frame copy starts unmapped
-// (rev0§2.5, one mapping per cap copy) and a Thread copy's rev0§5.4 ceiling is reduced to
+// (rev1§2.5, one mapping per cap copy) and a Thread copy's rev1§5.4 ceiling is reduced to
 // `min(parent, prio_ceiling)`. This is the "copy" half of monotone derivation —
 // derivation cannot change the designated object or amplify via the kind, and the
-// priority ceiling can only shrink (rev0§2.3). `prio_ceiling = 0xFF` (the `cap_copy`
+// priority ceiling can only shrink (rev1§2.3). `prio_ceiling = 0xFF` (the `cap_copy`
 // no-reduction sentinel; priorities are `< NUM_PRIOS = 32`) preserves the parent
-// ceiling exactly; a lower value is the rev0§2.3 supervision grant.
+// ceiling exactly; a lower value is the rev1§2.3 supervision grant.
 pub open spec fn derived_kind(k: CapKind, prio_ceiling: u8) -> CapKind {
     match k {
         CapKind::Frame { base, pages, mapping: _ } => CapKind::Frame { base, pages, mapping: None },
@@ -1307,10 +1307,10 @@ pub open spec fn empty_slots_detached(m: Map<SlotId, CapSlot>) -> bool {
     })
 }
 
-// ── CDT descendant reachability (the rev0§3.4 "sees through queues" obligation) ────
+// ── CDT descendant reachability (the rev1§3.4 "sees through queues" obligation) ────
 //
 // `revoke` deletes the *whole subtree* of its target, in-flight queue caps included
-// (rev0§3.4: queue slots are ordinary `CapSlot`s carrying the parent edge, so a cap queued
+// (rev1§3.4: queue slots are ordinary `CapSlot`s carrying the parent edge, so a cap queued
 // in a message is a genuine CDT descendant — `slot_move`, what `send` uses, inherits the
 // edge into the ring slot). The structural predicates above pin only the *direct* child
 // relation; these add the transitive closure so `revoke` can export "the subtree is gone"
@@ -3055,7 +3055,7 @@ pub open spec fn slot_refs(m: Map<SlotId, CapSlot>, obj: ObjId) -> nat {
     m.dom().filter(|k: SlotId| cap_obj(m[k].cap) == Some(obj)).len()
 }
 
-// The rev0§3.3 per-endpoint cap census: the number of live `Channel(ch, e)` caps in
+// The rev1§3.3 per-endpoint cap census: the number of live `Channel(ch, e)` caps in
 // the slot arena. The kernel keeps `chan_view[ch].end_caps[e]` exactly equal to
 // this (maintained by `endpoint_cap_added`/`_dropped`), so peer-closed fires when
 // the *last* endpoint cap is gone. `end_caps_sound` (below) makes that equality a
@@ -3336,7 +3336,7 @@ pub open spec fn cap_frame_aspace(c: Cap) -> Option<ObjId> {
 
 // Channel bindings naming `o`: the `(ch, end, ev)` triples whose binding's notif is
 // `Some(o)` (end ∈ {0,1}, ev ∈ {0,1,2}). A subset of `cv.dom() × {0,1} × {0,1,2}`,
-// finite when `cv.dom()` is. The rev0§3.6 binding term (the `binding_refs_ok` companion).
+// finite when `cv.dom()` is. The rev1§3.6 binding term (the `binding_refs_ok` companion).
 pub open spec fn binding_refs(cv: Map<ObjId, ChanView>, o: ObjId) -> nat {
     Set::new(
         |t: (ObjId, int, int)|
@@ -4581,7 +4581,7 @@ pub proof fn lemma_caps_consistent_frame<S: Store>(s0: &S, s1: &S, n: ObjId)
     }
 }
 
-// The rev0§3.3 per-endpoint cap census as a system invariant (the `caps_consistent`
+// The rev1§3.3 per-endpoint cap census as a system invariant (the `caps_consistent`
 // analog for channel endpoint counts; the body-removal census gate):
 // every live channel's `end_caps[e]` equals the count of `Channel(ch, e)` caps in
 // the arena. Refs-free (reads only `chan_view`/`slot_view`), so a `dec_ref` `-1`
@@ -4970,7 +4970,7 @@ pub proof fn lemma_set_slot_obj_census<S: Store>(
     // The four view terms read framed views (equal args).
 }
 
-// rev0§3.3 endpoint-cap census drop: clearing a `Channel(ch, e)` slot to a non-channel
+// rev1§3.3 endpoint-cap census drop: clearing a `Channel(ch, e)` slot to a non-channel
 // cap lowers `end_cap_count(ch, e)` by one and leaves every other `(ch2, e2)` fixed.
 // The `lemma_designation_drop` shape over the `cap_chan_end` filter; `delete`'s body
 // (PR2) consumes it when it empties a deleted channel cap's slot.
@@ -7761,18 +7761,18 @@ pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
     }
 }
 
-/// Derive a child cap (rev0§2.3): copy with rights intersected — the only
+/// Derive a child cap (rev1§2.3): copy with rights intersected — the only
 /// derivation; there is no amplification path.
 ///
 /// pre: the cspace is well-formed; `src`/`dst` are live; if `src` designates an
 /// object, that object is live (in the refcount table).
 /// post: on `Ok`, `dst` holds a faithful copy of `src`'s cap — same kind and
-/// designated object (a fresh Frame copy starts unmapped, rev0§2.5) — with
+/// designated object (a fresh Frame copy starts unmapped, rev1§2.5) — with
 /// rights ∩ `mask`, so its rights are a **subset** of `src`'s for every
 /// `mask` (the load-bearing monotone-derivation theorem, proven ∀ rather
-/// than sampled). For a thread cap the rev0§5.4 maximum-controlled-priority
+/// than sampled). For a thread cap the rev1§5.4 maximum-controlled-priority
 /// ceiling rides along and so attenuates monotonically too (`child.max_prio
-/// <= parent.max_prio`, rev0§2.3) — the priority axis of the lattice, here
+/// <= parent.max_prio`, rev1§2.3) — the priority axis of the lattice, here
 /// realized as ceiling-preservation. `dst` is `src`'s first child; the object's refcount and
 /// slot census both rise by exactly one; the cspace stays well-formed
 /// **and acyclic** (`cspace_wf` — `dst` is seated as a fresh leaf).
@@ -7802,11 +7802,11 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_
             &&& (final(store).slot_view()[dst].cap.rights.0
                   & old(store).slot_view()[src].cap.rights.0)
                   == final(store).slot_view()[dst].cap.rights.0
-            // rev0§5.4/rev0§2.3 monotone priority ceiling, now *reducing*: a derived thread
+            // rev1§5.4/rev1§2.3 monotone priority ceiling, now *reducing*: a derived thread
             // cap's maximum-controlled-priority ceiling is exactly `min(parent,
             // prio_ceiling)` — never above the parent's (the priority axis of the
             // derivation lattice, ∀) and never above the requested `prio_ceiling`
-            // (the rev0§2.3 supervision grant). Discharged from the
+            // (the rev1§2.3 supervision grant). Discharged from the
             // `derived_kind` equality above (the ceiling rides the kind). With the
             // `cap_copy` sentinel `prio_ceiling = 0xFF` this collapses to exact
             // preservation.
@@ -7856,8 +7856,8 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_
     assert(m0[dst].parent is None && m0[dst].first_child is None
         && m0[dst].next_sib is None && m0[dst].prev_sib is None);
 
-    // One mapping per cap copy (rev0§2.5): a fresh frame copy starts unmapped. A thread
-    // copy's rev0§5.4 ceiling is attenuated to `min(parent, prio_ceiling)` (rev0§2.3).
+    // One mapping per cap copy (rev1§2.5): a fresh frame copy starts unmapped. A thread
+    // copy's rev1§5.4 ceiling is attenuated to `min(parent, prio_ceiling)` (rev1§2.3).
     let kind = match s.cap.kind {
         CapKind::Frame { base, pages, mapping: _ } => CapKind::Frame { base, pages, mapping: None },
         CapKind::Thread(o, mp) => CapKind::Thread(o, if mp <= prio_ceiling { mp } else { prio_ceiling }),
@@ -7992,7 +7992,7 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_
     Ok(())
 }
 
-/// Unlink `slot` from the CDT, re-parenting its children one level up (rev0§2.3).
+/// Unlink `slot` from the CDT, re-parenting its children one level up (rev1§2.3).
 ///
 /// **Verified** (full body proof). Unlike `slot_move` (a
 /// transposition), this is a sibling-list *merge*: a `first_child→next_sib`
@@ -8315,7 +8315,7 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
     }
 }
 
-/// Move a cap between slots, preserving its CDT position (rev0§3.4: send and receive
+/// Move a cap between slots, preserving its CDT position (rev1§3.4: send and receive
 /// move caps; a move is the same cap relocating, not a derivation).
 ///
 /// **Verified** (full body proof). The body's whole effect is
@@ -8717,7 +8717,7 @@ pub(crate) fn dec_ref<S: Store>(store: &mut S, o: ObjId)
         // The cap→object invariant rides through unchanged — it reads only object views, all
         // framed by `set_obj_refs`.
         caps_consistent(old(store)),
-        // The rev0§3.3 endpoint-cap census is likewise refs-free (chan_view + slot_view, both
+        // The rev1§3.3 endpoint-cap census is likewise refs-free (chan_view + slot_view, both
         // framed by `set_obj_refs`), so it rides through too.
         end_caps_sound(old(store)),
         // Refs-domain completeness rides through: the census is framed and `set_obj_refs`
@@ -8837,7 +8837,7 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
             // `delete` preserves the cap→object invariant, so the resident-walk
             // maintains it for the next iteration's `delete`.
             caps_consistent(store),
-            // …and the rev0§3.3 endpoint-cap census.
+            // …and the rev1§3.3 endpoint-cap census.
             end_caps_sound(store),
             // …and refs-domain completeness (each `delete` requires + re-establishes it).
             census_dom_complete(store),
@@ -8971,7 +8971,7 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
         // The system cap→object invariant: needed for the `destroy_channel`/
         // `destroy_tcb` arms (which delete arbitrary caps) and preserved through the `-1`.
         caps_consistent(old(store)),
-        // The rev0§3.3 endpoint-cap census: the recursive
+        // The rev1§3.3 endpoint-cap census: the recursive
         // destructors delete arbitrary channel caps, so it threads through here too.
         end_caps_sound(old(store)),
         // Refs-domain completeness: threaded so the destructors keep
@@ -9672,7 +9672,7 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         // system invariant supplies (discharged by the now-proven body). The verified callers
         // (`bind`, `revoke`, `destroy_cspace`) carry it like 6a's `refcount_sound`.
         caps_consistent(old(store)),
-        // The rev0§3.3 endpoint-cap census (the body-removal census gate): the body's
+        // The rev1§3.3 endpoint-cap census (the body-removal census gate): the body's
         // Channel branch deletes one of possibly several `(co, end)` caps; this equality is
         // what lets it re-prove `caps_consistent`'s `end_caps[end] > 0` for the surviving
         // siblings. The verified callers carry it like `refcount_sound`.
@@ -9765,7 +9765,7 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
     // — the base the teardown branches + `obj_unref` compose onto.
     proof { lemma_dead_tcb_frozen_refl(&st0, store); }
     let ghost st_prep = *store;
-    // Channel endpoint liveness is tracked per end for peer-closed (rev0§3.3).
+    // Channel endpoint liveness is tracked per end for peer-closed (rev1§3.3).
     if let CapKind::Channel(ch, end) = cap.kind {
         proof {
             assert(cap_consistent(old(store), cap));
@@ -9795,7 +9795,7 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
     }
     let ghost st_chan = *store;
     // Deleting a mapped frame cap unmaps it — the one revocation story
-    // for shared memory (rev0§2.5).
+    // for shared memory (rev1§2.5).
     if let CapKind::Frame { pages, mapping: Some((asp, va)), .. } = cap.kind {
         let ghost s_pre = *store;
         store.aspace_unmap(asp, va, pages);
@@ -9991,7 +9991,7 @@ pub fn descend_to_leaf<S: Store>(store: &S, start: SlotId) -> (leaf: SlotId)
 }
 
 /// Revoke: delete every CDT descendant of `slot` — cspace residents and
-/// in-flight queue slots alike, unconditionally (rev0§2.2).
+/// in-flight queue slots alike, unconditionally (rev1§2.2).
 ///
 /// **Terminates** (`decreases count_nonempty`): each iteration descends to a
 /// leaf and deletes it, and `delete` strictly lowers the live-slot count — the
@@ -10002,7 +10002,7 @@ pub fn descend_to_leaf<S: Store>(store: &S, start: SlotId) -> (leaf: SlotId)
 /// `ensures` `first_child is None` + `cspace_wf` hold for *any* live `slot`, with **no homing
 /// precondition**: they ride `delete`'s unconditional teardown contract and the loop
 /// `decreases`, independent of whether `slot` is some object's home handle. This is the
-/// rev0§2.2 spec guarantee ("deletes all descendants … unconditional"), provable for the
+/// rev1§2.2 spec guarantee ("deletes all descendants … unconditional"), provable for the
 /// `homed_in_cspace` target every `Sys::CapRevoke` actually supplies (`cur_slot` is a cell of
 /// the caller's cspace) — not only for un-homed inputs the kernel never sends.
 ///
@@ -10026,7 +10026,7 @@ pub fn descend_to_leaf<S: Store>(store: &S, start: SlotId) -> (leaf: SlotId)
 /// survives, but proving *that* needs the stronger "emptied ⟹ a homing object was destroyed"
 /// frame (refs-monotone, the refcount cascade). `unhomed_frozen` is its foundation.
 ///
-/// **Sees through queues — a named obligation.** rev0§3.4 / the M1 exit criterion demand that
+/// **Sees through queues — a named obligation.** rev1§3.4 / the M1 exit criterion demand that
 /// `revoke` destroy descendants *including a cap queued in an in-flight message* "like any
 /// other descendant, no special case." It is exported: `ensures no_live_descendant(final, slot)`
 /// (no live slot — resident or in-flight ring cap — is a CDT descendant of `slot` afterward),
@@ -10056,7 +10056,7 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
     ensures
         // Descendant-deletion and well-formedness are **unconditional**: they
         // hold for *any* target, including the `homed_in_cspace` slot every `Sys::CapRevoke`
-        // supplies — so the spec-mandated guarantee (rev0§2.2) is reachable from the real call path.
+        // supplies — so the spec-mandated guarantee (rev1§2.2) is reachable from the real call path.
         cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom().contains(slot),
         final(store).slot_view()[slot].first_child is None,
@@ -10080,7 +10080,7 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
         // subtree predicate, by design); the witness is the initial-state home + its destruction.
         is_empty_cap(final(store).slot_view()[slot].cap)
             ==> exists|o: ObjId| homes(old(store), o, slot) && dead_obj(final(store), o),
-        // **Sees through queues — the rev0§3.4 / M1 subtree-deletion obligation, named.** After
+        // **Sees through queues — the rev1§3.4 / M1 subtree-deletion obligation, named.** After
         // `revoke`, no live slot anywhere — cspace resident *or* in-flight
         // channel ring cap — is a CDT descendant of `slot`. The transitive closure (not just the
         // `first_child is None` direct-child clause above) is what makes "revoke finds and deletes
@@ -10104,7 +10104,7 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
             // The slot domain is fixed across the walk (`delete` frames it) — the equality
             // `only_empties`'s transitivity reads off to compose the per-step frame.
             store.slot_view().dom() == old(store).slot_view().dom(),
-            // Teardown monotonicity so far: every slot empty at entry is still empty (rev0§3.4).
+            // Teardown monotonicity so far: every slot empty at entry is still empty (rev1§3.4).
             only_empties(old(store).slot_view(), store.slot_view()),
             refcount_sound(store),
             caps_consistent(store),
@@ -10181,7 +10181,7 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
         }
     }
     // The loop exited with `slot` childless; `cspace_wf` (hence `parent_has_first_child`) holds,
-    // so the whole subtree — in-flight queued caps included — is provably gone (rev0§3.4).
+    // so the whole subtree — in-flight queued caps included — is provably gone (rev1§3.4).
     proof {
         lemma_childless_no_descendant(store.slot_view(), slot);
     }

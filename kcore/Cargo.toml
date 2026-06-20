@@ -7,7 +7,7 @@ edition.workspace = true
 # so Verus and ordinary `cargo test` can verify it, and cross-buildable for
 # aarch64-unknown-none-softfloat as a dependency of `kernel`.
 #
-# vstd is the *Verus* dependency (plan doc/plans/3_verus-rewrite.md): it
+# vstd is the *Verus* dependency (see doc/guidelines/verus.md): it
 # provides the `verus!{}` macro + the ghost `spec`/`proof`/`int` vocabulary for
 # the deductive proofs (`untyped::carve`, the cspace/CDT contracts). It is `#![no_std]`
 # by default (std/alloc are opt-in features, off here) and its nightly

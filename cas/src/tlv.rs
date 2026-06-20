@@ -1,4 +1,4 @@
-//! Single directory-entry TLV codec (spec rev0§4.9), exposed as a standalone
+//! Single directory-entry TLV codec (spec rev1§4.9), exposed as a standalone
 //! encode/decode pair for the canonical-form fuzz oracle.
 //!
 //! Entries normally live only inside prolly-tree leaf nodes; this module

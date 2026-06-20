@@ -1,5 +1,5 @@
 #![no_main]
-//! Mount = crash recovery (rev0§4.5), as a parser of hostile disks. Arbitrary
+//! Mount = crash recovery (rev1§4.5), as a parser of hostile disks. Arbitrary
 //! bytes are presented as one whole image over the fake block device;
 //! `Store::mount` must return Ok or Err and never panic. `MemDev`
 //! bounds-checks every access, so an out-of-range read mount attempts
@@ -7,7 +7,7 @@
 //! ("never read out of the device's bounds").
 //!
 //! On a successful mount we run one cheap consistency pass: list every
-//! ref's root and walk to each snapshot root. This is rev0§4.5's "either a
+//! ref's root and walk to each snapshot root. This is rev1§4.5's "either a
 //! commit completed or it didn't" as an executable, coverage-guided
 //! property — adversarial input the crash-injection proptest never tries.
 //! Seed this target with mkfs-built minimal images and crash artifacts.

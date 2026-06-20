@@ -1,4 +1,4 @@
-//! Kernel-side address-space shell (spec rev0§2.5). The walker itself — table
+//! Kernel-side address-space shell (spec rev1§2.5). The walker itself — table
 //! allocation, `map`/`unmap`, the read-only lookup, the descriptor bit
 //! assembly, the VA-index arithmetic — lives in [`kcore::aspace`] as safe
 //! Rust over the table pool as an indexed slice, where it is Verus-verified.
