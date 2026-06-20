@@ -23,6 +23,13 @@ std = []
 # kcore/ipc/urt: an upgrade is a deliberate PR. Same recipe as urt/Cargo.toml.
 vstd = { version = "=0.0.0-2026-05-31-0205", default-features = false }
 
+[dev-dependencies]
+# Wrapper proptest tier (B4C): randomized alloc/free/access sequences over the
+# host backing, replayed under Miri as the UB oracle (rev1§6 "everything gets
+# Miri + proptest"). Test-only, so it never reaches the no_std userspace build of
+# storaged. Same pin as cas/loader/urt/storage-server/virtio-blk.
+proptest = "1"
+
 # `cargo verus verify -p dma-pool` targets this crate (the flag kcore/ipc/urt use).
 [package.metadata.verus]
 verify = true
