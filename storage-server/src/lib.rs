@@ -223,7 +223,13 @@ pub enum Response {
     NotFound,
     Handle(HandleId),
     Listing(Vec<DirEnt>),
-    Snapshots(Vec<SnapInfo>),
+    /// Snapshot rows plus the ref's current rev1§4.7 edit version, read in the
+    /// same call so a retention daemon's enumerate and its later guarded-batch
+    /// `expected_version` come from one atomic snapshot of the ref.
+    Snapshots {
+        snaps: Vec<SnapInfo>,
+        edit_version: u64,
+    },
     SnapId(u64),
     Ticket([u8; 16]),
     SessionDump(Vec<(HandleId, String)>),
@@ -604,18 +610,24 @@ impl<D: BlockDev> Server<D> {
                 let HandleTarget::Ref { name, .. } = &e.target else {
                     return Err(ErrorCode::ReadOnly);
                 };
-                Ok(Response::Snapshots(
-                    self.store
-                        .snapshots(name)
-                        .map(|r| SnapInfo {
-                            id: r.id,
-                            timestamp: r.timestamp,
-                            provenance: r.provenance.clone(),
-                            message: r.message.clone(),
-                            class: r.class,
-                        })
-                        .collect(),
-                ))
+                let snaps = self
+                    .store
+                    .snapshots(name)
+                    .map(|r| SnapInfo {
+                        id: r.id,
+                        timestamp: r.timestamp,
+                        provenance: r.provenance.clone(),
+                        message: r.message.clone(),
+                        class: r.class,
+                    })
+                    .collect();
+                // Same atomic read as the rows above: the version a daemon will
+                // present as `expected_version` (rev1§4.7).
+                let edit_version = self.store.edit_version(name).unwrap_or(0);
+                Ok(Response::Snapshots {
+                    snaps,
+                    edit_version,
+                })
             }
             Request::OpenSnapshot {
                 handle,

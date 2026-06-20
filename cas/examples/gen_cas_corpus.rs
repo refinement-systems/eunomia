@@ -9,7 +9,10 @@ use std::fs;
 use std::path::PathBuf;
 
 use cas::dev::{BlockDev, CrashDev, MemDev};
-use cas::disk::{encode_index, IndexEntry, Superblock, WalOp};
+use cas::disk::{
+    encode_index, IndexEntry, RefEntry, RefTable, SnapRow, Superblock, WalOp, CLASS_AUTO,
+    CLASS_KEEP,
+};
 use cas::hash::Hash;
 use cas::prolly::{
     parse_node, Content, Dir, Entry, EntryKind, MemStore, NodeRefs, NodeStore, FLAG_EXECUTABLE,
@@ -52,6 +55,7 @@ fn main() {
     superblock_seeds();
     wal_seeds();
     chunker_seeds();
+    ref_table_seeds();
     mount_recovery_seeds();
     println!("done.");
 }
@@ -221,6 +225,83 @@ fn chunker_seeds() {
     write_seed("chunker", "tiny", b"hello world");
     let mid: Vec<u8> = (0..2000u32).map(|i| (i * 7) as u8).collect();
     write_seed("chunker", "multi", &mid);
+}
+
+/// The format-v4 ref table (rev1§4.7): refs (now carrying `edit_version`),
+/// snapshot rows, and tags. Built with the real `RefTable::encode`, with
+/// non-zero `edit_version`s so the new field is exercised on the happy path.
+fn ref_table_seeds() {
+    // Smallest valid table: magic + three zero counts.
+    write_seed("ref_table", "empty", &RefTable::default().encode());
+
+    // One ref, one snapshot row, one tag pinning it — the common shape.
+    let mut simple = RefTable::default();
+    simple.refs.insert(
+        b"main".to_vec(),
+        RefEntry {
+            root: Hash::of(b"root"),
+            generation: 0,
+            next_snap_id: 2,
+            edit_version: 3,
+        },
+    );
+    simple.snaps.insert(
+        (b"main".to_vec(), 1),
+        SnapRow {
+            id: 1,
+            root: Hash::of(b"snap1"),
+            timestamp: 1_700_000_000_000_000_000,
+            provenance: b"session=1".to_vec(),
+            parent: None,
+            message: b"initial".to_vec(),
+            class: CLASS_KEEP,
+        },
+    );
+    simple
+        .tags
+        .insert(b"release".to_vec(), (b"main".to_vec(), 1));
+    write_seed("ref_table", "simple", &simple.encode());
+
+    // Several refs with distinct edit versions, plus a parented snapshot
+    // chain — width and the parent/Option<u64> path together.
+    let mut multi = RefTable::default();
+    for i in 0..5u64 {
+        let name = format!("ref-{i}");
+        multi.refs.insert(
+            name.into_bytes(),
+            RefEntry {
+                root: Hash::of(&[i as u8]),
+                generation: i,
+                next_snap_id: 3,
+                edit_version: i * 2 + 1,
+            },
+        );
+    }
+    multi.snaps.insert(
+        (b"ref-0".to_vec(), 1),
+        SnapRow {
+            id: 1,
+            root: Hash::of(b"a"),
+            timestamp: 10,
+            provenance: b"session=7".to_vec(),
+            parent: None,
+            message: Vec::new(),
+            class: CLASS_AUTO,
+        },
+    );
+    multi.snaps.insert(
+        (b"ref-0".to_vec(), 2),
+        SnapRow {
+            id: 2,
+            root: Hash::of(b"b"),
+            timestamp: 20,
+            provenance: b"session=7".to_vec(),
+            parent: Some(1),
+            message: b"second".to_vec(),
+            class: CLASS_AUTO,
+        },
+    );
+    write_seed("ref_table", "multi_ref", &multi.encode());
 }
 
 /// Dump a device's whole byte image.

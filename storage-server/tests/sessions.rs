@@ -391,10 +391,59 @@ fn snapshots_are_immutable_and_survive_rollback() {
     );
 
     // Provenance was server-assigned.
-    let Response::Snapshots(rows) = srv.handle(s, Request::ListSnapshots { handle: 0 }, 107) else {
+    let Response::Snapshots { snaps: rows, .. } =
+        srv.handle(s, Request::ListSnapshots { handle: 0 }, 107)
+    else {
         panic!()
     };
     assert!(rows[0].provenance.starts_with(b"session="));
+}
+
+/// rev1§4.7 (B5A): `ListSnapshots` returns the ref's current edit version
+/// alongside the rows, read in one call — so a retention daemon's enumerate and
+/// its later guarded-batch `expected_version` come from one atomic snapshot of
+/// the ref, and a concurrent mutation is detectable.
+#[test]
+fn list_snapshots_carries_the_ref_edit_version() {
+    let mut srv = new_server();
+    let root = srv.root_grant(b"main").unwrap();
+    let s = srv.open_session(vec![root]);
+
+    // The reply's edit_version equals the ref's current version.
+    let Response::Snapshots {
+        edit_version: v0, ..
+    } = srv.handle(s, Request::ListSnapshots { handle: 0 }, 10)
+    else {
+        panic!()
+    };
+    assert_eq!(Some(v0), srv.store().edit_version(b"main"));
+
+    // Taking a snapshot is an entry-set mutation: the next enumerate sees a
+    // strictly higher version.
+    let Response::SnapId(_) = srv.handle(
+        s,
+        Request::Snapshot {
+            handle: 0,
+            message: b"m".to_vec(),
+            class: 0,
+        },
+        11,
+    ) else {
+        panic!()
+    };
+    let Response::Snapshots {
+        snaps,
+        edit_version: v1,
+    } = srv.handle(s, Request::ListSnapshots { handle: 0 }, 12)
+    else {
+        panic!()
+    };
+    assert!(
+        v1 > v0,
+        "snapshot must advance the edit version: {v0} -> {v1}"
+    );
+    assert_eq!(Some(v1), srv.store().edit_version(b"main"));
+    assert_eq!(snaps.len(), 1);
 }
 
 #[test]

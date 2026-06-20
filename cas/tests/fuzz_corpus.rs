@@ -12,7 +12,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use cas::dev::MemDev;
-use cas::disk::{decode_index, encode_index, Superblock, WalOp};
+use cas::disk::{decode_index, encode_index, RefTable, Superblock, WalOp};
 use cas::prolly::{parse_node, NodeRefs};
 use cas::store::{Store, StoreOptions};
 
@@ -66,6 +66,19 @@ fn index_frame() {
                 decode_index(&bytes).unwrap(),
                 (entries, free),
                 "index not stable"
+            );
+        }
+    }
+}
+
+#[test]
+fn ref_table() {
+    for data in corpus_files("ref_table") {
+        if let Ok(table) = RefTable::decode(&data) {
+            assert_eq!(
+                RefTable::decode(&table.encode()).unwrap(),
+                table,
+                "ref table not stable"
             );
         }
     }

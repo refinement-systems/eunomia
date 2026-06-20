@@ -134,9 +134,11 @@ verus! {
 pub const SB_SIZE: usize = 4096;
 /// First byte of the WAL region (after the two 4 KiB superblock slots).
 pub const WAL_OFF: u64 = 8192;
-/// On-disk format version (format v3, rev1§2.6). Inside the macro for the version
-/// gate in `decode_checked_fields`.
-pub(crate) const SB_VERSION: u32 = 3;
+/// On-disk format version (format v4, rev1§2.6). Inside the macro for the version
+/// gate in `decode_checked_fields`. Bumped 3 → 4 in B5A: each `RefEntry` now carries
+/// a fixed-width `edit_version` (rev1§4.7), so a v3 reader handed a v4 ref record would
+/// desync — the version gate refuses old images cleanly rather than mis-decode.
+pub(crate) const SB_VERSION: u32 = 4;
 /// Chunk frame header size (magic + len + birth gen + hash). Inside the macro
 /// because the geometry spec bounds the index frame by it.
 pub const CHUNK_HEADER: usize = 4 + 4 + 8 + 32;
@@ -659,6 +661,12 @@ pub struct RefEntry {
     /// generation. Bumping it lazily invalidates all outstanding handles.
     pub generation: u64,
     pub next_snap_id: u64,
+    /// rev1§4.7 edit version: advances once per committed mutation of this
+    /// ref's entries (head moves, snapshot rows, tags). Plain data through
+    /// the normal commit path; the guarded-batch CAS (B5B) compares against
+    /// it. Orthogonal to `generation` (§2.2 revocation) and to the superblock
+    /// generation (§4.2).
+    pub edit_version: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -696,6 +704,7 @@ impl RefTable {
             out.extend_from_slice(e.root.as_bytes());
             out.extend_from_slice(&e.generation.to_le_bytes());
             out.extend_from_slice(&e.next_snap_id.to_le_bytes());
+            out.extend_from_slice(&e.edit_version.to_le_bytes());
         }
         out.extend_from_slice(&(self.snaps.len() as u32).to_le_bytes());
         for ((ref_name, _), s) in &self.snaps {
@@ -735,12 +744,14 @@ impl RefTable {
             let root = r.hash()?;
             let generation = r.u64()?;
             let next_snap_id = r.u64()?;
+            let edit_version = r.u64()?;
             t.refs.insert(
                 name,
                 RefEntry {
                     root,
                     generation,
                     next_snap_id,
+                    edit_version,
                 },
             );
         }
@@ -920,6 +931,7 @@ mod tests {
                 root: Hash::of(b"r"),
                 generation: 3,
                 next_snap_id: 2,
+                edit_version: 5,
             },
         );
         t.snaps.insert(
@@ -937,5 +949,31 @@ mod tests {
         t.tags.insert(b"v1".to_vec(), (b"main".to_vec(), 1));
         let enc = t.encode();
         assert_eq!(RefTable::decode(&enc), Ok(t));
+    }
+
+    #[test]
+    fn ref_record_missing_edit_version_is_rejected() {
+        // A v4 ref record ends with the 8-byte edit_version (rev1§4.7); a buffer
+        // cut short of it must be refused as truncated, never decoded with a
+        // junk/zero version. One ref, no snaps/tags, so the encoding tail is
+        // edit_version(8) | nsnaps=0 (4) | ntags=0 (4): dropping the last 12
+        // bytes lands the cut inside the ref record's version field.
+        let mut t = RefTable::default();
+        t.refs.insert(
+            b"main".to_vec(),
+            RefEntry {
+                root: Hash::of(b"r"),
+                generation: 1,
+                next_snap_id: 1,
+                edit_version: 7,
+            },
+        );
+        let enc = t.encode();
+        assert_eq!(RefTable::decode(&enc).map(|_| ()), Ok(()));
+        let truncated = &enc[..enc.len() - 12];
+        assert!(matches!(
+            RefTable::decode(truncated),
+            Err(FormatError::BadNode("truncated"))
+        ));
     }
 }
