@@ -138,6 +138,22 @@ fn main() {
         ),
         ("gc", Request::Gc { handle: 0 }),
         ("statfs", Request::Statfs { handle: 0 }),
+        (
+            "tag",
+            Request::Tag {
+                handle: 0,
+                name: b"release".to_vec(),
+                snap_id: 1,
+            },
+        ),
+        (
+            "untag",
+            Request::Untag {
+                handle: 0,
+                name: b"release".to_vec(),
+            },
+        ),
+        ("list_tags", Request::ListTags { handle: 0 }),
         // Handles 1 (read-only "etc" subtree) and 2 (read-only snapshot)
         // installed by the dispatch harness — seed their low ids too.
         (

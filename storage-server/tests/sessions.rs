@@ -1186,3 +1186,300 @@ fn apply_batch_all_or_nothing_over_wire() {
         Response::Ok
     );
 }
+
+/// rev1§4.7 "Tags" over the wire (M-8): create, list, and delete a tag across
+/// a session. `ListTags` is scoped to the handle's ref and reports each tag as
+/// `(name, ref_name, snap_id)`.
+#[test]
+fn tags_round_trip_over_a_session() {
+    let mut srv = new_server();
+    let root = srv.root_grant(b"main").unwrap();
+    let s = srv.open_session(vec![root]);
+    let Response::SnapId(snap) = srv.handle(
+        s,
+        Request::Snapshot {
+            handle: 0,
+            message: b"m".to_vec(),
+            class: 0,
+        },
+        10,
+    ) else {
+        panic!()
+    };
+
+    // No tags yet.
+    assert_eq!(
+        srv.handle(s, Request::ListTags { handle: 0 }, 11),
+        Response::Tags(vec![])
+    );
+
+    // Create one: it lists, scoped to the ref, with the id it pins.
+    assert_eq!(
+        srv.handle(
+            s,
+            Request::Tag {
+                handle: 0,
+                name: b"release".to_vec(),
+                snap_id: snap,
+            },
+            12,
+        ),
+        Response::Ok
+    );
+    assert_eq!(
+        srv.handle(s, Request::ListTags { handle: 0 }, 13),
+        Response::Tags(vec![(b"release".to_vec(), b"main".to_vec(), snap)])
+    );
+
+    // Delete it: gone.
+    assert_eq!(
+        srv.handle(
+            s,
+            Request::Untag {
+                handle: 0,
+                name: b"release".to_vec(),
+            },
+            14,
+        ),
+        Response::Ok
+    );
+    assert_eq!(
+        srv.handle(s, Request::ListTags { handle: 0 }, 15),
+        Response::Tags(vec![])
+    );
+}
+
+/// rev1§4.7: a tag is a `keep`-strength pin over the wire — a tagged snapshot
+/// can't be deleted out from under its tag, and because the tag names the
+/// snapshot *id* (not a hash) a metadata edit leaves it in place. The remedy
+/// is to delete the tag first.
+#[test]
+fn tag_pins_snapshot_over_the_wire_and_survives_metadata_edits() {
+    let mut srv = new_server();
+    let root = srv.root_grant(b"main").unwrap();
+    let s = srv.open_session(vec![root]);
+    let Response::SnapId(snap) = srv.handle(
+        s,
+        Request::Snapshot {
+            handle: 0,
+            message: b"m".to_vec(),
+            class: 0,
+        },
+        10,
+    ) else {
+        panic!()
+    };
+
+    assert_eq!(
+        srv.handle(
+            s,
+            Request::Tag {
+                handle: 0,
+                name: b"keep".to_vec(),
+                snap_id: snap,
+            },
+            11,
+        ),
+        Response::Ok
+    );
+    // A metadata edit must not unpin it (the tag points at the id, rev1§4.7).
+    assert_eq!(
+        srv.handle(
+            s,
+            Request::SetClass {
+                handle: 0,
+                snap_id: snap,
+                class: 2,
+            },
+            12,
+        ),
+        Response::Ok
+    );
+    assert_eq!(
+        srv.handle(s, Request::ListTags { handle: 0 }, 13),
+        Response::Tags(vec![(b"keep".to_vec(), b"main".to_vec(), snap)])
+    );
+
+    // Pinned: the snapshot can't be deleted while the tag holds it.
+    assert_eq!(
+        srv.handle(
+            s,
+            Request::DeleteSnapshot {
+                handle: 0,
+                snap_id: snap,
+            },
+            14,
+        ),
+        Response::Err(ErrorCode::Pinned)
+    );
+
+    // Delete the tag first, then the snapshot deletes cleanly.
+    assert_eq!(
+        srv.handle(
+            s,
+            Request::Untag {
+                handle: 0,
+                name: b"keep".to_vec(),
+            },
+            15,
+        ),
+        Response::Ok
+    );
+    assert_eq!(
+        srv.handle(
+            s,
+            Request::DeleteSnapshot {
+                handle: 0,
+                snap_id: snap,
+            },
+            16,
+        ),
+        Response::Ok
+    );
+}
+
+/// rev1§4.7: tag/untag are row surgery — they need `may-rewrite-history` (and
+/// validate the snapshot), while `ListTags` is a read needing `R_READ`.
+#[test]
+fn tag_ops_need_rewrite_history_and_validate_the_snapshot() {
+    let mut srv = new_server();
+    let root = srv.root_grant(b"main").unwrap();
+    let s = srv.open_session(vec![root]);
+    let Response::SnapId(snap) = srv.handle(
+        s,
+        Request::Snapshot {
+            handle: 0,
+            message: b"m".to_vec(),
+            class: 0,
+        },
+        10,
+    ) else {
+        panic!()
+    };
+
+    // No may-rewrite-history → Tag/Untag denied (deny-by-default, before any
+    // store work). Without even R_READ, ListTags is denied too.
+    let limited = HandleEntry {
+        rights: R_WRITE | R_SNAPSHOT,
+        ..srv.root_grant(b"main").unwrap()
+    };
+    let s2 = srv.open_session(vec![limited]);
+    assert_eq!(
+        srv.handle(
+            s2,
+            Request::Tag {
+                handle: 0,
+                name: b"r".to_vec(),
+                snap_id: snap,
+            },
+            11,
+        ),
+        Response::Err(ErrorCode::Denied)
+    );
+    assert_eq!(
+        srv.handle(
+            s2,
+            Request::Untag {
+                handle: 0,
+                name: b"r".to_vec(),
+            },
+            12,
+        ),
+        Response::Err(ErrorCode::Denied)
+    );
+    assert_eq!(
+        srv.handle(s2, Request::ListTags { handle: 0 }, 13),
+        Response::Err(ErrorCode::Denied)
+    );
+
+    // With the right: a real snapshot tags; a nonexistent one is NoSuchSnapshot.
+    assert_eq!(
+        srv.handle(
+            s,
+            Request::Tag {
+                handle: 0,
+                name: b"r".to_vec(),
+                snap_id: snap,
+            },
+            14,
+        ),
+        Response::Ok
+    );
+    assert_eq!(
+        srv.handle(
+            s,
+            Request::Tag {
+                handle: 0,
+                name: b"bad".to_vec(),
+                snap_id: snap + 999,
+            },
+            15,
+        ),
+        Response::Err(ErrorCode::NoSuchSnapshot)
+    );
+}
+
+/// rev1§4.7: tags are entry-set mutations, so creating or removing one advances
+/// the ref's edit version — exactly what a concurrent guarded batch checks.
+#[test]
+fn tag_and_untag_advance_the_ref_edit_version() {
+    let mut srv = new_server();
+    let root = srv.root_grant(b"main").unwrap();
+    let s = srv.open_session(vec![root]);
+    let Response::SnapId(snap) = srv.handle(
+        s,
+        Request::Snapshot {
+            handle: 0,
+            message: b"m".to_vec(),
+            class: 0,
+        },
+        10,
+    ) else {
+        panic!()
+    };
+    let Response::Snapshots {
+        edit_version: v0, ..
+    } = srv.handle(s, Request::ListSnapshots { handle: 0 }, 11)
+    else {
+        panic!()
+    };
+
+    assert_eq!(
+        srv.handle(
+            s,
+            Request::Tag {
+                handle: 0,
+                name: b"r".to_vec(),
+                snap_id: snap,
+            },
+            12,
+        ),
+        Response::Ok
+    );
+    let Response::Snapshots {
+        edit_version: v1, ..
+    } = srv.handle(s, Request::ListSnapshots { handle: 0 }, 13)
+    else {
+        panic!()
+    };
+    assert_eq!(v1, v0 + 1, "tag must advance the edit version");
+
+    assert_eq!(
+        srv.handle(
+            s,
+            Request::Untag {
+                handle: 0,
+                name: b"r".to_vec(),
+            },
+            14,
+        ),
+        Response::Ok
+    );
+    let Response::Snapshots {
+        edit_version: v2, ..
+    } = srv.handle(s, Request::ListSnapshots { handle: 0 }, 15)
+    else {
+        panic!()
+    };
+    assert_eq!(v2, v1 + 1, "untag must advance the edit version");
+}
