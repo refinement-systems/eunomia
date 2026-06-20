@@ -144,7 +144,7 @@ pub(crate) const SB_VERSION: u32 = 4;
 pub const CHUNK_HEADER: usize = 4 + 4 + 8 + 32;
 
 /// WAL record header size (magic + seq + payload len + payload checksum). Inside
-/// the macro so `store.rs`'s verified `decode_frame`/`replay_bound` can name its
+/// the macro so `store.rs`'s verified `decode_frame`/`recover_records` can name its
 /// concrete value — a `const` declared outside `verus!{}` is opaque to it. Erases
 /// to the same `pub const`, so external refs (the plain-Rust
 /// `encode_record`/`decode_record` below) are unchanged.
@@ -473,7 +473,7 @@ pub fn decode_index(
 
 pub(crate) const WAL_MAGIC: &[u8; 4] = b"WREC";
 // WAL_HEADER is declared inside the `verus!{}` block above (the verified
-// `decode_frame`/`replay_bound` in store.rs name its concrete value); it erases
+// `decode_frame`/`recover_records` in store.rs name its concrete value); it erases
 // to the same `pub const WAL_HEADER: usize = 48`.
 
 /// A logged mutation. Replay must be deterministic, so server-assigned
