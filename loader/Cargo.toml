@@ -6,6 +6,9 @@ edition.workspace = true
 [dependencies]
 ipc = { path = "../ipc" }
 
+[dev-dependencies]
+proptest = "1"
+
 [features]
 default = ["std"]
 std = []

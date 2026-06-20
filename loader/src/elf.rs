@@ -40,8 +40,9 @@ impl Segment {
     /// gap was `parse` under-checking relative to `prepare`).
     ///
     /// Total for *all* `(vaddr, memsz)` including `memsz == 0` (yields
-    /// `pages == 0`, no panic); `parse` drops `memsz == 0` segments, so
-    /// `prepare` only ever sees `memsz > 0` (⇒ `pages >= 1`).
+    /// `pages == 0` for a page-aligned `vaddr`, else `1` from the round-up — no
+    /// panic either way); `parse` drops `memsz == 0` segments, so `prepare`
+    /// only ever sees `memsz > 0` (⇒ `pages >= 1`).
     pub fn page_layout(&self) -> Result<PageLayout, ElfError> {
         let va_start = self.vaddr & !(PAGE - 1); // round down: cannot overflow
         let va_end = self

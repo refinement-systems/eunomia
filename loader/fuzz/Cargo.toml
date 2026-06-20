@@ -27,3 +27,10 @@ path = "fuzz_targets/elf_parse.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "segment_layout"
+path = "fuzz_targets/segment_layout.rs"
+test = false
+doc = false
+bench = false
