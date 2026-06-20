@@ -285,6 +285,38 @@ fn tickets_are_one_shot_with_ttl() {
         srv.handle(bob, Request::RedeemTicket { ticket: t2 }, 99),
         Response::Err(ErrorCode::BadTicket)
     );
+
+    // rev1§2.4: the caller requests the TTL but the server clamps it to
+    // MAX_TICKET_TTL_NANOS, so an unbounded request does not yield an unbounded
+    // ticket. A failed (expired) redeem still consumes the one-shot ticket
+    // (RedeemTicket removes before checking expiry), so each boundary point
+    // below needs its own freshly-minted ticket.
+    let mint = 100;
+    let Response::Ticket(t3) = srv.handle(
+        alice,
+        Request::MintTicket { handle: sub, ttl_nanos: u64::MAX },
+        mint,
+    ) else {
+        panic!()
+    };
+    // Just past the clamp → refused, despite the u64::MAX request.
+    assert_eq!(
+        srv.handle(bob, Request::RedeemTicket { ticket: t3 }, mint + MAX_TICKET_TTL_NANOS + 1),
+        Response::Err(ErrorCode::BadTicket)
+    );
+
+    let Response::Ticket(t4) = srv.handle(
+        alice,
+        Request::MintTicket { handle: sub, ttl_nanos: u64::MAX },
+        mint,
+    ) else {
+        panic!()
+    };
+    // Exactly at the clamp boundary → still valid (redeem fails only when now > expires).
+    assert!(matches!(
+        srv.handle(bob, Request::RedeemTicket { ticket: t4 }, mint + MAX_TICKET_TTL_NANOS),
+        Response::Handle(_)
+    ));
 }
 
 #[test]
