@@ -890,6 +890,11 @@ pub struct Store<D: BlockDev> {
     /// Working ref table: committed state + flushed-but-uncommitted roots
     /// and staged row edits. Serialized at commit.
     table: RefTable,
+    /// Refs whose entry-set changed since the last commit. Drained at the top
+    /// of `commit()`, advancing each named ref's rev1§4.7 edit version exactly
+    /// once — so N staged edits on one ref (a guarded batch) tick the version
+    /// once, and a no-op commit ticks nothing.
+    dirty_refs: BTreeSet<Vec<u8>>,
     overlays: BTreeMap<Vec<u8>, Overlay>,
     wal_tail: u64,
     wal_seq: u64,
@@ -945,6 +950,7 @@ impl<D: BlockDev> Store<D> {
             sb,
             sb_in_b: false,
             table,
+            dirty_refs: BTreeSet::new(),
             overlays: BTreeMap::new(),
             wal_tail: 0,
             wal_seq: 1,
@@ -1080,6 +1086,7 @@ impl<D: BlockDev> Store<D> {
             sb: sb.clone(),
             sb_in_b,
             table,
+            dirty_refs: BTreeSet::new(),
             overlays: BTreeMap::new(),
             wal_tail: sb.wal_head,
             wal_seq: sb.wal_next_seq,
@@ -1161,6 +1168,10 @@ impl<D: BlockDev> Store<D> {
                 root: empty_root,
                 generation: 0,
                 next_snap_id: 1,
+                // A fresh ref starts at edit version 0; create_ref does not mark
+                // it dirty, so its first committed entry-set mutation ticks it
+                // to 1 (rev1§4.7).
+                edit_version: 0,
             },
         );
         self.commit()
@@ -1168,6 +1179,21 @@ impl<D: BlockDev> Store<D> {
 
     pub fn refs(&self) -> impl Iterator<Item = (&Vec<u8>, &RefEntry)> {
         self.table.refs.iter()
+    }
+
+    /// The ref's current rev1§4.7 edit version (the value a guarded batch's
+    /// `expected_version` is compared against), or `None` if the ref is
+    /// unknown. Reads the working table, so an enumerate and a follow-up
+    /// `expected_version` taken back-to-back see one consistent value.
+    pub fn edit_version(&self, ref_name: &[u8]) -> Option<u64> {
+        self.table.refs.get(ref_name).map(|e| e.edit_version)
+    }
+
+    /// Mark a ref's entry-set as mutated this commit cycle (rev1§4.7). The
+    /// version is advanced once in `commit()`, no matter how many times this
+    /// is called for the same ref before the flip.
+    fn touch_ref(&mut self, name: &[u8]) {
+        self.dirty_refs.insert(name.to_vec());
     }
 
     /// Committed superblock generation (advances on every commit).
@@ -1219,6 +1245,7 @@ impl<D: BlockDev> Store<D> {
         };
         self.table.snaps.insert((ref_name.to_vec(), id), row);
         self.table.refs.get_mut(ref_name).unwrap().next_snap_id = id + 1;
+        self.touch_ref(ref_name); // new snapshot row + next_snap_id (rev1§4.7)
         self.commit()?;
         Ok(id)
     }
@@ -1241,6 +1268,7 @@ impl<D: BlockDev> Store<D> {
             .get_mut(ref_name)
             .ok_or(StoreError::NoSuchRef)?
             .root = root;
+        self.touch_ref(ref_name); // head move (rev1§4.7)
         self.commit()
     }
 
@@ -1590,6 +1618,10 @@ impl<D: BlockDev> Store<D> {
         }
 
         self.table.refs.get_mut(ref_name).unwrap().root = root;
+        // A flush that re-points the head is an entry-set mutation (rev1§4.7):
+        // a concurrent writer's commit between a retention daemon's read and
+        // its guarded batch advances the version, invalidating the batch (I-2).
+        self.touch_ref(ref_name);
         for rec in &mut self.wal_records {
             if rec.ref_name.as_slice() == ref_name {
                 rec.flushed = true;
@@ -1602,6 +1634,17 @@ impl<D: BlockDev> Store<D> {
     /// older slot, barrier 2. The WAL head advances past the contiguous
     /// prefix of flushed records (rev1§4.3 step 4).
     pub fn commit(&mut self) -> Result<(), StoreError> {
+        // rev1§4.7: advance the edit version of every ref whose entry-set
+        // changed since the last commit — once per ref, regardless of how many
+        // edits (head moves, rows, tags) were staged. Drained before the table
+        // is serialized so the bumped values are what lands on disk. A ref that
+        // was dirtied then dropped from the table (none today) is silently
+        // skipped by the `get_mut`.
+        for name in core::mem::take(&mut self.dirty_refs) {
+            if let Some(e) = self.table.refs.get_mut(&name) {
+                e.edit_version += 1;
+            }
+        }
         let rt_hash = self.chunks.put(&self.table.encode());
         self.check_io()?;
         // The index frame this commit supersedes becomes free once the
@@ -1761,6 +1804,7 @@ impl<D: BlockDev> Store<D> {
                 r.parent = new_parent;
             }
         }
+        self.touch_ref(ref_name); // snapshot row removed + re-parented (rev1§4.7)
         self.commit()
     }
 
@@ -1782,6 +1826,7 @@ impl<D: BlockDev> Store<D> {
             .get_mut(&(ref_name.to_vec(), snap_id))
             .ok_or(StoreError::NoSuchSnapshot)?
             .class = class;
+        self.touch_ref(ref_name); // retention-class edit on a snapshot row (rev1§4.7)
         self.commit()
     }
 }
@@ -2489,6 +2534,144 @@ mod tests {
             matches!(err, StoreError::UnsupportedVersion(2)),
             "got {err:?}"
         );
+    }
+
+    /// B5A bumped the format v3 → v4 (each `RefEntry` now carries a fixed-width
+    /// `edit_version`, rev1§4.7). A v3 ref record is one u64 shorter, so a v3
+    /// reader handed a v4 record — or vice versa — would desync; the version
+    /// gate must refuse the superseded format cleanly, never mis-decode.
+    #[test]
+    fn format_v3_image_is_refused_with_a_version_error() {
+        use crate::disk::{SB_A_OFF, SB_B_OFF};
+
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        store.write(b"main", &p(&["f"]), 0, b"data", 1).unwrap();
+        store
+            .snapshot(b"main", b"t", b"image", disk::CLASS_KEEP, 100)
+            .unwrap();
+        let dev = store.into_dev();
+        let mut img = vec![0u8; dev.len() as usize];
+        dev.read(0, &mut img).unwrap();
+        // Re-stamp both slots as the immediately-preceding format v3, intact
+        // and plausibly checksummed — the dangerous artifact, not a torn slot.
+        for off in [SB_A_OFF as usize, SB_B_OFF as usize] {
+            img[off + 8..off + 12].copy_from_slice(&3u32.to_le_bytes());
+            let sum = Hash::of(&img[off..off + disk::SB_BODY]);
+            img[off + disk::SB_BODY..off + disk::SB_BODY + 32].copy_from_slice(sum.as_bytes());
+        }
+        let err = Store::mount(MemDev::from_bytes(img), test_opts())
+            .err()
+            .expect("a v3 image must not mount");
+        assert!(
+            matches!(err, StoreError::UnsupportedVersion(3)),
+            "got {err:?}"
+        );
+    }
+
+    /// rev1§4.7: the edit version advances once per committed entry-set
+    /// mutation (snapshot row, head move, row surgery) and persists through the
+    /// commit — the value a later guarded batch's `expected_version` compares
+    /// against (B5B).
+    #[test]
+    fn edit_version_advances_per_committed_mutation_and_persists() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        // A fresh ref starts at 0 (create_ref does not mark it dirty).
+        assert_eq!(store.edit_version(b"main"), Some(0));
+
+        let snap = store
+            .snapshot(b"main", b"t", b"first", disk::CLASS_KEEP, 100)
+            .unwrap();
+        assert_eq!(store.edit_version(b"main"), Some(1), "snapshot row");
+
+        store.rollback(b"main", snap).unwrap();
+        assert_eq!(store.edit_version(b"main"), Some(2), "head move");
+
+        store.delete_snapshot(b"main", snap).unwrap();
+        assert_eq!(store.edit_version(b"main"), Some(3), "row surgery");
+
+        store.write(b"main", &p(&["f"]), 0, b"data", 1).unwrap();
+        store.sync_ref(b"main").unwrap();
+        assert_eq!(
+            store.edit_version(b"main"),
+            Some(4),
+            "write+flush head move"
+        );
+
+        // Persisted: the bumped value rode the commit onto disk.
+        let store2 = Store::mount(store.into_dev(), test_opts()).unwrap();
+        assert_eq!(store2.edit_version(b"main"), Some(4));
+    }
+
+    /// rev1§4.7/§2.2: the edit version and the revocation generation are
+    /// orthogonal counters in the same `RefEntry`. A revoke advances generation
+    /// and leaves the edit version untouched; an entry-set mutation advances the
+    /// edit version and leaves generation untouched. (Load-bearing: a retention
+    /// batch must not be rejected because an unrelated handle was revoked.)
+    #[test]
+    fn edit_version_orthogonal_to_revocation_generation() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        let gen = |s: &Store<MemDev>| {
+            s.refs()
+                .find(|(n, _)| n.as_slice() == b"main")
+                .unwrap()
+                .1
+                .generation
+        };
+        assert_eq!((store.edit_version(b"main"), gen(&store)), (Some(0), 0));
+
+        store.bump_generation(b"main").unwrap();
+        assert_eq!(
+            (store.edit_version(b"main"), gen(&store)),
+            (Some(0), 1),
+            "revoke moves generation only"
+        );
+
+        store
+            .snapshot(b"main", b"t", b"x", disk::CLASS_KEEP, 10)
+            .unwrap();
+        assert_eq!(
+            (store.edit_version(b"main"), gen(&store)),
+            (Some(1), 1),
+            "snapshot moves edit version only"
+        );
+    }
+
+    /// A commit with nothing dirty (a pure flush that moved no head) does not
+    /// advance the edit version — a flush that does not mutate the entry-set is
+    /// not a §4.7 mutation, so an outstanding `expected_version` stays valid.
+    #[test]
+    fn no_op_sync_does_not_advance_edit_version() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        store.sync_ref(b"main").unwrap(); // nothing dirty
+        assert_eq!(store.edit_version(b"main"), Some(0));
+
+        store.write(b"main", &p(&["f"]), 0, b"data", 1).unwrap();
+        store.sync_ref(b"main").unwrap(); // real head move
+        assert_eq!(store.edit_version(b"main"), Some(1));
+
+        store.sync_all().unwrap(); // nothing dirty again
+        store.sync_ref(b"main").unwrap();
+        assert_eq!(store.edit_version(b"main"), Some(1));
+    }
+
+    /// Design decision 2 / rev1§4.7: the bump is once per commit per dirtied
+    /// ref, not once per edit — so the guarded batch (B5B), which stages several
+    /// edits on one ref in one commit, ticks the version exactly once. The
+    /// dirty-set collapses repeated touches before the single commit.
+    #[test]
+    fn one_commit_bumps_a_dirtied_ref_exactly_once() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        // Stage several entry-set edits' worth of dirtying, then commit once.
+        store.touch_ref(b"main");
+        store.touch_ref(b"main");
+        store.touch_ref(b"main");
+        store.commit().unwrap();
+        assert_eq!(store.edit_version(b"main"), Some(1));
     }
 
     /// rev1§4.7: `ts = max(now, predecessor_ts + 1)` — an RTC that regressed

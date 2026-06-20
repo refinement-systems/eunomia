@@ -274,7 +274,7 @@ fn cmd_cat(arg: &[u8]) {
 
 fn cmd_snaps() {
     match request(&Request::ListSnapshots { handle: 0 }) {
-        Response::Snapshots(rows) => {
+        Response::Snapshots { snaps: rows, .. } => {
             for r in rows {
                 out(b"#");
                 out_num(r.id);
@@ -342,7 +342,7 @@ fn cmd_df() {
 /// delete the rest. `keep`-class and tagged rows survive.
 fn cmd_prune(n: u64) {
     let rows = match request(&Request::ListSnapshots { handle: 0 }) {
-        Response::Snapshots(rows) => rows,
+        Response::Snapshots { snaps: rows, .. } => rows,
         r => return report(r),
     };
     let candidates: Vec<u64> =

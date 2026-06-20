@@ -93,3 +93,10 @@ path = "fuzz_targets/mount_reseal.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "ref_table"
+path = "fuzz_targets/ref_table.rs"
+test = false
+doc = false
+bench = false
