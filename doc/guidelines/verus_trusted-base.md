@@ -100,7 +100,7 @@ Any phase touching these must re-establish them at ≥ the prior numbers.
 | kcore object core | `cargo verus verify -p kcore` | 335 verified, 0 errors |
 | CAS decode + recovery cores | `cargo verus verify -p cas --no-default-features` | 58 verified, 0 errors |
 | IPC header + session codecs | `cargo verus verify -p ipc` | 58 verified, 0 errors |
-| DMA-pool `FreeList` | `cargo verus verify -p dma-pool` | 26 verified, 0 errors |
+| DMA-pool `FreeList` (core + `is_full`/`is_allocated` wrapper-guard accessors) | `cargo verus verify -p dma-pool` | 29 verified, 0 errors |
 | urt slots + time | `cargo verus verify -p urt` | verified (slot bitmap + `utc_ns_at`) |
 | TLA+ | `CommitProtocol` (6886 states), `CapRevocation`/`_Teardown` (~799k, recorded run), `IpcReactor` (with a negative control) | pass |
 | Fuzzing | wire/on-disk/ELF decoders + mount/recovery cargo-fuzz targets, committed corpora + Miri replay | green |
