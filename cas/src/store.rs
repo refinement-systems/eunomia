@@ -525,21 +525,22 @@ fn advance_head(records: &[RecMeta], wal_seq: u64) -> (r: HeadAdvance)
     }
 }
 
-// ── Replay bound (rev1§4.8) ───────────────────────────────────────────────
+// ── Recovery walk (rev1§4.8) ──────────────────────────────────────────────
 //
 // The recovery-path dual of `advance_head`: from the committed head, how much of
 // the WAL is a valid recoverable run. `Store::mount` (rev1§4.5) reads contiguous,
 // checksummed, seq-continuous records until the first torn or seq-discontinuous
-// one (an unacked tail). The *bound* of that walk — the count of records and the
-// resulting `(wal_tail, wal_seq)` — lives in a verified parser core, leaving the
-// overlay apply + the content-level extent gate as the plain-Rust applier
-// (`mount` re-walks the span): a verified parser, a plain-Rust applier.
+// one (an unacked tail). The *decision* of that walk — the records, the resulting
+// `(wal_tail, wal_seq)`, and (B7C) the proof the run is `laid_out` — lives in the
+// verified `recover_records` core (below, in the gap-freedom block), leaving the
+// overlay apply + the content-level extent gate as the plain-Rust applier: a
+// verified parser, a plain-Rust applier.
 //
 // The framing parse (`decode_frame`) is **verified** — its in-bounds guarantee
 // is what makes the walk terminate and stay in range, the unbounded form of an
-// `off += rlen` in-bounds argument. The blake3 checksum and the `WalOp` payload
-// decode stay the **content seam** (`wal_content_ok`, `external_body`) — the
-// same boundary drawn for the superblock.
+// `off += rlen` in-bounds argument. The blake3 checksum stays the **content seam**
+// (`wal_checksum_ok`, `external_body`) — the same boundary drawn for the
+// superblock; the `WalOp` structural decode is verified (`wal_struct_ok`, B7B).
 
 /// One WAL record's framing: its sequence number and total on-disk length. The
 /// `Hash`-free verified analogue of `WalOp::decode_record`'s header parse.
@@ -639,7 +640,7 @@ fn decode_frame(wal: &[u8], off: usize) -> (r: Option<RecFrame>)
 // The spec `s_*` mirror of `decode_payload` is interpreted; `wal_struct_ok`
 // proves the exec walk equals it ∀ bytes (the `decode_frame`/`frame_at`
 // shape). `content_ok_spec` keeps its name/meaning, so `run_len`/`laid_out`/
-// `replay_bound` and the gap-freedom lemmas are unchanged.
+// `recover_records` and the gap-freedom lemmas are unchanged.
 
 /// One bounded read from `pay` at `pos`: `Some(pos + n)` iff `n` bytes remain,
 /// else `None` — the spec mirror of `Reader::take` (`prolly.rs`). Total.
@@ -754,7 +755,7 @@ spec fn wal_payload_struct_ok_spec(rec: Seq<u8>) -> bool {
 uninterp spec fn checksum_ok_spec(rec: Seq<u8>) -> bool;
 
 /// "This record is content-valid": the structural decode (verified) **and** the
-/// blake3 checksum (trusted). Opaque so `run_len`/`laid_out`/`replay_bound` and
+/// blake3 checksum (trusted). Opaque so `run_len`/`laid_out`/`recover_records` and
 /// the gap-freedom lemmas keep treating it as a black box exactly as before the
 /// split — only [`wal_content_ok`] reveals the conjunction.
 #[verifier::opaque]
@@ -904,7 +905,7 @@ fn wal_struct_ok(wal: &[u8], off: usize, rlen: usize) -> (r: bool)
 {
     broadcast use vstd::slice::group_slice_axioms;
     // Materialize `wal@.len() <= usize::MAX` so the `off + rlen` slice bound
-    // below is overflow-free (the `replay_bound` recipe).
+    // below is overflow-free (the recovery-walk recipe).
     let _glen = wal.len();
     let ghost rec = wal@.subrange(off as int, (off + rlen) as int);
     assert(rec.len() == rlen);
@@ -947,7 +948,7 @@ fn wal_checksum_ok(wal: &[u8], off: usize, rlen: usize) -> (r: bool)
 /// The content-layer acceptance `decode_record` makes after framing, now a
 /// **verified composition** (no longer one `external_body` box): the structural
 /// decode (verified, [`wal_struct_ok`]) **and** the blake3 checksum (trusted,
-/// [`wal_checksum_ok`]). Equal to [`content_ok_spec`], so `run_len`/`replay_bound`
+/// [`wal_checksum_ok`]). Equal to [`content_ok_spec`], so `run_len`/`recover_records`
 /// reason over the maximal run exactly as before — only the *internal* trust
 /// boundary shrank to blake3 (rev1§6.1(e), T-5).
 fn wal_content_ok(wal: &[u8], off: usize, rlen: usize) -> (r: bool)
@@ -964,10 +965,11 @@ fn wal_content_ok(wal: &[u8], off: usize, rlen: usize) -> (r: bool)
 /// `seq`: each record must frame ([`frame_at`]), continue the sequence, and pass
 /// the content seam (`content_ok_spec`); the run ends at the first that does not.
 /// The record at `seq == u64::MAX` is *counted* but ends the run (the sequence
-/// can't advance) — matching `replay_bound`/`mount`'s rev1§4.4 seq-exhaustion gate
-/// (the `mnt1_forged_wal_seq_max_rejected` corner). This is the closed form
-/// `replay_bound.count` is proven equal to, and the quantity the gap-freedom
-/// composition reasons about. **Terminating**
+/// can't advance) — matching `recover_records`/`mount`'s rev1§4.4 seq-exhaustion
+/// gate (the `mnt1_forged_wal_seq_max_rejected` corner; `recover_records` flags it
+/// as `forged_max` rather than fold it into the laid-out skeleton). This is the
+/// closed form `recover_records`'s `records.len() + forged_max` is proven equal
+/// to, and the quantity the gap-freedom composition reasons about. **Terminating**
 /// (`decreases wal.len() - off`; each accepted record's `rlen >= WAL_HEADER > 0`,
 /// from `frame_at`'s `Some` arm, strictly shrinks the remaining buffer).
 spec fn run_len(wal: Seq<u8>, off: int, seq: u64) -> nat
@@ -993,143 +995,38 @@ spec fn run_len(wal: Seq<u8>, off: int, seq: u64) -> nat
     }
 }
 
-/// How much of the WAL is a valid recoverable run from the committed head: the
-/// number of records to replay (`count`) and the byte offset just past them
-/// (`end_off`). `mount` re-walks `count` records itself (recomputing `wal_seq`
-/// via its `checked_add` forgery gate), so the span need not carry `wal_seq`.
-struct ReplaySpan {
-    count: usize,
-    end_off: u64,
-}
-
-/// Walk the WAL from `wal_head`, accepting contiguous records that frame cleanly
-/// (`decode_frame`), pass the content seam (`wal_content_ok`), and continue the
-/// sequence (`seq` match), stopping at the first torn or seq-discontinuous one —
-/// the TLA+ `Recover` action.
-///
-/// Proven here: **totality** (the `end_off <= wal.len()` in-bounds postcondition,
-/// ∀ bytes — the unbounded form of `mount`'s `off += rlen` in-bounds argument),
-/// **termination** (`decreases wal.len() - off`; each accepted record advances
-/// `off` by `rlen >= WAL_HEADER > 0`), and the tight **maximal-run
-/// equality** `count == run_len(wal@, wal_head, wal_next_seq)`: the walk accepts
-/// *exactly* the maximal contiguous seq-run (the closed-form characterization,
-/// the quantity the gap-freedom composition reasons about). A record at `seq ==
-/// u64::MAX` is still *counted* (so `mount`'s re-walk applies it and its
-/// `checked_add` fires the rev1§4.4 seq-exhaustion forgery gate, the
-/// `mnt1_forged_wal_seq_max_rejected` behaviour); the loop just can't advance past
-/// it, so it stops there — `run_len` counts it the same way.
-///
-/// The proof is the accumulator invariant `count + run_len(wal@, off, seq) ==
-/// run_len(wal@, wal_head, wal_next_seq)`: each accepted record unfolds `run_len`
-/// once (`1 + run_len` at the next offset/seq), and each stop point leaves
-/// `run_len(wal@, off, seq) == 0` — so `count` equals the total at every exit.
-/// The extent gate stays the plain-Rust applier's job (it needs the decoded
-/// `Write` content); `run_len` models the per-record acceptance through the
-/// `content_ok_spec` seam, not the extent check.
-fn replay_bound(wal: &[u8], wal_head: u64, wal_next_seq: u64) -> (r: ReplaySpan)
-    requires
-        wal_head <= wal@.len(),
-    ensures
-        r.end_off <= wal@.len(),
-        r.count == run_len(wal@, wal_head as int, wal_next_seq),
-{
-    broadcast use vstd::slice::group_slice_axioms;
-    let ghost total = run_len(wal@, wal_head as int, wal_next_seq);
-    // Materializes `wal@.len() <= usize::MAX` (a real slice length fits usize), so
-    // `wal_head <= wal.len()` makes the cast below value-preserving.
-    let wlen = wal.len();
-    let mut off: usize = wal_head as usize;
-    let mut seq: u64 = wal_next_seq;
-    let mut count: usize = 0;
-    assert(off as int == wal_head as int);
-    loop
-        // The accumulator: what's counted plus what `run_len` still sees from the
-        // current cursor equals the total run. Holds at every iteration top, but
-        // *not* at the seq-exhaustion break (`count` is bumped past a record whose
-        // `run_len` tail is not yet zero), so it is `invariant_except_break`; the
-        // loop `ensures` states what does hold at every exit.
-        invariant_except_break
-            count + run_len(wal@, off as int, seq) == total,
-        invariant
-            wlen == wal@.len(),
-            off <= wal@.len(),
-            count <= off,
-        ensures
-            off <= wal@.len(),
-            count == total,
-        decreases wal@.len() - off,
-    {
-        if off >= wlen {
-            // off == wal.len() (with off <= len), so the run from here is empty.
-            assert(wal@.len() <= off as int);
-            assert(run_len(wal@, off as int, seq) == 0);
-            break;
-        }
-        let frame = match decode_frame(wal, off) {
-            Some(f) => f,
-            None => {
-                // decode_frame: None ==> frame_at None ==> run_len here is 0.
-                assert(run_len(wal@, off as int, seq) == 0);
-                break;
-            }
-        };
-        // decode_frame: frame_at(wal@, off) == Some((frame.seq, frame.rlen)).
-        if frame.seq != seq {
-            assert(run_len(wal@, off as int, seq) == 0);
-            break;
-        }
-        if !wal_content_ok(wal, off, frame.rlen) {
-            // wal_content_ok: !r ==> !content_ok_spec(subrange) ==> run_len is 0.
-            assert(run_len(wal@, off as int, seq) == 0);
-            break;
-        }
-        // Record accepted. Unfold run_len once at this (off, seq): the two
-        // consequences carry the accumulator across the step (non-MAX) or pin
-        // count == total at the seq-exhaustion stop (MAX). Captured here (pre-bump)
-        // so the facts persist for the old (off, seq) after the mutations below.
-        assert(seq == u64::MAX ==> run_len(wal@, off as int, seq) == 1);
-        assert(seq != u64::MAX ==> run_len(wal@, off as int, seq)
-            == 1 + run_len(wal@, (off + frame.rlen) as int, (seq + 1) as u64));
-        // Accept this record (so `mount` replays it); count before the seq-exhaustion
-        // stop so a planted record at `seq == u64::MAX` is replayed and trips
-        // `mount`'s `checked_add` gate, not silently dropped (rev1§4.4 forgery gate).
-        count = count + 1;
-        off = off + frame.rlen;
-        // An honest seq counter never nears u64::MAX (2^64 records). At the boundary
-        // the loop can't advance the sequence, so it stops — having already counted
-        // the record above. The accumulator at this iteration's top gave count_top +
-        // 1 == total (run_len of a counted MAX record is 1), so count == total here.
-        if seq == u64::MAX {
-            assert(count == total);
-            break;
-        }
-        seq = seq + 1;
-    }
-    ReplaySpan { count, end_off: off as u64 }
-}
+// The recovery walk that *bounds* and *materializes* the run — totality, the
+// maximal-run equality `count == run_len`, and the proven `laid_out` skeleton —
+// is `recover_records`, in the gap-freedom composition block below (B7C folded
+// the former `replay_bound` into it so the recovery decision and its gap-freedom
+// guarantee are proven at one site, with no dead proof left behind).
 
 } // verus!
 
 // ── The gap-freedom composition (rev1§4.8) ────────────────────────────────
 //
-// `advance_head` (write path) and `replay_bound` (recovery path) operate on
-// different views — a `&[RecMeta]` queue vs. the raw WAL bytes. The composition
-// theorem relates them through `laid_out`, the linking invariant that the byte
-// region from a record's `off` *is* the record the queue describes (frames at
-// `off` with that `seq`, content-valid, contiguous, seq-continuous). Under it the
-// **gap-freedom lemma** holds: `advance_head`'s head sits at the first non-flushed
-// record, and replay from that head covers the whole suffix — so every
-// acked-but-uncommitted (unflushed) record is replayed. This is the code-level
-// shadow of the TLA+ `AckedWritesRecoverable` (WAL-replay half); the
-// content-coverage half — "flushed ⇒ effects already in the committed root" —
-// stays the `CommitProtocol` design gate, deliberately out of scope here.
+// `advance_head` (write path) and the recovery walk operate on different views —
+// a `&[RecMeta]` queue vs. the raw WAL bytes. The composition theorem relates
+// them through `laid_out`, the linking invariant that the byte region from a
+// record's `off` *is* the record the queue describes (frames at `off` with that
+// `seq`, content-valid, contiguous, seq-continuous). Under it the **gap-freedom
+// lemma** holds: `advance_head`'s head sits at the first non-flushed record, and
+// replay from that head covers the whole suffix — so every acked-but-uncommitted
+// (unflushed) record is replayed. This is the code-level shadow of the TLA+
+// `AckedWritesRecoverable` (WAL-replay half); the content-coverage half —
+// "flushed ⇒ effects already in the committed root" — stays the `CommitProtocol`
+// design gate, deliberately out of scope here.
 //
-// `laid_out` is a documented invariant, not enforced at one site Verus sees
-// (mount *builds* `records` by replaying; commit *consumes* the live queue), so
-// `lemma_gap_freedom` takes `advance_head`/`replay_bound`'s `ensures` as
-// hypotheses — they hold exactly when commit/mount call the two in sequence. This
-// is the rev1§4.8 "per-piece contracts compose into the theorem" shape: the
-// pieces are proven; the lemma joins them.
+// B7C discharges `laid_out` rather than assuming it: `recover_records` *rebuilds*
+// the run from the committed head and **proves `laid_out(wal@, records@, 0)`**
+// from the per-record framing/content/sequence facts its walk establishes, then
+// fires `lemma_gap_freedom` (and `lemma_run_len_covers` / `lemma_laid_out_mono`)
+// on that run — so the whole composition is live, its premise proven, not
+// documented. `mount` drives its applier off the verified skeleton, so the
+// running recovery sequencing is the proved one. What stays trusted is only the
+// *lifetime* join — that the live `wal_records` queue keeps matching the bytes as
+// write/flush/commit mutate it — the §6.1(c)/(e) Store seam; the full
+// replay-equality invariant remains the `CommitProtocol` model's (rev1§6.1(e)).
 
 verus! {
 
@@ -1210,14 +1107,15 @@ proof fn lemma_run_len_covers(wal: Seq<u8>, records: Seq<RecMeta>, k: int)
 }
 
 /// The gap-freedom theorem: composing `advance_head` (`n_flushed`/`head`/`next_seq`)
-/// with `replay_bound` (`count`). The four `requires` after `laid_out` are exactly
-/// the two functions' `ensures` — so this fires whenever commit/mount call them in
-/// sequence over a laid-out queue. Conclusion: **every unflushed record lies in the
-/// replayed span** `[n_flushed, n_flushed + count)`. With `advance_head` placing
-/// `head` at the first non-flushed record (everything below it flushed) and
-/// `replay_bound.count == run_len >= len - n_flushed` (coverage), no
-/// acked-but-uncommitted write is left behind — the code-level shadow of
-/// `AckedWritesRecoverable`'s WAL-replay half.
+/// with the recovery walk's `count` (`run_len`). The four `requires` after
+/// `laid_out` are exactly those functions' `ensures` — so this fires whenever
+/// commit/mount call them in sequence over a laid-out queue (discharged by
+/// `recover_records`). Conclusion: **every unflushed record lies in the replayed
+/// span** `[n_flushed, n_flushed + count)`. With `advance_head` placing `head` at
+/// the first non-flushed record (everything below it flushed) and
+/// `count == run_len >= len - n_flushed` (coverage), no acked-but-uncommitted
+/// write is left behind — the code-level shadow of `AckedWritesRecoverable`'s
+/// WAL-replay half.
 proof fn lemma_gap_freedom(
     wal: Seq<u8>,
     records: Seq<RecMeta>,
@@ -1233,7 +1131,7 @@ proof fn lemma_gap_freedom(
         forall|j: int| 0 <= j < n_flushed ==> (#[trigger] records[j]).flushed,
         n_flushed < records.len() ==> head == records[n_flushed].off
             && next_seq == records[n_flushed].seq,
-        // replay_bound's ensures (Part 1, the maximal-run equality):
+        // recover_records' ensures (Part 1, the maximal-run equality):
         n_flushed < records.len() ==> count == run_len(wal, head as int, next_seq),
     ensures
         forall|i: int|
@@ -1254,6 +1152,220 @@ proof fn lemma_gap_freedom(
     }
     // n_flushed == records.len(): all records flushed, so no unflushed record
     // exists — the conclusion is vacuous (any such i would be flushed by the hyp).
+}
+
+// ── B7C: discharge `laid_out`; fire the gap-freedom theorem on the running
+// recovery decision (T-2 + the mount/commit glue) ──────────────────────────
+//
+// `laid_out` used to be a *documented* invariant: `lemma_gap_freedom` took it on
+// faith and fired nowhere. B7C makes the recovery walk *produce* it.
+// `recover_records` rebuilds the maximal seq-continuous, content-valid run from
+// the committed head and **proves `laid_out(wal@, records@, 0)`** from the
+// per-record framing/content/sequence facts the walk already establishes — so the
+// linking invariant is discharged at the one site the recovery decision is made.
+// It then fires `lemma_gap_freedom` (and its supports `lemma_run_len_covers` /
+// `lemma_laid_out_mono`) on that rebuilt run, making the whole composition live.
+// `mount` consumes the verified skeleton to drive its applier, so the running
+// recovery sequencing *is* the proved one (the §4.2 glue contract).
+//
+// What stays trusted is the join across the Store's *lifetime* — that the live
+// in-memory `wal_records` queue keeps matching the on-device bytes as
+// write/flush/commit mutate it — the same trusted-Store seam §6.1(c)/(e) already
+// names; the full replay-equality invariant remains the `CommitProtocol` model's
+// (rev1§6.1(e)). The discharge ties the recovery *decision* to the code; it does
+// not pull the device I/O or the `WalOp` applier into the verified core.
+
+/// The framing length of the record at `off` (0 if none) — names the `rlen`
+/// [`frame_at`] returns so [`recover_records`] can state its cursor invariant.
+spec fn frame_rlen(wal: Seq<u8>, off: int) -> nat {
+    match frame_at(wal, off) {
+        Some((_, rlen)) => rlen,
+        None => 0,
+    }
+}
+
+/// One unfolded level of [`laid_out`]: the record at `k` frames as itself,
+/// continues the sequence, passes the content seam, has `seq < u64::MAX`, and
+/// (if not last) chains contiguously into `k + 1`. The `forall` over this is the
+/// loop-friendly form [`recover_records`] maintains; [`lemma_forall_laid_out`]
+/// folds it back into the recursive `laid_out`.
+spec fn rec_ok(wal: Seq<u8>, records: Seq<RecMeta>, k: int) -> bool {
+    match frame_at(wal, records[k].off as int) {
+        None => false,
+        Some((s, rlen)) => {
+            &&& s == records[k].seq
+            &&& records[k].seq < u64::MAX
+            &&& content_ok_spec(wal.subrange(records[k].off as int, records[k].off as int + rlen))
+            &&& (k + 1 < records.len() ==> records[k + 1].off as int == records[k].off as int + rlen)
+            &&& (k + 1 < records.len() ==> records[k + 1].seq == (records[k].seq + 1) as u64)
+        }
+    }
+}
+
+/// The forall-form implies the recursive form: if every record from `k` is
+/// `rec_ok`, the suffix is `laid_out`. Straight induction down the suffix.
+proof fn lemma_forall_laid_out(wal: Seq<u8>, records: Seq<RecMeta>, k: int)
+    requires
+        0 <= k <= records.len(),
+        forall|j: int| k <= j < records.len() ==> rec_ok(wal, records, j),
+    ensures
+        laid_out(wal, records, k),
+    decreases records.len() - k,
+{
+    if k < records.len() {
+        assert(rec_ok(wal, records, k));
+        lemma_forall_laid_out(wal, records, k + 1);
+    }
+}
+
+/// The recovery span plus the rebuilt record skeleton. `records` is the maximal
+/// seq-continuous, content-valid run from the head with `seq < u64::MAX` — the
+/// records `mount` replays — and is *proven* `laid_out`. `forged_max` flags an
+/// otherwise-valid record at `seq == u64::MAX` right after the run: the rev1§4.4
+/// seq-exhaustion forgery `mount` rejects (the run can't extend past it).
+/// `end_off`/`next_seq` are the post-run cursor for the new WAL tail/seq.
+struct Recovered {
+    records: Vec<RecMeta>,
+    end_off: u64,
+    next_seq: u64,
+    forged_max: bool,
+}
+
+/// Rebuild the recoverable run from `wal_head` and **prove it is laid out** —
+/// discharging what `lemma_gap_freedom` used to assume. The verified recovery
+/// core (B7C folded the former `replay_bound` bound into it): it walks the WAL
+/// (framing via `decode_frame`, the content seam via `wal_content_ok`, seq
+/// continuity), proves the **maximal-run equality** (`run_len`), *and*
+/// materializes the records so the linking invariant `laid_out` is established
+/// where the recovery decision is made. Then it fires the gap-freedom theorem on
+/// the rebuilt run (the in-code shadow of `AckedWritesRecoverable`'s WAL-replay
+/// half). `mount` drives its applier off the returned skeleton.
+fn recover_records(wal: &[u8], wal_head: u64, wal_next_seq: u64) -> (r: Recovered)
+    requires
+        wal_head <= wal@.len(),
+    ensures
+        // The maximal-run equality `replay_bound` used to prove, now keyed to the
+        // rebuilt records: the run accounts for exactly `run_len` (the `forged_max`
+        // record, if any, is the one counted past the laid-out skeleton).
+        run_len(wal@, wal_head as int, wal_next_seq)
+            == r.records@.len() + (if r.forged_max { 1nat } else { 0nat }),
+        r.end_off <= wal@.len(),
+        // The rebuilt run is laid out (the discharged `lemma_gap_freedom` premise),
+        // all unflushed (just replayed), and starts at the committed head.
+        laid_out(wal@, r.records@, 0),
+        forall|k: int| 0 <= k < r.records@.len() ==> !(#[trigger] r.records@[k]).flushed,
+        r.records@.len() > 0 ==> r.records@[0].off == wal_head && r.records@[0].seq == wal_next_seq,
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    let ghost total = run_len(wal@, wal_head as int, wal_next_seq);
+    let wlen = wal.len();
+    let mut records: Vec<RecMeta> = Vec::new();
+    let mut off: usize = wal_head as usize;
+    let mut seq: u64 = wal_next_seq;
+    let mut forged_max = false;
+    assert(off as int == wal_head as int);
+    loop
+        invariant_except_break
+            records@.len() + run_len(wal@, off as int, seq) == total,
+            !forged_max,
+        invariant
+            wlen == wal@.len(),
+            off <= wal@.len(),
+            forall|k: int| 0 <= k < records@.len() ==> rec_ok(wal@, records@, k),
+            forall|k: int| 0 <= k < records@.len() ==> !(#[trigger] records@[k]).flushed,
+            records@.len() == 0 ==> (off as int == wal_head as int && seq == wal_next_seq),
+            records@.len() > 0 ==> records@[0].off == wal_head && records@[0].seq == wal_next_seq,
+            records@.len() > 0 ==> {
+                &&& off as int == records@[records@.len() - 1].off as int
+                        + frame_rlen(wal@, records@[records@.len() - 1].off as int)
+                &&& seq as int == records@[records@.len() - 1].seq as int + 1
+            },
+        ensures
+            off <= wal@.len(),
+            total == records@.len() + (if forged_max { 1nat } else { 0nat }),
+            forall|k: int| 0 <= k < records@.len() ==> rec_ok(wal@, records@, k),
+            forall|k: int| 0 <= k < records@.len() ==> !(#[trigger] records@[k]).flushed,
+            records@.len() > 0 ==> records@[0].off == wal_head && records@[0].seq == wal_next_seq,
+        decreases wal@.len() - off,
+    {
+        if off >= wlen {
+            // off == wal.len(): the run from here is empty.
+            assert(run_len(wal@, off as int, seq) == 0);
+            break;
+        }
+        let frame = match decode_frame(wal, off) {
+            Some(f) => f,
+            None => {
+                assert(run_len(wal@, off as int, seq) == 0);
+                break;
+            }
+        };
+        if frame.seq != seq {
+            assert(run_len(wal@, off as int, seq) == 0);
+            break;
+        }
+        if !wal_content_ok(wal, off, frame.rlen) {
+            assert(run_len(wal@, off as int, seq) == 0);
+            break;
+        }
+        if seq == u64::MAX {
+            // An otherwise-valid record at the seq ceiling: the run can't extend
+            // (no seq + 1), so stop and flag the forgery for `mount` to reject.
+            // `run_len` *counts* it (1), so `total == records.len() + 1`.
+            assert(run_len(wal@, off as int, seq) == 1);
+            forged_max = true;
+            break;
+        }
+        // Accepted (seq < MAX): unfold `run_len` once so the accumulator carries
+        // across the step (the maximal-run accumulator recipe).
+        assert(run_len(wal@, off as int, seq)
+            == 1 + run_len(wal@, (off + frame.rlen) as int, (seq + 1) as u64));
+        let ghost prev = records@;
+        records.push(RecMeta { seq, off: off as u64, ref_name: Vec::new(), flushed: false });
+        proof {
+            let r = records@;
+            let n = prev.len() as int;
+            assert(r.len() == n + 1);
+            assert(r[n].off == off as u64 && r[n].seq == seq && !r[n].flushed);
+            // decode_frame tied the exec frame to frame_at; wal_content_ok tied the
+            // accept to content_ok_spec — the facts the new last record needs.
+            assert(frame_at(wal@, off as int) == Some((frame.seq, frame.rlen as nat)));
+            assert(content_ok_spec(wal@.subrange(off as int, off as int + frame.rlen as nat)));
+            assert forall|k: int| 0 <= k < r.len() implies rec_ok(wal@, r, k) by {
+                if k < n {
+                    // Unchanged records keep their framing/content; only the previous
+                    // last record (k == n - 1) gains a contiguity clause, discharged
+                    // by the cursor invariant (off / seq sit just past record n - 1).
+                    assert(r[k] == prev[k]);
+                    assert(rec_ok(wal@, prev, k));
+                    if k + 1 == r.len() - 1 {
+                        assert(r[k + 1] == r[n]);
+                        assert(off as int == prev[k].off as int + frame_rlen(wal@, prev[k].off as int));
+                    } else if k + 1 < n {
+                        assert(r[k + 1] == prev[k + 1]);
+                    }
+                } else {
+                    // k == n: the freshly pushed record frames and is content-valid;
+                    // its contiguity clause is vacuous (it is last).
+                    assert(r[k] == r[n]);
+                }
+            }
+        }
+        off = off + frame.rlen;
+        seq = seq + 1;
+    }
+    // The rebuilt run is laid out, and the gap-freedom theorem fires on it: every
+    // record sits within the replay count (here the whole run, all unflushed) —
+    // lemma_gap_freedom + lemma_run_len_covers + lemma_laid_out_mono are now live,
+    // their `laid_out` premise discharged above.
+    proof {
+        lemma_forall_laid_out(wal@, records@, 0);
+        if records@.len() > 0 {
+            let count = run_len(wal@, wal_head as int, wal_next_seq) as int;
+            lemma_gap_freedom(wal@, records@, 0, wal_head, wal_next_seq, count);
+        }
+    }
+    Recovered { records, end_off: off as u64, next_seq: seq, forged_max }
 }
 
 } // verus!
@@ -1473,25 +1585,24 @@ impl<D: BlockDev> Store<D> {
         };
 
         // WAL replay: contiguous, checksummed, seq-continuous records from the
-        // committed head; anything else is an unacked torn tail. The *bound* of
-        // this walk — how many records replay, and the resulting
-        // `(wal_tail, wal_seq)` — is the Verus-verified `replay_bound`:
-        // total + terminating ∀ bytes, so the `off += rlen` in-bounds
-        // reasoning is a theorem, not a code comment. The applier below
-        // re-walks exactly that many records to decode + apply each; the content
-        // layer (the `WalOp` decode) and the extent gate stay plain Rust.
+        // committed head; anything else is an unacked torn tail. The recovery
+        // *decision* — which records replay, the resulting `(wal_tail, wal_seq)`,
+        // and the rebuilt `RecMeta` skeleton — is the Verus-verified
+        // `recover_records`: total + terminating ∀ bytes, and it **proves the
+        // rebuilt run is `laid_out`** (B7C/T-2), discharging the `lemma_gap_freedom`
+        // premise on exactly this run. So the sequencing here is the proved one;
+        // the applier below decodes + applies each record over that verified
+        // skeleton — the content layer (`WalOp` decode) and the extent gate stay
+        // plain Rust (rev1§6.1(e)).
         let mut wal = vec![0u8; sb.wal_len as usize];
         store.chunks.dev.read(WAL_OFF, &mut wal)?;
-        let span = replay_bound(&wal, sb.wal_head, sb.wal_next_seq);
-        let mut off = sb.wal_head;
-        let mut seq = sb.wal_next_seq;
-        for _ in 0..span.count {
-            // `replay_bound` proved each of these `span.count` records frames,
-            // checksums, and continues the sequence — so `decode_record` returns
-            // `Some` here (the call is total because the verified core's contract
-            // says so).
-            let (_rseq, op, rlen) = WalOp::decode_record(&wal[off as usize..])
-                .expect("replay_bound accepted this record");
+        let recovered = recover_records(&wal, sb.wal_head, sb.wal_next_seq);
+        for rec in recovered.records.iter() {
+            // `recover_records` proved each rebuilt record frames, checksums, and
+            // continues the sequence — so `decode_record` returns `Some` here (the
+            // call is total because the verified core's contract says so).
+            let (_rseq, op, _rlen) = WalOp::decode_record(&wal[rec.off as usize..])
+                .expect("recover_records accepted this record");
             // Mirror of the pre-WAL extent gate in Store::write: no image
             // this code produced contains such a record — write rejects the
             // extent before logging — and a torn write can't fake one (the
@@ -1507,25 +1618,21 @@ impl<D: BlockDev> Store<D> {
             }
             store.apply_to_overlay(&op);
             store.wal_records.push_back(RecMeta {
-                seq,
-                off,
+                seq: rec.seq,
+                off: rec.off,
                 ref_name: op.ref_name().to_vec(),
                 flushed: false,
             });
-            off += rlen as u64;
-            // An honest seq counter never nears u64::MAX (2^64 records); a
-            // re-sealed `wal_next_seq` there overflows the increment. `replay_bound`
-            // stops at that boundary, so within `span.count` this never fires — it
-            // stays as the loud rejection the original walk gave (rev1§4.4 forgery gate).
-            seq = seq
-                .checked_add(1)
-                .ok_or(StoreError::Corrupt("wal sequence exhausted"))?;
         }
-        // The applier walked exactly to `replay_bound`'s verified bound (both
-        // advance by the same per-record `rlen`); cross-check it in debug builds.
-        debug_assert_eq!(off, span.end_off);
-        store.wal_tail = off;
-        store.wal_seq = seq;
+        // An otherwise-valid record at the seq ceiling immediately past the run is
+        // the rev1§4.4 seq-exhaustion forgery (an honest counter never nears
+        // u64::MAX). `recover_records` flags it rather than fold it into the
+        // laid-out run; reject it loudly, as the original re-walk's `checked_add` did.
+        if recovered.forged_max {
+            return Err(StoreError::Corrupt("wal sequence exhausted"));
+        }
+        store.wal_tail = recovered.end_off;
+        store.wal_seq = recovered.next_seq;
         Ok(store)
     }
 
@@ -2070,9 +2177,13 @@ impl<D: BlockDev> Store<D> {
 
         // Pop the contiguous flushed prefix; the new head/seq is the first
         // non-flushed record (or the linear-WAL reset when all flushed). The
-        // decision is the Verus-verified `advance_head`: everything
-        // popped is flushed, the head record (if any) is not — the TLA+
-        // `CommitPrepare.newHead`.
+        // decision is the Verus-verified `advance_head`: everything popped is
+        // flushed, the head record (if any) is not — the TLA+
+        // `CommitPrepare.newHead`. This is the write-path half of the gap-freedom
+        // composition (B7C): `advance_head` here + the recovery walk
+        // (`recover_records`) compose in `lemma_gap_freedom` to guarantee no
+        // acked-but-unflushed record is left behind the advanced head — leaving
+        // the bytes from `wal_head` recoverable, which the next `mount` replays.
         let wal_seq = self.wal_seq;
         let adv = advance_head(self.wal_records.make_contiguous(), wal_seq);
         for _ in 0..adv.n_flushed {
@@ -2498,6 +2609,75 @@ mod tests {
         assert!(!wal_struct_ok(&[0u8; 4], 0, 4));
     }
 
+    /// B7C/T-2: the recovery core `recover_records` rebuilds the laid-out run and
+    /// flags the seq-exhaustion forgery — teeth for the discharge that makes
+    /// `lemma_gap_freedom` live (verus.md §11). The `laid_out` ensures is checked
+    /// by Verus; here we pin the *runtime* behaviour the proof rides on: the right
+    /// records, the right cursor, and the `forged_max` boundary.
+    #[test]
+    fn recover_records_rebuilds_run_and_flags_forgery() {
+        let r0 = WalOp::Write {
+            ref_name: b"main".to_vec(),
+            path: p(&["a"]),
+            offset: 0,
+            mtime: 1,
+            data: b"hi".to_vec(),
+        }
+        .encode_record(0);
+        let r1 = WalOp::Unlink {
+            ref_name: b"main".to_vec(),
+            path: p(&["a"]),
+            mtime: 2,
+        }
+        .encode_record(1);
+
+        // Two well-formed, seq-continuous records, then a zeroed (torn) tail.
+        let mut wal = Vec::new();
+        wal.extend_from_slice(&r0);
+        wal.extend_from_slice(&r1);
+        wal.resize(wal.len() + 64, 0);
+        let rec = recover_records(&wal, 0, 0);
+        assert_eq!(rec.records.len(), 2);
+        assert!(!rec.forged_max);
+        assert_eq!((rec.records[0].off, rec.records[0].seq), (0, 0));
+        assert_eq!((rec.records[1].off, rec.records[1].seq), (r0.len() as u64, 1));
+        assert_eq!(rec.end_off, (r0.len() + r1.len()) as u64);
+        assert_eq!(rec.next_seq, 2);
+        assert!(rec.records.iter().all(|m| !m.flushed));
+
+        // A seq-discontinuous record is an unacked tail: the run stops at r0.
+        let r1_gap = WalOp::Unlink {
+            ref_name: b"main".to_vec(),
+            path: p(&["a"]),
+            mtime: 2,
+        }
+        .encode_record(5);
+        let mut wal_gap = Vec::new();
+        wal_gap.extend_from_slice(&r0);
+        wal_gap.extend_from_slice(&r1_gap);
+        wal_gap.resize(wal_gap.len() + 64, 0);
+        let rec_gap = recover_records(&wal_gap, 0, 0);
+        assert_eq!(rec_gap.records.len(), 1);
+        assert!(!rec_gap.forged_max);
+
+        // A valid record at the seq ceiling is the rev1§4.4 forgery: flagged, not
+        // folded into the laid-out run (mount rejects it loudly).
+        let r_max = WalOp::Write {
+            ref_name: b"main".to_vec(),
+            path: p(&["a"]),
+            offset: 0,
+            mtime: 1,
+            data: b"x".to_vec(),
+        }
+        .encode_record(u64::MAX);
+        let mut wal_max = Vec::new();
+        wal_max.extend_from_slice(&r_max);
+        wal_max.resize(wal_max.len() + 64, 0);
+        let rec_max = recover_records(&wal_max, 0, u64::MAX);
+        assert_eq!(rec_max.records.len(), 0);
+        assert!(rec_max.forged_max);
+    }
+
     #[test]
     fn write_read_sync_remount() {
         let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
@@ -2699,7 +2879,10 @@ mod tests {
         assert_eq!(h2, h, "same content hashes the same");
 
         let e2 = *store.chunks.index.get(&h).unwrap();
-        assert_ne!(e2.off, e1.off, "condemned hit must rewrite to a fresh extent");
+        assert_ne!(
+            e2.off, e1.off,
+            "condemned hit must rewrite to a fresh extent"
+        );
         assert_eq!(
             e2.birth, store.chunks.birth_gen,
             "the rewrite carries the current birth_gen (>= epoch)"
@@ -2733,7 +2916,10 @@ mod tests {
         assert_eq!(h2, h);
         let e2 = *store.chunks.index.get(&h).unwrap();
         assert_eq!(e2, e1, "live dedup leaves the index entry untouched");
-        assert_eq!(store.chunks.tail, tail, "live dedup allocates no new extent");
+        assert_eq!(
+            store.chunks.tail, tail,
+            "live dedup allocates no new extent"
+        );
     }
 
     #[test]
@@ -2742,10 +2928,14 @@ mod tests {
         // closed: no chunk remains condemned until the next cycle reopens it.
         let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
         store.create_ref(b"main").unwrap();
-        store.write(b"main", &p(&["f"]), 0, &[7u8; 5000], 1).unwrap();
+        store
+            .write(b"main", &p(&["f"]), 0, &[7u8; 5000], 1)
+            .unwrap();
         store.sync_ref(b"main").unwrap();
         // Supersede the file so its old chunks become condemnable garbage.
-        store.write(b"main", &p(&["f"]), 0, &[9u8; 5000], 2).unwrap();
+        store
+            .write(b"main", &p(&["f"]), 0, &[9u8; 5000], 2)
+            .unwrap();
         store.sync_ref(b"main").unwrap();
 
         let stats = store.gc().unwrap();

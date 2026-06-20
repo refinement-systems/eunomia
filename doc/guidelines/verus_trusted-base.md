@@ -18,11 +18,16 @@ For calibration, the mechanized surface these seams bound (the regression baseli
 "Baselines" below): `kcore`'s cspace/CDT, untyped retype, channel FIFO, notification
 waiter queue, timer armed list, thread report record, the aspace page-table walker, and
 `sysabi::decode`; the CAS decode + recovery-decision cores (`pick_survivor`,
-`commit_target`, `advance_head`, `decode_frame`, `replay_bound`, the WAL-record
-structural decode (`wal_struct_ok`/`e_payload_ok`, the verified half of `wal_content_ok`),
-`validate_geometry_fields`, `decode_checked_fields`, the single-entry TLV codec); the IPC
-fixed header + window-quota `Admission`; the DMA-pool `FreeList`; and `urt`'s slot bitmap
-and seqlock `utc_ns_at`. The seams below are the irreducible remainder.
+`commit_target`, `advance_head`, `decode_frame`, `recover_records` — the recovery walk
+that bounds *and* rebuilds the run, proving its `laid_out` linking invariant (B7C, T-2;
+folds in the former `replay_bound` maximal-run equality) — the WAL-record structural
+decode (`wal_struct_ok`/`e_payload_ok`, the verified half of `wal_content_ok`),
+`validate_geometry_fields`, `decode_checked_fields`, the single-entry TLV codec), and the
+**gap-freedom composition** (`lemma_gap_freedom` + `lemma_run_len_covers` /
+`lemma_laid_out_mono`), now *live* — fired by `recover_records` on the rebuilt run, its
+`laid_out` premise discharged rather than assumed; the IPC fixed header + window-quota
+`Admission`; the DMA-pool `FreeList`; and `urt`'s slot bitmap and seqlock `utc_ns_at`. The
+seams below are the irreducible remainder.
 
 GC mark-set **sufficiency** (every object reachable from a live root is in the mark set)
 and the mark **walk bound** are, by design, *neither* in the verified surface *nor* a
@@ -32,7 +37,7 @@ both Miri-replayed — and the bound is structural (the mark-on-push heap work-s
 depth O(1)). Mechanizing reachability would drag `Hash` into the Hash-free recovery core,
 so it stays test-routed (B6 Design decision 3). Recorded here so a reviewer sees the
 property is test-routed, not Verus-mechanized (the rev1§6.1 "no trust-routed property
-mistaken for mechanized" discipline); this routing leaves the gate unchanged (64/0 after B7B).
+mistaken for mechanized" discipline); this routing leaves the gate unchanged (65/0 after B7C).
 
 ## The seams (13 named constructs + the by-construction category)
 
@@ -50,6 +55,7 @@ invariant. They are the spec's rev1§6.1(a–d) `[trusted]` parts:
 | Cross-root untyped non-overlap | (b) | Disjointness within one untyped is proven (watermark monotonicity); the *independent* root untypeds' base/size constants live in `unsafe` boot code with no global frame table — their non-overlap and the int→pointer step are a boot-setup axiom. |
 | Page-table join | (c) | The cap-side unmap is proven over object state and the raw page-table write/clear is proven over page-table memory; the *join* — that the cap's recorded mapping is the true entry location and that map/unmap truly write/clear it — lives in the unverified kernel Store. |
 | Thread-lifecycle shell | (d) | The "suspended, never rescheduled" state (exception entry, syscall exit, scheduler), the anti-forgery/anti-suppression access control, and the exit/read-report syscall dispatch + register marshalling stay in the trusted shell; the asm context switch is inherently unverifiable. |
+| WAL queue ↔ bytes lifetime join | (c)/(e) | B7C discharges `laid_out` *at recovery* — `recover_records` rebuilds the run from the on-device bytes and proves it laid out, firing `lemma_gap_freedom`. What stays trusted is the join across the Store's *lifetime*: that the live in-memory `wal_records` queue keeps matching the WAL bytes as `write`/`flush`/`commit` mutate it. Maintaining that as a Store-wide invariant is the larger surface §6.1(e) keeps the commit routine plain Rust over; the full replay-equality invariant remains the `CommitProtocol` model's. |
 
 **Storage durability axiom — "fsync means fsync" (rev1§4.8, §6.1(e)).** Named in the
 commit/recovery model as the labeled top-level `ASSUME FsyncMeansFsync` in
@@ -119,7 +125,7 @@ Any phase touching these must re-establish them at ≥ the prior numbers.
 | Surface | Command | Result |
 |---|---|---|
 | kcore object core | `cargo verus verify -p kcore` | 335 verified, 0 errors |
-| CAS decode + recovery cores | `cargo verus verify -p cas --no-default-features` | 64 verified, 0 errors |
+| CAS decode + recovery cores | `cargo verus verify -p cas --no-default-features` | 65 verified, 0 errors |
 | IPC header + session codecs | `cargo verus verify -p ipc` | 58 verified, 0 errors |
 | DMA-pool `FreeList` (core + `is_full`/`is_allocated` wrapper-guard accessors) | `cargo verus verify -p dma-pool` | 29 verified, 0 errors |
 | urt slots + time | `cargo verus verify -p urt` | verified (slot bitmap + `utc_ns_at`) |
