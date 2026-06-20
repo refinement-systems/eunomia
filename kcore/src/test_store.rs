@@ -2247,17 +2247,36 @@ fn derive_attenuates_thread_priority_ceiling() {
 
 #[test]
 fn set_priority_writes_within_ceiling() {
-    // `thread::set_priority` writes the gated priority into the TCB through the
-    // verified Store seam — the post-state priority is exactly
-    // the requested value (hence `<= ceiling`). Executable witness on `ArrayStore`.
+    // `thread::set_priority` accepts an in-ceiling request, writing the priority
+    // into the TCB through the verified Store seam — the post-state priority is
+    // exactly the requested value (hence `<= ceiling`) and the call returns `Ok`.
+    // Executable witness on `ArrayStore`.
     let mut st = ArrayStore::new(1);
     st.tcbs.insert(9, tcb_state_default()); // priority starts at 0
-    crate::thread::set_priority(&mut st, ObjId(9), 5, 16);
+    assert!(crate::thread::set_priority(&mut st, ObjId(9), 5, 16).is_ok(), "in-ceiling accepted");
     assert_eq!(st.tcb_priority(ObjId(9)), 5, "priority written exactly");
     assert!(st.tcb_priority(ObjId(9)) <= 16, "priority within ceiling");
     // Boundary: prio == ceiling is admissible.
-    crate::thread::set_priority(&mut st, ObjId(9), 16, 16);
+    assert!(crate::thread::set_priority(&mut st, ObjId(9), 16, 16).is_ok(), "prio == ceiling accepted");
     assert_eq!(st.tcb_priority(ObjId(9)), 16, "prio == ceiling allowed");
+}
+
+#[test]
+fn set_priority_refuses_over_ceiling() {
+    // The rev1§6.1(d) gate: `thread::set_priority` *refuses* an over-ceiling
+    // request — returns `Err` and leaves the TCB's priority untouched, no shell
+    // `if` involved. A subsequent in-ceiling request still succeeds.
+    let mut st = ArrayStore::new(1);
+    st.tcbs.insert(7, tcb_state_default()); // priority starts at 0
+    // Seed a known in-ceiling priority so the refusal's "untouched" is observable.
+    assert!(crate::thread::set_priority(&mut st, ObjId(7), 4, 16).is_ok());
+    assert_eq!(st.tcb_priority(ObjId(7)), 4);
+    // Over-ceiling: refused, priority unchanged.
+    assert!(crate::thread::set_priority(&mut st, ObjId(7), 20, 16).is_err(), "over-ceiling refused");
+    assert_eq!(st.tcb_priority(ObjId(7)), 4, "refused write leaves priority untouched");
+    // The op stays usable: a fresh in-ceiling request is accepted.
+    assert!(crate::thread::set_priority(&mut st, ObjId(7), 9, 16).is_ok(), "in-ceiling still accepted");
+    assert_eq!(st.tcb_priority(ObjId(7)), 9, "later in-ceiling write lands");
 }
 
 #[test]
