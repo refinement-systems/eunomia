@@ -58,6 +58,16 @@ fn tree_node() {
 }
 
 #[test]
+fn gc_mark() {
+    // Same driver the `gc_mark` target runs: each recipe builds a store of
+    // tree nodes and marks it; the walk must never panic/overflow, and on
+    // success the mark set must read back everything reachable (rev1§4.6/§6).
+    for data in corpus_files("gc_mark") {
+        cas::gc::check_recipe(&data).unwrap();
+    }
+}
+
+#[test]
 fn index_frame() {
     for data in corpus_files("index_frame") {
         if let Ok((entries, free)) = decode_index(&data) {
