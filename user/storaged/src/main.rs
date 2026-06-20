@@ -154,6 +154,10 @@ pub extern "C" fn _start() -> ! {
     sys::debug_write(b"[storaged] store mounted\n");
 
     let mut server = Server::new(store, now_utc());
+    // The privileged stat-store holder (rev1§2.3): `root_grant` is the sole
+    // origin of `R_STAT_STORE`, so this single session can `statfs`. Phase C1
+    // splits this into per-process child sessions, which receive attenuated
+    // handles that strip `stat-store` unless explicitly granted.
     let grant = match server.root_grant(b"main") {
         Ok(g) => g,
         Err(_) => fail(b"no main ref"),

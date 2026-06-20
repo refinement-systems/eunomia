@@ -378,6 +378,73 @@ fn manual_gc_and_statfs() {
 }
 
 #[test]
+fn statfs_gated_by_stat_store() {
+    // statfs observes store-global space, so it needs `stat-store` (rev1§2.3),
+    // deny-by-default. Only the privileged root_grant originates the bit.
+    let mut srv = new_server();
+    let root = srv.root_grant(b"main").unwrap();
+    let zero = HandleEntry { rights: 0, ..srv.root_grant(b"main").unwrap() };
+    let ro = HandleEntry { rights: R_READ, ..srv.root_grant(b"main").unwrap() };
+    // handle 0: privileged (carries stat-store). handle 1: zero rights.
+    // handle 2: R_READ only. Neither 1 nor 2 has the bit.
+    let s = srv.open_session(vec![root, zero, ro]);
+
+    // Deny-by-default: a handle lacking the bit cannot observe the store.
+    assert_eq!(
+        srv.handle(s, Request::Statfs { handle: 1 }, 10),
+        Response::Err(ErrorCode::Denied)
+    );
+    assert_eq!(
+        srv.handle(s, Request::Statfs { handle: 2 }, 10),
+        Response::Err(ErrorCode::Denied)
+    );
+
+    // The privileged handle observes the whole store.
+    let Response::Space { total, used, free } = srv.handle(s, Request::Statfs { handle: 0 }, 10)
+    else {
+        panic!("privileged statfs was refused")
+    };
+    assert_eq!(used + free, total);
+
+    // Ordinary delegation strips the bit: a subtree handle masked by R_ALL
+    // (which omits bit 5) is refused — the intersection clears it for free.
+    let Response::Handle(plain) = srv.handle(
+        s,
+        Request::OpenChild { handle: 0, path: p(&["pub"]), rights_mask: R_ALL },
+        11,
+    ) else {
+        panic!()
+    };
+    assert_eq!(
+        srv.handle(s, Request::Statfs { handle: plain }, 12),
+        Response::Err(ErrorCode::Denied)
+    );
+
+    // Explicitly carrying the bit onto a deep subtree handle keeps it; its
+    // statfs observes the *whole* store — the right's scope ignores the
+    // subtree its handle denotes (rev1§2.3).
+    let Response::Handle(carried) = srv.handle(
+        s,
+        Request::OpenChild { handle: 0, path: p(&["pub"]), rights_mask: R_ALL | R_STAT_STORE },
+        13,
+    ) else {
+        panic!()
+    };
+    assert_eq!(
+        srv.handle(s, Request::Statfs { handle: carried }, 14),
+        Response::Space { total, used, free }
+    );
+
+    // A generation bump kills stat-store like any other right: lookup's
+    // staleness check precedes the rights check, so statfs returns Stale.
+    assert_eq!(srv.handle(s, Request::RevokeRef { handle: 0 }, 15), Response::Ok);
+    assert_eq!(
+        srv.handle(s, Request::Statfs { handle: 0 }, 16),
+        Response::Err(ErrorCode::Stale)
+    );
+}
+
+#[test]
 fn watermark_arms_gc_and_reclaim_recovers_space() {
     // Small store: ~112 KiB chunk region, so a few generations of churn
     // cross the 20%-free watermark.

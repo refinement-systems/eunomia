@@ -41,6 +41,16 @@ pub const R_SNAPSHOT: u8 = 1 << 2;
 /// revocation (generation bump, rev1§2.2).
 pub const R_REWRITE_HISTORY: u8 = 1 << 3;
 pub const R_ENUMERATE: u8 = 1 << 4;
+/// Store-global observation (rev1§2.3): gates `statfs(handle)` and any
+/// future global observable (GC counters, index occupancy). The one right
+/// whose scope ignores the subtree its handle denotes — and the one right
+/// kept OUT of `R_ALL`, so ordinary delegation strips it by default
+/// (deny-by-default). It originates only on the privileged `root_grant`.
+pub const R_STAT_STORE: u8 = 1 << 5;
+/// All ordinary, subtree-scoped, *delegatable* rights. Deliberately excludes
+/// `R_STAT_STORE` (bit 5): attenuation is plain intersection, so a delegated
+/// handle masked by `R_ALL` (or narrower) strips `stat-store` for free. The
+/// numeric value is stable — the committed fuzz corpora depend on it.
 pub const R_ALL: u8 = 0b1_1111;
 
 pub type SessionId = u64;
@@ -249,8 +259,11 @@ impl<D: BlockDev> Server<D> {
         self.sessions.remove(&id);
     }
 
-    /// Convenience for wiring init's world: a full-rights handle at a
-    /// ref's root.
+    /// The privileged init/maintenance grant: a full-rights handle at a
+    /// ref's root. This is the **sole origin** of `R_STAT_STORE` (rev1§2.3) —
+    /// every other handle is derived by intersection, which strips it. init
+    /// hands this (or a stat-store-bearing attenuation of it) only to the
+    /// shell and to maintenance holders.
     pub fn root_grant(&self, ref_name: &[u8]) -> Result<HandleEntry, StoreError> {
         let gen = self
             .store
@@ -265,7 +278,7 @@ impl<D: BlockDev> Server<D> {
                 subtree: Vec::new(),
                 gen_at_grant: gen,
             },
-            rights: R_ALL,
+            rights: R_ALL | R_STAT_STORE,
         })
     }
 
@@ -406,7 +419,10 @@ impl<D: BlockDev> Server<D> {
             }
             Request::OpenChild { handle, path, rights_mask } => {
                 let e = self.lookup(session, handle, 0)?;
-                // Monotone derivation (rev1§2.3): intersection only.
+                // Monotone derivation (rev1§2.3): intersection only. This is
+                // also what strips `R_STAT_STORE` from delegated children — a
+                // mask of `R_ALL` (which omits bit 5) clears it for free, so
+                // it survives only when the holder has it AND sets bit 5.
                 let rights = e.rights & rights_mask;
                 let entry = match &e.target {
                     HandleTarget::Ref { name, subtree, gen_at_grant } => {
@@ -498,6 +514,8 @@ impl<D: BlockDev> Server<D> {
                 } else {
                     self.resolve_snap_dir(&scoped, &path)?
                 };
+                // Masking to read/enumerate also drops `R_STAT_STORE`:
+                // snapshot handles never carry store-global observation.
                 let rights = e.rights & rights_mask & (R_READ | R_ENUMERATE);
                 let s = self.sessions.get_mut(&session).ok_or(ErrorCode::BadHandle)?;
                 Ok(Response::Handle(s.insert(HandleEntry {
@@ -614,7 +632,12 @@ impl<D: BlockDev> Server<D> {
                 })
             }
             Request::Statfs { handle } => {
-                self.lookup(session, handle, 0)?;
+                // Store-global observation needs `stat-store` (rev1§2.3),
+                // deny-by-default. `lookup` runs the generation check before
+                // the rights check, so a revoked handle dies with `Stale` and
+                // a handle lacking the bit is `Denied`. The handle's subtree
+                // is intentionally ignored: this right's scope is the store.
+                self.lookup(session, handle, R_STAT_STORE)?;
                 let sp = self.store.space();
                 Ok(Response::Space { total: sp.total, used: sp.used, free: sp.free })
             }
