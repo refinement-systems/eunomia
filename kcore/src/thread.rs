@@ -209,27 +209,40 @@ pub fn report_terminal<S: Store>(store: &mut S, t: ObjId, r: Report)
     }
 }
 
-/// Set a thread's rev1§5.4 run priority, bounded by the spawner's cap ceiling.
-/// The spawn path passes `ceiling = cap_max_prio(thread_cap)`, so the verified
-/// `requires prio <= ceiling` carries the rev1§5.4 cap-attenuation into the model
-/// and the post-state priority is exactly `prio` (hence `<= ceiling`). This makes
-/// the priority *write* a machine-checked step against the `tcb_view` seam: only
-/// the trusted `Store`-trait realization of `set_tcb_priority` remains, the
-/// same posture as every other setter (`set_tcb_report`, `set_tcb_bind_bits`).
+/// Set a thread's rev1§5.4 run priority, bounded by the spawner's cap ceiling —
+/// **refusing** the write when the requested priority exceeds the ceiling.
+/// The spawn path passes `ceiling = cap_max_prio(thread_cap)`, so the rev1§5.4
+/// cap-attenuation is carried into the model and the *refusal decision* is a
+/// machine-checked branch here, not an unverified shell `if` (rev1§6.1(d)): an
+/// over-ceiling request returns `Err` and leaves the thread untouched, an
+/// accepted one writes the priority through the `tcb_view` seam with a reachable
+/// post-state `priority == prio` (hence `<= ceiling`). Only the trusted
+/// `Store`-trait realization of `set_tcb_priority` remains, the same posture as
+/// every other setter (`set_tcb_report`, `set_tcb_bind_bits`).
 ///
-/// Frames every other view unchanged (the mutual-frame discipline), so a
-/// spawn that calls this leaves cspace/refs/channels/notifs/timers untouched.
-pub fn set_priority<S: Store>(store: &mut S, t: ObjId, prio: u8, ceiling: u8)
+/// Frames every other view unchanged in both branches (the mutual-frame
+/// discipline), so a spawn that calls this leaves cspace/refs/channels/notifs/
+/// timers untouched whether it accepts or refuses.
+pub fn set_priority<S: Store>(store: &mut S, t: ObjId, prio: u8, ceiling: u8) -> (res: Result<(), ()>)
     requires
         old(store).tcb_view().dom().contains(t),
-        prio <= ceiling,
     ensures
-        final(store).tcb_view() == old(store).tcb_view().insert(
-            t, TcbView { priority: prio, ..old(store).tcb_view()[t] }),
-        // The point of the seam: the written priority is exactly `prio`, hence
-        // within the cap ceiling — a reachable `ensures`, not a shell promise.
-        final(store).tcb_view()[t].priority == prio,
-        final(store).tcb_view()[t].priority <= ceiling,
+        // Accepted: the written priority is exactly `prio`, hence within the cap
+        // ceiling — a reachable `ensures`, not a shell promise.
+        res is Ok ==> {
+            &&& prio <= ceiling
+            &&& final(store).tcb_view() == old(store).tcb_view().insert(
+                    t, TcbView { priority: prio, ..old(store).tcb_view()[t] })
+            &&& final(store).tcb_view()[t].priority == prio
+            &&& final(store).tcb_view()[t].priority <= ceiling
+        },
+        // Refused: the request was over-ceiling and the thread is untouched.
+        res is Err ==> {
+            &&& prio > ceiling
+            &&& final(store).tcb_view() == old(store).tcb_view()
+        },
+        // Every non-TCB view is framed in both branches (`set_tcb_priority`
+        // frames them on the accept; the refuse mutates nothing).
         final(store).slot_view() == old(store).slot_view(),
         final(store).refs_view() == old(store).refs_view(),
         final(store).chan_view() == old(store).chan_view(),
@@ -238,8 +251,11 @@ pub fn set_priority<S: Store>(store: &mut S, t: ObjId, prio: u8, ceiling: u8)
         final(store).timer_head_view() == old(store).timer_head_view(),
         final(store).cspace_view() == old(store).cspace_view(),
 {
-    let _ = ceiling; // spec-only (the `prio <= ceiling` `requires`); erased build sees it unused
+    if prio > ceiling {
+        return Err(());
+    }
     store.set_tcb_priority(t, prio);
+    Ok(())
 }
 
 /// Configure a binding slot (holder-configured, rev1§3.6): the caller's

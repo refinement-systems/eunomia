@@ -452,16 +452,16 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             // thread cap (`max_prio`, stamped at retype = the retyper's
             // priority), so spawn gates on the cap, not the caller's live
             // priority — the lattice stays monotone and the ceiling is
-            // cap-attenuated through `kcore::cspace::derive`.
-            if prio > max_prio {
+            // cap-attenuated through `kcore::cspace::derive`. The refusal is now
+            // the verified `set_priority` op's own branch (rev1§6.1(d)), not a
+            // shell `if`: an over-ceiling `prio` returns `Err` and leaves the TCB
+            // untouched. Gated here, before any state mutation, so no refcount is
+            // bumped on refusal (the prior shell gate's position).
+            if thread::set_priority(tp, prio, max_prio).is_err() {
                 return Some(ERR_PERM);
             }
             (*csp).hdr.refs += 1;
             (*tp).cspace = Some(cs);
-            // rev1§5.4: the gated priority is written through the verified
-            // `kcore::thread::set_priority` (`prio <= max_prio` discharged by the
-            // gate above), not a raw store.
-            thread::set_priority(tp, prio, max_prio);
             (*tp).frame = TrapFrame::zeroed();
             (*tp).frame.elr = entry;
             (*tp).frame.sp_el0 = sp;
@@ -613,8 +613,12 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if (*tp).state != ThreadState::Inactive {
                 return Some(ERR_STATE);
             }
-            // rev1§5.4 ceiling carried on the thread cap (see ThreadStart).
-            if prio > max_prio {
+            // rev1§5.4 ceiling carried on the thread cap (see ThreadStart). The
+            // verified `set_priority` op makes the refusal itself (rev1§6.1(d)),
+            // gated here — before the range check and any refcount bump, the prior
+            // shell gate's position — so an over-ceiling `prio` returns `Err` →
+            // `ERR_PERM` (ahead of any `ERR_FAULT`) with the TCB untouched.
+            if thread::set_priority(tp, prio, max_prio).is_err() {
                 return Some(ERR_PERM);
             }
             // Entry/SP live in the child's aspace, not the caller's.
@@ -625,8 +629,6 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             (*asp_ptr).hdr.refs += 1;
             (*tp).cspace = Some(cs);
             (*tp).aspace = Some(asp);
-            // rev1§5.4: gated priority via the verified setter (see ThreadStart).
-            thread::set_priority(tp, prio, max_prio);
             (*tp).frame = TrapFrame::zeroed();
             (*tp).frame.elr = entry;
             (*tp).frame.sp_el0 = sp;
