@@ -43,6 +43,17 @@ CONSTANTS
     MaxWrites,  \* writes per ref — bounds the state space
     NULL        \* sentinel (model value)
 
+\* rev1§4.8 — THE single trusted storage-layer axiom, named (not derived).
+\* "fsync means fsync": a completed fsync barrier makes the preceding writes
+\* durable, and a crash never loses durable state. The model ENCODES this in
+\* CommitPrepare (chunkBuf -> durableRoots at barrier 1) and Crash (UNCHANGED
+\* durableRoots); this ASSUME makes the assumption an explicit, grep-able
+\* top-level axiom rather than an implicit consequence of the crash semantics.
+\* It rests on the QEMU/virtio-blk cache=writeback + FLUSH config under our
+\* control (rev1§4.8), NOT on any proof — the irreducible trusted base of the
+\* storage recovery argument, recorded as an axiom in the trusted-base ledger.
+ASSUME FsyncMeansFsync == TRUE
+
 VARIABLES
     \* -- durable --
     slotA, slotB,   \* superblock slots
@@ -252,5 +263,52 @@ AckedWritesRecoverable ==
         \/ v <= LiveSlot.refRoots[r]
         \/ \E i \in (LiveSlot.walHead + 1)..Len(walLog) :
               walLog[i] = <<r, v>>
+
+\* --- Action property: replay-equality ----------------------------------
+
+\* rev1§6/§4.5: replay-EQUALITY. After any Recover step, the rebuilt overlay
+\* is EXACTLY the acked writes past the committed head not already covered by
+\* the committed root — characterized semantically (over writeCtr + walLog),
+\* independently of how Recover computes the set. The earlier suite (the five
+\* invariants above) constrained only durable state and never named overlay,
+\* so a no-op Recover passed; this is the property that fails it (see the
+\* committed negative control CommitProtocol_NegControl.cfg). LiveSlot, walLog
+\* and writeCtr are UNCHANGED by Recover, so naming them unprimed is sound.
+\* The two phrasings — this comprehension and the WAL-index projection the
+\* Recover body uses — coincide IFF replay is correct, so the property bites
+\* on an off-by-one walHead bound, a dropped > refRoots idempotence filter, a
+\* wrong ref selection, or a rebuild-nothing recovery.
+RecoverReconstructs ==
+    [][ (crashed /\ ~crashed') =>
+          \A r \in Refs :
+            overlay'[r] = { v \in 1..writeCtr[r] :
+                              /\ v > LiveSlot.refRoots[r]
+                              /\ \E i \in (LiveSlot.walHead + 1)..Len(walLog) :
+                                     walLog[i] = <<r, v>> } ]_vars
+
+\* --- Negative control --------------------------------------------------
+
+\* NEGATIVE CONTROL (rev1§6 discipline): a Recover that rebuilds nothing.
+\* Under SpecNeg, RecoverReconstructs MUST be violated — the runnable proof
+\* that the property has teeth. Checked by CommitProtocol_NegControl.cfg,
+\* which reports a short counterexample (write -> crash -> recover-to-empty
+\* with an unflushed acked write outstanding). SpecNeg reuses every real
+\* action except it swaps Recover for RecoverNoop.
+RecoverNoop ==
+    /\ crashed
+    /\ overlay' = [r \in Refs |-> {}]
+    /\ crashed' = FALSE
+    /\ UNCHANGED <<slotA, slotB, walLog, durableRoots, chunkBuf,
+                   pendingRoot, pendingSB, commitPhase, writeCtr>>
+
+NextNeg ==
+    \/ \E r \in Refs : Write(r)
+    \/ \E r \in Refs : Flush(r)
+    \/ CommitPrepare
+    \/ CommitFinish
+    \/ Crash
+    \/ RecoverNoop
+
+SpecNeg == Init /\ [][NextNeg]_vars
 
 ====

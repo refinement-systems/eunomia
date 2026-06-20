@@ -50,6 +50,16 @@ invariant. They are the spec's rev1§6.1(a–d) `[trusted]` parts:
 | Page-table join | (c) | The cap-side unmap is proven over object state and the raw page-table write/clear is proven over page-table memory; the *join* — that the cap's recorded mapping is the true entry location and that map/unmap truly write/clear it — lives in the unverified kernel Store. |
 | Thread-lifecycle shell | (d) | The "suspended, never rescheduled" state (exception entry, syscall exit, scheduler), the anti-forgery/anti-suppression access control, and the exit/read-report syscall dispatch + register marshalling stay in the trusted shell; the asm context switch is inherently unverifiable. |
 
+**Storage durability axiom — "fsync means fsync" (rev1§4.8, §6.1(e)).** Named in the
+commit/recovery model as the labeled top-level `ASSUME FsyncMeansFsync` in
+`tla/commit_protocol/CommitProtocol.tla`: a completed fsync barrier makes the preceding
+writes durable, and a crash never loses durable state. It is **trusted by construction**
+(the QEMU/virtio-blk `cache=writeback` + FLUSH config under our control), recorded here as
+the storage layer's single **axiom** — *not* a closed seam and *not* a theorem. The model
+encodes it operationally (`CommitPrepare` moves `chunkBuf → durableRoots` at barrier 1;
+`Crash` leaves `durableRoots` `UNCHANGED`); the `ASSUME` makes the assumption explicit and
+grep-able rather than an implicit consequence of the crash semantics, as rev1§4.8 requires.
+
 ### (2) Out-of-scope total function — trust *totality + determinism only*
 
 | Construct | Location | Reason | Host test |
@@ -97,9 +107,9 @@ phase completes.
 |---|---|---|
 | Cap-side **MAP** bookkeeping moved behind a verified object op (symmetric with unmap) | §6.1(c) | **B8** |
 | Spawn-time **priority-ceiling gate** moved from the syscall shell into a verified op | §6.1(d), §5.4 | **B8** |
-| Per-record **structural decode** split out of `wal_content_ok`, verified like the other on-disk decoders | §6.1(e), §3.7 | **B7** (T-5) |
-| Model **replay-equality** mechanized by the `Recover` action property | §6.1(e), §6 | **B7** (T-1) |
-| **fsync means fsync** named as a labeled `ASSUME` in the storage model | §4.8, §6.1(e) | **B7** (T-4) |
+| Per-record **structural decode** split out of `wal_content_ok`, verified like the other on-disk decoders | §6.1(e), §3.7 | **B7B** (T-5) |
+| Model **replay-equality** mechanized by the `Recover` action property | §6.1(e), §6 | **B7A** — landed ✓ (T-1) |
+| **fsync means fsync** named as a labeled `ASSUME` in the storage model | §4.8, §6.1(e) | **B7A** — landed ✓ (T-4) |
 
 ## Baselines (regression gates)
 
@@ -112,7 +122,7 @@ Any phase touching these must re-establish them at ≥ the prior numbers.
 | IPC header + session codecs | `cargo verus verify -p ipc` | 58 verified, 0 errors |
 | DMA-pool `FreeList` (core + `is_full`/`is_allocated` wrapper-guard accessors) | `cargo verus verify -p dma-pool` | 29 verified, 0 errors |
 | urt slots + time | `cargo verus verify -p urt` | verified (slot bitmap + `utc_ns_at`) |
-| TLA+ | `CommitProtocol` (6886 states), `CapRevocation`/`_Teardown` (~799k, recorded run), `IpcReactor` (with a negative control) | pass |
+| TLA+ | `CommitProtocol` (6886 states; the `RecoverReconstructs` replay-equality action property + the committed negative control `CommitProtocol_NegControl.cfg`, which reports the expected violation), `CapRevocation`/`_Teardown` (~799k, recorded run), `IpcReactor` (with a negative control) | pass |
 | Fuzzing | wire/on-disk/ELF decoders + mount/recovery cargo-fuzz targets + the GC mark-walk target (`gc_mark`), committed corpora + Miri replay | green |
 
 ---
