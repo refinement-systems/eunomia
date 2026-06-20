@@ -9,7 +9,9 @@
 use crate::elf::{self, ElfError, PF_W, PF_X};
 use ipc::sys::{self, OBJ_ASPACE, OBJ_CSPACE, OBJ_FRAME, OBJ_THREAD, PERM_W, PERM_X};
 
-pub const PAGE: u64 = 4096;
+/// Canonical `PAGE` lives in `elf` (with the page-layout predicate that uses
+/// it); re-export here so `spawn::PAGE` keeps resolving for the stack math.
+pub use crate::elf::PAGE;
 /// Fixed-size stack with an unmapped guard region below it (rev1§5.3).
 pub const STACK_TOP: u64 = 0x9000_0000;
 pub const STACK_PAGES: u64 = 16;
@@ -54,13 +56,16 @@ pub fn prepare(
 
     for (i, seg) in img.segments[..img.nsegments].iter().enumerate() {
         let frame_slot = base + 3 + i as u32;
-        let va_start = seg.vaddr & !(PAGE - 1);
-        let va_end = (seg.vaddr + seg.memsz + PAGE - 1) & !(PAGE - 1);
-        let pages = (va_end - va_start) / PAGE;
-        check(sys::retype(untyped, OBJ_FRAME, pages, frame_slot, 0))?;
+        // Re-run `page_layout` rather than trusting `parse` (defense in depth:
+        // it must be total on its own input). All page-rounding overflow is
+        // handled here as a clean Err. An oversized-but-non-overflowing `pages`
+        // (small vaddr, huge memsz) is *not* a panic — it flows to `retype`,
+        // which fails on untyped exhaustion and returns a clean Sys error.
+        let l = seg.page_layout().map_err(SpawnError::Elf)?;
+        check(sys::retype(untyped, OBJ_FRAME, l.pages, frame_slot, 0))?;
         // Frames are zeroed at retype, so bss needs no explicit clear.
         let file = &image[seg.offset as usize..(seg.offset + seg.filesz) as usize];
-        check(sys::frame_write(frame_slot, seg.vaddr - va_start, file))?;
+        check(sys::frame_write(frame_slot, l.page_offset, file))?;
         let mut perms = 0;
         if seg.flags & PF_W != 0 {
             perms |= PERM_W;
@@ -68,7 +73,7 @@ pub fn prepare(
         if seg.flags & PF_X != 0 {
             perms |= PERM_X;
         }
-        check(sys::map(aspace_slot, frame_slot, va_start, perms))?;
+        check(sys::map(aspace_slot, frame_slot, l.va_start, perms))?;
     }
 
     let stack_slot = base + 3 + img.nsegments as u32;
