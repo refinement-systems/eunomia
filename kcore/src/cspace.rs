@@ -2984,6 +2984,17 @@ pub open spec fn ready_complete(rv: ReadyView, tv: Map<ObjId, TcbView>) -> bool 
             && ready_seq(rv, tv, tv[t].priority as int).contains(t)
 }
 
+// `ready_complete` with one Runnable thread `t` excepted — the liveness `ready_unqueue`
+// preserves. The splice leaves `t` transiently Runnable-and-off-chain, so completeness
+// holds for every *other* Runnable thread; `destroy_tcb` (B8C-4) closes the gap by halting
+// `t`. Kept a separate predicate (not a `ready_wf` conjunct) per the off-chain-`t` carve-out.
+pub open spec fn ready_complete_except(rv: ReadyView, tv: Map<ObjId, TcbView>, t: ObjId) -> bool {
+    forall|x: ObjId| #[trigger] tv.dom().contains(x) && tv[x].state == ThreadState::Runnable
+        && x != t
+        ==> (tv[x].priority as int) < NUM_PRIOS
+            && ready_seq(rv, tv, tv[x].priority as int).contains(x)
+}
+
 // The presence bitmap is coherent: bit `level` set ⇔ level `level`'s chain is non-empty.
 // Links the `u32` map `top_ready` bit-scans to the per-level chains.
 pub open spec fn ready_bitmap_coherent(rv: ReadyView, tv: Map<ObjId, TcbView>) -> bool {

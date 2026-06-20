@@ -175,6 +175,50 @@ pub proof fn lemma_ready_coherent_after_set(
     }
 }
 
+// Bitmap coherence after *clearing* bit `level` (`ready_dequeue`/`ready_unqueue`, when the
+// level empties): bit `level` is now clear and level empty; every other bit and chain is
+// unchanged. The clear-bit twin of `lemma_ready_coherent_after_set` — the level-still-
+// non-empty case keeps the bitmap unchanged and is handled inline in `lemma_ready_remove_wf`.
+#[verifier::spinoff_prover]
+#[verifier::rlimit(100)]
+pub proof fn lemma_ready_coherent_after_clear(
+    rv0: cspace::ReadyView,
+    tv0: Map<ObjId, cspace::TcbView>,
+    rvf: cspace::ReadyView,
+    tvf: Map<ObjId, cspace::TcbView>,
+    level: int,
+)
+    requires
+        cspace::ready_bitmap_coherent(rv0, tv0),
+        0 <= level < NUM_PRIOS,
+        rvf.bitmap == rv0.bitmap & !(1u32 << (level as u32)),
+        cspace::ready_seq(rvf, tvf, level).len() == 0,
+        forall|l: int| 0 <= l < NUM_PRIOS && l != level
+            ==> #[trigger] cspace::ready_seq(rvf, tvf, l) == cspace::ready_seq(rv0, tv0, l),
+    ensures
+        cspace::ready_bitmap_coherent(rvf, tvf),
+{
+    assert forall|l: int| 0 <= l < NUM_PRIOS implies
+        ((rvf.bitmap & (1u32 << (l as u32))) != 0
+            <==> (#[trigger] cspace::ready_seq(rvf, tvf, l)).len() > 0) by {
+        if l == level {
+            assert(l as u32 == level as u32);
+            lemma_clear_bit_self(rv0.bitmap, level as u32);
+            assert((rvf.bitmap & (1u32 << (l as u32))) == 0);
+            assert(cspace::ready_seq(rvf, tvf, l).len() == 0);
+        } else {
+            assert(l as u32 != level as u32);
+            lemma_clear_bit_other(rv0.bitmap, level as u32, l as u32);
+            assert((rvf.bitmap & (1u32 << (l as u32)) != 0)
+                == (rv0.bitmap & (1u32 << (l as u32)) != 0));
+            assert(cspace::ready_seq(rvf, tvf, l) == cspace::ready_seq(rv0, tv0, l));
+            // rv0 coherence (trigger ready_seq(rv0,tv0,l)) closes the iff.
+            assert((rv0.bitmap & (1u32 << (l as u32)) != 0)
+                == (cspace::ready_seq(rv0, tv0, l).len() > 0));
+        }
+    }
+}
+
 // The post-condition sweep for an append-to-tail (`ready_enqueue`/`make_runnable`):
 // from the *local* facts the op body establishes (the pushed chain at `level`, the
 // per-level head/tail/bitmap frame, the tcb frame) plus the pre-state invariants, derive
@@ -295,6 +339,133 @@ pub proof fn lemma_ready_push_wf(
             assert(cspace::ready_seq(rvf, tvf, lx) == cspace::ready_seq(rv0, tv0, lx));
         }
     }
+}
+
+// The post-condition sweep for a *removal* (`ready_dequeue`/`ready_unqueue`): from the
+// local facts the op body establishes (the spliced chain at `level` — `rs0.remove(k)` —, the
+// per-level head/tail/bitmap frame, the tcb frame) plus the pre-state `ready_wf`, derive the
+// global `ready_wf` over all 32 levels. The removal analogue of `lemma_ready_push_wf`; it
+// re-establishes `ready_wf` *only* (the liveness half — full `ready_complete` vs.
+// `ready_complete_except` — is the op-specific concern the caller proves). Requires only
+// `ready_wf(rv0)` (not `ready_complete`), so both ops call it. Spun off into its own Z3
+// instance so the op body stays within budget.
+#[verifier::spinoff_prover]
+#[verifier::rlimit(150)]
+pub proof fn lemma_ready_remove_wf(
+    rv0: cspace::ReadyView,
+    tv0: Map<ObjId, cspace::TcbView>,
+    rvf: cspace::ReadyView,
+    tvf: Map<ObjId, cspace::TcbView>,
+    level: int,
+    t: ObjId,
+    rs0: Seq<ObjId>,
+    k: int,
+)
+    requires
+        cspace::ready_wf(rv0, tv0),
+        0 <= level < NUM_PRIOS,
+        rs0 == cspace::ready_seq(rv0, tv0, level),
+        0 <= k < rs0.len(),
+        rs0[k] == t,
+        tv0[t].priority as int == level,
+        cspace::ready_chain(rvf, tvf, level, rs0.remove(k)),
+        tvf.dom() == tv0.dom(),
+        rvf.heads.dom() == rv0.heads.dom(),
+        rvf.tails.dom() == rv0.tails.dom(),
+        forall|l: int| #![trigger rvf.heads[l]] #![trigger rvf.tails[l]]
+            0 <= l < NUM_PRIOS && l != level
+            ==> rvf.heads[l] == rv0.heads[l] && rvf.tails[l] == rv0.tails[l],
+        rs0.remove(k).len() > 0 ==> rvf.bitmap == rv0.bitmap,
+        rs0.remove(k).len() == 0 ==> rvf.bitmap == rv0.bitmap & !(1u32 << (level as u32)),
+        forall|x: ObjId| x != t && (k == 0 || x != rs0[k - 1]) ==> #[trigger] tvf[x] == tv0[x],
+        k > 0 ==> tvf[rs0[k - 1]].state == tv0[rs0[k - 1]].state,
+        k > 0 ==> tvf[rs0[k - 1]].priority == tv0[rs0[k - 1]].priority,
+    ensures
+        cspace::ready_wf(rvf, tvf),
+        cspace::ready_seq(rvf, tvf, level) == rs0.remove(k),
+        // other levels' chains are untouched — `ready_unqueue` needs this to carry
+        // `ready_complete_except` for the surviving Runnable threads at other levels.
+        forall|l: int| #![trigger cspace::ready_seq(rvf, tvf, l)]
+            0 <= l < NUM_PRIOS && l != level
+            ==> cspace::ready_seq(rvf, tvf, l) == cspace::ready_seq(rv0, tv0, l),
+{
+    // `rs0` is genuinely the pre-state chain at `level`; `rs0[k-1]` (the spliced node's
+    // predecessor) is therefore at `level` too.
+    assert(cspace::ready_chain(rv0, tv0, level, rs0));
+
+    // level's seq is the spliced chain.
+    cspace::lemma_ready_chain_unique(rvf, tvf, level, cspace::ready_seq(rvf, tvf, level),
+        rs0.remove(k));
+
+    // other levels: seq + chain preserved (their nodes have priority != level, and the only
+    // moved tcbs — `t` and its predecessor `rs0[k-1]` — are at `level`, so they are framed).
+    assert forall|l: int| 0 <= l < NUM_PRIOS && l != level implies
+        #[trigger] cspace::ready_seq(rvf, tvf, l) == cspace::ready_seq(rv0, tv0, l)
+        && cspace::ready_chain(rvf, tvf, l, cspace::ready_seq(rvf, tvf, l)) by {
+        assert(rvf.heads[l] == rv0.heads[l] && rvf.tails[l] == rv0.tails[l]);
+        let rl = cspace::ready_seq(rv0, tv0, l);
+        assert(cspace::ready_chain(rv0, tv0, l, rl));
+        assert forall|i: int| 0 <= i < rl.len() implies #[trigger] tvf[rl[i]] == tv0[rl[i]] by {
+            assert(tv0[rl[i]].priority as int == l);
+            assert(rl[i] != t);
+            if k > 0 {
+                assert(tv0[rs0[k - 1]].priority as int == level);
+                assert(rl[i] != rs0[k - 1]);
+            }
+        }
+        cspace::lemma_ready_seq_frame(rv0, tv0, rvf, tvf, l);
+    }
+
+    // ready_wf assembly.
+    assert(rvf.heads.dom() == Set::new(|i: int| 0 <= i < NUM_PRIOS as int));
+    assert(rvf.tails.dom() == Set::new(|i: int| 0 <= i < NUM_PRIOS as int));
+    assert forall|lv: int| #![trigger rvf.heads[lv]] 0 <= lv < NUM_PRIOS as int implies
+        (rvf.heads[lv] is None <==> rvf.tails[lv] is None) by {
+        if lv == level {
+            let rk = rs0.remove(k);
+            assert(cspace::ready_chain(rvf, tvf, level, rk));
+            if rk.len() == 0 {
+                assert(rvf.heads[level] is None && rvf.tails[level] is None);
+            } else {
+                assert(rvf.heads[level] is Some && rvf.tails[level] is Some);
+            }
+        } else {
+            assert(rvf.heads[lv] == rv0.heads[lv] && rvf.tails[lv] == rv0.tails[lv]);
+        }
+    }
+    assert(cspace::ready_seq(rvf, tvf, level) == rs0.remove(k));
+    assert forall|lv: int| #![trigger cspace::ready_seq(rvf, tvf, lv)] 0 <= lv < NUM_PRIOS as int
+        implies cspace::ready_chain(rvf, tvf, lv, cspace::ready_seq(rvf, tvf, lv)) by {
+        if lv != level {
+            assert(cspace::ready_seq(rvf, tvf, lv) == cspace::ready_seq(rv0, tv0, lv));
+        }
+    }
+
+    // bitmap coherence: clear-bit lemma when the level empties, inline when it stays
+    // non-empty (the bitmap is then unchanged and rv0 coherence transfers directly).
+    if rs0.remove(k).len() == 0 {
+        assert(cspace::ready_seq(rvf, tvf, level).len() == 0);
+        lemma_ready_coherent_after_clear(rv0, tv0, rvf, tvf, level);
+    } else {
+        assert(rvf.bitmap == rv0.bitmap);
+        assert forall|l: int| 0 <= l < NUM_PRIOS implies
+            ((rvf.bitmap & (1u32 << (l as u32))) != 0
+                <==> (#[trigger] cspace::ready_seq(rvf, tvf, l)).len() > 0) by {
+            if l == level {
+                assert(l as u32 == level as u32);
+                assert(cspace::ready_seq(rvf, tvf, l) == rs0.remove(k));
+                assert(cspace::ready_seq(rv0, tv0, level).len() > 0);
+                assert((rv0.bitmap & (1u32 << (level as u32)) != 0)
+                    == (cspace::ready_seq(rv0, tv0, level).len() > 0));
+            } else {
+                assert(cspace::ready_seq(rvf, tvf, l) == cspace::ready_seq(rv0, tv0, l));
+                assert((rv0.bitmap & (1u32 << (l as u32)) != 0)
+                    == (cspace::ready_seq(rv0, tv0, l).len() > 0));
+            }
+        }
+    }
+    assert(cspace::ready_bitmap_coherent(rvf, tvf));
+    assert(cspace::ready_wf(rvf, tvf));
 }
 
 // Append `t` to the tail of its priority level's ready list and set the level's bit —
@@ -434,6 +605,378 @@ pub fn ready_enqueue<S: Store>(store: &mut S, t: ObjId)
         assert(bm == rv0.bitmap);
         assert(rvf.bitmap == rv0.bitmap | (1u32 << (level as u32)));
         lemma_ready_push_wf(rv0, tv0, rvf, tvf, level, t, pws);
+    }
+}
+
+// Pop the head of `level`'s ready list (round-robin within a level is FIFO), clearing the
+// level's bit if it empties — the verified core of the scheduler's `dequeue(top)`. Total:
+// `None` (a no-op) on an empty level. The popped thread stays `Runnable` and off the chain
+// (the caller — `maybe_switch` — immediately sets it `Running`), so the op preserves
+// `ready_wf` but *not* `ready_complete` (hence the contract carries neither completeness form).
+#[verifier::spinoff_prover]
+#[verifier::rlimit(60)]
+pub fn ready_dequeue<S: Store>(store: &mut S, level: usize) -> (r: Option<ObjId>)
+    requires
+        level < NUM_PRIOS,
+        cspace::ready_wf(old(store).ready_view(), old(store).tcb_view()),
+    ensures
+        final(store).slot_view() == old(store).slot_view(),
+        final(store).refs_view() == old(store).refs_view(),
+        final(store).chan_view() == old(store).chan_view(),
+        final(store).notif_view() == old(store).notif_view(),
+        final(store).timer_view() == old(store).timer_view(),
+        final(store).timer_head_view() == old(store).timer_head_view(),
+        final(store).cspace_view() == old(store).cspace_view(),
+        final(store).tcb_view().dom() == old(store).tcb_view().dom(),
+        cspace::ready_wf(final(store).ready_view(), final(store).tcb_view()),
+        ({
+            let rs0 = cspace::ready_seq(old(store).ready_view(), old(store).tcb_view(),
+                level as int);
+            &&& r == (if rs0.len() == 0 { None::<ObjId> } else { Some(rs0[0]) })
+            &&& rs0.len() == 0 ==> {
+                    &&& final(store).ready_view() == old(store).ready_view()
+                    &&& final(store).tcb_view() == old(store).tcb_view()
+                }
+            &&& rs0.len() > 0 ==> {
+                    &&& cspace::ready_seq(final(store).ready_view(), final(store).tcb_view(),
+                            level as int) == rs0.drop_first()
+                    &&& final(store).tcb_view()[rs0[0]].qnext is None
+                    &&& final(store).tcb_view()[rs0[0]].state == old(store).tcb_view()[rs0[0]].state
+                    &&& final(store).tcb_view()[rs0[0]].priority
+                            == old(store).tcb_view()[rs0[0]].priority
+                    &&& forall|x: ObjId| #![trigger final(store).tcb_view()[x]]
+                            x != rs0[0] ==> final(store).tcb_view()[x] == old(store).tcb_view()[x]
+                }
+        }),
+{
+    let ghost rv0 = old(store).ready_view();
+    let ghost tv0 = old(store).tcb_view();
+    let ghost level_i = level as int;
+    let ghost rs0 = cspace::ready_seq(rv0, tv0, level_i);
+    proof {
+        assert(cspace::ready_chain(rv0, tv0, level_i, rs0));
+    }
+    match store.ready_head(level) {
+        None => {
+            proof {
+                // head None ⇒ (ready_chain head/tail agreement) the chain is empty.
+                assert(rv0.heads[level_i] is None);
+                assert(rs0.len() == 0);
+            }
+            None
+        }
+        Some(t) => {
+            proof {
+                assert(rv0.heads[level_i] == Some(t));
+                assert(rs0.len() > 0);
+                assert(rs0[0] == t);
+            }
+            let next = store.tcb_qnext(t);
+            proof { assert(next == tv0[t].qnext); }
+            store.set_ready_head(level, next);
+            match next {
+                None => {
+                    store.set_ready_tail(level, None);
+                    let bm = store.ready_bitmap();
+                    store.set_ready_bitmap(bm & !(1u32 << (level as u32)));
+                }
+                Some(_) => {}
+            }
+            store.set_tcb_qnext(t, None);
+            proof {
+                let rvf = store.ready_view();
+                let tvf = store.tcb_view();
+                assert(rs0.remove(0) =~= rs0.drop_first());
+                assert(tvf.dom() =~= tv0.dom());
+                // lemma_ready_remove_chain (k = 0) final values.
+                assert(rvf.heads[level_i] == tv0[t].qnext);
+                if rs0.len() == 1 {
+                    assert(tv0[t].qnext is None);          // chain: sole node's qnext is None
+                    assert(rvf.tails[level_i] == None::<ObjId>);
+                } else {
+                    assert(tv0[t].qnext == Some(rs0[1]));  // chain: rs0[0].qnext == Some(rs0[1])
+                    assert(rvf.tails[level_i] == rv0.tails[level_i]);
+                }
+                assert forall|x: ObjId| x != t implies #[trigger] tvf[x] == tv0[x] by {}
+                cspace::lemma_ready_remove_chain(rv0, tv0, rvf, tvf, level_i, t, rs0, 0);
+                cspace::lemma_ready_chain_unique(rvf, tvf, level_i,
+                    cspace::ready_seq(rvf, tvf, level_i), rs0.remove(0));
+                // per-level head/tail frame + bitmap split for lemma_ready_remove_wf.
+                assert(rvf.heads.dom() =~= rv0.heads.dom());
+                assert(rvf.tails.dom() =~= rv0.tails.dom());
+                assert forall|l: int| 0 <= l < NUM_PRIOS && l != level_i implies
+                    #[trigger] rvf.heads[l] == rv0.heads[l] && rvf.tails[l] == rv0.tails[l] by {}
+                if rs0.remove(0).len() == 0 {
+                    assert(rvf.bitmap == rv0.bitmap & !(1u32 << (level_i as u32)));
+                } else {
+                    assert(rvf.bitmap == rv0.bitmap);
+                }
+                lemma_ready_remove_wf(rv0, tv0, rvf, tvf, level_i, t, rs0, 0);
+            }
+            Some(t)
+        }
+    }
+}
+
+// Splice `t` out of its priority level's ready list from an arbitrary position — the verified
+// core of the teardown `unqueue_ready` seam `destroy_tcb` already leans on. `ready_complete`
+// guarantees a Runnable `t` is charted on `level`'s chain, so the walk finds it (the
+// fall-off-end is unreachable, exactly like `timer::disarm`). The splice is census-free — a
+// ready thread holds no object ref, the §1.1 simplification — so only `t`'s `qnext` (cleared)
+// and its predecessor's `qnext` (re-threaded) move. `t` is left transiently Runnable-and-
+// off-chain, so the op preserves `ready_wf` + `ready_complete_except(t)` (the `destroy_tcb`
+// caller halts `t` to close the completeness gap — B8C-4).
+#[verifier::spinoff_prover]
+#[verifier::rlimit(100)]
+pub fn ready_unqueue<S: Store>(store: &mut S, t: ObjId)
+    requires
+        old(store).tcb_view().dom().contains(t),
+        old(store).tcb_view()[t].state == ThreadState::Runnable,
+        (old(store).tcb_view()[t].priority as int) < NUM_PRIOS,
+        cspace::ready_wf(old(store).ready_view(), old(store).tcb_view()),
+        cspace::ready_complete(old(store).ready_view(), old(store).tcb_view()),
+    ensures
+        final(store).slot_view() == old(store).slot_view(),
+        final(store).refs_view() == old(store).refs_view(),
+        final(store).chan_view() == old(store).chan_view(),
+        final(store).notif_view() == old(store).notif_view(),
+        final(store).timer_view() == old(store).timer_view(),
+        final(store).timer_head_view() == old(store).timer_head_view(),
+        final(store).cspace_view() == old(store).cspace_view(),
+        final(store).tcb_view().dom() == old(store).tcb_view().dom(),
+        cspace::ready_wf(final(store).ready_view(), final(store).tcb_view()),
+        cspace::ready_complete_except(final(store).ready_view(), final(store).tcb_view(), t),
+        ({
+            let level = old(store).tcb_view()[t].priority as int;
+            let rs0 = cspace::ready_seq(old(store).ready_view(), old(store).tcb_view(), level);
+            &&& cspace::ready_seq(final(store).ready_view(), final(store).tcb_view(), level)
+                    == rs0.remove(rs0.index_of(t))
+            &&& final(store).tcb_view()[t].qnext is None
+            &&& final(store).tcb_view()[t].state == old(store).tcb_view()[t].state
+            &&& final(store).tcb_view()[t].priority == old(store).tcb_view()[t].priority
+            &&& final(store).tcb_view()[t].cspace == old(store).tcb_view()[t].cspace
+            &&& final(store).tcb_view()[t].aspace == old(store).tcb_view()[t].aspace
+            // the "signal-shaped" frame: only level's chain nodes (t + its predecessor) moved.
+            &&& forall|x: ObjId| #![trigger final(store).tcb_view()[x]]
+                    final(store).tcb_view()[x] != old(store).tcb_view()[x]
+                    ==> old(store).tcb_view()[x].state == ThreadState::Runnable
+                        && old(store).tcb_view()[x].priority as int == level
+        }),
+{
+    let ghost rv0 = old(store).ready_view();
+    let ghost tv0 = old(store).tcb_view();
+    let ghost level = tv0[t].priority as int;
+    let ghost rs0 = cspace::ready_seq(rv0, tv0, level);
+    let lvl = store.tcb_priority(t) as usize;
+    proof {
+        assert(lvl as int == level);
+        assert(lvl < NUM_PRIOS);
+        assert(cspace::ready_chain(rv0, tv0, level, rs0));
+        // ready_complete ⇒ `t` is charted on `level`'s chain, so the walk finds it.
+        assert(rs0.contains(t));
+    }
+
+    let mut cur = store.ready_head(lvl);
+    let mut prev: Option<ObjId> = None;
+    let ghost mut k: int = 0;
+
+    while cur.is_some()
+        invariant
+            // the walk is read-only: every view pinned to entry.
+            store.slot_view() == old(store).slot_view(),
+            store.refs_view() == old(store).refs_view(),
+            store.chan_view() == old(store).chan_view(),
+            store.notif_view() == old(store).notif_view(),
+            store.tcb_view() == tv0,
+            store.ready_view() == rv0,
+            store.timer_view() == old(store).timer_view(),
+            store.timer_head_view() == old(store).timer_head_view(),
+            store.cspace_view() == old(store).cspace_view(),
+            rv0 == old(store).ready_view(),
+            tv0 == old(store).tcb_view(),
+            level == tv0[t].priority as int,
+            0 <= level < NUM_PRIOS,
+            lvl as int == level,
+            lvl < NUM_PRIOS,
+            rs0 == cspace::ready_seq(rv0, tv0, level),
+            cspace::ready_wf(rv0, tv0),
+            cspace::ready_complete(rv0, tv0),
+            cspace::ready_chain(rv0, tv0, level, rs0),
+            rs0.contains(t),
+            // `cur`/`prev` track position `k` in `rs0`, no `t` seen yet.
+            0 <= k <= rs0.len(),
+            cur == (if k < rs0.len() { Some(rs0[k]) } else { None::<ObjId> }),
+            prev == (if k == 0 { None::<ObjId> } else { Some(rs0[k - 1]) }),
+            forall|i: int| 0 <= i < k ==> rs0[i] != t,
+        decreases rs0.len() - k,
+    {
+        let c = cur.unwrap();
+        assert(k < rs0.len());
+        assert(c == rs0[k]);
+        // `ObjId`'s exec `==` is external; compare the u64 tag (the `remove_waiter` idiom).
+        if c.0 == t.0 {
+            assert(t == rs0[k]);
+            let ghost len = rs0.len() as int;
+            assert(rs0.len() > 0);
+            assert(rv0.heads[level] == Some(rs0[0]));
+            assert(rv0.tails[level] == Some(rs0[len - 1]));
+            // the tail names `t` iff `t` is the last element (no_duplicates).
+            assert((rs0[len - 1] == t) == (k == len - 1)) by {
+                if rs0[len - 1] == t { assert(rs0[len - 1] == rs0[k]); }
+                if k == len - 1 { assert(rs0[len - 1] == rs0[k]); }
+            }
+
+            let next = store.tcb_qnext(t);
+            assert(next == tv0[t].qnext);
+
+            // head-vs-middle splice (the predecessor's `qnext`, or the level head, retargets
+            // past `t`).
+            match prev {
+                None => {
+                    store.set_ready_head(lvl, next);
+                }
+                Some(p) => {
+                    proof { assert(k > 0); assert(p == rs0[k - 1]); assert(tv0.dom().contains(p)); }
+                    store.set_tcb_qnext(p, next);
+                }
+            }
+            // tail fixup: if `t` was the tail, the new tail is `prev`.
+            let tail_is_t = match store.ready_tail(lvl) {
+                Some(tl) => tl.0 == t.0,
+                None => false,
+            };
+            if tail_is_t {
+                store.set_ready_tail(lvl, prev);
+            }
+            store.set_tcb_qnext(t, None);
+            // clear the level's bit if the splice emptied it.
+            let h = store.ready_head(lvl);
+            if h.is_none() {
+                let bm = store.ready_bitmap();
+                store.set_ready_bitmap(bm & !(1u32 << (lvl as u32)));
+            }
+
+            proof {
+                let rvf = store.ready_view();
+                let tvf = store.tcb_view();
+                // `t == rs0[k]` ⇒ `index_of(t) == k` (no_duplicates).
+                assert(rs0.index_of(t) == k) by {
+                    let idx = rs0.index_of(t);
+                    assert(0 <= idx < rs0.len() && rs0[idx] == t);
+                }
+                assert(tvf.dom() =~= tv0.dom());
+                // ── lemma_ready_remove_chain final values (head/tail/qnext, keyed on k) ──
+                if k == 0 {
+                    assert(rvf.heads[level] == tv0[t].qnext);
+                } else {
+                    assert(rvf.heads[level] == rv0.heads[level]);
+                    assert(tvf[rs0[k - 1]].qnext == tv0[t].qnext);
+                    assert(tvf[rs0[k - 1]].state == tv0[rs0[k - 1]].state);
+                    assert(tvf[rs0[k - 1]].priority == tv0[rs0[k - 1]].priority);
+                }
+                if k == len - 1 {
+                    assert(rvf.tails[level]
+                        == (if k == 0 { None::<ObjId> } else { Some(rs0[k - 1]) }));
+                } else {
+                    assert(rvf.tails[level] == rv0.tails[level]);
+                }
+                assert forall|j: ObjId| j != t && (k == 0 || j != rs0[k - 1])
+                    implies #[trigger] tvf[j] == tv0[j] by {}
+                cspace::lemma_ready_remove_chain(rv0, tv0, rvf, tvf, level, t, rs0, k);
+                cspace::lemma_ready_chain_unique(rvf, tvf, level,
+                    cspace::ready_seq(rvf, tvf, level), rs0.remove(k));
+                // ── bitmap split: cleared iff the level emptied ──
+                assert(rvf.heads[level] is None <==> rs0.remove(k).len() == 0) by {
+                    assert(cspace::ready_chain(rvf, tvf, level, rs0.remove(k)));
+                }
+                assert(lvl as u32 == level as u32);
+                if rs0.remove(k).len() == 0 {
+                    assert(rvf.heads[level] is None);
+                    assert(rvf.bitmap == rv0.bitmap & !(1u32 << (level as u32)));
+                } else {
+                    assert(rvf.heads[level] is Some);
+                    assert(rvf.bitmap == rv0.bitmap);
+                }
+                // ── per-level head/tail frame, then the 32-level wf sweep ──
+                assert(rvf.heads.dom() =~= rv0.heads.dom()) by {
+                    assert(rv0.heads.dom().contains(level));
+                }
+                assert(rvf.tails.dom() =~= rv0.tails.dom()) by {
+                    assert(rv0.tails.dom().contains(level));
+                }
+                assert forall|l: int| 0 <= l < NUM_PRIOS && l != level implies
+                    #[trigger] rvf.heads[l] == rv0.heads[l] && rvf.tails[l] == rv0.tails[l] by {}
+                lemma_ready_remove_wf(rv0, tv0, rvf, tvf, level, t, rs0, k);
+
+                // ── ready_complete_except(t): every surviving Runnable thread stays charted ──
+                rs0.remove_ensures(k);
+                assert(cspace::ready_seq(rvf, tvf, level) == rs0.remove(k));
+                assert forall|x: ObjId| #[trigger] tvf.dom().contains(x)
+                    && tvf[x].state == ThreadState::Runnable && x != t
+                    implies (tvf[x].priority as int) < NUM_PRIOS
+                        && cspace::ready_seq(rvf, tvf, tvf[x].priority as int).contains(x) by {
+                    // `tv0[x]` is Runnable in both cases: unchanged ⇒ from `tvf[x] == tv0[x]`;
+                    // the changed `x != t` is `t`'s predecessor `rs0[k-1]`, on the chain.
+                    if tvf[x] != tv0[x] {
+                        assert(k > 0 && x == rs0[k - 1]);
+                        assert(tv0[rs0[k - 1]].state == ThreadState::Runnable);
+                    }
+                    assert(tv0.dom().contains(x));
+                    assert(tv0[x].state == ThreadState::Runnable);
+                    let px = tv0[x].priority as int;
+                    // only `qnext` ever moved, so `x`'s priority/state survive the splice.
+                    assert(tvf[x].priority as int == px);
+                    // rv0-`ready_complete` charts `x` at `px`.
+                    assert(px < NUM_PRIOS && cspace::ready_seq(rv0, tv0, px).contains(x));
+                    if px != level {
+                        assert(cspace::ready_seq(rvf, tvf, px) == cspace::ready_seq(rv0, tv0, px));
+                    } else {
+                        // `x ∈ rs0`, `x != t == rs0[k]` ⇒ `x ∈ rs0.remove(k)`.
+                        assert(rs0.contains(x));
+                        let j = rs0.index_of(x);
+                        assert(0 <= j < rs0.len() && rs0[j] == x);
+                        assert(j != k) by {
+                            if j == k {
+                                assert(rs0[j] == rs0[k]);
+                                assert(rs0[k] == t);
+                            }
+                        }
+                        let widx = if j < k { j } else { j - 1 };
+                        assert(0 <= widx < rs0.remove(k).len());
+                        assert(rs0.remove(k)[widx] == x);
+                        assert(rs0.remove(k).contains(x));
+                    }
+                    assert(cspace::ready_seq(rvf, tvf, px).contains(x));
+                }
+
+                // ── signal-shaped frame: only `t` and its predecessor (both Runnable at
+                //    `level` in `tv0`) moved ──
+                assert forall|x: ObjId| #[trigger] tvf[x] != tv0[x] implies
+                    tv0[x].state == ThreadState::Runnable && tv0[x].priority as int == level by {
+                    if x != t {
+                        assert(k > 0 && x == rs0[k - 1]);
+                        assert(0 <= k - 1 < rs0.len());
+                        assert(tv0[rs0[k - 1]].state == ThreadState::Runnable
+                            && tv0[rs0[k - 1]].priority as int == level);
+                    }
+                }
+                assert(tvf[t].qnext is None);
+            }
+            return;
+        }
+        prev = cur;
+        cur = store.tcb_qnext(c);
+        proof {
+            k = k + 1;
+        }
+    }
+    // Unreachable: `ready_complete` put `t` on the chain, so the walk cannot fall off the end.
+    proof {
+        assert(k == rs0.len());
+        assert(!rs0.contains(t)) by {
+            assert forall|i: int| 0 <= i < rs0.len() implies rs0[i] != t by {}
+        }
+        assert(false);
     }
 }
 
