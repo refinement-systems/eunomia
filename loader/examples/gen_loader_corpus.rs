@@ -18,6 +18,22 @@ fn write_seed(name: &str, bytes: &[u8]) {
     println!("  elf_parse/{name}: {} bytes", bytes.len());
 }
 
+/// Seed for the `segment_layout` target: a 16-byte `(vaddr, memsz)` LE pair,
+/// decoded by the target's leading-16-bytes convention.
+fn write_layout_seed(name: &str, vaddr: u64, memsz: u64) {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.push("fuzz");
+    p.push("corpus");
+    p.push("segment_layout");
+    fs::create_dir_all(&p).unwrap();
+    p.push(name);
+    let mut bytes = Vec::with_capacity(16);
+    bytes.extend_from_slice(&vaddr.to_le_bytes());
+    bytes.extend_from_slice(&memsz.to_le_bytes());
+    fs::write(&p, &bytes).unwrap();
+    println!("  segment_layout/{name}: {} bytes", bytes.len());
+}
+
 /// Common ELF64 header prefix with `phnum` program headers at offset 0x40.
 fn header(phnum: u16) -> Vec<u8> {
     let mut e = vec![0u8; 0x40];
@@ -60,6 +76,15 @@ fn main() {
     two.extend_from_slice(&phdr(PF_R | PF_W, 0x2000, 0x8001_0000, 0x10, 0x40));
     two.resize(0x2010, 0);
     write_seed("two_segments", &two);
+
+    // segment_layout corpus: 16-byte (vaddr, memsz) LE pairs bracketing the I-5
+    // page-rounding overflow boundary, so the fuzzer starts adjacent to it.
+    write_layout_seed("page_aligned", 0x8000_0000, 0x1000); // aligned, one page
+    write_layout_seed("unaligned", 0x8000_0123, 0x2000); // unaligned, multi-page
+    write_layout_seed("memsz_zero", 0x8000_0000, 0); // aligned + empty: pages == 0
+    write_layout_seed("unaligned_empty", 0x8000_0123, 0); // unaligned + empty: pages == 1
+    write_layout_seed("max_valid", u64::MAX - 0x1fff, 0x1000); // largest that lays out
+    write_layout_seed("i5_witness", u64::MAX - 8, 8); // first refused (rounding overflow)
 
     println!("done.");
 }

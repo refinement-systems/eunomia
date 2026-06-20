@@ -30,5 +30,22 @@ fuzz_target!(|data: &[u8]| {
         // Loading maps memsz bytes at vaddr; that range must not wrap.
         assert!(seg.vaddr.checked_add(seg.memsz).is_some(), "segment vaddr range wraps");
         assert!(seg.memsz > 0, "zero-size segment retained");
+
+        // Parse↔layout agreement (the B3A producer/consumer tightening): every
+        // segment `parse` accepts, `prepare` must be able to page-lay-out. A
+        // future loosening of `parse` that re-permits an unlayout-able segment
+        // fails here. (`memsz > 0` always — `parse` drops zero-size segments,
+        // so the round-up end is strictly past vaddr and pages >= 1.)
+        let l = seg.page_layout().expect("parse accepted a segment prepare cannot lay out");
+        assert!(l.va_start <= seg.vaddr && l.va_start % elf::PAGE == 0, "bad va_start");
+        assert!(l.va_end % elf::PAGE == 0 && l.va_end > seg.vaddr, "bad va_end");
+        assert_eq!(l.page_offset, seg.vaddr - l.va_start, "wrong page offset");
+        assert!(l.page_offset < elf::PAGE, "page offset not in-page");
+        assert_eq!(
+            l.pages.checked_mul(elf::PAGE),
+            Some(l.va_end - l.va_start),
+            "page count not exact",
+        );
+        assert!(l.pages >= 1, "non-empty segment spans zero pages");
     }
 });
