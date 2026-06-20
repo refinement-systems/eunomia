@@ -135,6 +135,9 @@ pub extern "C" fn _start() -> ! {
             pa: dma_pa,
             len: dma_len as usize,
         });
+        // The driver's completion poll observes the device's used-index update
+        // via the pool's volatile read (B2A/I-4); the IRQ-driven wait between
+        // polls, replacing the busy-spin, arrives with B-IRQ/C-M9 (rev1§3.6).
         match VirtioBlk::new(win, pool, 64 * 1024) {
             Ok(b) => {
                 blk = Some(b);

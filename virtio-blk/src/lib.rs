@@ -251,17 +251,29 @@ impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
         self.complete()
     }
 
-    /// Wait for the in-flight request. Polling MVP; the OS binds the
-    /// device IRQ to a notification and waits between polls instead.
-    fn complete(&mut self) -> Result<(), VirtioError> {
-        loop {
-            let mut idx = [0u8; 2];
-            self.pool.read(&self.used, 2, &mut idx);
-            if u16::from_le_bytes(idx) != self.last_used {
-                break;
-            }
-            core::hint::spin_loop();
+    /// Poll the used ring once for the in-flight request's completion.
+    ///
+    /// The used-index is device-written, so it is read **volatile**: a plain
+    /// `pool.read` is a non-volatile load the optimizer may hoist out of the
+    /// spin loop, which could never then observe the device's update (audit
+    /// I-4). On observing an advance, issue an `Acquire` fence so the device's
+    /// pre-index writes (status byte, payload) are not reordered after the
+    /// index observation — `finish()` reads them only after this returns true.
+    fn poll_used(&mut self) -> bool {
+        let mut idx = [0u8; 2];
+        self.pool.read_volatile(&self.used, 2, &mut idx);
+        if u16::from_le_bytes(idx) != self.last_used {
+            core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+            true
+        } else {
+            false
         }
+    }
+
+    /// Post-completion work: consume the used entry, ack the ISR, read the
+    /// device's status byte. Reached only after `poll_used` observed the
+    /// advance under the `Acquire` fence.
+    fn finish(&mut self) -> Result<(), VirtioError> {
         self.last_used = self.last_used.wrapping_add(1);
         let isr = self.mmio.read32(reg::INTERRUPT_STATUS);
         if isr != 0 {
@@ -274,6 +286,16 @@ impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
         } else {
             Err(VirtioError::DeviceError)
         }
+    }
+
+    /// Wait for the in-flight request. Polling MVP; the OS binds the
+    /// device IRQ to a notification and waits between polls instead
+    /// (rev1§3.6 "poll once, then wait").
+    fn complete(&mut self) -> Result<(), VirtioError> {
+        while !self.poll_used() {
+            core::hint::spin_loop();
+        }
+        self.finish()
     }
 
     pub fn read_sectors(&mut self, lba: u64, out: &mut [u8]) -> Result<(), VirtioError> {
