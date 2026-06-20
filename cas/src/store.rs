@@ -30,6 +30,13 @@
 //!   - The allocator is first-fit over a flat extent list and the tail
 //!     high-water mark never retracts (freed space is reusable, but the
 //!     region never visibly shrinks). Fine at MVP scale.
+//!   - GC is synchronous (rev1§8.3 defers concurrency to Phase C4). The
+//!     rev1§4.6 step-3 dedup-resurrection check (`ChunkStore::put`'s
+//!     `condemned` consultation) and the birth-generation live-by-fiat filter
+//!     (`gc`'s `birth < epoch` clause) are installed and structurally correct
+//!     but inert under the synchronous cycle — no flush interleaves a sweep,
+//!     so no chunk is condemned-then-resurrected and none is born mid-cycle.
+//!     Both become load-bearing when C4 makes GC concurrent.
 
 use crate::chunk::ChunkerParams;
 use crate::dev::{BlockDev, DevError};
@@ -183,6 +190,14 @@ struct ChunkStore<D: BlockDev> {
     /// at; freed (via `pending_free`) when the next commit supersedes it.
     index_extent: (u64, u64),
     io_error: Option<DevError>,
+    /// rev1§4.6 step 3 / §8.3: the *exact deletion-candidate list* for the
+    /// in-flight GC sweep. In-memory and transient — empty at every commit
+    /// boundary, populated only inside a `gc()` sweep window, never
+    /// serialized. While non-empty, `put` treats an index hit on one of these
+    /// hashes as a miss and rewrites the chunk (the single GC/mutator
+    /// interaction point, rev1§4.6). Inert under synchronous GC (no put
+    /// interleaves a sweep); load-bearing once C4 makes GC concurrent.
+    condemned: BTreeSet<Hash>,
 }
 
 impl<D: BlockDev> ChunkStore<D> {
@@ -312,14 +327,25 @@ impl<D: BlockDev> ChunkStore<D> {
 impl<D: BlockDev> NodeStore for ChunkStore<D> {
     fn put(&mut self, bytes: &[u8]) -> Hash {
         let hash = Hash::of(bytes);
-        if self.index.contains_key(&hash) {
-            // Dedup (rev1§4.3). The rev1§4.6 resurrection hazard (an index hit on
-            // a chunk the marker has condemned) cannot arise: GC here is
-            // synchronous, and the sweep removes condemned entries before
-            // any subsequent put, so a re-put of condemned content is an
-            // index miss and rewrites the chunk.
+        // Dedup (rev1§4.3): a *live* index hit returns the existing object.
+        // rev1§4.6 step 3 (dedup-resurrection): an index hit on a chunk the
+        // in-flight sweep has condemned is treated as a miss and rewritten
+        // below, so all GC/mutator interaction is confined to this one point.
+        // The `is_empty` short-circuit keeps the hot path free of the set
+        // lookup whenever no sweep is in flight. Inert under synchronous GC;
+        // load-bearing once C4 makes GC concurrent.
+        if self.index.contains_key(&hash)
+            && (self.condemned.is_empty() || !self.condemned.contains(&hash))
+        {
             return hash;
         }
+        // A true miss, or a resurrected condemned hit: cancel its condemnation
+        // and rewrite under the same hash at the current `birth_gen` (>= the
+        // GC epoch, so the rewrite is never re-condemned this cycle). The old
+        // condemned extent is still freed by the sweep (via `pending_free`),
+        // and the index no longer points at it after this replace, so there is
+        // no double-reference and no early reuse (rev1§4.2 deferred-reuse law).
+        self.condemned.remove(&hash);
         let frame = disk::encode_chunk_frame(bytes, self.birth_gen, &hash);
         let Some(off) = self.alloc(frame.len() as u64) else {
             self.io_error = Some(DevError::Io("chunk region full"));
@@ -963,6 +989,7 @@ impl<D: BlockDev> Store<D> {
             pending_free: Vec::new(),
             index_extent: (0, 0),
             io_error: None,
+            condemned: BTreeSet::new(),
         };
         let table = RefTable::default();
         let rt_hash = chunks.put(&table.encode());
@@ -1068,6 +1095,7 @@ impl<D: BlockDev> Store<D> {
             pending_free: Vec::new(),
             index_extent: (0, 0),
             io_error: None,
+            condemned: BTreeSet::new(),
         };
         // The durable index (format v2): a self-verifying frame the
         // superblock points at. It was covered by barrier 1 of the commit
@@ -1802,9 +1830,17 @@ impl<D: BlockDev> Store<D> {
         // working table and the WAL is empty, so the committed root set
         // is the complete root set.
         self.sync_all()?;
-        // Chunks born at/after the epoch are live by fiat (rev1§4.6). In this
-        // synchronous cycle none can appear between mark and sweep, but
-        // the check is the stated contract, not an optimization.
+        // The birth-generation "live by fiat" filter (the `e.birth < epoch`
+        // clause below) and the put-side resurrection check (`ChunkStore::put`)
+        // are the two halves of the rev1§4.6 single GC/mutator interaction
+        // point. Both are installed and structurally correct here, and become
+        // load-bearing once C4 (rev1§8.3) makes GC concurrent: a chunk written
+        // after the epoch then has `birth >= epoch` (never condemned), and a
+        // dedup hit on a condemned chunk rewrites rather than resurrects. Under
+        // today's synchronous cycle both are inert — `sync_all` above pins
+        // `epoch == birth_gen`, so every existing chunk has `birth < epoch` and
+        // none can be born between mark and sweep. Kept, not optimized away,
+        // because the contract is stated and C4 needs both halves in place.
         let epoch = self.chunks.birth_gen;
         let mut live: BTreeSet<Hash> = BTreeSet::new();
         live.insert(self.sb.ref_table);
@@ -1821,6 +1857,12 @@ impl<D: BlockDev> Store<D> {
             .filter(|(h, e)| !live.contains(h) && e.birth < epoch)
             .map(|(h, e)| (*h, *e))
             .collect();
+        // Open the resurrection-check window (rev1§4.6 step 3): for the
+        // duration of the sweep, a dedup hit on one of these condemned hashes
+        // rewrites the chunk instead of resurrecting the about-to-be-deleted
+        // index entry. Assigning (rather than extending) also discards any set
+        // left over by a prior cycle whose commit failed mid-flight.
+        self.chunks.condemned = condemned.iter().map(|(h, _)| *h).collect();
         let mut freed_bytes = 0u64;
         for (hash, e) in &condemned {
             self.chunks.index.remove(hash);
@@ -1831,6 +1873,9 @@ impl<D: BlockDev> Store<D> {
             freed_bytes += frame_len;
         }
         self.commit()?;
+        // Close the window: the sweep is durable, so no chunk is condemned
+        // until the next cycle reopens it.
+        self.chunks.condemned.clear();
         Ok(GcStats {
             live_objects: self.chunks.index.len() as u64,
             freed_objects: condemned.len() as u64,
@@ -2246,6 +2291,83 @@ mod tests {
         let mut buf = vec![0u8; dev_len];
         store.chunks.dev.read(0, &mut buf).unwrap();
         buf
+    }
+
+    #[test]
+    fn resurrection_rewrites_condemned_chunk() {
+        // The I-3 witness (rev1§4.6 step 3): a dedup lookup that hits a chunk
+        // the in-flight sweep has condemned must rewrite under the same hash,
+        // not resurrect the about-to-be-deleted index entry. Pre-B6A this
+        // dedup'd straight onto the condemned entry — the resurrection bug.
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        let content = b"resurrect me";
+
+        let h = store.chunks.put(content);
+        assert!(store.chunks.io_error.is_none());
+        let e1 = *store.chunks.index.get(&h).unwrap();
+
+        // Simulate a sweep that marked the live set *without* this chunk.
+        store.chunks.condemned.insert(h);
+        let h2 = store.chunks.put(content);
+        assert!(store.chunks.io_error.is_none());
+        assert_eq!(h2, h, "same content hashes the same");
+
+        let e2 = *store.chunks.index.get(&h).unwrap();
+        assert_ne!(e2.off, e1.off, "condemned hit must rewrite to a fresh extent");
+        assert_eq!(
+            e2.birth, store.chunks.birth_gen,
+            "the rewrite carries the current birth_gen (>= epoch)"
+        );
+        assert!(
+            !store.chunks.condemned.contains(&h),
+            "resurrection cancels the chunk's condemnation"
+        );
+        assert_eq!(
+            store.chunks.get(&h),
+            Some(content.to_vec()),
+            "the rewritten chunk reads back correctly"
+        );
+    }
+
+    #[test]
+    fn live_dedup_unaffected_outside_sweep() {
+        // With no sweep in flight (`condemned` empty), a re-put dedups: same
+        // hash, same index entry, no fresh extent — the rev1§4.3 fast path and
+        // the `is_empty` short-circuit are preserved.
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        let content = b"dedup me";
+
+        let h = store.chunks.put(content);
+        assert!(store.chunks.io_error.is_none());
+        assert!(store.chunks.condemned.is_empty());
+        let e1 = *store.chunks.index.get(&h).unwrap();
+        let tail = store.chunks.tail;
+
+        let h2 = store.chunks.put(content);
+        assert_eq!(h2, h);
+        let e2 = *store.chunks.index.get(&h).unwrap();
+        assert_eq!(e2, e1, "live dedup leaves the index entry untouched");
+        assert_eq!(store.chunks.tail, tail, "live dedup allocates no new extent");
+    }
+
+    #[test]
+    fn gc_closes_condemned_window() {
+        // After a synchronous gc() returns, the resurrection-check window is
+        // closed: no chunk remains condemned until the next cycle reopens it.
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        store.write(b"main", &p(&["f"]), 0, &[7u8; 5000], 1).unwrap();
+        store.sync_ref(b"main").unwrap();
+        // Supersede the file so its old chunks become condemnable garbage.
+        store.write(b"main", &p(&["f"]), 0, &[9u8; 5000], 2).unwrap();
+        store.sync_ref(b"main").unwrap();
+
+        let stats = store.gc().unwrap();
+        assert!(stats.freed_objects > 0, "expected reclaimable garbage");
+        assert!(
+            store.chunks.condemned.is_empty(),
+            "gc must close the resurrection-check window"
+        );
     }
 
     #[test]
