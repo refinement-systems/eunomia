@@ -327,6 +327,79 @@ impl<const N: usize> FreeList<N> {
         r
     }
 
+    /// The list is at its fragmentation cap. The exec witness for [`FreeList::free`]'s
+    /// `spec_nfree() < N` precondition: the wrapper is erased plain Rust and cannot
+    /// read the `closed` spec, so it asserts `!is_full()` (which, with the always-held
+    /// `wf` invariant `nfree <= N`, establishes `nfree < N`) before delegating.
+    pub fn is_full(&self) -> (r: bool)
+        ensures
+            r == (self.spec_nfree() == N as int),
+    {
+        self.nfree == N
+    }
+
+    /// `[off, off+n)` is wholly allocated — no position lies in any free extent. The
+    /// exec witness for [`FreeList::free`]'s no-double-free / no-overlap precondition
+    /// (`forall p in [off, off+n): !covers(p)`). O(nfree) over the `<= N` extents; the
+    /// loop invariant carries per-extent disjointness, mirroring `free`'s own
+    /// covers-reasoning (an extent overlaps `[off, off+n)` iff it covers a point in it).
+    #[verifier::spinoff_prover]
+    #[verifier::rlimit(100)]
+    pub fn is_allocated(&self, off: usize, n: usize) -> (r: bool)
+        requires
+            self.wf(),
+            n > 0,
+            // discharged at the wrapper call site (off + n <= backing.len() == spec_len);
+            // keeps the exec `off + n` below from overflowing.
+            off as int + n as int <= self.spec_len(),
+        ensures
+            r == (forall|p: int| off <= p < off + n ==> !self.covers(p)),
+    {
+        broadcast use vstd::array::group_array_axioms;
+        let mut k: usize = 0;
+        while k < self.nfree
+            invariant
+                self.wf(),
+                n > 0,
+                off as int + n as int <= self.spec_len(),
+                0 <= k <= self.nfree,
+                // every scanned extent is disjoint from [off, off+n).
+                forall|j: int| #![trigger self.free@[j]]
+                    0 <= j < k
+                    ==> (self.free@[j].0 as int + self.free@[j].1 as int <= off as int
+                            || off as int + n as int <= self.free@[j].0 as int),
+            decreases self.nfree - k,
+        {
+            let o = self.free[k].0;
+            let l = self.free[k].1;
+            // [o, o+l) overlaps [off, off+n) iff o+l > off && o < off+n. `o+l` is
+            // overflow-safe by `wf`; `off+n` by the precondition.
+            if o + l > off && o < off + n {
+                // The overlap covers a point of [off, off+n) — exhibit it.
+                assert(!(forall|p: int| off <= p < off + n ==> !self.covers(p))) by {
+                    let q: int = if o <= off { off as int } else { o as int };
+                    assert(self.free@[k as int].1 > 0);
+                    assert(self.ext_has(k as int, q));
+                    assert(self.covers(q));
+                }
+                return false;
+            }
+            k += 1;
+        }
+        // k == nfree: every extent is disjoint from [off, off+n), so no point is covered.
+        assert forall|p: int| off <= p < off + n implies !self.covers(p) by {
+            if self.covers(p) {
+                let j = choose|j: int| 0 <= j < self.nfree && self.ext_has(j, p);
+                assert(self.ext_has(j, p));
+                // invariant (k == nfree) gives j disjoint from [off, off+n), which
+                // contradicts ext_has(j, p) with p in [off, off+n).
+                assert(self.free@[j].0 as int + self.free@[j].1 as int <= off as int
+                    || off as int + n as int <= self.free@[j].0 as int);
+            }
+        }
+        true
+    }
+
     /// Carve `n` aligned bytes from the first extent that fits. `Some(start)`
     /// gives an in-pool, `align`-aligned offset whose `[start, start+n)` was
     /// free and is now used, every other position's coverage unchanged. `None`
@@ -1259,6 +1332,10 @@ impl<B: DmaBacking> DmaPool<B> {
     }
 
     pub fn alloc(&mut self, len: usize, align: usize) -> Option<DmaBuf> {
+        // Hard backstop for `FreeList::alloc`'s sole `align > 0` precondition (it
+        // computes `start % align`, a divide-by-zero on `align == 0`). Ordered before
+        // the power-of-two `debug_assert!` so the soundness check wins in release too.
+        assert!(align != 0, "dma-pool: zero alignment");
         debug_assert!(align.is_power_of_two());
         let start = self.fl.alloc(len, align)?;
         Some(DmaBuf {
@@ -1269,6 +1346,33 @@ impl<B: DmaBacking> DmaPool<B> {
     }
 
     pub fn free(&mut self, buf: DmaBuf) {
+        // The wrapper is erased plain Rust, so `FreeList::free`'s verified
+        // preconditions are not checked statically here — discharge each at runtime.
+        // A bad `DmaBuf` (wrong pool, out of extent, double-freed) is a trusted-driver
+        // bug (rev1§2.5 isolation TCB), so the backstop is a defined panic; this
+        // restores the original `assert!(nfree < MAX_FREE_RANGES)` the audit found
+        // demoted to a no-op Verus precondition.
+        assert!(buf.len > 0, "dma-pool: zero-length buffer"); // n > 0
+        // nfree < N: `!is_full()` plus the always-held `wf` invariant (`nfree <= N`).
+        assert!(
+            !self.fl.is_full(),
+            "dma-pool: free-list fragmentation cap (MAX_FREE_RANGES)"
+        );
+        // off + n <= len (== spec_len): the same arena predicate `range_ptr` uses, and
+        // it establishes `is_allocated`'s `off + n <= spec_len` precondition — so it
+        // must precede the `is_allocated` call below.
+        assert!(
+            buf.offset
+                .checked_add(buf.len)
+                .is_some_and(|e| e <= self.backing.len()),
+            "dma-pool: buffer outside pool arena"
+        );
+        // !covers: `is_allocated`'s `ensures` makes this exactly `free`'s no-double-free
+        // / no-overlap precondition.
+        assert!(
+            self.fl.is_allocated(buf.offset, buf.len),
+            "dma-pool: double free / overlap"
+        );
         self.fl.free(buf.offset, buf.len);
     }
 
@@ -1529,5 +1633,77 @@ mod tests {
         let mut p = pool(4096);
         let buf = p.alloc(16, 1).unwrap();
         p.write(&buf, 12, b"00000000"); // 12 + 8 > 16: slice-index panic via bytes_mut()
+    }
+
+    // --- B4B: MAX_FREE_RANGES backstop + discharged FreeList preconditions ---
+
+    #[test]
+    #[should_panic(expected = "fragmentation cap")]
+    fn full_list_backstop_panics() {
+        // 130 one-byte buffers fill the pool exactly (offsets 0..130).
+        let mut p = pool(130);
+        let bufs: Vec<DmaBuf> = (0..130).map(|_| p.alloc(1, 1).unwrap()).collect();
+        // Free every even offset below 127 -> 64 non-adjacent free extents (the
+        // odd-offset buffers between them stay allocated, so nothing merges),
+        // driving nfree to MAX_FREE_RANGES (64).
+        for b in &bufs {
+            if b.offset < 127 && b.offset % 2 == 0 {
+                p.free(*b);
+            }
+        }
+        // Offset 128 has allocated neighbours (127, 129), so freeing it cannot merge:
+        // it would be the 65th extent. Pre-B4B this was a raw self.free[N]
+        // index-out-of-bounds; the restored backstop must panic here instead.
+        let victim = *bufs.iter().find(|b| b.offset == 128).unwrap();
+        p.free(victim);
+    }
+
+    #[test]
+    #[should_panic(expected = "double free")]
+    fn double_free_panics() {
+        let mut p = pool(4096);
+        let b = p.alloc(64, 64).unwrap();
+        p.free(b);
+        // `DmaBuf` is `Copy`; the region is now free, so is_allocated is false and the
+        // no-double-free guard fires (closing the overlap -> aliasing &mut UB chain).
+        p.free(b);
+    }
+
+    #[test]
+    fn live_free_is_reallocatable() {
+        let mut p = pool(4096);
+        let a = p.alloc(128, 16).unwrap();
+        let off = a.offset;
+        p.free(a); // a single free of a live buffer succeeds ...
+        let b = p.alloc(128, 16).unwrap();
+        assert_eq!(b.offset, off); // ... and the space is re-allocatable.
+    }
+
+    #[test]
+    #[should_panic(expected = "zero-length buffer")]
+    fn zero_length_free_panics() {
+        let mut p = pool(4096);
+        let bogus = DmaBuf { offset: 0, len: 0, device_addr: DeviceAddress(0x4000_0000) };
+        p.free(bogus);
+    }
+
+    #[test]
+    #[should_panic(expected = "zero alignment")]
+    fn zero_alignment_alloc_panics() {
+        // align == 0 would divide-by-zero in FreeList::alloc; the hard assert (before
+        // the power-of-two debug_assert) catches it in release too.
+        let mut p = pool(4096);
+        let _ = p.alloc(16, 0);
+    }
+
+    #[test]
+    fn accessor_sanity() {
+        // is_full flips at the cap; is_allocated flips across a free/alloc of a region.
+        let mut fl = FreeList::<MAX_FREE_RANGES>::new(128);
+        assert!(!fl.is_full());
+        let start = fl.alloc(16, 1).unwrap();
+        assert!(fl.is_allocated(start, 16)); // just carved -> allocated
+        fl.free(start, 16);
+        assert!(!fl.is_allocated(start, 16)); // freed -> not allocated
     }
 }
