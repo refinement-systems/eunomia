@@ -80,11 +80,20 @@ const F_VERSION_1_SEL1: u32 = 1;
 const DESC_F_NEXT: u16 = 1;
 const DESC_F_WRITE: u16 = 2;
 
-const REQ_IN: u32 = 0; // device → driver (read)
-const REQ_OUT: u32 = 1; // driver → device (write)
-const REQ_FLUSH: u32 = 4;
+// Request types (virtio-blk). `pub` so the split-phase `submit` is callable
+// from the host tests and the future OS IRQ path (rev1§3.6).
+pub const REQ_IN: u32 = 0; // device → driver (read)
+pub const REQ_OUT: u32 = 1; // driver → device (write)
+pub const REQ_FLUSH: u32 = 4;
 
 const STATUS_OK: u8 = 0;
+
+/// Byte-offset of `avail.ring[idx % size]` within the avail buffer
+/// (`flags: u16`, `idx: u16`, then the `size`-entry `u16` ring). Pure so the
+/// ring/`u16`-wrap arithmetic is directly proptest-addressable.
+pub fn avail_ring_slot(idx: u16, qsize: u16) -> usize {
+    4 + (idx % qsize) as usize * 2
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VirtioError {
@@ -218,10 +227,19 @@ impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
         self.pool.write(&buf, i as usize * 16, &d);
     }
 
-    /// One synchronous request: header / data / status descriptor chain,
-    /// doorbell, poll the used ring, check the device's status byte.
+    /// One synchronous request: submit the chain and block on completion.
     fn request(&mut self, req_type: u32, sector: u64, data_len: usize, device_writes: bool)
         -> Result<(), VirtioError> {
+        self.submit(req_type, sector, data_len, device_writes);
+        self.complete()
+    }
+
+    /// Publish one request and ring the doorbell, without waiting: build the
+    /// header / data / status descriptor chain, push the head onto the avail
+    /// ring, `QUEUE_NOTIFY`. Pairs with `try_complete`/`complete`. This is the
+    /// rev1§3.6 "submit, then poll once" primitive the OS IRQ path reuses (it
+    /// waits on the device notification between `submit` and `try_complete`).
+    pub fn submit(&mut self, req_type: u32, sector: u64, data_len: usize, device_writes: bool) {
         let mut hdr = [0u8; 16];
         hdr[0..4].copy_from_slice(&req_type.to_le_bytes());
         hdr[8..16].copy_from_slice(&sector.to_le_bytes());
@@ -241,14 +259,13 @@ impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
         }
 
         // avail.ring[idx % size] = head; then publish idx+1.
-        let slot = 4 + (self.avail_idx % self.queue_size) as usize * 2;
+        let slot = avail_ring_slot(self.avail_idx, self.queue_size);
         let abuf = self.avail;
         self.pool.write(&abuf, slot, &0u16.to_le_bytes());
         self.avail_idx = self.avail_idx.wrapping_add(1);
         self.pool.write(&abuf, 2, &self.avail_idx.to_le_bytes());
 
         self.mmio.write32(reg::QUEUE_NOTIFY, 0);
-        self.complete()
     }
 
     /// Poll the used ring once for the in-flight request's completion.
@@ -288,6 +305,18 @@ impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
         }
     }
 
+    /// Poll the in-flight request once: `Some(status)` if the device has
+    /// completed it, `None` if still pending. The non-blocking half of
+    /// `complete` — the OS IRQ path calls this once per notification instead
+    /// of busy-spinning (rev1§3.6).
+    pub fn try_complete(&mut self) -> Option<Result<(), VirtioError>> {
+        if self.poll_used() {
+            Some(self.finish())
+        } else {
+            None
+        }
+    }
+
     /// Wait for the in-flight request. Polling MVP; the OS binds the
     /// device IRQ to a notification and waits between polls instead
     /// (rev1§3.6 "poll once, then wait").
@@ -296,6 +325,31 @@ impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
             core::hint::spin_loop();
         }
         self.finish()
+    }
+
+    /// Host-test affordance: reach the transport after it has been moved into
+    /// the driver (the fake device uses this to switch on deferred completion
+    /// and step the queue between polls).
+    #[cfg(any(feature = "std", test))]
+    pub fn mmio_mut(&mut self) -> &mut M {
+        &mut self.mmio
+    }
+
+    /// Host-test affordance: copy the read bounce buffer out after a read
+    /// request completes — the split-phase counterpart to `read_sectors`'
+    /// post-completion copy (the OS path extracts read data the same way).
+    #[cfg(any(feature = "std", test))]
+    pub fn read_data(&self, out: &mut [u8]) {
+        self.pool.read(&self.data, 0, out);
+    }
+
+    /// Host-test affordance: stage write data into the bounce buffer before a
+    /// `submit(REQ_OUT, ..)` — the split-phase counterpart to `write_sectors`'
+    /// pre-submit copy.
+    #[cfg(any(feature = "std", test))]
+    pub fn write_data(&mut self, data: &[u8]) {
+        let dbuf = self.data;
+        self.pool.write(&dbuf, 0, data);
     }
 
     pub fn read_sectors(&mut self, lba: u64, out: &mut [u8]) -> Result<(), VirtioError> {

@@ -72,6 +72,10 @@ fn blockdev_adapter_handles_unaligned_io() {
     assert!(dev.read(256 * SECTOR as u64 - 2, &mut over).is_err());
 }
 
+// Native-only: drives interpreted BLAKE3 through the whole cas engine — hours
+// under Miri. The Miri target is the *driver* (driver.rs + ring_props.rs +
+// async_complete.rs); the storage engine has its own Miri sweep in `cas`.
+#[cfg_attr(miri, ignore)]
 #[test]
 fn storage_engine_runs_over_virtio() {
     let opts = StoreOptions {

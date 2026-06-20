@@ -39,6 +39,11 @@ pub struct FakeBlock {
     isr: u32,
     last_avail: u16,
     used_idx: u16,
+    // Deferred completion (host async-poll tests): when set, QUEUE_NOTIFY only
+    // stages the queue; `device_step` runs it later, so the driver's poll loop
+    // observes a stale used-index first and runs as a real loop (audit I-4).
+    deferred: bool,
+    pending: bool,
 }
 
 impl FakeBlock {
@@ -60,6 +65,24 @@ impl FakeBlock {
             isr: 0,
             last_avail: 0,
             used_idx: 0,
+            deferred: false,
+            pending: false,
+        }
+    }
+
+    /// Defer completion: while on, `QUEUE_NOTIFY` stages the queue instead of
+    /// processing it, and `device_step` runs the staged work. Lets a test
+    /// interleave a stale poll between submit and completion.
+    pub fn set_deferred(&mut self, on: bool) {
+        self.deferred = on;
+    }
+
+    /// Run the queue staged by a deferred `QUEUE_NOTIFY`, advancing the used
+    /// ring. No-op if nothing is staged.
+    pub fn device_step(&mut self) {
+        if self.pending {
+            self.pending = false;
+            self.process_queue();
         }
     }
 
@@ -190,7 +213,13 @@ impl Mmio for FakeBlock {
             0x030 => assert_eq!(value, 0, "fake has one queue"),
             0x038 => self.queue_num = value,
             0x044 => self.queue_ready = value,
-            0x050 => self.process_queue(),
+            0x050 => {
+                if self.deferred {
+                    self.pending = true;
+                } else {
+                    self.process_queue();
+                }
+            }
             0x064 => self.isr &= !value,
             0x070 => {
                 // Writing FEATURES_OK is accepted only with VERSION_1 set.
