@@ -564,14 +564,25 @@ impl WalOp {
         Ok(op)
     }
 
-    /// Full record: header (magic, seq, len, checksum-of-payload) + payload.
+    /// Full record: header (magic, seq, len, checksum) + payload.
+    ///
+    /// The checksum covers `seq ‖ len ‖ payload`, not the payload alone, so the
+    /// record's freshness token (its sequence number) is bound to its body. The
+    /// WAL is a reused linear region whose stale bytes are rejected on replay by
+    /// the seq check (rev1§4.5); a payload-only checksum let a torn write at a
+    /// reused offset overwrite *just* the seq field of a stale, already-superseded
+    /// record — grafting a fresh seq onto an old body that still matched the old
+    /// checksum — which replayed the stale write. Binding seq+len into the hash
+    /// makes any such graft fail integrity (the stored hash was computed over the
+    /// old seq), restoring the freshness guarantee against torn writes.
     pub fn encode_record(&self, seq: u64) -> Vec<u8> {
         let payload = self.encode_payload();
+        let len = payload.len() as u32;
         let mut out = Vec::with_capacity(WAL_HEADER + payload.len());
         out.extend_from_slice(WAL_MAGIC);
         out.extend_from_slice(&seq.to_le_bytes());
-        out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        out.extend_from_slice(Hash::of(&payload).as_bytes());
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(record_checksum(seq, len, &payload).as_bytes());
         out.extend_from_slice(&payload);
         out
     }
@@ -589,12 +600,25 @@ impl WalOp {
             return None;
         }
         let payload = &buf[WAL_HEADER..WAL_HEADER + len];
-        if Hash::of(payload).as_bytes() != &buf[16..48] {
+        // Recompute over seq+len+payload (see encode_record): a torn write that
+        // stamps a fresh seq over a stale record's body fails here.
+        if record_checksum(seq, len as u32, payload).as_bytes() != &buf[16..48] {
             return None;
         }
         let op = WalOp::decode_payload(payload).ok()?;
         Some((seq, op, WAL_HEADER + len))
     }
+}
+
+/// WAL record checksum: BLAKE3 over the freshness-bearing header fields
+/// (`seq`, `len`) followed by the payload, so a record's sequence number is
+/// integrity-bound to its body (see [`WalOp::encode_record`]).
+fn record_checksum(seq: u64, len: u32, payload: &[u8]) -> Hash {
+    let mut summed = Vec::with_capacity(8 + 4 + payload.len());
+    summed.extend_from_slice(&seq.to_le_bytes());
+    summed.extend_from_slice(&len.to_le_bytes());
+    summed.extend_from_slice(payload);
+    Hash::of(&summed)
 }
 
 // ── Ref table (rev1§4.1, rev1§4.7) ──────────────────────────────────────────────
@@ -832,6 +856,12 @@ mod tests {
         let mut bad = rec.clone();
         *bad.last_mut().unwrap() ^= 1;
         assert!(WalOp::decode_record(&bad).is_none());
+        // The checksum binds the sequence number: a torn write at a reused WAL
+        // offset that overwrites only the seq field of a stale record (grafting a
+        // fresh seq onto an old body) must fail integrity, not decode as fresh.
+        let mut grafted = rec.clone();
+        grafted[4..12].copy_from_slice(&10u64.to_le_bytes());
+        assert!(WalOp::decode_record(&grafted).is_none());
     }
 
     #[test]

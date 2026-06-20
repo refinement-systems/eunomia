@@ -2175,6 +2175,118 @@ mod tests {
         }
     }
 
+    /// Regression for the WAL stale-record graft (rev1§4.5): the record
+    /// checksum once covered only the payload, not the sequence number. The WAL
+    /// is a reused linear region whose stale bytes are rejected on replay by the
+    /// seq check, but a torn write at a reused offset could overwrite *just* the
+    /// seq field of a stale, already-superseded record — stamping a fresh seq
+    /// onto an old body that still matched the old (payload-only) checksum — so
+    /// replay resurrected the superseded write.
+    ///
+    /// This is the deterministic minimization of a
+    /// `crash_recovery_preserves_acked_state` failure (the proptest seed is also
+    /// checked in under `proptest-regressions/`). The op sequence writes then
+    /// snapshots `d2/f3`, unlinks it, syncs, then GCs — leaving the old "write
+    /// d2/f3" record's bytes lingering at WAL offset 0. The crash then tears the
+    /// next op's record (an unlink) at that same offset such that its fresh seq
+    /// lands but the body reverts to the stale "write d2/f3". Pre-fix the grafted
+    /// record passed the checksum and `d2/f3` was resurrected; with the seq bound
+    /// into the checksum it fails integrity and replay correctly stops.
+    #[test]
+    fn crash_does_not_graft_seq_onto_stale_wal_record() {
+        // (selector, offset, data, is_unlink); selectors ≥12 are maintenance.
+        let ops: &[(u8, u64, &[u8], bool)] = &[
+            (12, 0, &[0], false), (0, 0, &[0], false), (4, 0, &[0], false),
+            (7, 0, &[0], false), (13, 0, &[0], false), (0, 0, &[0], false),
+            (0, 0, &[0], false), (3, 0, &[0], true), (12, 0, &[0], false),
+            (4, 0, &[0], false), (4, 0, &[0], false), (0, 0, &[0], false),
+            (0, 0, &[0], false), (13, 0, &[0], false), (7, 0, &[0], false),
+            (9, 0, &[0], false), (6, 0, &[0], true), (11, 0, &[0], true),
+            (4, 0, &[0], true), (12, 0, &[0], false), (15, 0, &[0], false),
+            (8, 0, &[0], true),
+        ];
+        let fail_at = 70u64;
+        let crash_seed = 14532340274190305123u64;
+        let dirs = ["d1", "d2"];
+
+        let mut store = Store::format(CrashDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        store.dev_mut().set_fail_after(fail_at);
+
+        let mut model: std::collections::HashMap<Path, Option<Vec<u8>>> =
+            std::collections::HashMap::new();
+        let mut inflight: Option<(Path, Option<Vec<u8>>)> = None;
+        for (sel, off, data, is_unlink) in ops {
+            if *sel >= 12 {
+                let r = match sel {
+                    12 => store.sync_all(),
+                    13 => store
+                        .snapshot(b"main", b"prop", b"", disk::CLASS_AUTO, *off)
+                        .map(|_| ()),
+                    14 => {
+                        let oldest = store.snapshots(b"main").next().map(|r| r.id);
+                        match oldest {
+                            Some(id) => store.delete_snapshot(b"main", id),
+                            None => Ok(()),
+                        }
+                    }
+                    _ => store.gc().map(|_| ()),
+                };
+                if r.is_err() {
+                    break;
+                }
+                continue;
+            }
+            let path = if sel % 2 == 0 {
+                p(&[&format!("f{}", sel % 4)])
+            } else {
+                p(&[dirs[(sel % 2) as usize], &format!("f{}", sel % 4)])
+            };
+            if *is_unlink {
+                if store.unlink(b"main", &path, 1).is_ok() {
+                    model.insert(path, None);
+                } else {
+                    inflight = Some((path, None));
+                    break;
+                }
+            } else {
+                let mut content = model.get(&path).cloned().flatten().unwrap_or_default();
+                let end = *off as usize + data.len();
+                if content.len() < end {
+                    content.resize(end, 0);
+                }
+                content[*off as usize..end].copy_from_slice(data);
+                if store.write(b"main", &path, *off, data, 1).is_ok() {
+                    model.insert(path, Some(content));
+                } else {
+                    inflight = Some((path, None));
+                    break;
+                }
+            }
+        }
+
+        let mut dev = store.into_dev();
+        dev.clear_fail();
+        dev.crash(crash_seed);
+        let recovered = Store::mount(dev, test_opts()).unwrap();
+
+        // The headline: d2/f3 was acked-deleted; it must not be resurrected.
+        let d2f3 = p(&["d2", "f3"]);
+        assert_eq!(model.get(&d2f3), Some(&None), "model expects d2/f3 deleted");
+        assert_eq!(
+            recovered.read(b"main", &d2f3).unwrap(),
+            None,
+            "acked unlink of d2/f3 must survive recovery (no stale-WAL graft)"
+        );
+        // And the full invariant holds for every acked path.
+        for (path, expect) in &model {
+            let got = recovered.read(b"main", path).unwrap();
+            let ok = got == *expect
+                || inflight.as_ref().is_some_and(|(ip, iv)| ip == path && got == *iv);
+            assert!(ok, "path {path:?}: got {got:?}, want {expect:?} (inflight {inflight:?})");
+        }
+    }
+
     /// rev1§2.6: pre-v3 images are re-created with mkfs, and that stance is
     /// only mechanical if an intact old-version image is refused with a
     /// *version* error — tick and nanosecond timestamp fields are
