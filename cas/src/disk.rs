@@ -638,7 +638,11 @@ impl WalOp {
 /// WAL record checksum: BLAKE3 over the freshness-bearing header fields
 /// (`seq`, `len`) followed by the payload, so a record's sequence number is
 /// integrity-bound to its body (see [`WalOp::encode_record`]).
-fn record_checksum(seq: u64, len: u32, payload: &[u8]) -> Hash {
+///
+/// `pub(crate)` so `store.rs`'s `wal_checksum_ok` (the BLAKE3-only record seam
+/// left after B7B splits the structural decode into the verified surface, T-5)
+/// recomputes the canonical checksum rather than re-deriving the hashed layout.
+pub(crate) fn record_checksum(seq: u64, len: u32, payload: &[u8]) -> Hash {
     let mut summed = Vec::with_capacity(8 + 4 + payload.len());
     summed.extend_from_slice(&seq.to_le_bytes());
     summed.extend_from_slice(&len.to_le_bytes());
