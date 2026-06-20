@@ -1294,6 +1294,21 @@ impl<B: DmaBacking> DmaPool<B> {
     pub fn read(&self, buf: &DmaBuf, offset: usize, out: &mut [u8]) {
         out.copy_from_slice(&self.bytes(buf)[offset..offset + out.len()]);
     }
+
+    /// Volatile CPU load of a device-written field — the used-ring index, an
+    /// ISR-style flag. Plain `read()`/`bytes()` are non-volatile loads the
+    /// optimizer may hoist out of a spin loop (it cannot see the device's
+    /// concurrent write), so a poll on them can never observe completion; this
+    /// re-reads memory every call. Order the payload the field gates with an
+    /// `Acquire` fence on the caller side. (rev1§2.5: the real-hardware
+    /// cache-maintenance/barrier debt is separate and tracked there; on the
+    /// QEMU target memory is coherent and only the compiler hazard is live.)
+    pub fn read_volatile(&self, buf: &DmaBuf, offset: usize, out: &mut [u8]) {
+        let base = unsafe { self.backing.cpu_base().add(buf.offset + offset) };
+        for (i, b) in out.iter_mut().enumerate() {
+            *b = unsafe { base.add(i).read_volatile() };
+        }
+    }
 }
 
 /// Host-side backing for tests and host tooling: plain heap memory with
