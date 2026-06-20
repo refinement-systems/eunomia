@@ -17,6 +17,7 @@ cas = { path = "../cas", default-features = false }
 [dev-dependencies]
 cas = { path = "../cas" }
 dma-pool = { path = "../dma-pool", features = ["std"] }
+proptest = "1"
 # Self dev-dependency: integration tests need the std-gated modules
 # (fake device, BlockDev adapter) compiled into the lib.
 virtio-blk = { path = ".", features = ["std"] }
