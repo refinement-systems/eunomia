@@ -31,6 +31,9 @@ use cas::hash::Hash;
 use cas::overlay::Path as TreePath;
 use cas::prolly::{Content, Entry, EntryKind};
 use cas::store::{Store, StoreError};
+// Re-exported: `RefEdit` is part of the public `Request::Apply` wire type, so
+// wire consumers reach it from this crate (rev1§4.7 guarded batch vocabulary).
+pub use cas::store::RefEdit;
 
 // ── Rights (rev1§2.3) ───────────────────────────────────────────────────
 
@@ -196,6 +199,20 @@ pub enum Request {
     Statfs {
         handle: HandleId,
     },
+    /// Guarded ref-table batch (rev1§4.7): apply `edits` to the ref
+    /// all-or-nothing, but only if its edit version still equals
+    /// `expected_version`. The read-then-act race fix (I-2/S-1) — a
+    /// concurrent snapshot/edit/write between the caller's enumerate and this
+    /// op has advanced the version, so the batch is refused with the current
+    /// version (`Response::VersionMismatch`) and the caller re-reads. Requires
+    /// `may-rewrite-history` on a ref-root handle (the `DeleteSnapshot`/`Gc`
+    /// gate). Appended last to keep every prior variant's postcard discriminant
+    /// — and the committed `request_dispatch` corpus — stable.
+    Apply {
+        handle: HandleId,
+        expected_version: u64,
+        edits: Vec<RefEdit>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,6 +260,18 @@ pub enum Response {
         total: u64,
         used: u64,
         free: u64,
+    },
+    /// A guarded batch (`Request::Apply`) committed; carries the ref's
+    /// post-batch edit version (rev1§4.7).
+    Applied {
+        edit_version: u64,
+    },
+    /// A guarded batch was refused because `expected_version` was stale;
+    /// carries the ref's current edit version so the caller re-reads and
+    /// retries. A data-carrying reply, not an `ErrorCode` — "fails carrying
+    /// the current version" (rev1§4.7).
+    VersionMismatch {
+        edit_version: u64,
     },
 }
 
@@ -801,6 +830,36 @@ impl<D: BlockDev> Server<D> {
                     used: sp.used,
                     free: sp.free,
                 })
+            }
+            Request::Apply {
+                handle,
+                expected_version,
+                edits,
+            } => {
+                // Same gate as DeleteSnapshot/Gc: `may-rewrite-history` on a
+                // ref-root handle. The store is the single authority — it does
+                // the version check, validates every edit, and commits once.
+                let name = self.rewrite_target(session, handle)?;
+                // A batched snapshot deletion is history rewriting (rev1§4.6),
+                // so it arms the same post-rewrite GC trigger DeleteSnapshot
+                // uses — but only once the batch actually commits.
+                let deletes = edits
+                    .iter()
+                    .any(|e| matches!(e, RefEdit::DeleteSnapshot { .. }));
+                match self.store.apply_batch(&name, expected_version, &edits) {
+                    Ok(edit_version) => {
+                        if deletes {
+                            self.gc_requested = true;
+                        }
+                        Ok(Response::Applied { edit_version })
+                    }
+                    // Carries the current version, so it is a data reply, not
+                    // an `ErrorCode` (rev1§4.7 "fails carrying the version").
+                    Err(StoreError::VersionMismatch { current }) => Ok(Response::VersionMismatch {
+                        edit_version: current,
+                    }),
+                    Err(e) => Err(store_err(e)),
+                }
             }
         }
     }

@@ -63,6 +63,14 @@ pub enum StoreError {
     NoSpace,
     /// The snapshot is a tag target; tags are keep-strength pins (rev1§4.7).
     Pinned,
+    /// A guarded ref-table batch's `expected_version` no longer matches the
+    /// ref's current edit version (rev1§4.7): a concurrent mutation advanced it
+    /// between the caller's enumerate and its `apply_batch`. Carries the
+    /// current version so the caller can re-read and retry; the batch made no
+    /// mutation and did not commit.
+    VersionMismatch {
+        current: u64,
+    },
     /// Write extent overflows u64 or exceeds the chunk region capacity.
     WriteOutOfRange,
 }
@@ -97,6 +105,9 @@ impl core::fmt::Display for StoreError {
             StoreError::Corrupt(w) => write!(f, "corrupt store: {w}"),
             StoreError::NoSpace => write!(f, "chunk region full"),
             StoreError::Pinned => write!(f, "snapshot pinned by a tag"),
+            StoreError::VersionMismatch { current } => {
+                write!(f, "ref edit version mismatch (current {current})")
+            }
             StoreError::WriteOutOfRange => write!(f, "write extent out of range"),
         }
     }
@@ -104,6 +115,35 @@ impl core::fmt::Display for StoreError {
 
 #[cfg(feature = "std")]
 impl std::error::Error for StoreError {}
+
+/// One edit in a guarded ref-table batch (rev1§4.7). The vocabulary is
+/// row + tag surgery — exactly the mutations a retention daemon issues ("mark
+/// survivors `keep`, then run the policy") — and deliberately excludes data
+/// writes (rev1§4.4 stays last-write-wins) and head moves (`Rollback` is a
+/// flush-bearing operation of its own; a concurrent head move still advances
+/// the edit version, so it invalidates a batch, but it is not itself a
+/// batchable edit). Snapshot ids and tag names are scoped to the one ref the
+/// batch targets. Serialized over the wire by the storage server; carried into
+/// `Store::apply_batch`, the single authority that validates and applies them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
+pub enum RefEdit {
+    /// Drop a snapshot row (rev1§4.6): fails `Pinned` if a tag points at it,
+    /// `NoSuchSnapshot` if absent; survivors re-parent to the grandparent.
+    DeleteSnapshot { id: u64 },
+    /// Edit a snapshot's retention class (the "mark survivors `keep`" flow).
+    SetClass { id: u64, class: u8 },
+    /// Re-point a snapshot's parent (history surgery, rev1§4.6).
+    SetParent { id: u64, parent: Option<u64> },
+    /// Replace a snapshot's commit message.
+    SetMessage { id: u64, message: Vec<u8> },
+    /// Pin a snapshot under a tag name (rev1§4.7); the tag maps to the snapshot
+    /// id, so it survives metadata edits.
+    CreateTag { name: Vec<u8>, snap_id: u64 },
+    /// Remove a tag, unpinning its snapshot.
+    DeleteTag { name: Vec<u8> },
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct StoreOptions {
@@ -1829,6 +1869,133 @@ impl<D: BlockDev> Store<D> {
         self.touch_ref(ref_name); // retention-class edit on a snapshot row (rev1§4.7)
         self.commit()
     }
+
+    /// Guarded ref-table batch (rev1§4.7) — the I-2/S-1 read-then-act fix.
+    /// Apply `edits` to `ref_name` all-or-nothing within one commit, but only
+    /// if the ref's edit version still equals `expected_version`:
+    ///
+    /// * **Version mismatch** (a concurrent mutation advanced the ref between
+    ///   the caller's enumerate and now): nothing is mutated or committed;
+    ///   `Err(VersionMismatch { current })` carries the value to re-read against.
+    /// * **Invalid edit** (missing snapshot, pinned deletion, bad class, …):
+    ///   the whole batch is rejected with the edit's `StoreError` and no commit
+    ///   — the staged clone is discarded, so the live table is untouched.
+    /// * **Success**: every edit lands in the one superblock flip (rev1§4.2,
+    ///   the system's sole atomicity mechanism — no new machinery), the ref's
+    ///   edit version advances exactly once (the §4.7 dirty-set rule, regardless
+    ///   of edit count), and the new version is returned.
+    ///
+    /// Staging on a clone makes all-or-nothing structural rather than a matter
+    /// of unwinding partial work, and lets each edit validate against the
+    /// batch's own intermediate state — so e.g. a `CreateTag` earlier in the
+    /// batch pins a snapshot a later `DeleteSnapshot` then correctly cannot
+    /// remove.
+    pub fn apply_batch(
+        &mut self,
+        ref_name: &[u8],
+        expected_version: u64,
+        edits: &[RefEdit],
+    ) -> Result<u64, StoreError> {
+        let current = self
+            .table
+            .refs
+            .get(ref_name)
+            .ok_or(StoreError::NoSuchRef)?
+            .edit_version;
+        if current != expected_version {
+            return Err(StoreError::VersionMismatch { current });
+        }
+        let mut staged = self.table.clone();
+        for edit in edits {
+            apply_ref_edit(&mut staged, ref_name, edit)?;
+        }
+        self.table = staged;
+        self.touch_ref(ref_name); // one dirty mark → exactly one bump in commit()
+        self.commit()?;
+        Ok(self.table.refs.get(ref_name).unwrap().edit_version)
+    }
+}
+
+/// Apply one `RefEdit` to a ref table, validating as it mutates. Operates on
+/// the staged clone `apply_batch` owns, so any `Err` leaves the live table
+/// untouched (the clone is discarded) and all checks compose against the
+/// batch's intermediate state. Tag/snapshot ids are scoped to `ref_name`.
+fn apply_ref_edit(table: &mut RefTable, ref_name: &[u8], edit: &RefEdit) -> Result<(), StoreError> {
+    match edit {
+        RefEdit::DeleteSnapshot { id } => {
+            let key = (ref_name.to_vec(), *id);
+            let row = table.snaps.get(&key).ok_or(StoreError::NoSuchSnapshot)?;
+            if table
+                .tags
+                .values()
+                .any(|(r, s)| r.as_slice() == ref_name && *s == *id)
+            {
+                return Err(StoreError::Pinned);
+            }
+            let new_parent = row.parent;
+            table.snaps.remove(&key);
+            let range = (ref_name.to_vec(), 0)..(ref_name.to_vec(), u64::MAX);
+            for (_, r) in table.snaps.range_mut(range) {
+                if r.parent == Some(*id) {
+                    r.parent = new_parent;
+                }
+            }
+        }
+        RefEdit::SetClass { id, class } => {
+            if *class > disk::CLASS_EPHEMERAL {
+                return Err(StoreError::Format(FormatError::BadEntry(
+                    "bad retention class",
+                )));
+            }
+            table
+                .snaps
+                .get_mut(&(ref_name.to_vec(), *id))
+                .ok_or(StoreError::NoSuchSnapshot)?
+                .class = *class;
+        }
+        RefEdit::SetParent { id, parent } => {
+            // Referential integrity only: a `Some(p)` parent must name an
+            // existing snapshot on this ref (no dangling parent). Cycle/policy
+            // questions belong to the retention daemon, not the store.
+            if let Some(p) = parent {
+                if !table.snaps.contains_key(&(ref_name.to_vec(), *p)) {
+                    return Err(StoreError::NoSuchSnapshot);
+                }
+            }
+            table
+                .snaps
+                .get_mut(&(ref_name.to_vec(), *id))
+                .ok_or(StoreError::NoSuchSnapshot)?
+                .parent = *parent;
+        }
+        RefEdit::SetMessage { id, message } => {
+            table
+                .snaps
+                .get_mut(&(ref_name.to_vec(), *id))
+                .ok_or(StoreError::NoSuchSnapshot)?
+                .message = message.clone();
+        }
+        RefEdit::CreateTag { name, snap_id } => {
+            if !table.snaps.contains_key(&(ref_name.to_vec(), *snap_id)) {
+                return Err(StoreError::NoSuchSnapshot);
+            }
+            table
+                .tags
+                .insert(name.clone(), (ref_name.to_vec(), *snap_id));
+        }
+        RefEdit::DeleteTag { name } => {
+            // Ref-scoped: only remove a tag that currently pins a snapshot on
+            // this batch's ref, so a batch can't reach across refs.
+            if table
+                .tags
+                .get(name)
+                .is_some_and(|(r, _)| r.as_slice() == ref_name)
+            {
+                table.tags.remove(name);
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2269,13 +2436,14 @@ mod tests {
         /// a crash at an arbitrary point (power cut mid-operation, torn
         /// unflushed writes), every acknowledged mutation is recoverable.
         /// At most the single in-flight unacked mutation is ambiguous.
-        /// Selectors 12–15 mix in maintenance ops (sync, snapshot,
-        /// snapshot deletion, GC) so the crash point can land anywhere in
-        /// the GC cycle too — none of them may change logical state.
+        /// Selectors 12–17 mix in maintenance ops (sync, snapshot,
+        /// snapshot deletion, GC, and rev1§4.7 guarded ref-table batches) so
+        /// the crash point can land anywhere in the commit too — none of them
+        /// may change logical (file) state, and a batch is all-or-nothing.
         #[test]
         fn crash_recovery_preserves_acked_state(
             ops in proptest::collection::vec(
-                (0u8..16, 0u64..400, proptest::collection::vec(any::<u8>(), 1..96), any::<bool>()),
+                (0u8..18, 0u64..400, proptest::collection::vec(any::<u8>(), 1..96), any::<bool>()),
                 1..50,
             ),
             fail_at in 4u64..600,
@@ -2306,7 +2474,36 @@ mod tests {
                                 None => Ok(()),
                             }
                         }
-                        _ => store.gc().map(|_| ()),
+                        15 => store.gc().map(|_| ()),
+                        // 16/17: a rev1§4.7 guarded batch at the ref's current
+                        // version (so it never version-mismatches here). Edits
+                        // are row/tag surgery — content-neutral like the others
+                        // — and ride the one commit all-or-nothing across the
+                        // crash point. 16 edits metadata; 17 deletes a row.
+                        _ => {
+                            let oldest = store.snapshots(b"main").next().map(|r| r.id);
+                            match oldest {
+                                Some(id) => {
+                                    let v = store.edit_version(b"main").unwrap_or(0);
+                                    let edits = if *sel == 16 {
+                                        vec![
+                                            RefEdit::SetClass {
+                                                id,
+                                                class: disk::CLASS_KEEP,
+                                            },
+                                            RefEdit::SetMessage {
+                                                id,
+                                                message: b"batched".to_vec(),
+                                            },
+                                        ]
+                                    } else {
+                                        vec![RefEdit::DeleteSnapshot { id }]
+                                    };
+                                    store.apply_batch(b"main", v, &edits).map(|_| ())
+                                }
+                                None => Ok(()),
+                            }
+                        }
                     };
                     // Maintenance never changes logical content, so a
                     // power cut inside one is unambiguous for the model.
@@ -2672,6 +2869,183 @@ mod tests {
         store.touch_ref(b"main");
         store.commit().unwrap();
         assert_eq!(store.edit_version(b"main"), Some(1));
+    }
+
+    /// rev1§4.7 / I-2: the guarded batch is conditional on the ref's edit
+    /// version. A stale `expected_version` is refused carrying the current
+    /// version, with no mutation and no commit; re-reading and retrying at the
+    /// current version applies the batch and ticks the version once.
+    #[test]
+    fn apply_batch_version_mismatch_rejects_without_mutation() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        store.write(b"main", &p(&["f"]), 0, b"1", 1).unwrap();
+        let s1 = store
+            .snapshot(b"main", b"t", b"a", disk::CLASS_AUTO, 10)
+            .unwrap();
+        let v = store.edit_version(b"main").unwrap();
+
+        let edits = [RefEdit::SetMessage {
+            id: s1,
+            message: b"renamed".to_vec(),
+        }];
+        // Stale version → VersionMismatch carrying the current version.
+        assert!(matches!(
+            store.apply_batch(b"main", v - 1, &edits),
+            Err(StoreError::VersionMismatch { current }) if current == v
+        ));
+        // No mutation, no commit: message and version are unchanged.
+        assert_eq!(
+            store
+                .snapshots(b"main")
+                .find(|r| r.id == s1)
+                .unwrap()
+                .message,
+            b"a"
+        );
+        assert_eq!(store.edit_version(b"main"), Some(v));
+
+        // Matching version applies the batch and ticks once.
+        let new_v = store.apply_batch(b"main", v, &edits).unwrap();
+        assert_eq!(new_v, v + 1);
+        assert_eq!(store.edit_version(b"main"), Some(v + 1));
+        assert_eq!(
+            store
+                .snapshots(b"main")
+                .find(|r| r.id == s1)
+                .unwrap()
+                .message,
+            b"renamed"
+        );
+    }
+
+    /// rev1§4.7: a guarded batch is all-or-nothing. An invalid edit anywhere in
+    /// the batch (deleting a pinned snapshot, or a nonexistent id) rejects the
+    /// whole batch with that edit's error — none of the earlier valid edits
+    /// land, and the version does not advance (no commit).
+    #[test]
+    fn apply_batch_all_or_nothing_on_invalid_edit() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        store.write(b"main", &p(&["f"]), 0, b"1", 1).unwrap();
+        let s1 = store
+            .snapshot(b"main", b"t", b"a", disk::CLASS_AUTO, 10)
+            .unwrap();
+        store.write(b"main", &p(&["f"]), 0, b"2", 2).unwrap();
+        let s2 = store
+            .snapshot(b"main", b"t", b"b", disk::CLASS_AUTO, 20)
+            .unwrap();
+        store.tag(b"rel", b"main", s1).unwrap(); // pin s1
+        let v = store.edit_version(b"main").unwrap();
+        let class =
+            |s: &Store<MemDev>, id: u64| s.snapshots(b"main").find(|r| r.id == id).unwrap().class;
+
+        // Two valid edits then a pinned delete → Pinned, nothing applied.
+        let edits = [
+            RefEdit::SetClass {
+                id: s1,
+                class: disk::CLASS_KEEP,
+            },
+            RefEdit::SetMessage {
+                id: s2,
+                message: b"keep".to_vec(),
+            },
+            RefEdit::DeleteSnapshot { id: s1 },
+        ];
+        assert!(matches!(
+            store.apply_batch(b"main", v, &edits),
+            Err(StoreError::Pinned)
+        ));
+        assert_eq!(class(&store, s1), disk::CLASS_AUTO);
+        assert_eq!(
+            store
+                .snapshots(b"main")
+                .find(|r| r.id == s2)
+                .unwrap()
+                .message,
+            b"b"
+        );
+        assert_eq!(store.edit_version(b"main"), Some(v));
+        assert!(store.snapshots(b"main").any(|r| r.id == s1));
+
+        // A nonexistent id → NoSuchSnapshot, also all-or-nothing.
+        let edits = [
+            RefEdit::SetClass {
+                id: s2,
+                class: disk::CLASS_KEEP,
+            },
+            RefEdit::DeleteSnapshot { id: 999 },
+        ];
+        assert!(matches!(
+            store.apply_batch(b"main", v, &edits),
+            Err(StoreError::NoSuchSnapshot)
+        ));
+        assert_eq!(class(&store, s2), disk::CLASS_AUTO);
+        assert_eq!(store.edit_version(b"main"), Some(v));
+    }
+
+    /// rev1§4.7: a multi-edit batch commits once (one version bump) and every
+    /// edit lands — including a tag create that then pins its snapshot — and
+    /// the result survives a remount.
+    #[test]
+    fn apply_batch_bumps_once_applies_all_and_persists() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        store.write(b"main", &p(&["f"]), 0, b"1", 1).unwrap();
+        let s1 = store
+            .snapshot(b"main", b"t", b"a", disk::CLASS_AUTO, 10)
+            .unwrap();
+        store.write(b"main", &p(&["f"]), 0, b"2", 2).unwrap();
+        let s2 = store
+            .snapshot(b"main", b"t", b"b", disk::CLASS_AUTO, 20)
+            .unwrap();
+        let v = store.edit_version(b"main").unwrap();
+
+        let edits = [
+            RefEdit::SetClass {
+                id: s1,
+                class: disk::CLASS_KEEP,
+            },
+            RefEdit::SetParent {
+                id: s2,
+                parent: None,
+            },
+            RefEdit::CreateTag {
+                name: b"rel".to_vec(),
+                snap_id: s2,
+            },
+        ];
+        let new_v = store.apply_batch(b"main", v, &edits).unwrap();
+        assert_eq!(new_v, v + 1, "one bump for the whole batch");
+        assert_eq!(
+            store.snapshots(b"main").find(|r| r.id == s1).unwrap().class,
+            disk::CLASS_KEEP
+        );
+        assert_eq!(
+            store
+                .snapshots(b"main")
+                .find(|r| r.id == s2)
+                .unwrap()
+                .parent,
+            None
+        );
+        // The batch's CreateTag now pins s2.
+        assert!(matches!(
+            store.delete_snapshot(b"main", s2),
+            Err(StoreError::Pinned)
+        ));
+
+        // Persisted across remount.
+        let store2 = Store::mount(store.into_dev(), test_opts()).unwrap();
+        assert_eq!(store2.edit_version(b"main"), Some(v + 1));
+        assert_eq!(
+            store2
+                .snapshots(b"main")
+                .find(|r| r.id == s1)
+                .unwrap()
+                .class,
+            disk::CLASS_KEEP
+        );
     }
 
     /// rev1§4.7: `ts = max(now, predecessor_ts + 1)` — an RTC that regressed
