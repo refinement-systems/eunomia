@@ -80,4 +80,7 @@ cargo test -p cas
 #     -p cas -p loader -p storage-server \
 #     --test fuzz_regressions --test fuzz_corpus
 cargo +nightly miri test -p cas
+# The DMA-pool wrapper (the one place PAs are visible) joins the sweep as of
+# B4C: it has no fuzz corpus, so its proptests run as the crate's lib tests —
+#   MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri test -p dma-pool
 ```

@@ -1513,6 +1513,8 @@ pub mod host {
 mod tests {
     use super::host::*;
     use super::*;
+    use proptest::prelude::*;
+    use std::panic;
 
     fn pool(len: usize) -> DmaPool<HostBacking> {
         DmaPool::new(HostBacking { mem: SharedMem::new(len), device_base: 0x4000_0000 })
@@ -1705,5 +1707,202 @@ mod tests {
         assert!(fl.is_allocated(start, 16)); // just carved -> allocated
         fl.free(start, 16);
         assert!(!fl.is_allocated(start, 16)); // freed -> not allocated
+    }
+
+    // --- B4C: wrapper proptest tier + Miri UB oracle (rev1§6) ---
+    //
+    // The verified `FreeList` proves the arithmetic; these properties prove the
+    // wrapper drivers actually use — alloc -> bytes/read/write/read_volatile ->
+    // free, over a real `HostBacking` — is sound under randomized sequences, with
+    // Miri as the oracle for the raw slices `range_ptr` forms. Kept inline (not a
+    // `tests/*.rs` file) so the private `DmaBuf.offset` and the `test`-cfg
+    // `HostBacking` are both in scope, and `cargo +nightly miri test -p dma-pool`
+    // covers it directly. See doc/plans/4_b4-detail.md §B4C.
+
+    const DEVICE_BASE: u64 = 0x4000_0000;
+
+    /// Run `f`, swallowing any panic message — the panic paths (cross-pool,
+    /// fragmentation cap) are exercised hundreds of times and the default hook
+    /// would flood the output. `DmaPool<HostBacking>` is not `UnwindSafe` (it
+    /// holds `Rc<UnsafeCell<..>>`), so we assert it: every closure below either
+    /// only reads, or panics in `DmaPool::{free,bytes,..}` *before* any mutation,
+    /// so no observer sees a torn invariant across the unwind.
+    fn catch_silent<R>(f: impl FnOnce() -> R) -> std::thread::Result<R> {
+        let prev = panic::take_hook();
+        panic::set_hook(Box::new(|_| {}));
+        let r = panic::catch_unwind(panic::AssertUnwindSafe(f));
+        panic::set_hook(prev);
+        r
+    }
+
+    /// A per-allocation-unique fill: `31` is invertible mod 256, so distinct
+    /// `tag`s (the monotonic alloc counter, <= 64 per sequence) never share a byte
+    /// sequence — an aliasing write from one live buffer into another is therefore
+    /// always caught as a content mismatch.
+    fn pattern(tag: u32, len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|i| tag.wrapping_mul(31).wrapping_add(i as u32) as u8)
+            .collect()
+    }
+
+    #[derive(Debug, Clone)]
+    enum Op {
+        Alloc { len: usize, align_log2: u32 },
+        Free { idx: usize },
+    }
+
+    fn op_strategy() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            (1usize..=256, 0u32..=8).prop_map(|(len, align_log2)| Op::Alloc { len, align_log2 }),
+            any::<usize>().prop_map(|idx| Op::Free { idx }),
+        ]
+    }
+
+    proptest! {
+        // Miri: a few cases cover the same paths; native keeps the full sweep
+        // (mirrors cas/src/file.rs). dma-pool has no blake3, so Miri is fast.
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 256 },
+            ..ProptestConfig::default()
+        })]
+
+        /// Property 1 — alloc/free/access round-trip + disjointness. Every live
+        /// buffer stays in-pool, carries its own (aligned) device address, is
+        /// disjoint from every other live buffer (the wrapper corollary of
+        /// `lemma_two_allocs_disjoint`), and a write to one never perturbs another.
+        #[test]
+        fn alloc_free_access_roundtrip(ops in prop::collection::vec(op_strategy(), 0..64)) {
+            const LEN: usize = 4096;
+            let mut p = DmaPool::new(HostBacking {
+                mem: SharedMem::new(LEN),
+                device_base: DEVICE_BASE,
+            });
+            // (buf, expected-bytes) for each currently-live buffer.
+            let mut live: Vec<(DmaBuf, Vec<u8>)> = Vec::new();
+            let mut tag: u32 = 1;
+
+            for op in ops {
+                match op {
+                    Op::Alloc { len, align_log2 } => {
+                        let align = 1usize << align_log2;
+                        if let Some(buf) = p.alloc(len, align) {
+                            prop_assert_eq!(buf.len, len);
+                            prop_assert!(buf.offset + buf.len <= LEN);
+                            prop_assert_eq!(buf.device_addr().0, DEVICE_BASE + buf.offset as u64);
+                            prop_assert_eq!(buf.device_addr().0 % align as u64, 0u64);
+                            // Disjoint from every other live buffer.
+                            for (other, _) in &live {
+                                prop_assert!(
+                                    buf.offset + buf.len <= other.offset
+                                        || other.offset + other.len <= buf.offset,
+                                    "overlapping live buffers: {:?} vs {:?}",
+                                    buf,
+                                    other
+                                );
+                            }
+                            // Write a unique pattern; read it back three ways.
+                            let pat = pattern(tag, len);
+                            tag = tag.wrapping_add(1);
+                            p.write(&buf, 0, &pat);
+                            prop_assert_eq!(p.bytes(&buf), &pat[..]);
+                            let mut back = vec![0u8; len];
+                            p.read(&buf, 0, &mut back);
+                            prop_assert_eq!(&back, &pat);
+                            let vlen = len.min(16);
+                            let mut vbuf = vec![0u8; vlen];
+                            p.read_volatile(&buf, 0, &mut vbuf);
+                            prop_assert_eq!(&vbuf[..], &pat[..vlen]);
+                            live.push((buf, pat));
+                        }
+                    }
+                    Op::Free { idx } => {
+                        if !live.is_empty() {
+                            let (buf, pat) = live.remove(idx % live.len());
+                            prop_assert_eq!(p.bytes(&buf), &pat[..]); // still intact
+                            p.free(buf);
+                        }
+                    }
+                }
+                // After every op: no live buffer was perturbed by another's write.
+                for (buf, pat) in &live {
+                    prop_assert_eq!(p.bytes(buf), &pat[..]);
+                }
+            }
+        }
+
+        /// Property 2 — cross-pool safety, never UB. A buffer carved from pool A,
+        /// applied to a differently-sized pool B, either round-trips (in-bounds)
+        /// or panics — never an out-of-bounds slice. Miri is the oracle on the
+        /// in-bounds-foreign path: reverting `range_ptr`'s `abs_end <=
+        /// backing.len()` bound would make `b.bytes(&buf)` form a slice past B's
+        /// backing — an immediate Miri error right here. So this guards a real
+        /// hole, not a tautology (the B4 plan's oracle-sanity, documented rather
+        /// than committed as an unsound variant that would break the Miri sweep).
+        #[test]
+        fn cross_pool_never_ub(
+            a_len in 64usize..=4096,
+            b_len in 64usize..=4096,
+            pad in 0usize..4096,
+            req_len in 1usize..=256,
+            align_log2 in 0u32..=8,
+        ) {
+            let mut a = DmaPool::new(HostBacking {
+                mem: SharedMem::new(a_len),
+                device_base: DEVICE_BASE,
+            });
+            let b = DmaPool::new(HostBacking {
+                mem: SharedMem::new(b_len),
+                device_base: 0x8000_0000,
+            });
+            // Push the carve to a varied offset inside A, so foreign buffers land
+            // at many positions relative to B's end (some past it, some within).
+            let pad = pad % a_len; // a_len >= 64
+            if pad > 0 {
+                let _ = a.alloc(pad, 1);
+            }
+            let buf = match a.alloc(req_len, 1usize << align_log2) {
+                Some(buf) => buf,
+                None => return Ok(()),
+            };
+            // Independent oracle: in-bounds for B iff the whole extent fits in B.
+            let in_bounds = buf.offset.checked_add(buf.len).is_some_and(|e| e <= b_len);
+            if in_bounds {
+                // Miri validates the foreign-but-in-bounds slice formation + reads.
+                let s = b.bytes(&buf);
+                prop_assert_eq!(s.len(), buf.len);
+                let _ = s.iter().fold(0u8, |acc, &x| acc ^ x); // touch every byte
+                let mut out = vec![0u8; buf.len];
+                b.read_volatile(&buf, 0, &mut out);
+            } else {
+                let res = catch_silent(|| b.bytes(&buf).len());
+                prop_assert!(res.is_err());
+            }
+        }
+
+        /// Property 3 — fragmentation backstop never UB. Fragment a small pool by
+        /// freeing a chosen subset of 1-byte buffers; each `free` either succeeds
+        /// or panics cleanly. Under Miri this confirms the restored
+        /// `assert!(!is_full())` fires before any `self.free[N]` out-of-bounds
+        /// index (the randomized companion to `full_list_backstop_panics`).
+        #[test]
+        fn fragmentation_backstop_never_ub(free_mask in prop::collection::vec(any::<bool>(), 0..200)) {
+            const LEN: usize = 200;
+            let mut p = DmaPool::new(HostBacking {
+                mem: SharedMem::new(LEN),
+                device_base: DEVICE_BASE,
+            });
+            // Fill the pool with 1-byte buffers (offsets 0..LEN).
+            let bufs: Vec<DmaBuf> = (0..LEN).map_while(|_| p.alloc(1, 1)).collect();
+            // Free the masked subset; each non-adjacent free adds a free extent,
+            // marching nfree toward (and possibly past) MAX_FREE_RANGES. Each index
+            // is freed at most once, so no double-free — only the cap can panic.
+            for (i, &do_free) in free_mask.iter().enumerate() {
+                if i < bufs.len() && do_free {
+                    let buf = bufs[i];
+                    // Ok (carved a new extent) or Err (clean cap panic) — never UB.
+                    let _ = catch_silent(|| p.free(buf));
+                }
+            }
+        }
     }
 }
