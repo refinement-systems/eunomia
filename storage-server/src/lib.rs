@@ -194,6 +194,12 @@ pub enum ErrorCode {
 
 // ── Server ──────────────────────────────────────────────────────────────
 
+/// Maximum claim-ticket lifetime (rev1§2.4): the caller's requested TTL is
+/// clamped to this so no ticket outlives the bound. Tickets are for prompt
+/// peer hand-off, not durable authority — that stays in the handle/session
+/// regime. Default 60 s; a tunable policy default, not an ABI promise.
+pub const MAX_TICKET_TTL_NANOS: u64 = 60_000_000_000;
+
 struct PendingTicket {
     entry: HandleEntry,
     expires: u64,
@@ -569,6 +575,8 @@ impl<D: BlockDev> Server<D> {
             }
             Request::MintTicket { handle, ttl_nanos } => {
                 let e = self.lookup(session, handle, 0)?;
+                // rev1§2.4: the caller requests the TTL, the server clamps it.
+                let ttl = ttl_nanos.min(MAX_TICKET_TTL_NANOS);
                 self.ticket_seq += 1;
                 let mut seed = [0u8; 24];
                 seed[..8].copy_from_slice(&self.ticket_seed.to_le_bytes());
@@ -579,7 +587,7 @@ impl<D: BlockDev> Server<D> {
                 ticket.copy_from_slice(&digest.as_bytes()[..16]);
                 self.tickets.insert(
                     ticket,
-                    PendingTicket { entry: e, expires: now.saturating_add(ttl_nanos) },
+                    PendingTicket { entry: e, expires: now.saturating_add(ttl) },
                 );
                 Ok(Response::Ticket(ticket))
             }
