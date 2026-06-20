@@ -7,7 +7,7 @@ use dma_pool::host::{HostBacking, SharedMem};
 use dma_pool::DmaPool;
 use virtio_blk::blockdev::VirtioBlockDev;
 use virtio_blk::fake::FakeBlock;
-use virtio_blk::{VirtioBlk, SECTOR};
+use virtio_blk::{VirtioBlk, VirtioError, SECTOR};
 
 const DEV_BASE: u64 = 0x4000_0000;
 
@@ -70,6 +70,43 @@ fn blockdev_adapter_handles_unaligned_io() {
     // Reading past the end of the device must fail, not wrap.
     let mut over = [0u8; 4];
     assert!(dev.read(256 * SECTOR as u64 - 2, &mut over).is_err());
+}
+
+// S-11 (rev1§4.x): the driver carries a defensive LBA-vs-capacity bound, so an
+// out-of-range transfer is refused locally (`OutOfRange`) *before* any device
+// round-trip — distinct from the device's own `DeviceError`, which a real
+// round-trip past the end would surface.
+#[test]
+fn lba_past_capacity_refused_locally() {
+    let mut blk = make_driver(64);
+    let cap = blk.capacity_sectors();
+    assert_eq!(cap, 64);
+
+    // The exact last sector is in range: end == capacity is allowed.
+    let mut last = vec![0u8; SECTOR];
+    blk.read_sectors(cap - 1, &mut last).unwrap();
+    blk.write_sectors(cap - 1, &last).unwrap();
+
+    // One sector starting one past the end → local refusal (not DeviceError),
+    // for both directions, and with no device round-trip.
+    let mut over = vec![0u8; SECTOR];
+    assert_eq!(blk.read_sectors(cap, &mut over), Err(VirtioError::OutOfRange));
+    assert_eq!(blk.write_sectors(cap, &over), Err(VirtioError::OutOfRange));
+
+    // A multi-sector transfer that starts in range but whose tail crosses the
+    // end is refused as a whole.
+    let mut multi = vec![0u8; SECTOR * 4];
+    assert_eq!(
+        blk.read_sectors(cap - 2, &mut multi),
+        Err(VirtioError::OutOfRange)
+    );
+
+    // An adversarial lba near u64::MAX refuses via checked add rather than
+    // wrapping back into a valid-looking range.
+    assert_eq!(
+        blk.read_sectors(u64::MAX, &mut last),
+        Err(VirtioError::OutOfRange)
+    );
 }
 
 // Native-only: drives interpreted BLAKE3 through the whole cas engine — hours

@@ -104,6 +104,12 @@ pub enum VirtioError {
     NoQueue,
     NoMemory,
     TooLarge,
+    /// A transfer whose last sector would run past the device's reported
+    /// capacity. Distinct from `TooLarge` (exceeds `max_transfer`). Defensive
+    /// local bound (rev1§4.x, S-11): the device stays ground truth for its own
+    /// geometry; this turns a device-dependent `DeviceError` into a
+    /// deterministic local refusal and is never a correctness dependency.
+    OutOfRange,
     DeviceError,
     Unsupported,
 }
@@ -352,11 +358,26 @@ impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
         self.pool.write(&dbuf, 0, data);
     }
 
+    /// Defensive LBA bound (rev1§4.x, S-11). The device remains ground truth
+    /// for its own geometry; this refuses a transfer whose last sector runs
+    /// past the reported `capacity` *before* any device round-trip — a local
+    /// hardening, never a correctness dependency. Checked so an adversarial
+    /// `lba` near `u64::MAX` refuses rather than wraps (same discipline as
+    /// `cas::dev::access_range`).
+    fn check_capacity(&self, lba: u64, len: usize) -> Result<(), VirtioError> {
+        let nsectors = (len / SECTOR) as u64;
+        if lba.checked_add(nsectors).is_none_or(|end| end > self.capacity) {
+            return Err(VirtioError::OutOfRange);
+        }
+        Ok(())
+    }
+
     pub fn read_sectors(&mut self, lba: u64, out: &mut [u8]) -> Result<(), VirtioError> {
         debug_assert_eq!(out.len() % SECTOR, 0);
         if out.len() > self.max_transfer {
             return Err(VirtioError::TooLarge);
         }
+        self.check_capacity(lba, out.len())?;
         self.request(REQ_IN, lba, out.len(), true)?;
         let data = self.data;
         self.pool.read(&data, 0, out);
@@ -368,6 +389,7 @@ impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
         if data.len() > self.max_transfer {
             return Err(VirtioError::TooLarge);
         }
+        self.check_capacity(lba, data.len())?;
         let dbuf = self.data;
         self.pool.write(&dbuf, 0, data);
         self.request(REQ_OUT, lba, data.len(), false)
