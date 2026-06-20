@@ -23,6 +23,16 @@ waiter queue, timer armed list, thread report record, the aspace page-table walk
 fixed header + window-quota `Admission`; the DMA-pool `FreeList`; and `urt`'s slot bitmap
 and seqlock `utc_ns_at`. The seams below are the irreducible remainder.
 
+GC mark-set **sufficiency** (every object reachable from a live root is in the mark set)
+and the mark **walk bound** are, by design, *neither* in the verified surface *nor* a
+trusted seam: sufficiency is delivered at the rev1§6 oracle tier — one `LiveOnly`
+read-through oracle driven by the `gc_mark` cargo-fuzz target and a randomized proptest,
+both Miri-replayed — and the bound is structural (the mark-on-push heap work-stack, native
+depth O(1)). Mechanizing reachability would drag `Hash` into the Hash-free recovery core,
+so it stays test-routed (B6 Design decision 3). Recorded here so a reviewer sees the
+property is test-routed, not Verus-mechanized (the rev1§6.1 "no trust-routed property
+mistaken for mechanized" discipline); the gate is unchanged at 58/0.
+
 ## The seams (13 named constructs + the by-construction category)
 
 Grouped by the `verus.md` §11 category. Each interpreted-hash / size / std-gap seam is a
@@ -103,7 +113,7 @@ Any phase touching these must re-establish them at ≥ the prior numbers.
 | DMA-pool `FreeList` (core + `is_full`/`is_allocated` wrapper-guard accessors) | `cargo verus verify -p dma-pool` | 29 verified, 0 errors |
 | urt slots + time | `cargo verus verify -p urt` | verified (slot bitmap + `utc_ns_at`) |
 | TLA+ | `CommitProtocol` (6886 states), `CapRevocation`/`_Teardown` (~799k, recorded run), `IpcReactor` (with a negative control) | pass |
-| Fuzzing | wire/on-disk/ELF decoders + mount/recovery cargo-fuzz targets, committed corpora + Miri replay | green |
+| Fuzzing | wire/on-disk/ELF decoders + mount/recovery cargo-fuzz targets + the GC mark-walk target (`gc_mark`), committed corpora + Miri replay | green |
 
 ---
 

@@ -24,6 +24,20 @@
 //! a fault. The mark walk is a host cargo-fuzz target (`gc_mark`, rev1§6);
 //! its driver `check_recipe` lives here so the target and its corpus-replay
 //! test share one sufficiency oracle.
+//!
+//! Verification posture (rev1§6, B6 Design decision 3): mark-set
+//! **sufficiency** — every object reachable from a live root lands in the
+//! mark set, so the set alone serves every read — is a global reachability
+//! invariant over a content-addressed graph, delivered at the rev1§6 *oracle
+//! tier*, not mechanized in Verus. Mechanizing it would model `parse_node`,
+//! `chunk_list_entries`, and the store in spec and drag `Hash` into the
+//! Hash-free recovery core (`store.rs`, `prolly.rs`), against that core's
+//! design. So sufficiency is test-routed: one `LiveOnly` read-through oracle
+//! (`check_recipe`), driven by two drivers — the `gc_mark` cargo-fuzz target
+//! (hostile shapes) and a randomized proptest (realistic snapshot-family
+//! shapes) — both Miri-replayed. The walk's termination/bound is guaranteed
+//! **structurally** (above), exercised by the fuzz refuse-not-crash oracle;
+//! no Verus obligation is added, so the gate stays 58/0.
 
 use crate::chunk::ChunkerParams;
 use crate::file::{chunk_list_entries, make_file_entry, read_file};
@@ -340,6 +354,7 @@ pub fn check_recipe(data: &[u8]) -> Result<(), &'static str> {
 mod tests {
     use super::*;
     use crate::tree;
+    use proptest::prelude::*;
 
     const TEST_PARAMS: ChunkerParams = ChunkerParams {
         min: 64,
@@ -347,6 +362,9 @@ mod tests {
         max: 1024,
     };
 
+    /// Hand-built regression seed for `mark_set_sufficient_over_random_trees`:
+    /// an inline file, a chunked file, and a nested directory, marked from one
+    /// root that left superseded roots behind.
     #[test]
     fn mark_set_is_sufficient_to_read_everything() {
         let mut store = MemStore::new();
@@ -378,6 +396,57 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(read_file(&filtered, &e.content, e.size).unwrap(), big_data);
+    }
+
+    proptest! {
+        // Miri: a few cases cover the same paths; native keeps the full sweep.
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 256 },
+            ..ProptestConfig::default()
+        })]
+        /// Mark-set sufficiency over randomized snapshot-family shapes: varied
+        /// depth, fanout, inline vs chunked files, and structural sharing from
+        /// repeated `tree::put` over shared roots. Asserts the *same* oracle
+        /// the `gc_mark` fuzz target drives (`walk_collect` full == `LiveOnly`
+        /// view) — one oracle, two drivers (rev1§6, B6 Design decision 3).
+        ///
+        /// Disjoint dir/file name alphabets (`d*` vs `f*`) mean a path
+        /// component never names a file, so `tree::put` never hits the
+        /// not-a-directory error and the builder is total. The shared name set
+        /// maximizes structural sharing, which the mark walk dedups.
+        #[test]
+        fn mark_set_sufficient_over_random_trees(
+            files in proptest::collection::btree_map(
+                (
+                    proptest::collection::vec(
+                        proptest::sample::select(vec![b"d1".to_vec(), b"d2".to_vec(), b"d3".to_vec()]),
+                        0..3,
+                    ),
+                    proptest::sample::select(vec![b"f1".to_vec(), b"f2".to_vec(), b"f3".to_vec()]),
+                ),
+                proptest::collection::vec(any::<u8>(), 0..2048),
+                2..16,
+            ),
+        ) {
+            let mut store = MemStore::new();
+            let mut root = Dir::new().save(&mut store);
+            for ((dirs, name), content) in &files {
+                let entry = make_file_entry(&mut store, &TEST_PARAMS, name, content, 1, 0);
+                let dir_path: Vec<&[u8]> = dirs.iter().map(|d| d.as_slice()).collect();
+                root = tree::put(&mut store, &root, &dir_path, entry, 1).unwrap();
+            }
+
+            let mut live = BTreeSet::new();
+            mark(&store, &root, &mut live).unwrap();
+
+            // Pruning: the incremental build supersedes earlier roots (at
+            // minimum the empty root), so the live set is a strict subset.
+            prop_assert!(live.len() < store.len());
+            // Sufficiency: every reachable read matches through the mark set
+            // alone — the shared `LiveOnly`/`walk_collect` oracle.
+            let view = LiveOnly { inner: &store, live: &live };
+            prop_assert_eq!(walk_collect(&store, &root), walk_collect(&view, &root));
+        }
     }
 
     /// A `DirRoot` chain deep enough that the pre-B6B native recursion
