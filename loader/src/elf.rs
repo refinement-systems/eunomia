@@ -6,6 +6,11 @@ pub const PF_X: u32 = 1;
 pub const PF_W: u32 = 2;
 pub const PF_R: u32 = 4;
 
+/// Page size the loader maps segments at (rev1§5). Canonical home: `spawn`
+/// re-exports it (`pub use crate::elf::PAGE`) so the page-layout predicate
+/// and its sole consumer agree by construction.
+pub const PAGE: u64 = 4096;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Segment {
     pub vaddr: u64,
@@ -13,6 +18,50 @@ pub struct Segment {
     pub filesz: u64,
     pub memsz: u64,
     pub flags: u32,
+}
+
+/// Page geometry a segment maps into: the page-aligned VA span, the page
+/// count, and the in-page offset of `vaddr` where the file bytes are written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageLayout {
+    pub va_start: u64,
+    pub va_end: u64,
+    pub pages: u64,
+    pub page_offset: u64,
+}
+
+impl Segment {
+    /// Page geometry the loader maps this segment into (rev1§5). All
+    /// arithmetic is checked: a segment whose page-rounded end would exceed
+    /// `u64::MAX` is refused (`BadSegment`), never wrapped or aborted —
+    /// `spawn::prepare` runs this on untrusted images (rev1§3.7) and must
+    /// refuse-not-crash (rev1§5.3). `parse` runs the same check so the
+    /// producer never hands `prepare` a segment it cannot lay out (the I-5
+    /// gap was `parse` under-checking relative to `prepare`).
+    ///
+    /// Total for *all* `(vaddr, memsz)` including `memsz == 0` (yields
+    /// `pages == 0`, no panic); `parse` drops `memsz == 0` segments, so
+    /// `prepare` only ever sees `memsz > 0` (⇒ `pages >= 1`).
+    pub fn page_layout(&self) -> Result<PageLayout, ElfError> {
+        let va_start = self.vaddr & !(PAGE - 1); // round down: cannot overflow
+        let va_end = self
+            .vaddr
+            .checked_add(self.memsz) // subsumes the old vaddr+memsz wrap check
+            .and_then(|e| e.checked_add(PAGE - 1)) // the I-5 overflow point
+            .map(|e| e & !(PAGE - 1)) // round up to page boundary
+            .ok_or(ElfError::BadSegment)?;
+        // va_end >= va_start (round-up of vaddr+memsz vs round-down of vaddr),
+        // so the subtraction cannot underflow once the checked add succeeds;
+        // checked_sub is belt-and-suspenders, keeping the fn total under any
+        // future caller.
+        let span = va_end.checked_sub(va_start).ok_or(ElfError::BadSegment)?;
+        Ok(PageLayout {
+            va_start,
+            va_end,
+            pages: span / PAGE,
+            page_offset: self.vaddr - va_start, // in [0, PAGE): cannot underflow
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,7 +170,10 @@ pub fn parse(bytes: &[u8]) -> Result<Image<'_>, ElfError> {
                 .offset
                 .checked_add(seg.filesz)
                 .is_none_or(|end| end > bytes.len() as u64)
-            || seg.vaddr.checked_add(seg.memsz).is_none()
+            // Producer/consumer agreement: refuse exactly the segments
+            // `prepare` cannot lay out (subsumes the old vaddr+memsz wrap
+            // check and additionally rejects the I-5 page-rounding overflow).
+            || seg.page_layout().is_err()
         {
             return Err(ElfError::BadSegment);
         }
@@ -184,5 +236,45 @@ mod tests {
         let mut trunc = tiny_elf();
         trunc[0x60..0x68].copy_from_slice(&10_000u64.to_le_bytes()); // filesz beyond file
         assert!(matches!(parse(&trunc), Err(ElfError::BadSegment)));
+        // I-5 witness: vaddr + memsz within PAGE-1 of u64::MAX. The page-up
+        // rounding would overflow, so `parse` must refuse it (it used to pass,
+        // letting `prepare` abort/wrap). memsz=8, filesz=8 keeps filesz<=memsz
+        // and the file extent in-bounds, isolating the rounding overflow.
+        let mut i5 = tiny_elf();
+        i5[0x50..0x58].copy_from_slice(&(u64::MAX - 8).to_le_bytes()); // vaddr
+        i5[0x60..0x68].copy_from_slice(&8u64.to_le_bytes()); // filesz
+        i5[0x68..0x70].copy_from_slice(&8u64.to_le_bytes()); // memsz
+        assert!(matches!(parse(&i5), Err(ElfError::BadSegment)));
+    }
+
+    fn seg(vaddr: u64, memsz: u64) -> Segment {
+        Segment { vaddr, offset: 0, filesz: 0, memsz, flags: 0 }
+    }
+
+    #[test]
+    fn page_layout_normal() {
+        let l = seg(0x8000_0123, 0x2000).page_layout().unwrap();
+        assert_eq!(l.va_start, 0x8000_0000);
+        assert_eq!(l.va_end, 0x8000_3000);
+        assert_eq!(l.pages, 3);
+        assert_eq!(l.page_offset, 0x123);
+        // Universal invariants.
+        assert!(l.va_start <= 0x8000_0123);
+        assert!(0x8000_0123 < l.va_end);
+        assert_eq!(l.pages * PAGE, l.va_end - l.va_start);
+        assert!(l.page_offset < PAGE);
+    }
+
+    #[test]
+    fn page_layout_overflow_boundary_refused() {
+        // The audit's I-5 witness: vaddr + memsz == u64::MAX, so the `+ PAGE-1`
+        // page-up rounding overflows. The old unchecked math would abort
+        // (overflow-checks on, dev) or wrap (release); `page_layout` returns a
+        // clean Err with no panic.
+        assert_eq!(seg(u64::MAX - 8, 8).page_layout(), Err(ElfError::BadSegment));
+        // The exact boundary: the largest vaddr+memsz that still rounds up
+        // without overflow is u64::MAX - (PAGE-1).
+        assert!(seg(u64::MAX - (PAGE - 1), 0).page_layout().is_ok());
+        assert_eq!(seg(u64::MAX - (PAGE - 1) + 1, 0).page_layout(), Err(ElfError::BadSegment));
     }
 }
