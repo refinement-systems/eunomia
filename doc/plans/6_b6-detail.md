@@ -149,7 +149,8 @@ up front so nothing is silently dropped or over-claimed:
   `:2295`, `crash_mid_gc_loses_no_data` `:2549`, `mark_set_is_sufficient_to_read_everything`
   `gc.rs:90`, plus the new resurrection tests, the deep-chain regression, and the
   strengthened sufficiency proptest).
-- `cargo verus verify -p cas --no-default-features` = **58/0** (held — see above).
+- `cargo verus verify -p cas --no-default-features`: **58/0** through B6A/B6B (held), then **> 58/0**
+  after B6C adds the verified worklist-driver core (record the new total in the ledger — see above).
 - Miri replay clean: the documented sweep grows by the new `gc_mark` corpus, which rides the
   existing `--test fuzz_corpus`:
   `MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri test -p cas -p loader
