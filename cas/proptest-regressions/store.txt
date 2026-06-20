@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 3c8817f150127e50d38785eb1189b4e6ccac3bf1bb52d28c9b7972fcce6c0e40 # shrinks to ops = [(12, 0, [0], false), (0, 0, [0], false), (4, 0, [0], false), (7, 0, [0], false), (13, 0, [0], false), (0, 0, [0], false), (0, 0, [0], false), (3, 0, [0], true), (12, 0, [0], false), (4, 0, [0], false), (4, 0, [0], false), (0, 0, [0], false), (0, 0, [0], false), (13, 0, [0], false), (7, 0, [0], false), (9, 0, [0], false), (6, 0, [0], true), (11, 0, [0], true), (4, 0, [0], true), (12, 0, [0], false), (15, 0, [0], false), (8, 0, [0], true)], fail_at = 70, crash_seed = 14532340274190305123
