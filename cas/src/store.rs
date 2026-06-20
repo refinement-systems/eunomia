@@ -625,29 +625,340 @@ fn decode_frame(wal: &[u8], off: usize) -> (r: Option<RecFrame>)
     }
 }
 
-/// The content-layer acceptance `decode_record` makes after framing: the blake3
-/// payload checksum AND that the payload decodes to a `WalOp`. `external_body`
-/// because both are out of verification scope — blake3 is interpreted hashing
-/// (the same seam as `checksum_ok`) and the `WalOp` payload is `Vec`-building
-/// content (TLA+'s abstracted record value, not the replay-bound decision). Assumed
-/// **total**: it inspects the exact-`rlen` record slice and returns a bool. The
-/// `content_ok_spec` ghost lets the maximal-run characterization name the seam
-/// (the standard trusted-fn-with-uninterpreted-spec idiom). The
-/// `off + rlen <= len` precondition (from `decode_frame`) keeps the slice in bounds.
+// ── The record content seam, split (rev1§3.7/§6.1(e), T-5) ─────────────────
+//
+// `decode_record`'s post-framing acceptance folds three things into one
+// `is_some()`: framing (already verified by `decode_frame`/`frame_at`), the
+// **blake3 record checksum** (interpreted hashing — irreducibly trusted, the
+// same seam class as `checksum_ok`), and the **structural payload decode**
+// (`WalOp::decode_payload` — a bounded, total tag-dispatch + length-prefixed
+// walk). B7B pulls the structural half into the verified surface so blake3 is
+// the *only* uninterpreted part of the record seam:
+//   content_ok_spec(rec) == wal_payload_struct_ok_spec(rec)   [verified]
+//                        && checksum_ok_spec(rec)             [trusted: blake3]
+// The spec `s_*` mirror of `decode_payload` is interpreted; `wal_struct_ok`
+// proves the exec walk equals it ∀ bytes (the `decode_frame`/`frame_at`
+// shape). `content_ok_spec` keeps its name/meaning, so `run_len`/`laid_out`/
+// `replay_bound` and the gap-freedom lemmas are unchanged.
+
+/// One bounded read from `pay` at `pos`: `Some(pos + n)` iff `n` bytes remain,
+/// else `None` — the spec mirror of `Reader::take` (`prolly.rs`). Total.
+spec fn s_take(pay: Seq<u8>, pos: int, n: int) -> Option<int> {
+    if 0 <= pos && 0 <= n && pos + n <= pay.len() {
+        Some(pos + n)
+    } else {
+        None
+    }
+}
+
+/// A length-prefixed path of `count` components from `pos`: each component is a
+/// `u8` length byte followed by that many bytes (the `take_path` closure in
+/// `WalOp::decode_payload`). `Some(end)` iff all `count` fit; `None` on the
+/// first truncation. Terminating (`decreases count`).
+spec fn s_path(pay: Seq<u8>, pos: int, count: int) -> Option<int>
+    decreases count,
+{
+    if count <= 0 {
+        Some(pos)
+    } else {
+        match s_take(pay, pos, 1) {
+            None => None,
+            Some(p1) => match s_take(pay, p1, pay[pos] as int) {
+                None => None,
+                Some(p2) => s_path(pay, p2, count - 1),
+            },
+        }
+    }
+}
+
+/// The payload region structurally decodes and is *exactly* consumed — the
+/// interpreted mirror of `WalOp::decode_payload`: a tag byte (1 = Write,
+/// 2 = Unlink), then for Write `ref_name`/`path`/`offset`/`mtime`/`data`
+/// (the data length a `u32`), for Unlink `ref_name`/`path`/`mtime`, with the
+/// final cursor at the end (`Reader::done`). Verified-equal to the exec walk by
+/// [`wal_struct_ok`]; no longer trusted.
+spec fn s_payload_ok(pay: Seq<u8>) -> bool {
+    match s_take(pay, 0, 1) {
+        None => false,
+        Some(p_tag) => {
+            let tag = pay[0];
+            if tag == 1u8 {
+                // Write: rl·ref_name, path, offset u64, mtime u64, dl u32·data.
+                match s_take(pay, p_tag, 1) {
+                    None => false,
+                    Some(p_rl) => match s_take(pay, p_rl, pay[p_tag] as int) {
+                        None => false,
+                        Some(p_ref) => match s_take(pay, p_ref, 1) {
+                            None => false,
+                            Some(p_pc) => match s_path(pay, p_pc, pay[p_ref] as int) {
+                                None => false,
+                                Some(p_path) => match s_take(pay, p_path, 8) {
+                                    None => false,
+                                    Some(p_off) => match s_take(pay, p_off, 8) {
+                                        None => false,
+                                        Some(p_mt) => match s_take(pay, p_mt, 4) {
+                                            None => false,
+                                            Some(p_dl) => match s_take(
+                                                pay,
+                                                p_dl,
+                                                disk::spec_u32_le(pay, p_mt) as int,
+                                            ) {
+                                                None => false,
+                                                Some(p_data) => p_data == pay.len(),
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                }
+            } else if tag == 2u8 {
+                // Unlink: rl·ref_name, path, mtime u64.
+                match s_take(pay, p_tag, 1) {
+                    None => false,
+                    Some(p_rl) => match s_take(pay, p_rl, pay[p_tag] as int) {
+                        None => false,
+                        Some(p_ref) => match s_take(pay, p_ref, 1) {
+                            None => false,
+                            Some(p_pc) => match s_path(pay, p_pc, pay[p_ref] as int) {
+                                None => false,
+                                Some(p_path) => match s_take(pay, p_path, 8) {
+                                    None => false,
+                                    Some(p_mt) => p_mt == pay.len(),
+                                },
+                            },
+                        },
+                    },
+                }
+            } else {
+                false
+            }
+        }
+    }
+}
+
+/// The record's payload (everything past the 48-byte header) structurally
+/// decodes — the **verified** half of [`content_ok_spec`]. The payload is the
+/// tail `rec[WAL_HEADER..]` because `decode_record` slices `buf[WAL_HEADER..
+/// WAL_HEADER + len]` over a record whose `rlen == WAL_HEADER + len`.
+spec fn wal_payload_struct_ok_spec(rec: Seq<u8>) -> bool {
+    &&& rec.len() >= WAL_HEADER
+    &&& s_payload_ok(rec.subrange(WAL_HEADER as int, rec.len() as int))
+}
+
+/// The blake3 record-checksum gate, uninterpreted — interpreted hashing out of
+/// SMT scope (the same seam class as `checksum_ok`, `disk.rs`). [`wal_checksum_ok`]
+/// is its `external_body` exec twin. After B7B's structural split this is the
+/// **only** uninterpreted part of the record seam (rev1§6.1(e)).
+uninterp spec fn checksum_ok_spec(rec: Seq<u8>) -> bool;
+
+/// "This record is content-valid": the structural decode (verified) **and** the
+/// blake3 checksum (trusted). Opaque so `run_len`/`laid_out`/`replay_bound` and
+/// the gap-freedom lemmas keep treating it as a black box exactly as before the
+/// split — only [`wal_content_ok`] reveals the conjunction.
+#[verifier::opaque]
+spec fn content_ok_spec(rec: Seq<u8>) -> bool {
+    wal_payload_struct_ok_spec(rec) && checksum_ok_spec(rec)
+}
+
+/// Exec twin of [`s_take`]: advance `pos` by `n` if `n` bytes remain. Bounds-
+/// checked via `len - pos` (never `pos + n`), so no `usize` overflow — total ∀.
+fn e_take(pay: &[u8], pos: usize, n: usize) -> (r: Option<usize>)
+    requires
+        pos <= pay@.len(),
+    ensures
+        match r {
+            Some(p) => s_take(pay@, pos as int, n as int) == Some(p as int) && p <= pay@.len(),
+            None => s_take(pay@, pos as int, n as int) is None,
+        },
+{
+    if pay.len() - pos < n {
+        None
+    } else {
+        Some(pos + n)
+    }
+}
+
+/// Exec twin of [`s_path`]: walk `count` length-prefixed components from `pos`,
+/// proven equal to the spec walk ∀ bytes. Recursive (mirroring `s_path`) so the
+/// equality unfolds in lockstep; `decreases count`.
+fn e_path(pay: &[u8], pos: usize, count: usize) -> (r: Option<usize>)
+    requires
+        pos <= pay@.len(),
+    ensures
+        match r {
+            Some(p) => s_path(pay@, pos as int, count as int) == Some(p as int) && p <= pay@.len(),
+            None => s_path(pay@, pos as int, count as int) is None,
+        },
+    decreases count,
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    if count == 0 {
+        Some(pos)
+    } else {
+        match e_take(pay, pos, 1) {
+            None => None,
+            Some(p1) => {
+                let clen = pay[pos] as usize;
+                match e_take(pay, p1, clen) {
+                    None => None,
+                    Some(p2) => e_path(pay, p2, count - 1),
+                }
+            }
+        }
+    }
+}
+
+/// Exec twin of [`s_payload_ok`]: the structural payload walk as a verified
+/// `bool`, proven equal to the spec ∀ bytes (the totality + correctness theorem
+/// for the structural half of the record seam, rev1§3.7). Mirrors
+/// `WalOp::decode_payload` byte-for-byte but returns acceptance instead of
+/// building the `Vec`s (that stays the plain-Rust applier's job, rev1§6.1(e)).
+fn e_payload_ok(pay: &[u8]) -> (r: bool)
+    ensures
+        r == s_payload_ok(pay@),
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    let p_tag = match e_take(pay, 0, 1) {
+        None => return false,
+        Some(p) => p,
+    };
+    let tag = pay[0];
+    if tag == 1u8 {
+        let p_rl = match e_take(pay, p_tag, 1) {
+            None => return false,
+            Some(p) => p,
+        };
+        let rl = pay[p_tag] as usize;
+        let p_ref = match e_take(pay, p_rl, rl) {
+            None => return false,
+            Some(p) => p,
+        };
+        let p_pc = match e_take(pay, p_ref, 1) {
+            None => return false,
+            Some(p) => p,
+        };
+        let pc = pay[p_ref] as usize;
+        let p_path = match e_path(pay, p_pc, pc) {
+            None => return false,
+            Some(p) => p,
+        };
+        let p_off = match e_take(pay, p_path, 8) {
+            None => return false,
+            Some(p) => p,
+        };
+        let p_mt = match e_take(pay, p_off, 8) {
+            None => return false,
+            Some(p) => p,
+        };
+        let p_dl = match e_take(pay, p_mt, 4) {
+            None => return false,
+            Some(p) => p,
+        };
+        let dl = read_u32_le(pay, p_mt) as usize;
+        let p_data = match e_take(pay, p_dl, dl) {
+            None => return false,
+            Some(p) => p,
+        };
+        p_data == pay.len()
+    } else if tag == 2u8 {
+        let p_rl = match e_take(pay, p_tag, 1) {
+            None => return false,
+            Some(p) => p,
+        };
+        let rl = pay[p_tag] as usize;
+        let p_ref = match e_take(pay, p_rl, rl) {
+            None => return false,
+            Some(p) => p,
+        };
+        let p_pc = match e_take(pay, p_ref, 1) {
+            None => return false,
+            Some(p) => p,
+        };
+        let pc = pay[p_ref] as usize;
+        let p_path = match e_path(pay, p_pc, pc) {
+            None => return false,
+            Some(p) => p,
+        };
+        let p_mt = match e_take(pay, p_path, 8) {
+            None => return false,
+            Some(p) => p,
+        };
+        p_mt == pay.len()
+    } else {
+        false
+    }
+}
+
+/// The **verified** structural half of the record seam: does the record's
+/// payload region structurally decode? Proven equal to [`wal_payload_struct_ok_spec`]
+/// ∀ bytes. The payload is the tail past the 48-byte header (`decode_record`'s
+/// `buf[WAL_HEADER..WAL_HEADER + len]` over an `rlen == WAL_HEADER + len`
+/// record). `off + rlen <= len` (from `decode_frame`) keeps the slice in bounds.
+fn wal_struct_ok(wal: &[u8], off: usize, rlen: usize) -> (r: bool)
+    requires
+        off + rlen <= wal@.len(),
+    ensures
+        r == wal_payload_struct_ok_spec(wal@.subrange(off as int, (off + rlen) as int)),
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    // Materialize `wal@.len() <= usize::MAX` so the `off + rlen` slice bound
+    // below is overflow-free (the `replay_bound` recipe).
+    let _glen = wal.len();
+    let ghost rec = wal@.subrange(off as int, (off + rlen) as int);
+    assert(rec.len() == rlen);
+    if rlen < WAL_HEADER {
+        return false;
+    }
+    let pay = &wal[off + WAL_HEADER..off + rlen];
+    assert(pay@ =~= rec.subrange(WAL_HEADER as int, rlen as int));
+    e_payload_ok(pay)
+}
+
+/// The **trusted** half of the record seam: the blake3 record checksum, the lone
+/// uninterpreted part after B7B's split. `external_body` because blake3 is
+/// interpreted hashing — out of SMT scope, the same boundary as `checksum_ok`
+/// (`disk.rs`). Total: inspects the exact-`rlen` record and returns a bool;
+/// recomputes the canonical `record_checksum` (`disk.rs`) over `seq‖len‖payload`
+/// and compares the stored 32 bytes. `checksum_ok_spec` is its uninterpreted
+/// twin. `off + rlen <= len` (from `decode_frame`) keeps the slicing in bounds.
 #[verifier::external_body]
+fn wal_checksum_ok(wal: &[u8], off: usize, rlen: usize) -> (r: bool)
+    requires
+        off + rlen <= wal@.len(),
+    ensures
+        r == checksum_ok_spec(wal@.subrange(off as int, (off + rlen) as int)),
+{
+    let rec = &wal[off..off + rlen];
+    if rec.len() < WAL_HEADER {
+        return false;
+    }
+    let seq = u64::from_le_bytes(rec[4..12].try_into().unwrap());
+    let len = u32::from_le_bytes(rec[12..16].try_into().unwrap());
+    let payload_len = len as usize;
+    if rec.len() - WAL_HEADER < payload_len {
+        return false;
+    }
+    let payload = &rec[WAL_HEADER..WAL_HEADER + payload_len];
+    disk::record_checksum(seq, len, payload).as_bytes() == &rec[16..48]
+}
+
+/// The content-layer acceptance `decode_record` makes after framing, now a
+/// **verified composition** (no longer one `external_body` box): the structural
+/// decode (verified, [`wal_struct_ok`]) **and** the blake3 checksum (trusted,
+/// [`wal_checksum_ok`]). Equal to [`content_ok_spec`], so `run_len`/`replay_bound`
+/// reason over the maximal run exactly as before — only the *internal* trust
+/// boundary shrank to blake3 (rev1§6.1(e), T-5).
 fn wal_content_ok(wal: &[u8], off: usize, rlen: usize) -> (r: bool)
     requires
         off + rlen <= wal@.len(),
     ensures
         r == content_ok_spec(wal@.subrange(off as int, (off + rlen) as int)),
 {
-    WalOp::decode_record(&wal[off..off + rlen]).is_some()
+    reveal(content_ok_spec);
+    wal_struct_ok(wal, off, rlen) && wal_checksum_ok(wal, off, rlen)
 }
-
-/// Ghost model of [`wal_content_ok`] — uninterpreted (blake3 + the `WalOp`
-/// payload decode are seams), so the maximal-run spec can reference "this record
-/// is content-valid" without looking inside the hash or the content decode.
-uninterp spec fn content_ok_spec(rec: Seq<u8>) -> bool;
 
 /// The length of the maximal contiguous recoverable run from `off` at sequence
 /// `seq`: each record must frame ([`frame_at`]), continue the sequence, and pass
@@ -2110,6 +2421,81 @@ mod tests {
 
     fn p(parts: &[&str]) -> Path {
         parts.iter().map(|s| s.as_bytes().to_vec()).collect()
+    }
+
+    /// Wrap a raw payload in a minimal WAL record frame (magic+seq+len+cksum+
+    /// payload). `wal_struct_ok` reads only the structure of the tail past the
+    /// 48-byte header, so the header fields here need not be self-consistent —
+    /// the structural predicate never inspects them.
+    fn framed(payload: &[u8]) -> Vec<u8> {
+        let mut rec = Vec::with_capacity(WAL_HEADER + payload.len());
+        rec.extend_from_slice(b"WREC");
+        rec.extend_from_slice(&0u64.to_le_bytes()); // seq
+        rec.extend_from_slice(&(payload.len() as u32).to_le_bytes()); // len
+        rec.extend_from_slice(&[0u8; 32]); // checksum placeholder
+        rec.extend_from_slice(payload);
+        rec
+    }
+
+    /// B7B/T-5: the structural decode split out of `wal_content_ok` and verified
+    /// like the other on-disk decoders. This test gives the verified predicate
+    /// *teeth* (verus.md §11): it must accept well-formed records and reject
+    /// structurally-malformed ones, and the blake3 half must stay independent.
+    #[test]
+    fn wal_struct_ok_has_teeth() {
+        // A real Write record's structure is accepted, and (with its real
+        // checksum) so is the full content predicate.
+        let write = WalOp::Write {
+            ref_name: b"root".to_vec(),
+            path: vec![b"dir".to_vec(), b"file".to_vec()],
+            offset: 42,
+            mtime: 7,
+            data: b"hello world".to_vec(),
+        };
+        let rec = write.encode_record(1);
+        assert!(wal_struct_ok(&rec, 0, rec.len()));
+        assert!(wal_content_ok(&rec, 0, rec.len()));
+
+        // A complete Unlink record is accepted too (the other tag).
+        let unlink = WalOp::Unlink {
+            ref_name: b"root".to_vec(),
+            path: vec![b"x".to_vec()],
+            mtime: 3,
+        };
+        let urec = unlink.encode_record(2);
+        assert!(wal_struct_ok(&urec, 0, urec.len()));
+
+        // The blake3 half still bites: corrupt one checksum byte and the
+        // structure still decodes, but content acceptance fails.
+        let mut bad_cksum = rec.clone();
+        bad_cksum[16] ^= 0xFF;
+        assert!(wal_struct_ok(&bad_cksum, 0, bad_cksum.len()));
+        assert!(!wal_content_ok(&bad_cksum, 0, bad_cksum.len()));
+
+        // Teeth — structurally-malformed payloads must be rejected:
+        // (a) unknown op tag.
+        let bad_tag = framed(&[99]);
+        assert!(!wal_struct_ok(&bad_tag, 0, bad_tag.len()));
+        // (b) trailing bytes after a complete Unlink op (the `done()` check).
+        //     payload = tag(2) · rl(0) · path-count(0) · mtime(8 zero bytes).
+        let mut unlink_payload = vec![2u8, 0u8, 0u8];
+        unlink_payload.extend_from_slice(&0u64.to_le_bytes());
+        let mut trailing = unlink_payload.clone();
+        trailing.push(0xFF);
+        let with_trailing = framed(&trailing);
+        assert!(!wal_struct_ok(&with_trailing, 0, with_trailing.len()));
+        // the same payload without the trailing byte is accepted.
+        let exact = framed(&unlink_payload);
+        assert!(wal_struct_ok(&exact, 0, exact.len()));
+        // (c) a path component length that runs past the buffer.
+        //     tag(2) · rl(0) · path-count(1) · comp-len(5) · <no comp bytes>.
+        let truncated = framed(&[2, 0, 1, 5]);
+        assert!(!wal_struct_ok(&truncated, 0, truncated.len()));
+        // (d) empty payload (no tag byte at all).
+        let empty = framed(&[]);
+        assert!(!wal_struct_ok(&empty, 0, empty.len()));
+        // (e) a record shorter than the header decodes nothing.
+        assert!(!wal_struct_ok(&[0u8; 4], 0, 4));
     }
 
     #[test]

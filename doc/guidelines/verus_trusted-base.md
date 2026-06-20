@@ -18,7 +18,8 @@ For calibration, the mechanized surface these seams bound (the regression baseli
 "Baselines" below): `kcore`'s cspace/CDT, untyped retype, channel FIFO, notification
 waiter queue, timer armed list, thread report record, the aspace page-table walker, and
 `sysabi::decode`; the CAS decode + recovery-decision cores (`pick_survivor`,
-`commit_target`, `advance_head`, `decode_frame`, `replay_bound`,
+`commit_target`, `advance_head`, `decode_frame`, `replay_bound`, the WAL-record
+structural decode (`wal_struct_ok`/`e_payload_ok`, the verified half of `wal_content_ok`),
 `validate_geometry_fields`, `decode_checked_fields`, the single-entry TLV codec); the IPC
 fixed header + window-quota `Admission`; the DMA-pool `FreeList`; and `urt`'s slot bitmap
 and seqlock `utc_ns_at`. The seams below are the irreducible remainder.
@@ -31,7 +32,7 @@ both Miri-replayed — and the bound is structural (the mark-on-push heap work-s
 depth O(1)). Mechanizing reachability would drag `Hash` into the Hash-free recovery core,
 so it stays test-routed (B6 Design decision 3). Recorded here so a reviewer sees the
 property is test-routed, not Verus-mechanized (the rev1§6.1 "no trust-routed property
-mistaken for mechanized" discipline); the gate is unchanged at 58/0.
+mistaken for mechanized" discipline); this routing leaves the gate unchanged (64/0 after B7B).
 
 ## The seams (13 named constructs + the by-construction category)
 
@@ -65,7 +66,7 @@ grep-able rather than an implicit consequence of the crash semantics, as rev1§4
 | Construct | Location | Reason | Host test |
 |---|---|---|---|
 | `checksum_ok` | `cas/src/disk.rs:337` | BLAKE3 superblock-body checksum — interpreted hashing, out of SMT scope; trusted total (inspects buffer, returns bool, no panic). `requires buf@.len()==SB_SIZE` keeps the slicing in bounds. | BLAKE3-justified per rev1§6.1(e); exercised by the superblock-decode fuzz/proptest corpora + Miri replay. |
-| `wal_content_ok` | `cas/src/store.rs:569` | BLAKE3 payload checksum **and** `WalOp` structural decode; paired with the `uninterp spec fn content_ok_spec` twin so the maximal-run spec names the seam without looking inside. | mount/recovery fuzz corpora + Miri replay. **`[verifying]`: B7/T-5 splits the structural decode out and verifies it (rev1§3.7), shrinking this seam to BLAKE3-only.** |
+| `wal_checksum_ok` | `cas/src/store.rs:927` | BLAKE3 WAL-record checksum (`record_checksum` over `seq‖len‖payload`) — interpreted hashing, out of SMT scope; trusted total (inspects the exact-`rlen` record, returns bool, no panic). `requires off+rlen<=wal@.len()` (from `decode_frame`) keeps the slicing in bounds. Paired with the `uninterp spec fn checksum_ok_spec` twin. **The lone uninterpreted part of the record seam after B7B (T-5) split the `WalOp` structural decode into the verified surface (`wal_struct_ok`).** | mount/recovery fuzz corpora + Miri replay; `wal_struct_ok_has_teeth` (`cas/src/store.rs:2445`) pins the structural/checksum split. |
 | `u64::saturating_mul` | `kcore/src/aspace.rs:76` | vstd specs `saturating_add`/`saturating_sub` but not `_mul`; `va_range_ok` needs it. `returns` mirrors documented std saturating semantics. | std-semantics mirror (the `checked_next_multiple_of` precedent); no dedicated unit test. |
 | `usize::checked_next_multiple_of` | `kcore/src/untyped.rs:258` | vstd has no spec yet; the Untyped arm needs only that it returns an `Option`, then re-checks positivity. | positivity re-checked at the call site; signature-only trust. |
 | `CapSlot::empty` | `kcore/src/cspace.rs:1226` | plain-Rust `const fn` shared with the kernel shell; the `ensures` state what it builds (empty cap, all four CDT links `None`) so `slot_move`'s final clear verifies. | consumed by the verified `slot_move`; `ensures` pins the construction. |
@@ -89,7 +90,7 @@ grep-able rather than an implicit consequence of the crash semantics, as rev1§4
 | `AspaceObj::bytes_for` | `kcore/src/untyped.rs:236` | `ensures r > 0`; as above. | `bytes_for_positive`. |
 
 **Tally:** 7 `external_body` (4 kcore: `ExTcb`/`ExNotifObj`/`ExTimerObj`/`fixed_object_bytes`;
-2 CAS: `checksum_ok`/`wal_content_ok`; 1 urt: `debug_check_free`) + 6 `assume_specification`
+2 CAS: `checksum_ok`/`wal_checksum_ok`; 1 urt: `debug_check_free`) + 6 `assume_specification`
 (3 `bytes_for` + `saturating_mul` + `checked_next_multiple_of` + `CapSlot::empty`) = **13**.
 
 > **Reconciliation with audit §4.1.** The audit (`doc/results/0_audit_rev0.md` §4.1)
@@ -107,7 +108,7 @@ phase completes.
 |---|---|---|
 | Cap-side **MAP** bookkeeping moved behind a verified object op (symmetric with unmap) | §6.1(c) | **B8** |
 | Spawn-time **priority-ceiling gate** moved from the syscall shell into a verified op | §6.1(d), §5.4 | **B8** |
-| Per-record **structural decode** split out of `wal_content_ok`, verified like the other on-disk decoders | §6.1(e), §3.7 | **B7B** (T-5) |
+| Per-record **structural decode** split out of `wal_content_ok`, verified like the other on-disk decoders | §6.1(e), §3.7 | **B7B** — landed ✓ (T-5; full Verus predicate, gate 58→64) |
 | Model **replay-equality** mechanized by the `Recover` action property | §6.1(e), §6 | **B7A** — landed ✓ (T-1) |
 | **fsync means fsync** named as a labeled `ASSUME` in the storage model | §4.8, §6.1(e) | **B7A** — landed ✓ (T-4) |
 
@@ -118,7 +119,7 @@ Any phase touching these must re-establish them at ≥ the prior numbers.
 | Surface | Command | Result |
 |---|---|---|
 | kcore object core | `cargo verus verify -p kcore` | 335 verified, 0 errors |
-| CAS decode + recovery cores | `cargo verus verify -p cas --no-default-features` | 58 verified, 0 errors |
+| CAS decode + recovery cores | `cargo verus verify -p cas --no-default-features` | 64 verified, 0 errors |
 | IPC header + session codecs | `cargo verus verify -p ipc` | 58 verified, 0 errors |
 | DMA-pool `FreeList` (core + `is_full`/`is_allocated` wrapper-guard accessors) | `cargo verus verify -p dma-pool` | 29 verified, 0 errors |
 | urt slots + time | `cargo verus verify -p urt` | verified (slot bitmap + `utc_ns_at`) |
