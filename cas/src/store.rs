@@ -1312,6 +1312,11 @@ impl<D: BlockDev> Store<D> {
         self.commit()
     }
 
+    /// Pin a snapshot under a tag name (rev1§4.7): the tag maps to the
+    /// snapshot *id*, so it survives metadata edits, and it is a
+    /// `keep`-strength pin — `delete_snapshot` of a tagged snapshot fails
+    /// `Pinned`. A tag is an entry-set mutation, so it advances the ref's
+    /// edit version (rev1§4.7) like a row edit or a head move.
     pub fn tag(&mut self, name: &[u8], ref_name: &[u8], snap_id: u64) -> Result<(), StoreError> {
         if !self.table.snaps.contains_key(&(ref_name.to_vec(), snap_id)) {
             return Err(StoreError::NoSuchSnapshot);
@@ -1319,7 +1324,35 @@ impl<D: BlockDev> Store<D> {
         self.table
             .tags
             .insert(name.to_vec(), (ref_name.to_vec(), snap_id));
+        self.touch_ref(ref_name); // tag added (rev1§4.7 entry-set mutation)
         self.commit()
+    }
+
+    /// Remove a tag, unpinning its snapshot (rev1§4.7). Ref-scoped: only a
+    /// tag that currently pins a snapshot on `ref_name` is removed, so a
+    /// handle on one ref cannot reach across to another ref's tags (the same
+    /// confinement `RefEdit::DeleteTag` keeps inside a guarded batch).
+    /// Idempotent: removing an absent — or foreign-ref — tag is a no-op that
+    /// neither commits nor advances the edit version.
+    pub fn untag(&mut self, ref_name: &[u8], name: &[u8]) -> Result<(), StoreError> {
+        match self.table.tags.get(name) {
+            Some((r, _)) if r.as_slice() == ref_name => {
+                self.table.tags.remove(name);
+                self.touch_ref(ref_name); // tag removed (rev1§4.7 entry-set mutation)
+                self.commit()
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Enumerate every tag as `(name, ref_name, snap_id)` (rev1§4.7). Reads
+    /// the working table; the wire `ListTags` handler scopes the view to the
+    /// caller's ref.
+    pub fn tags(&self) -> impl Iterator<Item = (&[u8], &[u8], u64)> + '_ {
+        self.table
+            .tags
+            .iter()
+            .map(|(name, (r, id))| (name.as_slice(), r.as_slice(), *id))
     }
 
     // ── Write path (rev1§4.3) ───────────────────────────────────────────
@@ -2365,6 +2398,151 @@ mod tests {
             store.snapshots(b"main").find(|r| r.id == s3).unwrap().class,
             disk::CLASS_KEEP
         );
+    }
+
+    /// rev1§4.7 "Tags" (M-8): `tag`/`untag`/`tags` round-trip; a tag is an
+    /// entry-set mutation (advances the edit version) that pins the snapshot,
+    /// persists across mount, and survives a metadata edit (it names the id);
+    /// `untag` is ref-scoped and idempotent.
+    #[test]
+    fn tag_untag_list_pin_and_advance_edit_version() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        let snap = store
+            .snapshot(b"main", b"t", b"first", disk::CLASS_AUTO, 10)
+            .unwrap();
+        let v0 = store.edit_version(b"main").unwrap();
+
+        // Create: pins the snapshot, advances the edit version, lists.
+        store.tag(b"release", b"main", snap).unwrap();
+        assert_eq!(store.edit_version(b"main"), Some(v0 + 1), "tag advances");
+        assert_eq!(
+            store.tags().collect::<Vec<_>>(),
+            vec![(b"release".as_slice(), b"main".as_slice(), snap)]
+        );
+        assert!(matches!(
+            store.delete_snapshot(b"main", snap),
+            Err(StoreError::Pinned)
+        ));
+
+        // A metadata edit leaves the tag in place (it names the id, not a hash).
+        store
+            .set_snapshot_class(b"main", snap, disk::CLASS_KEEP)
+            .unwrap();
+        assert_eq!(
+            store.tags().collect::<Vec<_>>(),
+            vec![(b"release".as_slice(), b"main".as_slice(), snap)]
+        );
+
+        // Tagging a missing snapshot fails without touching the table.
+        assert!(matches!(
+            store.tag(b"bad", b"main", snap + 999),
+            Err(StoreError::NoSuchSnapshot)
+        ));
+
+        // Persisted: the tag and the bumped version rode the commit onto disk.
+        let mut store = Store::mount(store.into_dev(), test_opts()).unwrap();
+        assert_eq!(
+            store.tags().collect::<Vec<_>>(),
+            vec![(b"release".as_slice(), b"main".as_slice(), snap)]
+        );
+        let v_tagged = store.edit_version(b"main").unwrap();
+
+        // Untag of a name that does not pin this ref is a no-op: no commit, so
+        // the edit version is unchanged.
+        store.untag(b"main", b"nope").unwrap();
+        assert_eq!(store.edit_version(b"main"), Some(v_tagged), "no-op untag");
+
+        // Real untag: unpins, advances the version, and the snapshot now deletes.
+        store.untag(b"main", b"release").unwrap();
+        assert_eq!(
+            store.edit_version(b"main"),
+            Some(v_tagged + 1),
+            "untag advances"
+        );
+        assert_eq!(store.tags().count(), 0);
+        store.delete_snapshot(b"main", snap).unwrap();
+    }
+
+    proptest! {
+        // Miri: a few cases cover the same paths; native keeps the full sweep.
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 256 },
+            ..ProptestConfig::default()
+        })]
+        /// rev1§4.7 invariant under random tag/untag/delete interleavings: a
+        /// pinned snapshot is never deleted, and a tag never strands on a
+        /// snapshot that is gone — the model mirrors which ids are tagged and
+        /// which still exist, and the store must agree at every step.
+        #[test]
+        fn tag_pins_hold_under_random_interleavings(
+            ops in proptest::collection::vec((0u8..3, 0u8..4, 0u8..3), 1..40),
+        ) {
+            let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+            store.create_ref(b"main").unwrap();
+            // Four snapshots to tag/delete against.
+            let mut live: Vec<u64> = Vec::new();
+            for i in 0..4u64 {
+                store.write(b"main", &p(&["f"]), 0, &[i as u8], i + 1).unwrap();
+                live.push(
+                    store
+                        .snapshot(b"main", b"t", b"", disk::CLASS_AUTO, 10 + i)
+                        .unwrap(),
+                );
+            }
+            // model: tag name -> snapshot id it pins (only names "0".."2").
+            let mut tags: std::collections::BTreeMap<u8, u64> =
+                std::collections::BTreeMap::new();
+
+            for (op, snap_sel, tag_sel) in ops {
+                let id = 1 + snap_sel as u64; // snapshot ids are 1..=4
+                let tag_name = [b'0' + tag_sel];
+                match op {
+                    // Create a tag (if the snapshot still exists).
+                    0 => {
+                        match store.tag(&tag_name, b"main", id) {
+                            Ok(()) => {
+                                prop_assert!(live.contains(&id));
+                                tags.insert(tag_sel, id);
+                            }
+                            Err(StoreError::NoSuchSnapshot) => {
+                                prop_assert!(!live.contains(&id));
+                            }
+                            Err(e) => prop_assert!(false, "unexpected tag error: {e:?}"),
+                        }
+                    }
+                    // Remove a tag (ref-scoped, idempotent).
+                    1 => {
+                        store.untag(b"main", &tag_name).unwrap();
+                        tags.remove(&tag_sel);
+                    }
+                    // Delete a snapshot: must fail iff some tag still pins it.
+                    _ => {
+                        let pinned = tags.values().any(|t| *t == id);
+                        match store.delete_snapshot(b"main", id) {
+                            Ok(()) => {
+                                prop_assert!(!pinned, "deleted a pinned snapshot");
+                                prop_assert!(live.contains(&id));
+                                live.retain(|x| *x != id);
+                            }
+                            Err(StoreError::Pinned) => prop_assert!(pinned),
+                            Err(StoreError::NoSuchSnapshot) => {
+                                prop_assert!(!live.contains(&id))
+                            }
+                            Err(e) => prop_assert!(false, "unexpected delete error: {e:?}"),
+                        }
+                    }
+                }
+                // Invariant: every tag points at a still-live snapshot.
+                let pinned_ids: Vec<u64> = store.tags().map(|(_, _, id)| id).collect();
+                for pinned_id in pinned_ids {
+                    prop_assert!(
+                        live.contains(&pinned_id),
+                        "tag stranded on a deleted snapshot"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

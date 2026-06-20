@@ -213,6 +213,28 @@ pub enum Request {
         expected_version: u64,
         edits: Vec<RefEdit>,
     },
+    /// Pin a snapshot under a tag name (rev1§4.7 "Tags"): `name → snapshot id`,
+    /// surviving metadata edits, acting as a `keep`-strength pin. Row surgery,
+    /// so it requires `may-rewrite-history` on a ref-root handle (the
+    /// `DeleteSnapshot`/`Apply` gate) and the tag is scoped to that ref.
+    Tag {
+        handle: HandleId,
+        name: Vec<u8>,
+        snap_id: u64,
+    },
+    /// Delete a tag, unpinning its snapshot (rev1§4.7). Ref-scoped to the
+    /// handle's ref and `may-rewrite-history`-gated, like `Tag`.
+    Untag {
+        handle: HandleId,
+        name: Vec<u8>,
+    },
+    /// Enumerate the handle ref's tags (rev1§4.7). Read-only, so it needs only
+    /// `R_READ`, like `ListSnapshots`. Appended after `Apply`/`Tag`/`Untag` to
+    /// keep every prior variant's postcard discriminant — and the committed
+    /// `request_dispatch` corpus — stable.
+    ListTags {
+        handle: HandleId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,6 +295,9 @@ pub enum Response {
     VersionMismatch {
         edit_version: u64,
     },
+    /// The handle ref's tags (rev1§4.7), each `(name, ref_name, snap_id)`.
+    /// Appended last to keep prior variants' postcard discriminants stable.
+    Tags(Vec<(Vec<u8>, Vec<u8>, u64)>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -860,6 +885,40 @@ impl<D: BlockDev> Server<D> {
                     }),
                     Err(e) => Err(store_err(e)),
                 }
+            }
+            Request::Tag {
+                handle,
+                name,
+                snap_id,
+            } => {
+                // Tags are row surgery (rev1§4.7), so the same gate as
+                // DeleteSnapshot/Apply: `may-rewrite-history` on a ref-root
+                // handle. The tag is scoped to that ref.
+                let ref_name = self.rewrite_target(session, handle)?;
+                self.store
+                    .tag(&name, &ref_name, snap_id)
+                    .map_err(store_err)?;
+                Ok(Response::Ok)
+            }
+            Request::Untag { handle, name } => {
+                let ref_name = self.rewrite_target(session, handle)?;
+                self.store.untag(&ref_name, &name).map_err(store_err)?;
+                Ok(Response::Ok)
+            }
+            Request::ListTags { handle } => {
+                // Read-only enumeration, scoped to the handle's ref (mirrors
+                // `ListSnapshots`): a ref handle sees only its own tags.
+                let e = self.lookup(session, handle, R_READ)?;
+                let HandleTarget::Ref { name, .. } = &e.target else {
+                    return Err(ErrorCode::ReadOnly);
+                };
+                let tags = self
+                    .store
+                    .tags()
+                    .filter(|(_, r, _)| *r == name.as_slice())
+                    .map(|(n, r, id)| (n.to_vec(), r.to_vec(), id))
+                    .collect();
+                Ok(Response::Tags(tags))
             }
         }
     }
