@@ -23,6 +23,7 @@
 
 use crate::id::{ObjId, SlotId};
 use crate::store::{Binding, Store};
+use crate::sysabi::NUM_PRIOS;
 use crate::thread::{Report, ThreadState};
 use vstd::prelude::*;
 
@@ -383,6 +384,21 @@ pub struct TimerView {
     pub next: Option<ObjId>,
 }
 
+// The 32-level ready queue (rev1§5.4): one intrusive `Tcb.qnext` list per priority
+// level + a `u32` presence bitmap. Per-level head/tail (the waiter-queue shape, ×32)
+// plus the `timer_head_view`-style global-scalar bitmap. A thread is on the
+// `heads[level]`..`tails[level]` chain iff it is `Runnable` at `priority == level`
+// (the per-element covenant in `ready_chain`); `bitmap` bit `level` is set iff that
+// level's chain is non-empty (the coherence invariant in `ready_wf`). The link is the
+// same `Tcb.qnext` the waiter queue threads — disambiguated by state (`Runnable` here,
+// `BlockedNotif` there) — so a thread is on at most one of the two.
+#[verifier::ext_equal]
+pub struct ReadyView {
+    pub heads: Map<int, Option<ObjId>>, // level (0..NUM_PRIOS) → list head
+    pub tails: Map<int, Option<ObjId>>, // level (0..NUM_PRIOS) → list tail
+    pub bitmap: u32,                     // bit `level` set ⇔ level's chain non-empty
+}
+
 // Cspace residency — the slot-handle list a cspace object owns. The
 // kernel fixes this at construction (`cspace_num_slots`/`cspace_slot` are getters
 // with no setter), so it is an immutable projection exactly like `ChanView
@@ -434,6 +450,11 @@ pub trait ExStore {
     // The armed-timer list head — a `Store`-seam scalar (the kernel static,
     // store.rs:130); the list *logic* is in `crate::timer` (phase 4e).
     spec fn timer_head_view(&self) -> Option<ObjId>;
+    // The 32-level ready queue (per-level head/tail + presence bitmap) — `Store`-seam
+    // state (the `READY`/`READY_BITMAP` kernel statics); the list *logic* is the
+    // verified `crate::ready` ops (B8C). Framed unchanged by every object setter
+    // exactly as `timer_head_view` is; changed only by the enqueue/dequeue/unqueue ops.
+    spec fn ready_view(&self) -> ReadyView;
     // The TLBI effect log: the ordered sequence of `(asid, va)` TLB
     // invalidations issued through this store. The seventh view — pure hardware
     // effect, not object state — so `aspace::unmap_in` can prove "one TLBI per
@@ -457,6 +478,7 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     fn obj_refs(&self, o: ObjId) -> (r: u32)
@@ -473,6 +495,7 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     // ── cspace residents ─────────────────────────────────────────
@@ -529,6 +552,7 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     fn chan_head(&self, ch: ObjId, ring: usize) -> (r: u32)
@@ -555,6 +579,7 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     fn chan_count(&self, ch: ObjId, ring: usize) -> (r: u32)
@@ -581,6 +606,7 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     fn chan_binding(&self, ch: ObjId, end: usize, ev: usize) -> (r: Binding)
@@ -608,6 +634,7 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     // The ring cap-slot handle — immutable channel layout, so getter only.
@@ -641,6 +668,7 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     // Payload is abstracted out, so the write is a frame-only no-op on the
@@ -654,6 +682,7 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     // `&self` (only `buf` is written), so the store is unchanged automatically; the
@@ -681,6 +710,7 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     fn notif_wait_head(&self, n: ObjId) -> (r: Option<ObjId>)
@@ -698,6 +728,7 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     fn notif_wait_tail(&self, n: ObjId) -> (r: Option<ObjId>)
@@ -715,6 +746,7 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     // ── thread (TCB) accessors ───────────────────────────────────
@@ -739,6 +771,7 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     fn tcb_qnext(&self, t: ObjId) -> (r: Option<ObjId>)
@@ -756,6 +789,7 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     fn tcb_wait_notif(&self, t: ObjId) -> (r: Option<ObjId>)
@@ -773,6 +807,7 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     fn tcb_report(&self, t: ObjId) -> (r: Report)
@@ -790,6 +825,7 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     fn tcb_priority(&self, t: ObjId) -> (r: u8)
@@ -807,6 +843,7 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     fn tcb_bind_slot(&self, t: ObjId, which: usize) -> (r: SlotId)
@@ -838,6 +875,7 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     fn tcb_cspace(&self, t: ObjId) -> (r: Option<ObjId>)
@@ -855,6 +893,7 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     fn tcb_aspace(&self, t: ObjId) -> (r: Option<ObjId>)
@@ -872,6 +911,7 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     fn set_tcb_retval(&mut self, t: ObjId, v: u64)
@@ -885,6 +925,7 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     // ── timer accessors (the armed-list logic) ──────────────────────────────
@@ -906,6 +947,7 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     fn timer_deadline(&self, t: ObjId) -> (r: u64)
@@ -923,6 +965,7 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     fn timer_notif(&self, t: ObjId) -> (r: Option<ObjId>)
@@ -940,6 +983,7 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     fn timer_bits(&self, t: ObjId) -> (r: u64)
@@ -957,6 +1001,7 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     fn timer_next(&self, t: ObjId) -> (r: Option<ObjId>)
@@ -974,6 +1019,7 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     fn timer_armed_head(&self) -> (r: Option<ObjId>)
@@ -988,6 +1034,70 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
+            final(self).ready_view() == old(self).ready_view(),
+            final(self).cspace_view() == old(self).cspace_view();
+
+    // ── ready queue (B8C) ──────────────────────────────────────────────────
+    //
+    // The 32-level ready queue's per-level head/tail + presence bitmap, the
+    // `timer_armed_head` precedent generalized: getters project `ready_view`, setters
+    // update one level (or the scalar bitmap) and frame every other view. The list
+    // *logic* (enqueue/dequeue/unqueue/top) is the verified `crate::ready` ops; these are
+    // the by-handle accessors they run against (kernel statics in production, the array
+    // backing in `test_store`). `level < NUM_PRIOS` mirrors the production fixed-array bound.
+    fn ready_head(&self, level: usize) -> (r: Option<ObjId>)
+        requires level < crate::sysabi::NUM_PRIOS,
+        ensures r == self.ready_view().heads[level as int];
+
+    fn set_ready_head(&mut self, level: usize, h: Option<ObjId>)
+        requires level < crate::sysabi::NUM_PRIOS,
+        ensures
+            final(self).ready_view() == (ReadyView {
+                heads: old(self).ready_view().heads.insert(level as int, h),
+                ..old(self).ready_view()
+            }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
+
+    fn ready_tail(&self, level: usize) -> (r: Option<ObjId>)
+        requires level < crate::sysabi::NUM_PRIOS,
+        ensures r == self.ready_view().tails[level as int];
+
+    fn set_ready_tail(&mut self, level: usize, t: Option<ObjId>)
+        requires level < crate::sysabi::NUM_PRIOS,
+        ensures
+            final(self).ready_view() == (ReadyView {
+                tails: old(self).ready_view().tails.insert(level as int, t),
+                ..old(self).ready_view()
+            }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
+
+    fn ready_bitmap(&self) -> (r: u32)
+        ensures r == self.ready_view().bitmap;
+
+    fn set_ready_bitmap(&mut self, b: u32)
+        ensures
+            final(self).ready_view() == (ReadyView { bitmap: b, ..old(self).ready_view() }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     // ── scheduler seam ─────────────────────────────────────
@@ -1010,6 +1120,7 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     // `unqueue_ready` — the `destroy_tcb` teardown counterpart of `make_runnable`
@@ -1029,6 +1140,7 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     // ── aspace hardware seam (the `aspace::map_in` post-map barrier) ──────────
@@ -1050,6 +1162,7 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
             final(self).tlb_log_view() == old(self).tlb_log_view();
 
@@ -1070,6 +1183,7 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     // The trailing `dsb`/`isb` after the per-page TLBIs — a pure fence, framing
@@ -1084,6 +1198,7 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
             final(self).tlb_log_view() == old(self).tlb_log_view();
 
@@ -1107,6 +1222,7 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     // The map-time twin of `aspace_unmap` (B8A, rev1§6.1(c)). Like the unmap, it is page-table
@@ -1125,6 +1241,7 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
     fn aspace_destroy(&mut self, a: ObjId)
@@ -1139,6 +1256,7 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 }
 
@@ -2569,6 +2687,324 @@ pub proof fn lemma_remove_chain(
             assert(nvf[n].wait_tail == Some(dws[last]));
         }
     }
+}
+
+// ── ready-queue list model (B8C) ─────────────────────────────────────────
+// The 32-level ready queue is, per level, a head+tail intrusive list over `Tcb.qnext`
+// — the waiter-queue shape (`waiter_chain`/`waiter_seq`/`lemma_remove_chain`) with the
+// notification `n` replaced by a priority `level`, `wait_head`/`wait_tail` by
+// `ready_view().heads`/`tails` at `level`, and the per-element covenant
+// `wait_notif == Some(n) && BlockedNotif` by `state == Runnable && priority == level`.
+// Globally it adds (separate from `ready_wf`): `ready_complete` — the timer-list
+// completeness discipline, every Runnable thread is charted on its level's chain, which
+// makes `ready_unqueue`/`ready_dequeue` find their target — and a `u32` presence bitmap
+// (`ready_bitmap_coherent`) whose bit `level` is set iff that level's chain is non-empty
+// (what `top_ready` bit-scans). The link is the same `Tcb.qnext`, disambiguated by
+// state — a thread is on the ready chain (Runnable) or a waiter chain (BlockedNotif),
+// never both.
+
+// `rs` is level `level`'s ready list in head-to-tail (FIFO) order. The `waiter_chain`
+// analog: distinct (acyclic — index IS the rank), head/tail agree with the ends, `qnext`
+// threads each to the next (last to `None`), every charted node is `Runnable` at
+// `priority == level`.
+pub open spec fn ready_chain(
+    rv: ReadyView,
+    tv: Map<ObjId, TcbView>,
+    level: int,
+    rs: Seq<ObjId>,
+) -> bool {
+    &&& rs.no_duplicates()
+    &&& forall|i: int| #![trigger rs[i]] 0 <= i < rs.len() ==> tv.dom().contains(rs[i])
+    &&& (rs.len() == 0 ==> rv.heads[level] is None && rv.tails[level] is None)
+    &&& (rs.len() > 0 ==> rv.heads[level] == Some(rs[0])
+                       && rv.tails[level] == Some(rs[rs.len() - 1]))
+    &&& forall|i: int| #![trigger rs[i]] 0 <= i < rs.len() ==>
+            tv[rs[i]].qnext == (if i + 1 < rs.len() { Some(rs[i + 1]) } else { None })
+    &&& forall|i: int| #![trigger rs[i]] 0 <= i < rs.len() ==>
+            tv[rs[i]].state == ThreadState::Runnable && tv[rs[i]].priority as int == level
+}
+
+// The FIFO ready `Seq` at `level` — well-defined when a chain exists (unique by the
+// `qnext` threading, `lemma_ready_chain_unique`). `ready_enqueue` ⇒ `Seq::push`,
+// `ready_dequeue` ⇒ `Seq::drop_first`, `ready_unqueue` ⇒ a splice (`Seq::remove`).
+pub open spec fn ready_seq(rv: ReadyView, tv: Map<ObjId, TcbView>, level: int) -> Seq<ObjId> {
+    choose|rs: Seq<ObjId>| ready_chain(rv, tv, level, rs)
+}
+
+// `rs1[k] == rs2[k]` for any in-bounds `k` — heads agree, then `qnext` threads each step
+// (`lemma_chain_eq_at`, per level).
+proof fn lemma_ready_chain_eq_at(
+    rv: ReadyView,
+    tv: Map<ObjId, TcbView>,
+    level: int,
+    rs1: Seq<ObjId>,
+    rs2: Seq<ObjId>,
+    k: int,
+)
+    requires
+        ready_chain(rv, tv, level, rs1),
+        ready_chain(rv, tv, level, rs2),
+        0 <= k < rs1.len(),
+        k < rs2.len(),
+    ensures
+        rs1[k] == rs2[k],
+    decreases k,
+{
+    if k == 0 {
+        assert(rv.heads[level] == Some(rs1[0]));
+        assert(rv.heads[level] == Some(rs2[0]));
+    } else {
+        lemma_ready_chain_eq_at(rv, tv, level, rs1, rs2, k - 1);
+        assert(tv[rs1[k - 1]].qnext == Some(rs1[k]));
+        assert(tv[rs2[k - 1]].qnext == Some(rs2[k]));
+    }
+}
+
+// No ready chain is a strict prefix of another (`lemma_chain_not_strict_prefix` per level).
+proof fn lemma_ready_chain_not_strict_prefix(
+    rv: ReadyView,
+    tv: Map<ObjId, TcbView>,
+    level: int,
+    rs1: Seq<ObjId>,
+    rs2: Seq<ObjId>,
+)
+    requires
+        ready_chain(rv, tv, level, rs1),
+        ready_chain(rv, tv, level, rs2),
+        rs1.len() < rs2.len(),
+    ensures
+        false,
+{
+    if rs1.len() == 0 {
+        assert(rv.heads[level] is None);
+        assert(rv.heads[level] == Some(rs2[0]));
+    } else {
+        let k: int = rs1.len() as int - 1;
+        lemma_ready_chain_eq_at(rv, tv, level, rs1, rs2, k);
+        assert(tv[rs1[k]].qnext is None);
+        assert(tv[rs2[k]].qnext == Some(rs2[k + 1]));
+    }
+}
+
+// `ready_chain` determines `rs` uniquely (the `choose` in `ready_seq` is the FIFO order).
+pub proof fn lemma_ready_chain_unique(
+    rv: ReadyView,
+    tv: Map<ObjId, TcbView>,
+    level: int,
+    rs1: Seq<ObjId>,
+    rs2: Seq<ObjId>,
+)
+    requires
+        ready_chain(rv, tv, level, rs1),
+        ready_chain(rv, tv, level, rs2),
+    ensures
+        rs1 == rs2,
+{
+    if rs1.len() < rs2.len() {
+        lemma_ready_chain_not_strict_prefix(rv, tv, level, rs1, rs2);
+    }
+    if rs2.len() < rs1.len() {
+        lemma_ready_chain_not_strict_prefix(rv, tv, level, rs2, rs1);
+    }
+    assert forall|i: int| 0 <= i < rs1.len() implies rs1[i] == rs2[i] by {
+        lemma_ready_chain_eq_at(rv, tv, level, rs1, rs2, i);
+    }
+    assert(rs1 =~= rs2);
+}
+
+// The splice lemma (`lemma_remove_chain` per level): removing `t == rs0[k]` from level
+// `level`'s chain — predecessor re-threaded past `t`, head/tail fixed — yields the chain
+// over `rs0.remove(k)`. Unlike the waiter splice, `t` itself is *not* cleared (the
+// scheduler leaves a Runnable thread's `qnext`/state alone; `destroy_tcb` halts it
+// afterwards), so `t` is merely excluded from the "every other TCB unchanged" clause.
+pub proof fn lemma_ready_remove_chain(
+    rv0: ReadyView,
+    tv0: Map<ObjId, TcbView>,
+    rvf: ReadyView,
+    tvf: Map<ObjId, TcbView>,
+    level: int,
+    t: ObjId,
+    rs0: Seq<ObjId>,
+    k: int,
+)
+    requires
+        ready_chain(rv0, tv0, level, rs0),
+        0 <= k < rs0.len(),
+        rs0[k] == t,
+        tvf.dom() == tv0.dom(),
+        // predecessor re-threaded past `t` (k>0: set_tcb_qnext(rs0[k-1], tv0[t].qnext)),
+        // its covenant fields framed.
+        k > 0 ==> tvf[rs0[k - 1]].qnext == tv0[t].qnext,
+        k > 0 ==> tvf[rs0[k - 1]].state == tv0[rs0[k - 1]].state,
+        k > 0 ==> tvf[rs0[k - 1]].priority == tv0[rs0[k - 1]].priority,
+        // every other TCB unchanged (`t` excepted — the scheduler leaves it alone).
+        forall|j: ObjId| #![trigger tvf[j]]
+            j != t && (k == 0 || j != rs0[k - 1]) ==> tvf[j] == tv0[j],
+        // head fix: k==0 ⇒ new head is `t`'s old qnext; else unchanged.
+        k == 0 ==> rvf.heads[level] == tv0[t].qnext,
+        k > 0 ==> rvf.heads[level] == rv0.heads[level],
+        // tail fix: `t` was the tail (k==len-1) ⇒ tail drops to the predecessor; else
+        // unchanged.
+        k == rs0.len() - 1 ==> rvf.tails[level]
+            == (if k == 0 { None::<ObjId> } else { Some(rs0[k - 1]) }),
+        k < rs0.len() - 1 ==> rvf.tails[level] == rv0.tails[level],
+    ensures
+        ready_chain(rvf, tvf, level, rs0.remove(k)),
+{
+    let drs = rs0.remove(k);
+    let len = rs0.len() as int;
+    rs0.remove_ensures(k);
+
+    // Clause 1: no_duplicates.
+    assert(drs.no_duplicates()) by {
+        assert forall|i: int, j: int|
+            0 <= i < drs.len() && 0 <= j < drs.len() && i != j implies drs[i] != drs[j] by {
+            let ii = if i < k { i } else { i + 1 };
+            let jj = if j < k { j } else { j + 1 };
+            assert(drs[i] == rs0[ii] && drs[j] == rs0[jj]);
+            assert(ii != jj);
+        }
+    }
+
+    // Clauses 2, 5, 6: per-node domain / qnext-threading / state+priority covenant.
+    assert forall|i: int| #![trigger drs[i]] 0 <= i < drs.len() implies
+        tvf.dom().contains(drs[i])
+        && tvf[drs[i]].qnext == (if i + 1 < drs.len() { Some(drs[i + 1]) } else { None::<ObjId> })
+        && tvf[drs[i]].state == ThreadState::Runnable
+        && tvf[drs[i]].priority as int == level by {
+        let ii = if i < k { i } else { i + 1 };
+        assert(drs[i] == rs0[ii]);
+        assert(tv0.dom().contains(rs0[ii]));
+        assert(tv0[rs0[ii]].qnext == (if ii + 1 < len { Some(rs0[ii + 1]) } else { None::<ObjId> }));
+        assert(tv0[rs0[ii]].state == ThreadState::Runnable && tv0[rs0[ii]].priority as int == level);
+        if k > 0 && i == k - 1 {
+            assert(ii == k - 1);
+            assert(tv0[t].qnext == (if k + 1 < len { Some(rs0[k + 1]) } else { None::<ObjId> }));
+            if i + 1 < drs.len() {
+                assert(drs[i + 1] == rs0[k + 1]);
+            } else {
+                assert(k + 1 == len);
+            }
+        } else {
+            assert(tvf[rs0[ii]] == tv0[rs0[ii]]);
+            if i + 1 < drs.len() {
+                let i1 = if i + 1 < k { i + 1 } else { i + 2 };
+                assert(drs[i + 1] == rs0[i1]);
+            }
+        }
+    }
+
+    // Clauses 3, 4: head / tail of `drs`.
+    if drs.len() == 0 {
+        assert(tv0[rs0[0]].qnext is None);
+        assert(rvf.heads[level] is None);
+        assert(rvf.tails[level] is None);
+    } else {
+        if k == 0 {
+            assert(drs[0] == rs0[1]);
+            assert(tv0[rs0[0]].qnext == Some(rs0[1]));
+            assert(rvf.heads[level] == Some(drs[0]));
+        } else {
+            assert(drs[0] == rs0[0]);
+            assert(rv0.heads[level] == Some(rs0[0]));
+            assert(rvf.heads[level] == Some(drs[0]));
+        }
+        let last = drs.len() - 1;
+        if k == len - 1 {
+            assert(k > 0);
+            assert(last == k - 1);
+            assert(drs[last] == rs0[k - 1]);
+            assert(rvf.tails[level] == Some(drs[last]));
+        } else {
+            assert(rv0.tails[level] == Some(rs0[len - 1]));
+            assert(drs[last] == rs0[len - 1]);
+            assert(rvf.tails[level] == Some(drs[last]));
+        }
+    }
+}
+
+// `ready_chain` reads only `heads[level]`, `tails[level]`, and `tv[rs[i]]` — so a change
+// that frames those (e.g. an op at a *different* level, or a touch to threads off `rs`)
+// preserves the chain. The per-level frame the ops use to carry the 31 untouched levels.
+pub proof fn lemma_ready_chain_frame(
+    rv0: ReadyView,
+    tv0: Map<ObjId, TcbView>,
+    rvf: ReadyView,
+    tvf: Map<ObjId, TcbView>,
+    level: int,
+    rs: Seq<ObjId>,
+)
+    requires
+        ready_chain(rv0, tv0, level, rs),
+        rvf.heads[level] == rv0.heads[level],
+        rvf.tails[level] == rv0.tails[level],
+        tvf.dom() == tv0.dom(),
+        forall|i: int| #![trigger tvf[rs[i]]] 0 <= i < rs.len() ==> tvf[rs[i]] == tv0[rs[i]],
+    ensures
+        ready_chain(rvf, tvf, level, rs),
+{
+}
+
+// When the chain at `level` is preserved (`lemma_ready_chain_frame`'s conclusion), so is
+// `ready_seq` at `level` (uniqueness). Carries the per-level `ready_seq` equality the ops'
+// `ready_complete` re-establishment needs for the 31 untouched levels.
+pub proof fn lemma_ready_seq_frame(
+    rv0: ReadyView,
+    tv0: Map<ObjId, TcbView>,
+    rvf: ReadyView,
+    tvf: Map<ObjId, TcbView>,
+    level: int,
+)
+    requires
+        rvf.heads[level] == rv0.heads[level],
+        rvf.tails[level] == rv0.tails[level],
+        tvf.dom() == tv0.dom(),
+        exists|rs: Seq<ObjId>| ready_chain(rv0, tv0, level, rs),
+        forall|i: int| #![trigger tv0[ready_seq(rv0, tv0, level)[i]]]
+            0 <= i < ready_seq(rv0, tv0, level).len()
+            ==> tvf[ready_seq(rv0, tv0, level)[i]] == tv0[ready_seq(rv0, tv0, level)[i]],
+    ensures
+        ready_chain(rvf, tvf, level, ready_seq(rv0, tv0, level)),
+        ready_seq(rvf, tvf, level) == ready_seq(rv0, tv0, level),
+{
+    let rs = ready_seq(rv0, tv0, level);
+    assert(ready_chain(rv0, tv0, level, rs));
+    lemma_ready_chain_frame(rv0, tv0, rvf, tvf, level, rs);
+    lemma_ready_chain_unique(rvf, tvf, level, ready_seq(rvf, tvf, level), rs);
+}
+
+// Every Runnable thread is charted on its priority level's chain — the timer-list
+// completeness discipline (`timer_complete`), which makes `ready_unqueue`/`ready_dequeue`
+// find their target. Kept *separate* from `ready_wf`: `ready_unqueue` transiently leaves
+// `t` Runnable-and-off-chain (until `destroy_tcb` halts it), so it preserves only the
+// `except t` form.
+pub open spec fn ready_complete(rv: ReadyView, tv: Map<ObjId, TcbView>) -> bool {
+    forall|t: ObjId| #[trigger] tv.dom().contains(t) && tv[t].state == ThreadState::Runnable
+        ==> (tv[t].priority as int) < NUM_PRIOS
+            && ready_seq(rv, tv, tv[t].priority as int).contains(t)
+}
+
+// The presence bitmap is coherent: bit `level` set ⇔ level `level`'s chain is non-empty.
+// Links the `u32` map `top_ready` bit-scans to the per-level chains.
+pub open spec fn ready_bitmap_coherent(rv: ReadyView, tv: Map<ObjId, TcbView>) -> bool {
+    forall|level: int| #![trigger ready_seq(rv, tv, level)] 0 <= level < NUM_PRIOS as int ==>
+        ((rv.bitmap & (1u32 << (level as u32))) != 0 <==> ready_seq(rv, tv, level).len() > 0)
+}
+
+// The ready queue is well-formed: per-level head/tail domain + empty-agreement, a chain
+// witness per level, and bitmap coherence. (`ready_complete` is the separate liveness
+// half — see its note.)
+pub open spec fn ready_wf(rv: ReadyView, tv: Map<ObjId, TcbView>) -> bool {
+    &&& rv.heads.dom() == Set::new(|i: int| 0 <= i < NUM_PRIOS as int)
+    &&& rv.tails.dom() == Set::new(|i: int| 0 <= i < NUM_PRIOS as int)
+    &&& forall|level: int| #![trigger rv.heads[level]] 0 <= level < NUM_PRIOS as int ==>
+            (rv.heads[level] is None <==> rv.tails[level] is None)
+    // The chain witness *is* `ready_seq` — stated directly (rather than `exists rs`) so the
+    // conjunct has a trigger anchor (`ready_seq`) in its body and is re-provable without a
+    // witness-surfacing by-block. Equivalent: `ready_chain(.., ready_seq(..))` ⟺ a chain exists.
+    &&& forall|level: int| #![trigger ready_seq(rv, tv, level)] 0 <= level < NUM_PRIOS as int ==>
+            ready_chain(rv, tv, level, ready_seq(rv, tv, level))
+    &&& ready_bitmap_coherent(rv, tv)
 }
 
 // ── armed-timer list model ───────────────────────────────────────
@@ -7867,6 +8303,7 @@ pub fn obj_ref<S: Store>(store: &mut S, cap: Cap)
         final(store).tcb_view() == old(store).tcb_view(),
         final(store).timer_view() == old(store).timer_view(),
         final(store).timer_head_view() == old(store).timer_head_view(),
+            final(store).ready_view() == old(store).ready_view(),
         final(store).cspace_view() == old(store).cspace_view(),
 {
     match cap.kind {
@@ -7920,6 +8357,7 @@ pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
         final(store).tcb_view() == old(store).tcb_view(),
         final(store).timer_view() == old(store).timer_view(),
         final(store).timer_head_view() == old(store).timer_head_view(),
+            final(store).ready_view() == old(store).ready_view(),
         final(store).cspace_view() == old(store).cspace_view(),
         forall|k: SlotId| #[trigger] old(store).slot_view().dom().contains(k)
             ==> final(store).slot_view()[k].cap == old(store).slot_view()[k].cap,
@@ -8275,6 +8713,7 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
         final(store).tcb_view() == old(store).tcb_view(),
         final(store).timer_view() == old(store).timer_view(),
         final(store).timer_head_view() == old(store).timer_head_view(),
+            final(store).ready_view() == old(store).ready_view(),
         final(store).cspace_view() == old(store).cspace_view(),
 {
     let ghost m0 = old(store).slot_view();
@@ -8320,6 +8759,7 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
             store.tcb_view() == old(store).tcb_view(),
             store.timer_view() == old(store).timer_view(),
             store.timer_head_view() == old(store).timer_head_view(),
+            store.ready_view() == old(store).ready_view(),
             store.cspace_view() == old(store).cspace_view(),
             cspace_wf(m0),
             valid_srank(m0, srk),
@@ -8590,6 +9030,7 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
         final(store).tcb_view() == old(store).tcb_view(),
         final(store).timer_view() == old(store).timer_view(),
         final(store).timer_head_view() == old(store).timer_head_view(),
+            final(store).ready_view() == old(store).ready_view(),
         final(store).slot_view()[dst].cap == old(store).slot_view()[src].cap,
         is_empty_cap(final(store).slot_view()[src].cap),
         // The cap-content frame: only `src`/`dst` change cap; the neighbour fixups
@@ -8803,6 +9244,7 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
             store.tcb_view() == tv0,
             store.timer_view() == tmv0,
             store.timer_head_view() == th0,
+            store.ready_view() == old(store).ready_view(),
             cspace_wf(m0),
             valid_srank(m0, srk),
             rl == relabeled(m0, src, dst),
@@ -8972,6 +9414,7 @@ pub(crate) fn dec_ref<S: Store>(store: &mut S, o: ObjId)
         final(store).tcb_view() == old(store).tcb_view(),
         final(store).timer_view() == old(store).timer_view(),
         final(store).timer_head_view() == old(store).timer_head_view(),
+            final(store).ready_view() == old(store).ready_view(),
         final(store).cspace_view() == old(store).cspace_view(),
         caps_consistent(final(store)),
         end_caps_sound(final(store)),
@@ -9626,6 +10069,7 @@ pub fn unref_aspace<S: Store>(store: &mut S, a: ObjId)
         final(store).tcb_view() == old(store).tcb_view(),
         final(store).timer_view() == old(store).timer_view(),
         final(store).timer_head_view() == old(store).timer_head_view(),
+            final(store).ready_view() == old(store).ready_view(),
         final(store).cspace_view() == old(store).cspace_view(),
         // Aspaces appear in no `cap_consistent` arm and every object view is framed, so the
         // invariant is preserved.
@@ -9720,6 +10164,7 @@ pub fn ref_aspace<S: Store>(store: &mut S, a: ObjId)
         final(store).tcb_view() == old(store).tcb_view(),
         final(store).timer_view() == old(store).timer_view(),
         final(store).timer_head_view() == old(store).timer_head_view(),
+            final(store).ready_view() == old(store).ready_view(),
         final(store).cspace_view() == old(store).cspace_view(),
         // Aspaces appear in no `cap_consistent` arm and every object view is framed, so the
         // invariant is preserved (the `unref_aspace` argument, unchanged by the `+1`).
@@ -9931,6 +10376,7 @@ fn delete_prepare<S: Store>(store: &mut S, slot: SlotId) -> (cap: Cap)
         final(store).tcb_view() == old(store).tcb_view(),
         final(store).timer_view() == old(store).timer_view(),
         final(store).timer_head_view() == old(store).timer_head_view(),
+            final(store).ready_view() == old(store).ready_view(),
         final(store).cspace_view() == old(store).cspace_view(),
         forall|x: SlotId| final(store).slot_view().dom().contains(x) && x != slot
             ==> #[trigger] final(store).slot_view()[x].cap == old(store).slot_view()[x].cap,

@@ -99,6 +99,12 @@ struct ArrayStore {
     tcbs: BTreeMap<u64, TcbState>,
     timers: BTreeMap<u64, TimerState>,
     timer_armed_head: Option<ObjId>,
+    // The 32-level ready queue: per-level head/tail + a presence bitmap — the
+    // executable counterpart of the `ready_view` ghost view (the `READY`/`READY_BITMAP`
+    // kernel statics). `ready_enqueue`/`dequeue`/`unqueue`/`top_ready` run against these.
+    ready_heads: Vec<Option<ObjId>>, // len NUM_PRIOS
+    ready_tails: Vec<Option<ObjId>>, // len NUM_PRIOS
+    ready_bitmap: u32,
     // The TLBI effect log: the executable counterpart of the `tlb_log_view`
     // ghost view. `tlb_invalidate_page` appends `(asid, va)`, so `check_unmap`
     // can assert `unmap_in` issues one TLBI per cleared page, in order (the
@@ -117,6 +123,9 @@ impl ArrayStore {
             tcbs: BTreeMap::new(),
             timers: BTreeMap::new(),
             timer_armed_head: None,
+            ready_heads: vec![None; crate::sysabi::NUM_PRIOS],
+            ready_tails: vec![None; crate::sysabi::NUM_PRIOS],
+            ready_bitmap: 0,
             tlb_log: Vec::new(),
         }
     }
@@ -353,6 +362,24 @@ impl Store for ArrayStore {
     }
     fn set_timer_armed_head(&mut self, h: Option<ObjId>) {
         self.timer_armed_head = h;
+    }
+    fn ready_head(&self, level: usize) -> Option<ObjId> {
+        self.ready_heads[level]
+    }
+    fn set_ready_head(&mut self, level: usize, h: Option<ObjId>) {
+        self.ready_heads[level] = h;
+    }
+    fn ready_tail(&self, level: usize) -> Option<ObjId> {
+        self.ready_tails[level]
+    }
+    fn set_ready_tail(&mut self, level: usize, t: Option<ObjId>) {
+        self.ready_tails[level] = t;
+    }
+    fn ready_bitmap(&self) -> u32 {
+        self.ready_bitmap
+    }
+    fn set_ready_bitmap(&mut self, b: u32) {
+        self.ready_bitmap = b;
     }
 }
 

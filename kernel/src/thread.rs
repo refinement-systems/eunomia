@@ -79,6 +79,29 @@ static mut READY: [Queue; NUM_PRIOS] = [EMPTY_QUEUE; NUM_PRIOS];
 static mut READY_BITMAP: u32 = 0;
 static mut CURRENT: *mut Tcb = ptr::null_mut();
 
+// By-handle accessors over the ready-queue statics — the realization of the
+// `Store::ready_*` seam (kernel/src/store.rs) the verified `kcore::ready` ops run
+// against. Trusted shell: the ObjId↔`*mut Tcb` conversion is the same `as_tcb`/`tcb_id`
+// link the notif/timer queues use (rev1§6.1(d), Honesty note 3).
+pub(crate) unsafe fn ready_head_at(level: usize) -> Option<ObjId> {
+    tcb_id(READY[level].head)
+}
+pub(crate) unsafe fn set_ready_head_at(level: usize, h: Option<ObjId>) {
+    READY[level].head = as_tcb(h);
+}
+pub(crate) unsafe fn ready_tail_at(level: usize) -> Option<ObjId> {
+    tcb_id(READY[level].tail)
+}
+pub(crate) unsafe fn set_ready_tail_at(level: usize, t: Option<ObjId>) {
+    READY[level].tail = as_tcb(t);
+}
+pub(crate) unsafe fn ready_bitmap_get() -> u32 {
+    READY_BITMAP
+}
+pub(crate) unsafe fn ready_bitmap_set(b: u32) {
+    READY_BITMAP = b;
+}
+
 pub unsafe fn current() -> *mut Tcb {
     CURRENT
 }

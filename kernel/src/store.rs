@@ -289,4 +289,25 @@ impl Store for KernelStore {
     fn set_timer_armed_head(&mut self, h: Option<ObjId>) {
         unsafe { crate::timer::set_armed_head(obj_or_null::<TimerObj>(h)) }
     }
+    // ── ready queue (B8C): the per-level head/tail + bitmap, realized over the
+    //    `READY`/`READY_BITMAP` kernel statics. The verified `kcore::ready` ops run
+    //    against these by-handle accessors (the trusted ObjId↔`*mut Tcb` link seam).
+    fn ready_head(&self, level: usize) -> Option<ObjId> {
+        unsafe { crate::thread::ready_head_at(level) }
+    }
+    fn set_ready_head(&mut self, level: usize, h: Option<ObjId>) {
+        unsafe { crate::thread::set_ready_head_at(level, h) }
+    }
+    fn ready_tail(&self, level: usize) -> Option<ObjId> {
+        unsafe { crate::thread::ready_tail_at(level) }
+    }
+    fn set_ready_tail(&mut self, level: usize, t: Option<ObjId>) {
+        unsafe { crate::thread::set_ready_tail_at(level, t) }
+    }
+    fn ready_bitmap(&self) -> u32 {
+        unsafe { crate::thread::ready_bitmap_get() }
+    }
+    fn set_ready_bitmap(&mut self, b: u32) {
+        unsafe { crate::thread::ready_bitmap_set(b) }
+    }
 }
