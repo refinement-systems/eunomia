@@ -53,7 +53,7 @@ invariant. They are the spec's rev1§6.1(a–d) `[trusted]` parts:
 |---|---|---|
 | Physical-region exclusivity | (a) | "No cap references the region" = "the untyped has no immediate CDT child"; that this implies every cap into the carved region is a CDT descendant holds *by construction* (the only frame-creation path records the untyped as parent), because the object seam carries no physical-memory model. |
 | Cross-root untyped non-overlap | (b) | Disjointness within one untyped is proven (watermark monotonicity); the *independent* root untypeds' base/size constants live in `unsafe` boot code with no global frame table — their non-overlap and the int→pointer step are a boot-setup axiom. |
-| Page-table join | (c) | The cap-side unmap is proven over object state and the raw page-table write/clear is proven over page-table memory; the *join* — that the cap's recorded mapping is the true entry location and that map/unmap truly write/clear it — lives in the unverified kernel Store. |
+| Page-table join | (c) | The cap-side map **and** unmap are both proven over object state (B8A landed the map record — `map_frame` — symmetric with the unmap; the derived copy starts unmapped, a map records the entry coordinates on the cap, a delete clears them) and the raw page-table write/clear is proven over page-table memory; what stays trusted is the *join* — that the cap's recorded mapping is the true entry location and that `aspace_map`/`aspace_unmap` truly write/clear it — which lives in the unverified kernel Store. |
 | Thread-lifecycle shell | (d) | The "suspended, never rescheduled" state (exception entry, syscall exit, scheduler), the anti-forgery/anti-suppression access control, and the exit/read-report syscall dispatch + register marshalling stay in the trusted shell; the asm context switch is inherently unverifiable. |
 | WAL queue ↔ bytes lifetime join | (c)/(e) | B7C discharges `laid_out` *at recovery* — `recover_records` rebuilds the run from the on-device bytes and proves it laid out, firing `lemma_gap_freedom`. What stays trusted is the join across the Store's *lifetime*: that the live in-memory `wal_records` queue keeps matching the WAL bytes as `write`/`flush`/`commit` mutate it. Maintaining that as a Store-wide invariant is the larger surface §6.1(e) keeps the commit routine plain Rust over; the full replay-equality invariant remains the `CommitProtocol` model's. |
 
@@ -112,7 +112,7 @@ phase completes.
 
 | Transition | rev1§ | Closing phase |
 |---|---|---|
-| Cap-side **MAP** bookkeeping moved behind a verified object op (symmetric with unmap) | §6.1(c) | **B8** |
+| Cap-side **MAP** bookkeeping moved behind a verified object op (symmetric with unmap) | §6.1(c) | **B8A** — landed ✓ (verified `cspace::map_frame` + `ref_aspace` driving a new `Store::aspace_map` seam, term-for-term the mirror of the delete/unmap branch; gate 335→342) |
 | Spawn-time **priority-ceiling gate** moved from the syscall shell into a verified op | §6.1(d), §5.4 | **B8** |
 | Per-record **structural decode** split out of `wal_content_ok`, verified like the other on-disk decoders | §6.1(e), §3.7 | **B7B** — landed ✓ (T-5; full Verus predicate, gate 58→64) |
 | Model **replay-equality** mechanized by the `Recover` action property | §6.1(e), §6 | **B7A** — landed ✓ (T-1) |
@@ -124,7 +124,7 @@ Any phase touching these must re-establish them at ≥ the prior numbers.
 
 | Surface | Command | Result |
 |---|---|---|
-| kcore object core | `cargo verus verify -p kcore` | 335 verified, 0 errors |
+| kcore object core | `cargo verus verify -p kcore` | 342 verified, 0 errors |
 | CAS decode + recovery cores | `cargo verus verify -p cas --no-default-features` | 65 verified, 0 errors |
 | IPC header + session codecs | `cargo verus verify -p ipc` | 58 verified, 0 errors |
 | DMA-pool `FreeList` (core + `is_full`/`is_allocated` wrapper-guard accessors) | `cargo verus verify -p dma-pool` | 29 verified, 0 errors |

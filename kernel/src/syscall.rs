@@ -530,12 +530,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if !(*asp_slot).cap.rights.has(Rights::WRITE) {
                 return Some(ERR_PERM);
             }
-            let CapKind::Frame {
-                base,
-                pages,
-                mapping,
-            } = (*fr_slot).cap.kind
-            else {
+            let CapKind::Frame { mapping, .. } = (*fr_slot).cap.kind else {
                 return Some(ERR_TYPE);
             };
             if mapping.is_some() {
@@ -549,17 +544,12 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if perms & crate::aspace::PERM_DEVICE != 0 && !(*fr_slot).cap.rights.has(Rights::PHYS) {
                 return Some(ERR_PERM);
             }
-            let asp_ptr = aspace_ptr(asp);
-            match crate::aspace::map(asp_ptr, base, va, pages, perms) {
-                Ok(()) => {
-                    (*asp_ptr).hdr.refs += 1;
-                    (*fr_slot).cap.kind = CapKind::Frame {
-                        base,
-                        pages,
-                        mapping: Some((asp, va)),
-                    };
-                    Some(0)
-                }
+            // Cap-side bookkeeping (the mapping record + aspace refcount bump) is the verified
+            // `cspace::map_frame` (B8A, rev1§6.1(c)), symmetric with the delete/unmap path; it
+            // drives the page-table write through the `aspace_map` Store seam. The shell keeps
+            // only the access-control validation above (§6.1(d)-style).
+            match crate::cspace::map_frame(fr_slot, asp, va, perms) {
+                Ok(()) => Some(0),
                 Err(crate::aspace::MapError::NeedMemory) => Some(ERR_NOMEM),
                 Err(crate::aspace::MapError::AlreadyMapped) => Some(ERR_STATE),
                 Err(_) => Some(ERR_ARG),

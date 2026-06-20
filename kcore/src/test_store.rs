@@ -20,8 +20,8 @@ use crate::channel::{
     EV_READABLE, MSG_PAYLOAD,
 };
 use crate::cspace::{
-    cdt_unlink, delete, derive, destroy_cspace, obj_unref, revoke, slot_move, unref_aspace,
-    unref_cspace, Cap, CapKind, CapSlot, ChanEnd, Rights,
+    cdt_unlink, delete, derive, destroy_cspace, map_frame, obj_unref, revoke, slot_move,
+    unref_aspace, unref_cspace, Cap, CapKind, CapSlot, ChanEnd, Rights,
 };
 use crate::id::{ObjId, SlotId};
 use crate::notification::{destroy_notif, remove_waiter, signal, wait};
@@ -168,6 +168,19 @@ impl Store for ArrayStore {
         self.refs.remove(&a.0);
     }
     fn aspace_unmap(&mut self, _a: ObjId, _va: u64, _pages: u64) {}
+    // The map-time twin of `aspace_unmap`: page-table machinery with no kcore object state, so
+    // the no-op faithfully "frames every view". Always succeeds here (the real kernel can fail
+    // with `NeedMemory`; `map_frame`'s `Err` arm — store unchanged — is verified, not exercised).
+    fn aspace_map(
+        &mut self,
+        _a: ObjId,
+        _pa: u64,
+        _va: u64,
+        _pages: u64,
+        _perms: u64,
+    ) -> Result<(), crate::aspace::MapError> {
+        Ok(())
+    }
 
     // ── channel state: the `chan_*` accessors backed by `chans` ──
     fn chan_depth(&self, ch: ObjId) -> u32 {
@@ -3152,6 +3165,64 @@ fn delete_mapped_frame_drops_aspace_ref() {
         1,
         "delete mapped frame: census == refs preserved"
     );
+}
+
+// ── B8A: `map_frame` — the verified cap-side map record (the inverse of delete's branch) ──
+
+// Records `Some((asp, va))` on an unmapped frame cap and bumps the aspace refcount (the
+// `frame_map_refs` census term rises with `ref_aspace`'s `+1`), leaving the store sound. The
+// host counterpart of `map_frame`'s `ensures`; mirrors `check_unref_aspace`.
+fn check_map_frame(st: &mut ArrayStore, slot: SlotId, asp: ObjId, va: u64) {
+    assert!(refcount_sound_exec(st), "map_frame pre: refcount_sound");
+    assert!(
+        matches!(st.slots[slot.0 as usize].cap.kind, CapKind::Frame { mapping: None, .. }),
+        "map_frame pre: the frame is unmapped"
+    );
+    assert!(st.refs.contains_key(&asp.0), "map_frame pre: the aspace is live");
+    let r0 = st.refs[&asp.0];
+    let res = map_frame(st, slot, asp, va, 0);
+    assert!(res.is_ok(), "map_frame: the test store's aspace_map always succeeds");
+    assert!(
+        cap_frame_aspace_exec(st.slots[slot.0 as usize].cap) == Some(asp),
+        "map_frame post: the mapping is recorded on the frame cap"
+    );
+    assert_eq!(st.refs[&asp.0], r0 + 1, "map_frame post: the aspace ref is bumped");
+    assert!(refcount_sound_exec(st), "map_frame post: refcount_sound restored");
+}
+
+#[test]
+fn map_frame_records_and_bumps() {
+    let mut st = ArrayStore::new(1);
+    st.slots[0] = detached(frame_cap(0x1000)); // an unmapped frame cap
+    st.refs.insert(2, 0); // a live, as-yet-unreferenced aspace
+    check_map_frame(&mut st, SlotId(0), ObjId(2), 0x4000);
+    assert_eq!(st.refs[&2], 1, "map_frame: refs[asp] == 1 after one mapping");
+}
+
+// `map_frame` then `delete` is the identity on the aspace refcount: map records + bumps,
+// delete's frame-unmap branch clears + drops. The symmetry B8A delivers (derive proves
+// unmapped-on-copy, `map_frame` record-on-map, `delete` clear-on-unmap).
+#[test]
+fn map_then_delete_roundtrip() {
+    let mut st = ArrayStore::new(2);
+    // slot 0: already mapped into aspace 2 (keeps it alive across the delete); slot 1: unmapped.
+    st.slots[0] = detached(Cap {
+        kind: CapKind::Frame {
+            base: 0x1000,
+            pages: 1,
+            mapping: Some((ObjId(2), 0x4000)),
+        },
+        rights: Rights(0xff),
+    });
+    st.slots[1] = detached(frame_cap(0x2000));
+    st.refs.insert(2, 1); // one mapped frame ⇒ census(2) == 1
+    assert!(refcount_sound_exec(&st), "fixture is refcount_sound");
+    map_frame(&mut st, SlotId(1), ObjId(2), 0x8000, 0).expect("map_frame ok");
+    assert_eq!(st.refs[&2], 2, "after map: aspace ref bumped to 2");
+    assert!(refcount_sound_exec(&st), "after map: refcount_sound");
+    check_delete(&mut st, SlotId(1)); // delete the newly-mapped frame
+    assert_eq!(st.refs[&2], 1, "after delete: aspace ref restored to 1");
+    assert!(refcount_sound_exec(&st), "after delete: refcount_sound");
 }
 
 // Deleting the *last* mapped frame drives `unref_aspace` to zero, firing

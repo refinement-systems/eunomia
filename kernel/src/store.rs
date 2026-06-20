@@ -256,6 +256,19 @@ impl Store for KernelStore {
     fn aspace_unmap(&mut self, a: ObjId, va: u64, pages: u64) {
         unsafe { crate::aspace::unmap(obj_ptr::<AspaceObj>(a), va, pages) }
     }
+    fn aspace_map(
+        &mut self,
+        a: ObjId,
+        pa: u64,
+        va: u64,
+        pages: u64,
+        perms: u64,
+    ) -> Result<(), crate::aspace::MapError> {
+        // The trusted page-table join (rev1§6.1(c)): the verified cap-side record is
+        // `kcore::cspace::map_frame`, which drives this seam exactly as `delete` drives
+        // `aspace_unmap`.
+        unsafe { crate::aspace::map(obj_ptr::<AspaceObj>(a), pa, va, pages, perms) }
+    }
     fn aspace_destroy(&mut self, a: ObjId) {
         unsafe { crate::aspace::destroy_aspace(obj_ptr::<AspaceObj>(a)) }
     }

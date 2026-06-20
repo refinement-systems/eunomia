@@ -1109,6 +1109,24 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
+    // The map-time twin of `aspace_unmap` (B8A, rev1§6.1(c)). Like the unmap, it is page-table
+    // maintenance — no object state — so it frames every object view + `refs_view` +
+    // `cspace_view` in **both** result arms (the TLBI log it may touch is left unconstrained,
+    // like the other hardware effects). It is *fallible* (the unmap is not): the table pool may
+    // be exhausted. `map_frame` consumes it exactly as `delete`'s frame branch consumes
+    // `aspace_unmap` — page-table side here, the verified cap-side record + `ref_aspace` there.
+    fn aspace_map(&mut self, a: ObjId, pa: u64, va: u64, pages: u64, perms: u64)
+        -> (res: Result<(), crate::aspace::MapError>)
+        ensures
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).cspace_view() == old(self).cspace_view();
+
     fn aspace_destroy(&mut self, a: ObjId)
         requires
             old(self).refs_view().dom().contains(a),
@@ -1516,6 +1534,40 @@ pub proof fn lemma_chan_wf_frame(
         chan_wf(cv1, sv1, ch),
 {
     // `in_live_window` reads only `head`/`count`/`depth`, all framed, so the window is identical.
+    assert forall|r: int, i: int| #[trigger] in_live_window(cv1[ch], r, i)
+        == in_live_window(cv0[ch], r, i) by {}
+}
+
+// `chan_wf` carried across an edit that fixes the `ChanView` and each slot's *emptiness*
+// (not necessarily its cap content). The only slot facts `chan_wf` reads are the arena
+// domain and the emptiness of out-of-window ring slots, so an edit that keeps every slot's
+// emptiness — e.g. a frame cap's `mapping: None → Some` (a Frame stays non-empty) — carries
+// it. The `lemma_chan_wf_frame` companion for B8A's `map_frame`, which records (not empties).
+pub proof fn lemma_chan_wf_emptiness_frame(
+    cv0: Map<ObjId, ChanView>,
+    cv1: Map<ObjId, ChanView>,
+    sv0: Map<SlotId, CapSlot>,
+    sv1: Map<SlotId, CapSlot>,
+    ch: ObjId,
+)
+    requires
+        chan_wf(cv0, sv0, ch),
+        cv1.dom().contains(ch),
+        cv1[ch].depth == cv0[ch].depth,
+        cv1[ch].end_caps.len() == cv0[ch].end_caps.len(),
+        cv1[ch].head == cv0[ch].head,
+        cv1[ch].count == cv0[ch].count,
+        cv1[ch].ring_cap == cv0[ch].ring_cap,
+        cv1[ch].msg_len == cv0[ch].msg_len,
+        cv1[ch].bindings.dom() == cv0[ch].bindings.dom(),
+        sv1.dom() == sv0.dom(),
+        forall|s: SlotId| #[trigger] sv1.dom().contains(s)
+            ==> is_empty_cap(sv1[s].cap) == is_empty_cap(sv0[s].cap),
+    ensures
+        chan_wf(cv1, sv1, ch),
+{
+    // `in_live_window` reads only `head`/`count`/`depth`, all framed, so the window is identical;
+    // the out-of-window ring slots stay empty because every slot's emptiness is fixed.
     assert forall|r: int, i: int| #[trigger] in_live_window(cv1[ch], r, i)
         == in_live_window(cv0[ch], r, i) by {}
 }
@@ -4968,6 +5020,191 @@ pub proof fn lemma_set_slot_obj_census<S: Store>(
     // A cap is either an object cap or a frame cap, never both, so at most one delta fires.
     assert(!(cap_obj(v.cap) == Some(x) && cap_frame_aspace(v.cap) == Some(x)));
     // The four view terms read framed views (equal args).
+}
+
+// ── B8A: the map-time mirror of the clear-slot census drop. Recording a frame mapping
+// (`mapping: None → Some((asp, va))`) raises `frame_map_refs(asp)` — hence `obj_census(asp)`
+// — by one, the inverse of `delete_prepare` clearing it. `lemma_set_slot_census` keyed its
+// rise off `is_empty_cap(old)`; here the old cap is a (non-empty) unmapped Frame, so the
+// precondition relaxes to "designates and maps nothing" (both hold for `Frame{mapping:None}`).
+
+// The slot-term deltas for re-pointing a slot whose old cap designates/maps nothing to a new
+// cap `v` (the `lemma_set_slot_census` shape, old-cap precondition relaxed from `is_empty_cap`).
+proof fn lemma_map_frame_slot_census(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot, x: ObjId)
+    requires
+        m.dom().finite(),
+        m.dom().contains(k),
+        cap_obj(m[k].cap) is None,
+        cap_frame_aspace(m[k].cap) is None,
+    ensures
+        slot_refs(m.insert(k, v), x) == slot_refs(m, x) + (if cap_obj(v.cap) == Some(x) {
+            1nat
+        } else {
+            0nat
+        }),
+        frame_map_refs(m.insert(k, v), x) == frame_map_refs(m, x) + (if cap_frame_aspace(v.cap)
+            == Some(x) {
+            1nat
+        } else {
+            0nat
+        }),
+{
+    let m2 = m.insert(k, v);
+    assert(m2.dom() =~= m.dom());
+    let fs1 = m.dom().filter(|j: SlotId| cap_obj(m[j].cap) == Some(x));
+    let fs2 = m2.dom().filter(|j: SlotId| cap_obj(m2[j].cap) == Some(x));
+    assert(fs1.finite());
+    assert(!fs1.contains(k));
+    if cap_obj(v.cap) == Some(x) {
+        assert forall|j: SlotId| #![trigger fs2.contains(j)] fs2.contains(j) <==> fs1.insert(k).contains(j) by {
+            if j != k {
+                assert(m2[j] == m[j]);
+            }
+        }
+        assert(fs2 =~= fs1.insert(k));
+    } else {
+        assert forall|j: SlotId| #![trigger fs2.contains(j)] fs2.contains(j) <==> fs1.contains(j) by {
+            if j != k {
+                assert(m2[j] == m[j]);
+            }
+        }
+        assert(fs2 =~= fs1);
+    }
+    let fm1 = m.dom().filter(|j: SlotId| cap_frame_aspace(m[j].cap) == Some(x));
+    let fm2 = m2.dom().filter(|j: SlotId| cap_frame_aspace(m2[j].cap) == Some(x));
+    assert(fm1.finite());
+    assert(!fm1.contains(k));
+    if cap_frame_aspace(v.cap) == Some(x) {
+        assert forall|j: SlotId| #![trigger fm2.contains(j)] fm2.contains(j) <==> fm1.insert(k).contains(j) by {
+            if j != k {
+                assert(m2[j] == m[j]);
+            }
+        }
+        assert(fm2 =~= fm1.insert(k));
+    } else {
+        assert forall|j: SlotId| #![trigger fm2.contains(j)] fm2.contains(j) <==> fm1.contains(j) by {
+            if j != k {
+                assert(m2[j] == m[j]);
+            }
+        }
+        assert(fm2 =~= fm1);
+    }
+}
+
+// The full `obj_census` rise for recording a frame mapping: `s_new.slot_view()` is
+// `s_old.slot_view()` with `slot` set to a mapped Frame `v` (`cap_obj(v.cap) is None`,
+// `cap_frame_aspace(v.cap)` the target aspace); the four non-slot terms read framed views.
+// The census rises by one exactly at the mapped aspace — the `lemma_set_slot_obj_census`
+// mirror with the relaxed old-cap precondition.
+pub proof fn lemma_map_frame_census<S: Store>(
+    s_old: &S,
+    s_new: &S,
+    slot: SlotId,
+    v: CapSlot,
+    x: ObjId,
+)
+    requires
+        s_new.slot_view() == s_old.slot_view().insert(slot, v),
+        s_old.slot_view().dom().contains(slot),
+        s_old.slot_view().dom().finite(),
+        cap_obj(s_old.slot_view()[slot].cap) is None,
+        cap_frame_aspace(s_old.slot_view()[slot].cap) is None,
+        cap_obj(v.cap) is None,
+        s_new.chan_view() == s_old.chan_view(),
+        s_new.notif_view() == s_old.notif_view(),
+        s_new.tcb_view() == s_old.tcb_view(),
+        s_new.timer_view() == s_old.timer_view(),
+    ensures
+        obj_census(s_new, x) == obj_census(s_old, x) + (if cap_frame_aspace(v.cap) == Some(x) {
+            1nat
+        } else {
+            0nat
+        }),
+{
+    lemma_map_frame_slot_census(s_old.slot_view(), slot, v, x);
+    // slot_refs delta is 0 (`cap_obj(v.cap) is None`); frame_map_refs carries the `if`; the
+    // four non-slot terms read framed views (equal args).
+}
+
+// Recording a frame mapping leaves every `end_cap_count` fixed — neither the old (unmapped
+// Frame) nor the new (mapped Frame) cap is a channel-endpoint cap (`cap_chan_end is None`),
+// so no `(ch, e)` filter moves. `end_caps_sound` rides through. The `lemma_clear_slot_end_cap`
+// all-fixed case, keyed on emptiness-of-endpoint rather than emptiness-of-cap.
+proof fn lemma_map_frame_end_cap(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot, ch: ObjId, e: int)
+    requires
+        m.dom().finite(),
+        m.dom().contains(k),
+        cap_chan_end(m[k].cap) is None,
+        cap_chan_end(v.cap) is None,
+    ensures
+        end_cap_count(m.insert(k, v), ch, e) == end_cap_count(m, ch, e),
+{
+    let m2 = m.insert(k, v);
+    assert(m2.dom() =~= m.dom());
+    let f1 = m.dom().filter(|j: SlotId| cap_chan_end(m[j].cap) == Some((ch, e)));
+    let f2 = m2.dom().filter(|j: SlotId| cap_chan_end(m2[j].cap) == Some((ch, e)));
+    assert forall|j: SlotId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.contains(j) by {
+        if j != k {
+            assert(m2[j] == m[j]);
+        }
+    }
+    assert(f2 =~= f1);
+}
+
+// Recording a frame mapping preserves `caps_consistent`. Every *other* live cap's consistency
+// reads the slot arena only through its domain (an `insert` on an existing key fixes it) and
+// the *emptiness* of specific slots (a Frame stays non-empty across `None → Some`, so emptiness
+// is fixed everywhere) — plus object views this edit frames; the changed Frame cap is
+// `cap_consistent` unconditionally (the `_ => true` arm). The mirror of the slot-clear's
+// `caps_consistent` re-establishment, for the record (rather than clear) direction.
+pub proof fn lemma_map_frame_caps_consistent<S: Store>(
+    s_old: &S,
+    s_new: &S,
+    slot: SlotId,
+    v: CapSlot,
+)
+    requires
+        caps_consistent(s_old),
+        s_new.slot_view() == s_old.slot_view().insert(slot, v),
+        s_old.slot_view().dom().contains(slot),
+        !is_empty_cap(s_old.slot_view()[slot].cap),
+        v.cap.kind matches CapKind::Frame { .. },
+        s_new.chan_view() == s_old.chan_view(),
+        s_new.notif_view() == s_old.notif_view(),
+        s_new.tcb_view() == s_old.tcb_view(),
+        s_new.timer_view() == s_old.timer_view(),
+        s_new.timer_head_view() == s_old.timer_head_view(),
+        s_new.cspace_view() == s_old.cspace_view(),
+    ensures
+        caps_consistent(s_new),
+{
+    let sv0 = s_old.slot_view();
+    let sv1 = s_new.slot_view();
+    assert(sv1.dom() =~= sv0.dom());
+    assert(!is_empty_cap(v.cap));
+    // Emptiness is fixed at every slot: `slot` goes Frame→Frame (both non-empty); others equal.
+    assert forall|s: SlotId| #[trigger] sv1.dom().contains(s)
+        implies is_empty_cap(sv1[s].cap) == is_empty_cap(sv0[s].cap) by {
+        if s != slot {
+            assert(sv1[s] == sv0[s]);
+        }
+    }
+    assert(sv1.dom().finite());
+    assert forall|s: SlotId| #![trigger sv1[s]]
+        sv1.dom().contains(s) && !is_empty_cap(sv1[s].cap)
+        implies cap_consistent(s_new, sv1[s].cap) by {
+        if s == slot {
+            // The recorded Frame cap is consistent unconditionally (`_ => true`).
+        } else {
+            assert(sv1[s] == sv0[s]);
+            assert(cap_consistent(s_old, sv0[s].cap));
+            // A Channel cap's `chan_wf` reads slot emptiness; carry it via the emptiness frame.
+            // Every other kind reads only framed object views + slot dom.
+            if let CapKind::Channel(o, _) = sv0[s].cap.kind {
+                lemma_chan_wf_emptiness_frame(s_old.chan_view(), s_new.chan_view(), sv0, sv1, o);
+            }
+        }
+    }
 }
 
 // rev1§3.3 endpoint-cap census drop: clearing a `Channel(ch, e)` slot to a non-channel
@@ -9445,6 +9682,219 @@ pub fn unref_aspace<S: Store>(store: &mut S, a: ObjId)
             if old(store).refs_view().dom().contains(o) && old(store).refs_view()[o] == 0 {
                 assert(o != a);
             }
+        }
+    }
+}
+
+/// **Map-time refcount increment** — the increment twin of [`unref_aspace`] (B8A, rev1§6.1(c)).
+///
+/// **Under-by-one census precondition.** The caller ([`map_frame`]) records the mapping that
+/// names `a` *before* calling, so at entry `a`'s census has already risen by one while
+/// `refs[a]` has not: `refs[a] + 1 == census(a)`, sound everywhere else. The `+1` here lands
+/// the matching increment, restoring the full `refcount_sound` invariant — the exact mirror of
+/// `unref_aspace`'s `-1` (which lands after the slot is *cleared*). `refs[a] < u32::MAX` is the
+/// overflow gate for `obj_refs(a) + 1`.
+///
+/// The proof is light (the `unref_aspace` mirror): `obj_census` reads only the seven object
+/// views (never `refs_view`), and `set_obj_refs` frames those views, so the census is invariant
+/// across this op — no per-term recount is needed inside `ref_aspace`.
+pub fn ref_aspace<S: Store>(store: &mut S, a: ObjId)
+    requires
+        old(store).refs_view().dom().contains(a),
+        old(store).refs_view()[a] < u32::MAX as nat,
+        old(store).refs_view()[a] + 1 == obj_census(old(store), a),
+        forall|o: ObjId| o != a && old(store).refs_view().dom().contains(o)
+            ==> #[trigger] old(store).refs_view()[o] == obj_census(old(store), o),
+        caps_consistent(old(store)),
+        end_caps_sound(old(store)),
+        census_dom_complete(old(store)),
+    ensures
+        final(store).refs_view() == old(store).refs_view().insert(
+            a,
+            (old(store).refs_view()[a] + 1) as nat,
+        ),
+        refcount_sound(final(store)),
+        final(store).slot_view() == old(store).slot_view(),
+        final(store).chan_view() == old(store).chan_view(),
+        final(store).notif_view() == old(store).notif_view(),
+        final(store).tcb_view() == old(store).tcb_view(),
+        final(store).timer_view() == old(store).timer_view(),
+        final(store).timer_head_view() == old(store).timer_head_view(),
+        final(store).cspace_view() == old(store).cspace_view(),
+        // Aspaces appear in no `cap_consistent` arm and every object view is framed, so the
+        // invariant is preserved (the `unref_aspace` argument, unchanged by the `+1`).
+        caps_consistent(final(store)),
+        end_caps_sound(final(store)),
+        // `a` was already in the domain (it gained a reference), and every census is framed
+        // (only `refs[a]` rose, to meet its census), so coverage carries.
+        census_dom_complete(final(store)),
+{
+    let r = store.obj_refs(a);
+    store.set_obj_refs(a, r + 1);
+    proof {
+        // Every census view is framed unchanged by `set_obj_refs`, so the recount is invariant.
+        assert forall|o: ObjId| #[trigger] obj_census(final(store), o)
+            == obj_census(old(store), o) by {}
+        // refcount_sound: `a`'s refs rose with the `+1` to meet its census (the under-by-one
+        // closed); every other object's refs and census are both untouched.
+        assert forall|o: ObjId| final(store).refs_view().dom().contains(o)
+            implies #[trigger] final(store).refs_view()[o] == obj_census(final(store), o) by {
+            if o != a {
+                assert(old(store).refs_view()[o] == obj_census(old(store), o));
+            }
+        }
+        // caps_consistent: every object view is framed equal to `old`, so each live cap's
+        // (refs-free) consistency carries over.
+        assert forall|s: SlotId| #![trigger final(store).slot_view()[s]]
+            final(store).slot_view().dom().contains(s)
+                && !is_empty_cap(final(store).slot_view()[s].cap)
+            implies cap_consistent(final(store), final(store).slot_view()[s].cap) by {
+            assert(cap_consistent(old(store), old(store).slot_view()[s].cap));
+        }
+        // census_dom_complete: census framed; the domain only grew the count at `a` (present).
+        assert forall|o: ObjId| #[trigger] obj_census(final(store), o) >= 1
+            implies final(store).refs_view().dom().contains(o) by {
+            assert(obj_census(old(store), o) >= 1);
+        }
+    }
+}
+
+/// **Map-time cap-side record** (B8A, rev1§6.1(c)) — [`delete`]'s frame-unmap branch run
+/// backwards. Records the mapping on a previously-unmapped frame cap and bumps the target
+/// aspace's refcount, driving the page-table write through the [`Store::aspace_map`] seam
+/// exactly as `delete` drives the unmap through `aspace_unmap`. This makes the cap-side mapping
+/// guarantee **symmetric**: `derive` proves a derived copy starts unmapped (`derived_kind`
+/// clears `mapping`), `map_frame` proves record-on-map, `delete` proves clear-on-unmap. The
+/// page-table write itself stays the trusted join (the `aspace_map` realization), exactly as
+/// `aspace_unmap`'s is.
+///
+/// On `Err` (the page-table map failed — pool exhausted / already mapped) nothing is recorded
+/// and the store is unchanged: `aspace_map` frames every view, and neither the cap-side record
+/// nor the ref bump has run.
+pub fn map_frame<S: Store>(store: &mut S, frame_slot: SlotId, asp: ObjId, va: u64, perms: u64)
+    -> (res: Result<(), crate::aspace::MapError>)
+    requires
+        cspace_wf(old(store).slot_view()),
+        old(store).slot_view().dom().finite(),
+        old(store).slot_view().dom().contains(frame_slot),
+        old(store).slot_view()[frame_slot].cap.kind matches CapKind::Frame { mapping: None, .. },
+        old(store).refs_view().dom().contains(asp),
+        old(store).refs_view()[asp] < u32::MAX as nat,
+        refcount_sound(old(store)),
+        caps_consistent(old(store)),
+        end_caps_sound(old(store)),
+        census_dom_complete(old(store)),
+    ensures
+        old(store).slot_view()[frame_slot].cap.kind matches CapKind::Frame { base, pages, .. } ==> (
+            res is Ok ==> {
+                &&& final(store).slot_view()[frame_slot].cap == (Cap {
+                        kind: CapKind::Frame { base, pages, mapping: Some((asp, va)) },
+                        rights: old(store).slot_view()[frame_slot].cap.rights,
+                    })
+                &&& final(store).slot_view().dom() == old(store).slot_view().dom()
+                &&& (forall|x: SlotId| final(store).slot_view().dom().contains(x) && x != frame_slot
+                        ==> #[trigger] final(store).slot_view()[x] == old(store).slot_view()[x])
+                &&& final(store).refs_view() == old(store).refs_view().insert(
+                        asp, (old(store).refs_view()[asp] + 1) as nat)
+                &&& cspace_wf(final(store).slot_view())
+                &&& refcount_sound(final(store))
+                &&& caps_consistent(final(store))
+                &&& end_caps_sound(final(store))
+                &&& census_dom_complete(final(store))
+                &&& final(store).chan_view() == old(store).chan_view()
+                &&& final(store).notif_view() == old(store).notif_view()
+                &&& final(store).tcb_view() == old(store).tcb_view()
+                &&& final(store).timer_view() == old(store).timer_view()
+                &&& final(store).timer_head_view() == old(store).timer_head_view()
+                &&& final(store).cspace_view() == old(store).cspace_view()
+            }),
+        res is Err ==> {
+            &&& final(store).slot_view() == old(store).slot_view()
+            &&& final(store).refs_view() == old(store).refs_view()
+            &&& final(store).chan_view() == old(store).chan_view()
+            &&& final(store).notif_view() == old(store).notif_view()
+            &&& final(store).tcb_view() == old(store).tcb_view()
+            &&& final(store).timer_view() == old(store).timer_view()
+            &&& final(store).timer_head_view() == old(store).timer_head_view()
+            &&& final(store).cspace_view() == old(store).cspace_view()
+        },
+{
+    let cs = store.slot(frame_slot);
+    // PA + extent from the cap drive the page-table map; `(asp, va)` records on success.
+    let (base, pages) = match cs.cap.kind {
+        CapKind::Frame { base, pages, .. } => (base, pages),
+        // Unreachable: the requires pins `frame_slot` to a Frame cap.
+        _ => return Err(crate::aspace::MapError::BadVa),
+    };
+    match store.aspace_map(asp, base, va, pages, perms) {
+        Err(e) => Err(e),
+        Ok(()) => {
+            let ghost st_pre = *store;
+            let new = CapSlot {
+                cap: Cap {
+                    kind: CapKind::Frame { base, pages, mapping: Some((asp, va)) },
+                    rights: cs.cap.rights,
+                },
+                ..cs
+            };
+            store.set_slot(frame_slot, new);
+            proof {
+                // `aspace_map` framed every view, so `st_pre` equals `old(store)` on every
+                // census input — hence the census and `refcount_sound` carry across it.
+                assert(st_pre.slot_view() == old(store).slot_view());
+                assert(st_pre.refs_view() == old(store).refs_view());
+                assert(st_pre.chan_view() == old(store).chan_view());
+                assert(st_pre.notif_view() == old(store).notif_view());
+                assert(st_pre.tcb_view() == old(store).tcb_view());
+                assert(st_pre.timer_view() == old(store).timer_view());
+                // `refs_view` is literally unchanged until `ref_aspace` (set_slot + aspace_map
+                // both frame it), so refs-domain facts carry straight from `old(store)`.
+                assert(store.refs_view() == old(store).refs_view());
+                assert(refcount_sound(&st_pre)) by {
+                    assert forall|o: ObjId| #[trigger] st_pre.refs_view().dom().contains(o)
+                        implies st_pre.refs_view()[o] == obj_census(&st_pre, o) by {
+                        // census reads only views, all equal to `old`'s ⇒ census equal there.
+                        assert(obj_census(&st_pre, o) == obj_census(old(store), o));
+                        assert(old(store).refs_view()[o] == obj_census(old(store), o));
+                    }
+                }
+                // The recorded frame raises `obj_census(asp)` by one, nothing else.
+                assert forall|x: ObjId| #[trigger] obj_census(store, x)
+                    == obj_census(&st_pre, x) + (if x == asp { 1nat } else { 0nat }) by {
+                    lemma_map_frame_census(&st_pre, store, frame_slot, new, x);
+                }
+                // The under-by-one census window at `asp`; sound elsewhere (refs framed).
+                assert(st_pre.refs_view()[asp] == obj_census(&st_pre, asp));
+                assert(store.refs_view()[asp] + 1 == obj_census(store, asp));
+                assert(store.refs_view()[asp] < u32::MAX as nat);
+                assert forall|o: ObjId| o != asp && store.refs_view().dom().contains(o)
+                    implies #[trigger] store.refs_view()[o] == obj_census(store, o) by {
+                    assert(st_pre.refs_view()[o] == obj_census(&st_pre, o));
+                }
+                // cspace_wf: only the cap kind changed; the CDT links are identical.
+                lemma_local_cap_edit_preserves_cspace_wf(st_pre.slot_view(), frame_slot, new);
+                // caps_consistent across the Frame→Frame edit.
+                lemma_map_frame_caps_consistent(&st_pre, store, frame_slot, new);
+                // end_caps_sound: no endpoint-cap filter moves (neither cap names an endpoint).
+                assert forall|ch: ObjId, e: int|
+                    store.chan_view().dom().contains(ch) && store.chan_view()[ch].end_caps.len() == 2
+                        && 0 <= e < 2
+                    implies #[trigger] store.chan_view()[ch].end_caps[e]
+                        == end_cap_count(store.slot_view(), ch, e) by {
+                    lemma_map_frame_end_cap(st_pre.slot_view(), frame_slot, new, ch, e);
+                }
+                // census_dom_complete: `asp` already in dom; every other census is framed, so
+                // `census_dom_complete(old)` covers it (refs domain unchanged here).
+                assert forall|o: ObjId| #[trigger] obj_census(store, o) >= 1
+                    implies store.refs_view().dom().contains(o) by {
+                    if o != asp {
+                        assert(obj_census(old(store), o) == obj_census(&st_pre, o));
+                        assert(old(store).refs_view().dom().contains(o));
+                    }
+                }
+            }
+            ref_aspace(store, asp);
+            Ok(())
         }
     }
 }

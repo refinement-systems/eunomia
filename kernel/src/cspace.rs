@@ -8,11 +8,23 @@
 pub use kcore::cspace::*;
 
 use crate::store::KernelStore;
-use kcore::id::SlotId;
+use kcore::id::{ObjId, SlotId};
 
 /// See [`kcore::cspace::delete`].
 pub unsafe fn delete(slot: *mut CapSlot) {
     kcore::cspace::delete(&mut KernelStore, SlotId(slot as u64));
+}
+
+/// See [`kcore::cspace::map_frame`] — the verified cap-side map record (B8A). Records the
+/// `(asp, va)` mapping on the unmapped frame cap at `slot` and bumps the aspace refcount,
+/// driving the page-table write through `KernelStore::aspace_map`.
+pub unsafe fn map_frame(
+    slot: *mut CapSlot,
+    asp: ObjId,
+    va: u64,
+    perms: u64,
+) -> Result<(), kcore::aspace::MapError> {
+    kcore::cspace::map_frame(&mut KernelStore, SlotId(slot as u64), asp, va, perms)
 }
 
 /// See [`kcore::cspace::revoke`].
