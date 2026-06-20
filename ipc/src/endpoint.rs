@@ -46,7 +46,11 @@ impl Default for Message {
 impl Message {
     /// An empty message (zero-length payload, no caps).
     pub const fn new() -> Message {
-        Message { payload: [0u8; MAX_PAYLOAD], payload_len: 0, caps: [None; 4] }
+        Message {
+            payload: [0u8; MAX_PAYLOAD],
+            payload_len: 0,
+            caps: [None; 4],
+        }
     }
 
     /// A payload-only message. `data` must fit in `MAX_PAYLOAD`.
@@ -104,7 +108,8 @@ impl<'t, T: Transport> Endpoint<'t, T> {
     /// Any `caps` move out of the sender's cspace on success.
     pub fn send_nb(&self, msg: &Message) -> Result<(), SendErr> {
         let slots = msg.cap_slots();
-        self.transport.send_nb(self.chan, msg.payload(), slots.as_ref())
+        self.transport
+            .send_nb(self.chan, msg.payload(), slots.as_ref())
     }
 
     /// Non-blocking receive (rev1§3.3) into `msg`. `Err(RecvErr::Empty)` when the
@@ -116,7 +121,9 @@ impl<'t, T: Transport> Endpoint<'t, T> {
     /// there and set to `None` otherwise (null-slot tolerance, rev1§3.4).
     pub fn recv_nb(&self, msg: &mut Message) -> Result<(), RecvErr> {
         let dests = msg.cap_slots();
-        let ok = self.transport.recv_nb(self.chan, &mut msg.payload, dests.as_ref())?;
+        let ok = self
+            .transport
+            .recv_nb(self.chan, &mut msg.payload, dests.as_ref())?;
         msg.payload_len = ok.len as u16;
         for i in 0..4 {
             if ok.cap_mask & (1 << i) == 0 {

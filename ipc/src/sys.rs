@@ -164,7 +164,17 @@ pub fn cap_install(cspace: u32, src: u32, dst_index: u32) -> i64 {
 
 pub fn chan_send(chan: u32, data: &[u8], caps: Option<&[u32; 4]>) -> i64 {
     let cp = caps.map(|c| c.as_ptr() as u64).unwrap_or(0);
-    unsafe { syscall(8, chan as u64, data.as_ptr() as u64, data.len() as u64, cp, 0, 0) }
+    unsafe {
+        syscall(
+            8,
+            chan as u64,
+            data.as_ptr() as u64,
+            data.len() as u64,
+            cp,
+            0,
+            0,
+        )
+    }
 }
 
 /// Returns (len, cap-present mask). `buf` must hold 256 bytes.
@@ -210,13 +220,29 @@ pub fn map(aspace: u32, frame: u32, va: u64, perms: u64) -> i64 {
 
 pub fn frame_write(frame: u32, offset: u64, data: &[u8]) -> i64 {
     unsafe {
-        syscall(17, frame as u64, offset, data.as_ptr() as u64, data.len() as u64, 0, 0)
+        syscall(
+            17,
+            frame as u64,
+            offset,
+            data.as_ptr() as u64,
+            data.len() as u64,
+            0,
+            0,
+        )
     }
 }
 
 pub fn thread_start_as(tcb: u32, cspace: u32, aspace: u32, entry: u64, sp: u64, prio: u64) -> i64 {
     unsafe {
-        syscall(18, tcb as u64, cspace as u64, aspace as u64, entry, sp, prio)
+        syscall(
+            18,
+            tcb as u64,
+            cspace as u64,
+            aspace as u64,
+            entry,
+            sp,
+            prio,
+        )
     }
 }
 

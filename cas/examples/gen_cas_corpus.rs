@@ -35,7 +35,11 @@ fn write_seed(target: &str, name: &str, bytes: &[u8]) {
 fn small_opts() -> StoreOptions {
     StoreOptions {
         wal_len: 4096,
-        chunker: cas::chunk::ChunkerParams { min: 64, avg: 256, max: 1024 },
+        chunker: cas::chunk::ChunkerParams {
+            min: 64,
+            avg: 256,
+            max: 1024,
+        },
         overlay_budget: 16 * 1024,
     }
 }
@@ -85,7 +89,12 @@ fn tlv_entry_seeds() {
         mtime: 9,
         content: Content::ChunkList(Hash::of(b"list")),
     };
-    for (n, e) in [("inline", inline), ("exec", exec), ("dir", dir), ("chunked", chunked)] {
+    for (n, e) in [
+        ("inline", inline),
+        ("exec", exec),
+        ("dir", dir),
+        ("chunked", chunked),
+    ] {
         write_seed("tlv_entry", n, &cas::tlv::encode(&e));
     }
 }
@@ -119,16 +128,15 @@ fn tree_node_seeds() {
     let mut wide = Dir::new();
     for i in 0..300u32 {
         let name = format!("file-{i:04}");
-        wide
-            .upsert(Entry {
-                name: name.into_bytes(),
-                kind: EntryKind::File,
-                flags: 0,
-                size: 4,
-                mtime: 1,
-                content: Content::Inline(i.to_le_bytes().to_vec()),
-            })
-            .unwrap();
+        wide.upsert(Entry {
+            name: name.into_bytes(),
+            kind: EntryKind::File,
+            flags: 0,
+            size: 4,
+            mtime: 1,
+            content: Content::Inline(i.to_le_bytes().to_vec()),
+        })
+        .unwrap();
     }
     let root = wide.save(&mut store);
     let root_bytes = store.get(&root).unwrap();
@@ -142,14 +150,32 @@ fn tree_node_seeds() {
 
 fn index_frame_seeds() {
     let mut entries = BTreeMap::new();
-    entries.insert(Hash::of(b"a"), IndexEntry { off: 48, len: 100, birth: 1 });
-    entries.insert(Hash::of(b"b"), IndexEntry { off: 196, len: 7, birth: 3 });
+    entries.insert(
+        Hash::of(b"a"),
+        IndexEntry {
+            off: 48,
+            len: 100,
+            birth: 1,
+        },
+    );
+    entries.insert(
+        Hash::of(b"b"),
+        IndexEntry {
+            off: 196,
+            len: 7,
+            birth: 3,
+        },
+    );
     let mut free = BTreeMap::new();
     free.insert(300u64, 64u64);
     free.insert(512u64, 4096u64);
     write_seed("index_frame", "pad0", &encode_index(&entries, &free, 0));
     write_seed("index_frame", "pad17", &encode_index(&entries, &free, 17));
-    write_seed("index_frame", "empty", &encode_index(&BTreeMap::new(), &BTreeMap::new(), 0));
+    write_seed(
+        "index_frame",
+        "empty",
+        &encode_index(&BTreeMap::new(), &BTreeMap::new(), 0),
+    );
 }
 
 fn superblock_seeds() {
@@ -217,18 +243,32 @@ fn mount_recovery_seeds() {
     // snapshot — the consistency pass walks all of it.
     let mut store = Store::format(MemDev::new(32 * 1024), small_opts()).unwrap();
     store.create_ref(b"main").unwrap();
-    store.write(b"main", &vec![b"readme".to_vec()], 0, b"hi", 1).unwrap();
+    store
+        .write(b"main", &vec![b"readme".to_vec()], 0, b"hi", 1)
+        .unwrap();
     let big: Vec<u8> = (0..3000u32).map(|i| i as u8).collect();
-    store.write(b"main", &vec![b"data".to_vec(), b"big".to_vec()], 0, &big, 2).unwrap();
+    store
+        .write(
+            b"main",
+            &vec![b"data".to_vec(), b"big".to_vec()],
+            0,
+            &big,
+            2,
+        )
+        .unwrap();
     store.sync_all().unwrap();
-    store.snapshot(b"main", b"gen", b"v1", cas::disk::CLASS_KEEP, 100).unwrap();
+    store
+        .snapshot(b"main", b"gen", b"v1", cas::disk::CLASS_KEEP, 100)
+        .unwrap();
     seed_both("clean", &dump(&store.into_dev()));
 
     // An image with an acked-but-unflushed write living only in the WAL —
     // mount must replay it. (No sync after the write.)
     let mut store = Store::format(MemDev::new(32 * 1024), small_opts()).unwrap();
     store.create_ref(b"main").unwrap();
-    store.write(b"main", &vec![b"pending".to_vec()], 0, b"unflushed", 1).unwrap();
+    store
+        .write(b"main", &vec![b"pending".to_vec()], 0, b"unflushed", 1)
+        .unwrap();
     seed_both("wal_pending", &dump(&store.into_dev()));
 
     // Torn images straight out of the crash device: durable state plus a
@@ -236,9 +276,13 @@ fn mount_recovery_seeds() {
     for seed in [0xDEADu64, 0x1234, 0xF00D] {
         let mut store = Store::format(CrashDev::new(32 * 1024), small_opts()).unwrap();
         store.create_ref(b"main").unwrap();
-        store.write(b"main", &vec![b"a".to_vec()], 0, b"committed", 1).unwrap();
+        store
+            .write(b"main", &vec![b"a".to_vec()], 0, b"committed", 1)
+            .unwrap();
         store.sync_all().unwrap();
-        store.write(b"main", &vec![b"b".to_vec()], 0, b"in flight", 2).unwrap();
+        store
+            .write(b"main", &vec![b"b".to_vec()], 0, b"in flight", 2)
+            .unwrap();
         let mut dev = store.into_dev();
         dev.crash(seed);
         seed_both(&format!("torn_{seed:x}"), &dump(&dev));
@@ -252,7 +296,9 @@ fn mount_recovery_seeds() {
     // there this seed mutates into a live-path image — also useful.)
     let mut store = Store::format(MemDev::new(32 * 1024), small_opts()).unwrap();
     store.create_ref(b"main").unwrap();
-    store.write(b"main", &vec![b"old".to_vec()], 0, b"tick era", 1).unwrap();
+    store
+        .write(b"main", &vec![b"old".to_vec()], 0, b"tick era", 1)
+        .unwrap();
     store.sync_all().unwrap();
     let mut img = dump(&store.into_dev());
     for off in [cas::disk::SB_A_OFF as usize, cas::disk::SB_B_OFF as usize] {

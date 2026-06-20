@@ -80,7 +80,10 @@ impl ModelTransport {
         }
         let mut notifs = Vec::with_capacity(num_notifs);
         for _ in 0..num_notifs {
-            notifs.push(Notification { word: Mutex::new(0), cv: Condvar::new() });
+            notifs.push(Notification {
+                word: Mutex::new(0),
+                cv: Condvar::new(),
+            });
         }
         ModelTransport { rings, cap, notifs }
     }
@@ -151,7 +154,12 @@ impl Transport for ModelTransport {
         Ok(())
     }
 
-    fn recv_nb(&self, ch: Chan, buf: &mut [u8], _dests: Option<&[u32; 4]>) -> Result<RecvOk, RecvErr> {
+    fn recv_nb(
+        &self,
+        ch: Chan,
+        buf: &mut [u8],
+        _dests: Option<&[u32; 4]>,
+    ) -> Result<RecvOk, RecvErr> {
         let (result, writable) = {
             let mut ring = self.ring(ch).lock().unwrap();
             match ring.msgs.pop_front() {
@@ -365,14 +373,25 @@ mod tests {
         let mut expected: std::vec::Vec<u8> =
             (1..=per_sender).chain(101..=100 + per_sender).collect();
         expected.sort_unstable();
-        assert_eq!(sorted, expected, "every id received exactly once (no drop, no dup)");
+        assert_eq!(
+            sorted, expected,
+            "every id received exactly once (no drop, no dup)"
+        );
 
         // Per-sender FIFO: each sender's ids arrive in increasing (send) order,
         // since the channel is FIFO (rev1§3.3).
         let a: std::vec::Vec<u8> = got.iter().copied().filter(|&x| x <= per_sender).collect();
-        assert!(a.windows(2).all(|w| w[0] < w[1]), "sender A not FIFO: {:?}", a);
+        assert!(
+            a.windows(2).all(|w| w[0] < w[1]),
+            "sender A not FIFO: {:?}",
+            a
+        );
         let b: std::vec::Vec<u8> = got.iter().copied().filter(|&x| x > 100).collect();
-        assert!(b.windows(2).all(|w| w[0] < w[1]), "sender B not FIFO: {:?}", b);
+        assert!(
+            b.windows(2).all(|w| w[0] < w[1]),
+            "sender B not FIFO: {:?}",
+            b
+        );
     }
 
     #[cfg(all(not(loom), not(shuttle)))]
@@ -432,7 +451,10 @@ mod tests {
 
         sender.join().unwrap();
         let got = receiver.join().unwrap();
-        assert_eq!(got, 42, "the receiver must observe the sent message (no lost wakeup)");
+        assert_eq!(
+            got, 42,
+            "the receiver must observe the sent message (no lost wakeup)"
+        );
     }
 
     #[cfg(all(not(loom), not(shuttle)))]
@@ -478,7 +500,8 @@ mod tests {
             let mut reactor = Reactor::new(&*ts, NOTIF);
             reactor.register(CHAN, Signals::WRITABLE, KEY).unwrap();
             for i in 1..=n {
-                ep.send_blocking(&mut reactor, &Message::bytes(&[i])).unwrap();
+                ep.send_blocking(&mut reactor, &Message::bytes(&[i]))
+                    .unwrap();
             }
         });
 
@@ -564,7 +587,11 @@ mod tests {
 
         sender.join().unwrap();
         let got = receiver.join().unwrap();
-        assert_eq!(got, Some(CAP_SLOT), "the receiver must land the valuable cap");
+        assert_eq!(
+            got,
+            Some(CAP_SLOT),
+            "the receiver must land the valuable cap"
+        );
     }
 
     #[cfg(all(not(loom), not(shuttle)))]
@@ -603,9 +630,9 @@ mod tests {
         use crate::transport::{Chan, Notif};
         const SERVER_NOTIF: Notif = 0;
         const WINDOW: u32 = 1; // each client requests one window byte
-        // Channel layout: request channel for client i is `i`, reply channel is
-        // `num_clients + i` (a fn, not a closure, so it crosses the move into
-        // each thread without borrowing the captured `num_clients`).
+                               // Channel layout: request channel for client i is `i`, reply channel is
+                               // `num_clients + i` (a fn, not a closure, so it crosses the move into
+                               // each thread without borrowing the captured `num_clients`).
         fn req_chan(i: usize) -> Chan {
             i as Chan
         }
@@ -679,13 +706,26 @@ mod tests {
         assert_eq!(client_views.len(), num_clients);
         // The server's record of each client matches what that client received
         // (no drop / no cross-wire / no duplication across the N channels).
-        assert_eq!(server_view, client_views, "server/client reply views diverged");
+        assert_eq!(
+            server_view, client_views,
+            "server/client reply views diverged"
+        );
         // The quota never over-grants: exactly min(budget, N) grants.
-        let grants = client_views.iter().filter(|r| matches!(r, GrantReply::Grant(_))).count();
-        let refused = client_views.iter().filter(|r| matches!(r, GrantReply::Refused)).count();
+        let grants = client_views
+            .iter()
+            .filter(|r| matches!(r, GrantReply::Grant(_)))
+            .count();
+        let refused = client_views
+            .iter()
+            .filter(|r| matches!(r, GrantReply::Refused))
+            .count();
         let expect_grants = (budget as usize).min(num_clients);
         assert_eq!(grants, expect_grants, "wrong number of admissions");
-        assert_eq!(refused, num_clients - expect_grants, "wrong number of refusals");
+        assert_eq!(
+            refused,
+            num_clients - expect_grants,
+            "wrong number of refusals"
+        );
     }
 
     #[cfg(all(not(loom), not(shuttle)))]

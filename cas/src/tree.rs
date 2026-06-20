@@ -25,7 +25,10 @@ pub fn lookup(
     for comp in parents {
         let dir = Dir::load(store, &cur)?;
         match dir.get(comp) {
-            Some(Entry { content: Content::DirRoot(h), .. }) => cur = *h,
+            Some(Entry {
+                content: Content::DirRoot(h),
+                ..
+            }) => cur = *h,
             Some(_) => return Err(FormatError::BadEntry("not a directory")),
             None => return Ok(None),
         }
@@ -49,13 +52,19 @@ pub fn put(
         return Ok(dir.save(store));
     };
     let child_root = match dir.get(first) {
-        Some(Entry { content: Content::DirRoot(h), .. }) => *h,
+        Some(Entry {
+            content: Content::DirRoot(h),
+            ..
+        }) => *h,
         Some(_) => return Err(FormatError::BadEntry("not a directory")),
         None => Dir::new().save(store),
     };
     let new_child_root = put(store, &child_root, rest, entry, mkdir_mtime)?;
     let child_entry = match dir.get(first) {
-        Some(e) => Entry { content: Content::DirRoot(new_child_root), ..e.clone() },
+        Some(e) => Entry {
+            content: Content::DirRoot(new_child_root),
+            ..e.clone()
+        },
         None => Entry {
             name: first.to_vec(),
             kind: EntryKind::Dir,
@@ -82,11 +91,18 @@ pub fn remove(
     let mut dir = Dir::load(store, root)?;
     if rest.is_empty() {
         let removed = dir.remove(first);
-        let new_root = if removed.is_some() { dir.save(store) } else { *root };
+        let new_root = if removed.is_some() {
+            dir.save(store)
+        } else {
+            *root
+        };
         return Ok((new_root, removed));
     }
     match dir.get(first) {
-        Some(Entry { content: Content::DirRoot(h), .. }) => {
+        Some(Entry {
+            content: Content::DirRoot(h),
+            ..
+        }) => {
             let child_root = *h;
             let (new_child_root, removed) = remove(store, &child_root, rest)?;
             if removed.is_none() {
@@ -112,7 +128,11 @@ mod tests {
     use crate::prolly::MemStore;
     use proptest::prelude::*;
 
-    const TEST_PARAMS: ChunkerParams = ChunkerParams { min: 64, avg: 256, max: 1024 };
+    const TEST_PARAMS: ChunkerParams = ChunkerParams {
+        min: 64,
+        avg: 256,
+        max: 1024,
+    };
 
     fn empty_root(store: &mut MemStore) -> Hash {
         Dir::new().save(store)
@@ -132,7 +152,10 @@ mod tests {
 
         let (root, removed) = remove(&mut store, &root, &[b"etc", b"app", b"config"]).unwrap();
         assert!(removed.is_some());
-        assert_eq!(lookup(&store, &root, &[b"etc", b"app", b"config"]).unwrap(), None);
+        assert_eq!(
+            lookup(&store, &root, &[b"etc", b"app", b"config"]).unwrap(),
+            None
+        );
         // Parent dirs survive removal of their last entry (no auto-prune).
         assert!(lookup(&store, &root, &[b"etc", b"app"]).unwrap().is_some());
     }

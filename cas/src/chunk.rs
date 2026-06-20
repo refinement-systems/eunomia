@@ -69,7 +69,11 @@ fn find_boundary(params: &ChunkerParams, data: &[u8]) -> Option<usize> {
     let (mask_s, mask_l) = params.masks();
     let scan_end = data.len().min(params.max);
     if scan_end <= params.min {
-        return if data.len() >= params.max { Some(params.max) } else { None };
+        return if data.len() >= params.max {
+            Some(params.max)
+        } else {
+            None
+        };
     }
     let mut fp: u64 = 0;
     for (i, &b) in data[params.min..scan_end].iter().enumerate() {
@@ -196,7 +200,9 @@ mod tests {
         let mut rand_bytes = |n: usize| -> Vec<u8> {
             (0..n)
                 .map(|_| {
-                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    state = state
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
                     (state >> 33) as u8
                 })
                 .collect()
@@ -219,7 +225,10 @@ mod tests {
         let common = ba.iter().find(|c| bb.contains(c));
         let first = *common.expect("streams never realigned on random data");
         // Realignment must happen within a few chunks of the suffix start.
-        assert!(first < 4 * TEST_PARAMS.max as i64, "realigned too late: {first}");
+        assert!(
+            first < 4 * TEST_PARAMS.max as i64,
+            "realigned too late: {first}"
+        );
         let ta: Vec<_> = ba.iter().filter(|&&c| c >= first).collect();
         let tb: Vec<_> = bb.iter().filter(|&&c| c >= first).collect();
         assert_eq!(ta, tb);

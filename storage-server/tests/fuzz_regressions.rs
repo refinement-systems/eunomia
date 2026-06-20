@@ -11,7 +11,11 @@ use storage_server::{wire, ErrorCode, Request, Response, Server, SessionId};
 fn fresh() -> (Server<MemDev>, SessionId) {
     let opts = StoreOptions {
         wal_len: 4096,
-        chunker: ChunkerParams { min: 64, avg: 256, max: 1024 },
+        chunker: ChunkerParams {
+            min: 64,
+            avg: 256,
+            max: 1024,
+        },
         overlay_budget: 16 * 1024,
     };
     let mut store = Store::format(MemDev::new(64 * 1024), opts).unwrap();
@@ -30,12 +34,22 @@ fn fresh() -> (Server<MemDev>, SessionId) {
 #[test]
 fn ovl1_dispatch_write_offset_overflow_rejected() {
     let (mut server, session) = fresh();
-    let req = Request::Write { handle: 0, path: vec![b"f".to_vec()], offset: u64::MAX, data: vec![1] };
+    let req = Request::Write {
+        handle: 0,
+        path: vec![b"f".to_vec()],
+        offset: u64::MAX,
+        data: vec![1],
+    };
     let bytes = wire::encode_request(&req).unwrap();
     let decoded = wire::decode_request(&bytes).unwrap();
     let resp = server.handle(session, decoded, 1_000);
     assert_eq!(resp, Response::Err(ErrorCode::BadOffset));
     // The server must survive: a sane write on the same session succeeds.
-    let ok = Request::Write { handle: 0, path: vec![b"f".to_vec()], offset: 0, data: b"hello".to_vec() };
+    let ok = Request::Write {
+        handle: 0,
+        path: vec![b"f".to_vec()],
+        offset: 0,
+        data: b"hello".to_vec(),
+    };
     assert_eq!(server.handle(session, ok, 1_001), Response::Ok);
 }

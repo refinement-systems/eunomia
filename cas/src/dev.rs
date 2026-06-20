@@ -61,14 +61,18 @@ pub struct MemDev {
 
 impl MemDev {
     pub fn new(len: usize) -> MemDev {
-        MemDev { data: RefCell::new(vec![0; len]) }
+        MemDev {
+            data: RefCell::new(vec![0; len]),
+        }
     }
 
     /// Wrap an existing byte buffer as a device (the device length is the
     /// buffer length). Used to present arbitrary fuzz input as a whole
     /// image to `Store::mount`.
     pub fn from_bytes(data: Vec<u8>) -> MemDev {
-        MemDev { data: RefCell::new(data) }
+        MemDev {
+            data: RefCell::new(data),
+        }
     }
 }
 
@@ -117,7 +121,10 @@ impl FileDev {
     }
 
     pub fn open(path: &std::path::Path) -> std::io::Result<FileDev> {
-        let file = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)?;
         let len = file.metadata()?.len();
         Ok(FileDev { file, len })
     }
@@ -127,12 +134,16 @@ impl FileDev {
 impl BlockDev for FileDev {
     fn read(&self, offset: u64, buf: &mut [u8]) -> DevResult<()> {
         use std::os::unix::fs::FileExt;
-        self.file.read_exact_at(buf, offset).map_err(|_| DevError::Io("file read"))
+        self.file
+            .read_exact_at(buf, offset)
+            .map_err(|_| DevError::Io("file read"))
     }
 
     fn write(&mut self, offset: u64, data: &[u8]) -> DevResult<()> {
         use std::os::unix::fs::FileExt;
-        self.file.write_all_at(data, offset).map_err(|_| DevError::Io("file write"))
+        self.file
+            .write_all_at(data, offset)
+            .map_err(|_| DevError::Io("file write"))
     }
 
     fn flush(&mut self) -> DevResult<()> {
@@ -192,7 +203,9 @@ impl CrashDev {
     pub fn crash(&mut self, seed: u64) {
         let mut s = seed;
         let mut next = || {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             s >> 33
         };
         let mut disk = self.durable.clone();

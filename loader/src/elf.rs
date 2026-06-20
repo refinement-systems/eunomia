@@ -137,8 +137,13 @@ pub fn parse(bytes: &[u8]) -> Result<Image<'_>, ElfError> {
         return Err(ElfError::BadSegment);
     }
 
-    let mut segments = [Segment { vaddr: 0, offset: 0, filesz: 0, memsz: 0, flags: 0 };
-        MAX_SEGMENTS];
+    let mut segments = [Segment {
+        vaddr: 0,
+        offset: 0,
+        filesz: 0,
+        memsz: 0,
+        flags: 0,
+    }; MAX_SEGMENTS];
     let mut n = 0;
     for i in 0..phnum {
         // Checked: `e_phoff` is untrusted, so `ph` (and the `ph + k` field
@@ -187,7 +192,12 @@ pub fn parse(bytes: &[u8]) -> Result<Image<'_>, ElfError> {
     if n == 0 {
         return Err(ElfError::BadSegment);
     }
-    Ok(Image { entry, segments, nsegments: n, bytes })
+    Ok(Image {
+        entry,
+        segments,
+        nsegments: n,
+        bytes,
+    })
 }
 
 #[cfg(test)]
@@ -206,7 +216,7 @@ mod tests {
         e[32..40].copy_from_slice(&0x40u64.to_le_bytes()); // phoff
         e[54..56].copy_from_slice(&56u16.to_le_bytes()); // phentsize
         e[56..58].copy_from_slice(&1u16.to_le_bytes()); // phnum
-        // phdr at 0x40
+                                                        // phdr at 0x40
         e[0x40..0x44].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
         e[0x44..0x48].copy_from_slice(&(PF_R | PF_X).to_le_bytes());
         e[0x48..0x50].copy_from_slice(&0x78u64.to_le_bytes()); // offset
@@ -249,7 +259,13 @@ mod tests {
     }
 
     fn seg(vaddr: u64, memsz: u64) -> Segment {
-        Segment { vaddr, offset: 0, filesz: 0, memsz, flags: 0 }
+        Segment {
+            vaddr,
+            offset: 0,
+            filesz: 0,
+            memsz,
+            flags: 0,
+        }
     }
 
     #[test]
@@ -272,10 +288,16 @@ mod tests {
         // page-up rounding overflows. The old unchecked math would abort
         // (overflow-checks on, dev) or wrap (release); `page_layout` returns a
         // clean Err with no panic.
-        assert_eq!(seg(u64::MAX - 8, 8).page_layout(), Err(ElfError::BadSegment));
+        assert_eq!(
+            seg(u64::MAX - 8, 8).page_layout(),
+            Err(ElfError::BadSegment)
+        );
         // The exact boundary: the largest vaddr+memsz that still rounds up
         // without overflow is u64::MAX - (PAGE-1).
         assert!(seg(u64::MAX - (PAGE - 1), 0).page_layout().is_ok());
-        assert_eq!(seg(u64::MAX - (PAGE - 1) + 1, 0).page_layout(), Err(ElfError::BadSegment));
+        assert_eq!(
+            seg(u64::MAX - (PAGE - 1) + 1, 0).page_layout(),
+            Err(ElfError::BadSegment)
+        );
     }
 }

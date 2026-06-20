@@ -14,7 +14,10 @@ const DEV_BASE: u64 = 0x4000_0000;
 fn make_driver(sectors: usize) -> VirtioBlk<FakeBlock, HostBacking> {
     let mem = SharedMem::new(256 * 1024);
     let fake = FakeBlock::new(mem.clone(), DEV_BASE, sectors);
-    let pool = DmaPool::new(HostBacking { mem, device_base: DEV_BASE });
+    let pool = DmaPool::new(HostBacking {
+        mem,
+        device_base: DEV_BASE,
+    });
     VirtioBlk::new(fake, pool, 64 * 1024).unwrap()
 }
 
@@ -52,9 +55,9 @@ fn blockdev_adapter_handles_unaligned_io() {
     let mut model = vec![0u8; 256 * SECTOR];
     let cases: &[(u64, usize)] = &[
         (0, 10),
-        (511, 2),       // straddles a sector boundary
-        (513, 1500),    // partial head, full middle, partial tail
-        (700, 65_536),  // spans multiple max_transfer chunks
+        (511, 2),      // straddles a sector boundary
+        (513, 1500),   // partial head, full middle, partial tail
+        (700, 65_536), // spans multiple max_transfer chunks
         (130_000, 3),
     ];
     for (i, &(off, len)) in cases.iter().enumerate() {
@@ -90,7 +93,10 @@ fn lba_past_capacity_refused_locally() {
     // One sector starting one past the end → local refusal (not DeviceError),
     // for both directions, and with no device round-trip.
     let mut over = vec![0u8; SECTOR];
-    assert_eq!(blk.read_sectors(cap, &mut over), Err(VirtioError::OutOfRange));
+    assert_eq!(
+        blk.read_sectors(cap, &mut over),
+        Err(VirtioError::OutOfRange)
+    );
     assert_eq!(blk.write_sectors(cap, &over), Err(VirtioError::OutOfRange));
 
     // A multi-sector transfer that starts in range but whose tail crosses the
@@ -117,12 +123,15 @@ fn lba_past_capacity_refused_locally() {
 fn storage_engine_runs_over_virtio() {
     let opts = StoreOptions {
         wal_len: 32 * 1024,
-        chunker: cas::chunk::ChunkerParams { min: 64, avg: 256, max: 1024 },
+        chunker: cas::chunk::ChunkerParams {
+            min: 64,
+            avg: 256,
+            max: 1024,
+        },
         overlay_budget: 64 * 1024,
     };
-    let p = |parts: &[&str]| -> Vec<Vec<u8>> {
-        parts.iter().map(|s| s.as_bytes().to_vec()).collect()
-    };
+    let p =
+        |parts: &[&str]| -> Vec<Vec<u8>> { parts.iter().map(|s| s.as_bytes().to_vec()).collect() };
 
     // 4 MiB virtio disk, full stack on top.
     let dev = VirtioBlockDev::new(make_driver(8192));
@@ -130,8 +139,12 @@ fn storage_engine_runs_over_virtio() {
     store.create_ref(b"main").unwrap();
     let big: Vec<u8> = (0..100_000u32).flat_map(|i| i.to_le_bytes()).collect();
     store.write(b"main", &p(&["data.bin"]), 0, &big, 1).unwrap();
-    let snap = store.snapshot(b"main", b"test", b"", cas::disk::CLASS_KEEP, 50).unwrap();
-    store.write(b"main", &p(&["data.bin"]), 0, b"CLOBBERED", 2).unwrap();
+    let snap = store
+        .snapshot(b"main", b"test", b"", cas::disk::CLASS_KEEP, 50)
+        .unwrap();
+    store
+        .write(b"main", &p(&["data.bin"]), 0, b"CLOBBERED", 2)
+        .unwrap();
     store.sync_all().unwrap();
 
     // Remount over the same virtio device: recovery path runs through
@@ -140,5 +153,11 @@ fn storage_engine_runs_over_virtio() {
     let head = store2.read(b"main", &p(&["data.bin"])).unwrap().unwrap();
     assert_eq!(&head[..9], b"CLOBBERED");
     let root = store2.snapshot_root(b"main", snap).unwrap();
-    assert_eq!(store2.read_at_root(&root, &p(&["data.bin"])).unwrap().unwrap(), big);
+    assert_eq!(
+        store2
+            .read_at_root(&root, &p(&["data.bin"]))
+            .unwrap()
+            .unwrap(),
+        big
+    );
 }

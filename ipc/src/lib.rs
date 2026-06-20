@@ -54,9 +54,7 @@ pub mod wire;
 pub use endpoint::{Endpoint, Message, MAX_PAYLOAD};
 pub use reactor::{Key, Reactor, RegisterErr, Signals};
 pub use session::{admit_connect, Admission, ConnectErr, ConnectReq, GrantReply, WindowGrant};
-pub use transport::{
-    Chan, Event, RecvErr, RecvOk, SendErr, SyscallTransport, Transport,
-};
+pub use transport::{Chan, Event, RecvErr, RecvOk, SendErr, SyscallTransport, Transport};
 #[cfg(feature = "wire")]
 pub use wire::{decode, encode, WireError};
 
@@ -65,10 +63,10 @@ pub use wire::{decode, encode, WireError};
 #[cfg(feature = "fuzzing")]
 pub mod fuzz_support;
 
+#[cfg(any(test, loom, shuttle))]
+pub mod model;
 /// The cfg-swappable concurrency seam + the deterministic in-memory kernel
 /// (`ModelTransport`) the Shuttle/Loom harnesses drive. Not in the production
 /// no_std build.
 #[cfg(any(test, loom, shuttle))]
 mod sync;
-#[cfg(any(test, loom, shuttle))]
-pub mod model;

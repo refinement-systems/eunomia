@@ -25,12 +25,12 @@ use crate::cspace::{
 };
 use crate::id::{ObjId, SlotId};
 use crate::notification::{destroy_notif, remove_waiter, signal, wait};
-use crate::timer::{arm, check_expired, destroy_timer, disarm};
-use crate::untyped::{reset, retype_check, retype_install, ObjType, RetypeError};
 use crate::store::{Binding, Store};
 use crate::thread::{
     bind as thread_bind, destroy_tcb, report_terminal, Report, ThreadState, BIND_EXIT, BIND_FAULT,
 };
+use crate::timer::{arm, check_expired, destroy_timer, disarm};
+use crate::untyped::{reset, retype_check, retype_install, ObjType, RetypeError};
 use std::collections::{BTreeMap, VecDeque};
 
 // ── The concrete store ────────────────────────────────────────────────────
@@ -54,9 +54,9 @@ struct ChanState {
     end_caps: [u32; 2],
     head: [u32; 2],
     count: [u32; 2],
-    bindings: BTreeMap<(usize, usize), Binding>,      // (end, ev)
-    msg_len: BTreeMap<(usize, u32), u16>,             // (ring, index)
-    ring_cap: BTreeMap<(usize, u32, usize), SlotId>,  // (ring, index, cap) -> arena handle
+    bindings: BTreeMap<(usize, usize), Binding>, // (end, ev)
+    msg_len: BTreeMap<(usize, u32), u16>,        // (ring, index)
+    ring_cap: BTreeMap<(usize, u32, usize), SlotId>, // (ring, index, cap) -> arena handle
 }
 
 #[derive(Clone, PartialEq)]
@@ -127,10 +127,14 @@ impl ArrayStore {
         self.slots[s.0 as usize]
     }
     fn chan(&self, ch: ObjId) -> &ChanState {
-        self.chans.get(&ch.0).expect("chan_*: channel not registered in this test store")
+        self.chans
+            .get(&ch.0)
+            .expect("chan_*: channel not registered in this test store")
     }
     fn chan_mut(&mut self, ch: ObjId) -> &mut ChanState {
-        self.chans.get_mut(&ch.0).expect("set_chan_*: channel not registered in this test store")
+        self.chans
+            .get_mut(&ch.0)
+            .expect("set_chan_*: channel not registered in this test store")
     }
 }
 
@@ -142,7 +146,10 @@ impl Store for ArrayStore {
         self.slots[s.0 as usize] = v;
     }
     fn obj_refs(&self, o: ObjId) -> u32 {
-        *self.refs.get(&o.0).expect("obj_refs: object not registered in this test store")
+        *self
+            .refs
+            .get(&o.0)
+            .expect("obj_refs: object not registered in this test store")
     }
     fn set_obj_refs(&mut self, o: ObjId, r: u32) {
         self.refs.insert(o.0, r);
@@ -185,7 +192,11 @@ impl Store for ArrayStore {
         self.chan_mut(ch).count[ring] = v;
     }
     fn chan_binding(&self, ch: ObjId, end: usize, ev: usize) -> Binding {
-        self.chan(ch).bindings.get(&(end, ev)).copied().unwrap_or(Binding::UNBOUND)
+        self.chan(ch)
+            .bindings
+            .get(&(end, ev))
+            .copied()
+            .unwrap_or(Binding::UNBOUND)
     }
     fn set_chan_binding(&mut self, ch: ObjId, end: usize, ev: usize, b: Binding) {
         self.chan_mut(ch).bindings.insert((end, ev), b);
@@ -343,7 +354,8 @@ fn cdt_wf_exec(st: &ArrayStore) -> bool {
     // links_in_domain — checked first so every later index is sound.
     for i in 0..n {
         let s = st.slots[i];
-        if !(in_dom(s.parent) && in_dom(s.first_child) && in_dom(s.next_sib) && in_dom(s.prev_sib)) {
+        if !(in_dom(s.parent) && in_dom(s.first_child) && in_dom(s.next_sib) && in_dom(s.prev_sib))
+        {
             return false;
         }
     }
@@ -451,7 +463,10 @@ fn cap_obj_exec(cap: Cap) -> Option<ObjId> {
 // Exec mirror of the spec `cap_frame_aspace` (the aspace a mapped frame holds).
 fn cap_frame_aspace_exec(cap: Cap) -> Option<ObjId> {
     match cap.kind {
-        CapKind::Frame { mapping: Some((a, _)), .. } => Some(a),
+        CapKind::Frame {
+            mapping: Some((a, _)),
+            ..
+        } => Some(a),
         _ => None,
     }
 }
@@ -520,7 +535,9 @@ fn obj_census_exec(st: &ArrayStore, o: ObjId) -> u32 {
 
 // Every live object's stored refcount equals its census (`cspace::refcount_sound`).
 fn refcount_sound_exec(st: &ArrayStore) -> bool {
-    st.refs.iter().all(|(&o, &r)| obj_census_exec(st, ObjId(o)) == r)
+    st.refs
+        .iter()
+        .all(|(&o, &r)| obj_census_exec(st, ObjId(o)) == r)
 }
 
 // The exec mirror of the spec `in_live_window` (cspace.rs): ring index `i` is one
@@ -723,8 +740,10 @@ fn end_caps_sound_exec(st: &ArrayStore) -> bool {
             let count = st
                 .slots
                 .iter()
-                .filter(|s| matches!(s.cap.kind, CapKind::Channel(o, end)
-                    if o.0 == ch && end_idx_exec(end) == e))
+                .filter(|s| {
+                    matches!(s.cap.kind, CapKind::Channel(o, end)
+                    if o.0 == ch && end_idx_exec(end) == e)
+                })
                 .count() as u32;
             cs.end_caps[e] == count
         })
@@ -734,7 +753,13 @@ fn end_caps_sound_exec(st: &ArrayStore) -> bool {
 // ── Shape builders ─────────────────────────────────────────────────────────
 
 fn detached(cap: Cap) -> CapSlot {
-    CapSlot { cap, parent: None, first_child: None, next_sib: None, prev_sib: None }
+    CapSlot {
+        cap,
+        parent: None,
+        first_child: None,
+        next_sib: None,
+        prev_sib: None,
+    }
 }
 // A blank TCB (the `Tcb::empty` analog) so fixtures set only the fields under test
 // with `..tcb_state_default()`. `bind_slots` default to SlotId(0); they are unread
@@ -754,19 +779,42 @@ fn tcb_state_default() -> TcbState {
     }
 }
 fn frame_cap(base: u64) -> Cap {
-    Cap { kind: CapKind::Frame { base, pages: 1, mapping: None }, rights: Rights(0xff) }
+    Cap {
+        kind: CapKind::Frame {
+            base,
+            pages: 1,
+            mapping: None,
+        },
+        rights: Rights(0xff),
+    }
 }
 fn cspace_cap(o: u64) -> Cap {
-    Cap { kind: CapKind::CSpace(ObjId(o)), rights: Rights(0xff) }
+    Cap {
+        kind: CapKind::CSpace(ObjId(o)),
+        rights: Rights(0xff),
+    }
 }
 fn untyped_cap(base: u64, size: u64, watermark: u64) -> Cap {
-    Cap { kind: CapKind::Untyped { base, size, watermark }, rights: Rights(0xff) }
+    Cap {
+        kind: CapKind::Untyped {
+            base,
+            size,
+            watermark,
+        },
+        rights: Rights(0xff),
+    }
 }
 fn notif_cap(o: u64) -> Cap {
-    Cap { kind: CapKind::Notification(ObjId(o)), rights: Rights(0xff) }
+    Cap {
+        kind: CapKind::Notification(ObjId(o)),
+        rights: Rights(0xff),
+    }
 }
 fn thread_cap(o: u64, max_prio: u8) -> Cap {
-    Cap { kind: CapKind::Thread(ObjId(o), max_prio), rights: Rights(0xff) }
+    Cap {
+        kind: CapKind::Thread(ObjId(o), max_prio),
+        rights: Rights(0xff),
+    }
 }
 
 // The exec mirror of the spec `CapKind::Untyped { base, size, watermark }`
@@ -774,7 +822,11 @@ fn thread_cap(o: u64, max_prio: u8) -> Cap {
 // `retype_check`'s expected `Ok` triple and to read `reset`'s watermark edit.
 fn untyped_geom(c: Cap) -> Option<(u64, u64, u64)> {
     match c.kind {
-        CapKind::Untyped { base, size, watermark } => Some((base, size, watermark)),
+        CapKind::Untyped {
+            base,
+            size,
+            watermark,
+        } => Some((base, size, watermark)),
         _ => None,
     }
 }
@@ -784,7 +836,14 @@ fn untyped_geom(c: Cap) -> Option<(u64, u64, u64)> {
 // flattened to `u64` because `SlotId` is not `Debug` (so `assert_eq!` on the
 // raw handle would not compile). Used to assert the read-only / single-slot
 // frames against the real bodies.
-type SlotFp = (bool, Option<u64>, Option<u64>, Option<u64>, Option<u64>, Option<(u64, u64, u64)>);
+type SlotFp = (
+    bool,
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+    Option<(u64, u64, u64)>,
+);
 fn fingerprint(st: &ArrayStore) -> Vec<SlotFp> {
     (0..st.n())
         .map(|i| {
@@ -806,7 +865,10 @@ fn fingerprint(st: &ArrayStore) -> Vec<SlotFp> {
 struct Lcg(u64);
 impl Lcg {
     fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0 >> 33
     }
     fn below(&mut self, n: usize) -> usize {
@@ -832,7 +894,10 @@ fn gen_forest(seed: u64, n: usize, edges: usize) -> ArrayStore {
         derive(&mut st, src, dst, 0xff, 0xFF).expect("derive Frame child");
         nonempty.push(dst);
     }
-    assert!(cspace_wf_exec(&st), "generator produced a non-cspace_wf forest");
+    assert!(
+        cspace_wf_exec(&st),
+        "generator produced a non-cspace_wf forest"
+    );
     st
 }
 
@@ -844,7 +909,10 @@ fn gen_forest(seed: u64, n: usize, edges: usize) -> ArrayStore {
 fn assert_only_empties(before: &[CapSlot], st: &ArrayStore, ctx: &str) {
     for i in 0..before.len() {
         if before[i].cap.is_empty() {
-            assert!(st.slots[i].cap.is_empty(), "{ctx}: empty slots stay empty (§6d only_empties)");
+            assert!(
+                st.slots[i].cap.is_empty(),
+                "{ctx}: empty slots stay empty (§6d only_empties)"
+            );
         }
     }
 }
@@ -866,18 +934,36 @@ fn check_delete(st: &mut ArrayStore, slot: SlotId) {
     delete(st, slot);
     assert!(cspace_wf_exec(st), "delete post: cspace_wf preserved");
     assert_eq!(st.n(), n0, "delete post: dom preserved");
-    assert!(st.at(slot).cap.is_empty(), "delete post: target slot emptied");
-    assert!(count_nonempty_exec(st) < c0, "delete post: count_nonempty strictly drops");
+    assert!(
+        st.at(slot).cap.is_empty(),
+        "delete post: target slot emptied"
+    );
+    assert!(
+        count_nonempty_exec(st) < c0,
+        "delete post: count_nonempty strictly drops"
+    );
     // residency is immutable across delete (the frame destroy_cspace's loop reads).
-    assert!(st.cspaces == resid0, "delete post: cspace residency unchanged");
+    assert!(
+        st.cspaces == resid0,
+        "delete post: cspace residency unchanged"
+    );
     if sound0 {
-        assert!(refcount_sound_exec(st), "delete post: refcount_sound preserved");
+        assert!(
+            refcount_sound_exec(st),
+            "delete post: refcount_sound preserved"
+        );
     }
     if consistent0 {
-        assert!(caps_consistent_exec(st), "delete post: caps_consistent preserved (§6d)");
+        assert!(
+            caps_consistent_exec(st),
+            "delete post: caps_consistent preserved (§6d)"
+        );
     }
     if end_caps0 {
-        assert!(end_caps_sound_exec(st), "delete post: end_caps_sound preserved (§6d)");
+        assert!(
+            end_caps_sound_exec(st),
+            "delete post: end_caps_sound preserved (§6d)"
+        );
     }
     assert_only_empties(&empty0, st, "delete post");
 }
@@ -890,18 +976,36 @@ fn check_delete(st: &mut ArrayStore, slot: SlotId) {
 fn check_unref_aspace(st: &mut ArrayStore, a: ObjId) {
     let r0 = st.refs[&a.0];
     assert!(r0 > 0, "unref_aspace pre: refs[a] > 0");
-    assert_eq!(obj_census_exec(st, a) + 1, r0, "unref_aspace pre: off-by-one census at a");
+    assert_eq!(
+        obj_census_exec(st, a) + 1,
+        r0,
+        "unref_aspace pre: off-by-one census at a"
+    );
     for (&o, &r) in &st.refs {
         if o != a.0 {
-            assert_eq!(obj_census_exec(st, ObjId(o)), r, "unref_aspace pre: sound at every other object");
+            assert_eq!(
+                obj_census_exec(st, ObjId(o)),
+                r,
+                "unref_aspace pre: sound at every other object"
+            );
         }
     }
     unref_aspace(st, a);
-    assert!(refcount_sound_exec(st), "unref_aspace post: refcount_sound restored");
+    assert!(
+        refcount_sound_exec(st),
+        "unref_aspace post: refcount_sound restored"
+    );
     if r0 == 1 {
-        assert!(!st.refs.contains_key(&a.0), "unref_aspace post: last ref → aspace_destroy dropped a");
+        assert!(
+            !st.refs.contains_key(&a.0),
+            "unref_aspace post: last ref → aspace_destroy dropped a"
+        );
     } else {
-        assert_eq!(st.refs[&a.0], r0 - 1, "unref_aspace post: refs decremented, a still live");
+        assert_eq!(
+            st.refs[&a.0],
+            r0 - 1,
+            "unref_aspace post: refs decremented, a still live"
+        );
     }
 }
 
@@ -914,33 +1018,62 @@ fn check_cdt_unlink(st: &mut ArrayStore, slot: SlotId) {
     assert!(cspace_wf_exec(st), "cdt_unlink post: cspace_wf preserved");
     assert_eq!(st.n(), n0, "cdt_unlink post: dom preserved");
     assert!(
-        s.parent.is_none() && s.first_child.is_none() && s.next_sib.is_none() && s.prev_sib.is_none(),
+        s.parent.is_none()
+            && s.first_child.is_none()
+            && s.next_sib.is_none()
+            && s.prev_sib.is_none(),
         "cdt_unlink post: slot fully detached"
     );
-    assert_eq!(s.cap.is_empty(), cap_was_empty, "cdt_unlink post: cap untouched");
-    assert_eq!(count_nonempty_exec(st), c0, "cdt_unlink post: count_nonempty unchanged");
+    assert_eq!(
+        s.cap.is_empty(),
+        cap_was_empty,
+        "cdt_unlink post: cap untouched"
+    );
+    assert_eq!(
+        count_nonempty_exec(st),
+        c0,
+        "cdt_unlink post: count_nonempty unchanged"
+    );
 }
 
 fn check_slot_move(st: &mut ArrayStore, src: SlotId, dst: SlotId) {
     assert!(cspace_wf_exec(st), "slot_move pre: cspace_wf");
-    assert!(!st.at(src).cap.is_empty() && st.at(dst).cap.is_empty(), "slot_move pre: src live, dst empty");
+    assert!(
+        !st.at(src).cap.is_empty() && st.at(dst).cap.is_empty(),
+        "slot_move pre: src live, dst empty"
+    );
     let (n0, c0) = (st.n(), count_nonempty_exec(st));
     let moved = st.at(src).cap;
     slot_move(st, src, dst);
     assert!(cspace_wf_exec(st), "slot_move post: cspace_wf preserved");
     assert_eq!(st.n(), n0, "slot_move post: dom preserved");
     assert!(st.at(src).cap.is_empty(), "slot_move post: src emptied");
-    assert!(!st.at(dst).cap.is_empty(), "slot_move post: dst now holds the cap");
-    assert!(matches!(st.at(dst).cap.kind, CapKind::Frame { base, .. } if matches!(moved.kind, CapKind::Frame { base: b, .. } if b == base)),
-        "slot_move post: dst inherits src's cap");
-    assert_eq!(count_nonempty_exec(st), c0, "slot_move post: count_nonempty unchanged (one owner relocates)");
+    assert!(
+        !st.at(dst).cap.is_empty(),
+        "slot_move post: dst now holds the cap"
+    );
+    assert!(
+        matches!(st.at(dst).cap.kind, CapKind::Frame { base, .. } if matches!(moved.kind, CapKind::Frame { base: b, .. } if b == base)),
+        "slot_move post: dst inherits src's cap"
+    );
+    assert_eq!(
+        count_nonempty_exec(st),
+        c0,
+        "slot_move post: count_nonempty unchanged (one owner relocates)"
+    );
 }
 
 // Re-derive `retype_check`'s spec result from the store state, then assert the
 // real body returns exactly that AND left the arena untouched (the read-only
 // frame, which holds on every path). Covers the geometry, the error precedence
 // (NotUntyped before DestOccupied), and the channel `dst2` validity.
-fn check_retype_check(st: &mut ArrayStore, ut: SlotId, ty: ObjType, dst: SlotId, dst2: Option<SlotId>) {
+fn check_retype_check(
+    st: &mut ArrayStore,
+    ut: SlotId,
+    ty: ObjType,
+    dst: SlotId,
+    dst2: Option<SlotId>,
+) {
     let fp = fingerprint(st);
     let geom = untyped_geom(st.at(ut).cap);
     let dst_empty = st.at(dst).cap.is_empty();
@@ -953,11 +1086,23 @@ fn check_retype_check(st: &mut ArrayStore, ut: SlotId, ty: ObjType, dst: SlotId,
         true
     };
     let res = retype_check(st, ut, ty, dst, dst2);
-    assert_eq!(fingerprint(st), fp, "retype_check post: read-only on every path");
+    assert_eq!(
+        fingerprint(st),
+        fp,
+        "retype_check post: read-only on every path"
+    );
     match (geom, dst_empty, chan_ok) {
-        (None, _, _) => assert_eq!(res, Err(RetypeError::NotUntyped), "non-Untyped ut → NotUntyped (precedence)"),
+        (None, _, _) => assert_eq!(
+            res,
+            Err(RetypeError::NotUntyped),
+            "non-Untyped ut → NotUntyped (precedence)"
+        ),
         (Some(g), true, true) => assert_eq!(res, Ok(g), "Ok returns the untyped's geometry"),
-        (Some(_), _, _) => assert_eq!(res, Err(RetypeError::DestOccupied), "occupied/aliased/missing dst(2) → DestOccupied"),
+        (Some(_), _, _) => assert_eq!(
+            res,
+            Err(RetypeError::DestOccupied),
+            "occupied/aliased/missing dst(2) → DestOccupied"
+        ),
     }
 }
 
@@ -971,7 +1116,11 @@ fn check_reset(st: &mut ArrayStore, ut: SlotId) {
     let res = reset(st, ut);
     match (geom, had_child) {
         (None, _) => {
-            assert_eq!(res, Err(RetypeError::NotUntyped), "non-Untyped → NotUntyped");
+            assert_eq!(
+                res,
+                Err(RetypeError::NotUntyped),
+                "non-Untyped → NotUntyped"
+            );
             assert_eq!(fingerprint(st), fp, "reset NotUntyped: read-only");
         }
         (Some(_), true) => {
@@ -982,7 +1131,11 @@ fn check_reset(st: &mut ArrayStore, ut: SlotId) {
             assert_eq!(res, Ok(()), "Untyped, no children → Ok");
             let mut expected = fp.clone();
             expected[ut.0 as usize].5 = Some((base, size, 0));
-            assert_eq!(fingerprint(st), expected, "reset Ok: only ut's watermark zeroed, all else intact");
+            assert_eq!(
+                fingerprint(st),
+                expected,
+                "reset Ok: only ut's watermark zeroed, all else intact"
+            );
         }
     }
 }
@@ -994,12 +1147,28 @@ fn cap_kind_eq(a: CapKind, b: CapKind) -> bool {
     match (a, b) {
         (CapKind::Empty, CapKind::Empty) => true,
         (
-            CapKind::Untyped { base: b1, size: s1, watermark: w1 },
-            CapKind::Untyped { base: b2, size: s2, watermark: w2 },
+            CapKind::Untyped {
+                base: b1,
+                size: s1,
+                watermark: w1,
+            },
+            CapKind::Untyped {
+                base: b2,
+                size: s2,
+                watermark: w2,
+            },
         ) => b1 == b2 && s1 == s2 && w1 == w2,
         (
-            CapKind::Frame { base: b1, pages: p1, mapping: m1 },
-            CapKind::Frame { base: b2, pages: p2, mapping: m2 },
+            CapKind::Frame {
+                base: b1,
+                pages: p1,
+                mapping: m1,
+            },
+            CapKind::Frame {
+                base: b2,
+                pages: p2,
+                mapping: m2,
+            },
         ) => b1 == b2 && p1 == p2 && m1 == m2,
         (CapKind::Aspace(o1), CapKind::Aspace(o2)) => o1 == o2,
         (CapKind::CSpace(o1), CapKind::CSpace(o2)) => o1 == o2,
@@ -1034,11 +1203,21 @@ fn check_retype_install(
 
     retype_install(st, ut, ty, kind, end, dst, dst2);
 
-    assert!(cspace_wf_exec(st), "retype_install post: cspace_wf preserved");
+    assert!(
+        cspace_wf_exec(st),
+        "retype_install post: cspace_wf preserved"
+    );
     // watermark advanced to `end - base`, base/size kept.
-    assert_eq!(untyped_geom(st.at(ut).cap), Some((base, size, end - base)), "watermark advanced");
+    assert_eq!(
+        untyped_geom(st.at(ut).cap),
+        Some((base, size, end - base)),
+        "watermark advanced"
+    );
     // `dst` holds the new cap as a CDT child of `ut`.
-    assert!(cap_kind_eq(st.at(dst).cap.kind, kind), "dst holds the carved kind");
+    assert!(
+        cap_kind_eq(st.at(dst).cap.kind, kind),
+        "dst holds the carved kind"
+    );
     // SlotId is not Debug (see `fingerprint`), so compare with `assert!(==)`.
     assert!(st.at(dst).parent == Some(ut), "dst is a CDT child of ut");
     // rev1§2.5 rights-inheritance table.
@@ -1048,9 +1227,17 @@ fn check_retype_install(
         ObjType::Untyped => ut_rights & (Rights::READ | Rights::WRITE),
         _ => Rights::ALL.0,
     };
-    assert_eq!(st.at(dst).cap.rights.0, expect_rights, "rights-inheritance table");
+    assert_eq!(
+        st.at(dst).cap.rights.0,
+        expect_rights,
+        "rights-inheritance table"
+    );
     if matches!(ty, ObjType::Untyped) {
-        assert_eq!(st.at(dst).cap.rights.0 & Rights::PHYS, 0, "sub-Untyped never carries PHYS");
+        assert_eq!(
+            st.at(dst).cap.rights.0 & Rights::PHYS,
+            0,
+            "sub-Untyped never carries PHYS"
+        );
     }
     // refcount / chan_view deltas.
     match kind {
@@ -1071,7 +1258,10 @@ fn check_retype_install(
             }
         }
         _ => {
-            assert_eq!(st.refs, refs_before, "non-channel: refs untouched (init pre-counts dst)");
+            assert_eq!(
+                st.refs, refs_before,
+                "non-channel: refs untouched (init pre-counts dst)"
+            );
             assert!(st.chans == chans_before, "non-channel: chan_view untouched");
         }
     }
@@ -1109,7 +1299,15 @@ fn signal_fixture(with_waiter: bool) -> (ArrayStore, ObjId) {
     msg_len.insert((1usize, 0u32), 0u16);
     st.chans.insert(
         7,
-        ChanState { depth: 1, end_caps: [1, 1], head: [0, 0], count: [1, 0], bindings, msg_len, ring_cap },
+        ChanState {
+            depth: 1,
+            end_caps: [1, 1],
+            head: [0, 0],
+            count: [1, 0],
+            bindings,
+            msg_len,
+            ring_cap,
+        },
     );
 
     let n = ObjId(100);
@@ -1118,11 +1316,29 @@ fn signal_fixture(with_waiter: bool) -> (ArrayStore, ObjId) {
         let t = ObjId(200);
         st.tcbs.insert(
             200,
-            TcbState { state: ThreadState::BlockedNotif, wait_notif: Some(n), ..tcb_state_default() },
+            TcbState {
+                state: ThreadState::BlockedNotif,
+                wait_notif: Some(n),
+                ..tcb_state_default()
+            },
         );
-        st.notifs.insert(100, NotifState { word: 0, wait_head: Some(t), wait_tail: Some(t) });
+        st.notifs.insert(
+            100,
+            NotifState {
+                word: 0,
+                wait_head: Some(t),
+                wait_tail: Some(t),
+            },
+        );
     } else {
-        st.notifs.insert(100, NotifState { word: 0, wait_head: None, wait_tail: None });
+        st.notifs.insert(
+            100,
+            NotifState {
+                word: 0,
+                wait_head: None,
+                wait_tail: None,
+            },
+        );
     }
     (st, n)
 }
@@ -1151,12 +1367,24 @@ fn check_remove_waiter(st: &mut ArrayStore, n: ObjId, t: ObjId, queued: bool) {
     let chans = st.chans.clone();
     let refs0 = st.refs[&n.0];
     remove_waiter(st, n, t);
-    assert!(fingerprint(st) == fp, "remove_waiter post: slot_view unchanged");
+    assert!(
+        fingerprint(st) == fp,
+        "remove_waiter post: slot_view unchanged"
+    );
     assert!(st.chans == chans, "remove_waiter post: chan_view unchanged");
-    assert!(notif_wf_exec(st, n), "remove_waiter post: notif_wf preserved");
+    assert!(
+        notif_wf_exec(st, n),
+        "remove_waiter post: notif_wf preserved"
+    );
     if queued {
-        assert!(st.tcbs[&t.0].qnext.is_none(), "removed waiter's qnext cleared");
-        assert!(st.tcbs[&t.0].wait_notif.is_none(), "removed waiter's wait_notif cleared");
+        assert!(
+            st.tcbs[&t.0].qnext.is_none(),
+            "removed waiter's qnext cleared"
+        );
+        assert!(
+            st.tcbs[&t.0].wait_notif.is_none(),
+            "removed waiter's wait_notif cleared"
+        );
         assert_eq!(st.refs[&n.0], refs0 - 1, "queued ref released");
     } else {
         assert_eq!(st.refs[&n.0], refs0, "absent removal touches no ref");
@@ -1214,10 +1442,19 @@ fn check_endpoint_cap_dropped(st: &mut ArrayStore, ch: ObjId, end: ChanEnd) {
 
     endpoint_cap_dropped(st, ch, end);
 
-    assert!(fingerprint(st) == fp, "endpoint_cap_dropped: slot_view unchanged");
-    assert!(*st.chan(ch) == expect_chan, "endpoint_cap_dropped: only end_caps[end] decremented");
+    assert!(
+        fingerprint(st) == fp,
+        "endpoint_cap_dropped: slot_view unchanged"
+    );
+    assert!(
+        *st.chan(ch) == expect_chan,
+        "endpoint_cap_dropped: only end_caps[end] decremented"
+    );
     if before != 1 {
-        assert!(st.refs == refs_before, "endpoint_cap_dropped: refs_view unchanged (no fire)");
+        assert!(
+            st.refs == refs_before,
+            "endpoint_cap_dropped: refs_view unchanged (no fire)"
+        );
     }
 }
 
@@ -1226,13 +1463,28 @@ fn check_endpoint_cap_dropped(st: &mut ArrayStore, ch: ObjId, end: ChanEnd) {
 // untouched; and the `refs_view` delta — old notif released, new acquired, in the
 // decrement-then-increment order so a same-notif rebind is net-zero
 // (`bind_refs_post`).
-fn check_bind(st: &mut ArrayStore, ch: ObjId, end: ChanEnd, event: usize, notif: Option<ObjId>, bits: u64) {
+fn check_bind(
+    st: &mut ArrayStore,
+    ch: ObjId,
+    end: ChanEnd,
+    event: usize,
+    notif: Option<ObjId>,
+    bits: u64,
+) {
     let e = end_idx_exec(end);
-    let old_notif = st.chan(ch).bindings.get(&(e, event)).copied().unwrap_or(Binding::UNBOUND).notif;
+    let old_notif = st
+        .chan(ch)
+        .bindings
+        .get(&(e, event))
+        .copied()
+        .unwrap_or(Binding::UNBOUND)
+        .notif;
     let fp = fingerprint(st);
     let refs_before = st.refs.clone();
     let mut expect_chan = st.chan(ch).clone();
-    expect_chan.bindings.insert((e, event), Binding { notif, bits });
+    expect_chan
+        .bindings
+        .insert((e, event), Binding { notif, bits });
     let mut expect_refs = refs_before.clone();
     if let Some(no) = old_notif {
         *expect_refs.get_mut(&no.0).unwrap() -= 1;
@@ -1244,7 +1496,10 @@ fn check_bind(st: &mut ArrayStore, ch: ObjId, end: ChanEnd, event: usize, notif:
     bind(st, ch, end, event, notif, bits);
 
     assert!(fingerprint(st) == fp, "bind: slot_view unchanged");
-    assert!(*st.chan(ch) == expect_chan, "bind: only the (end,event) binding changed");
+    assert!(
+        *st.chan(ch) == expect_chan,
+        "bind: only the (end,event) binding changed"
+    );
     assert_eq!(st.refs, expect_refs, "bind: refs delta (old -1, new +1)");
 }
 
@@ -1279,23 +1534,47 @@ fn check_destroy_channel(st: &mut ArrayStore, ch: ObjId) {
     destroy_channel(st, ch);
 
     assert_only_empties(&empty0, st, "destroy_channel post");
-    assert!(cspace_wf_exec(st), "destroy_channel post: cspace_wf preserved");
+    assert!(
+        cspace_wf_exec(st),
+        "destroy_channel post: cspace_wf preserved"
+    );
     // residency is immutable across teardown (the frame obj_unref's Channel arm reads).
-    assert!(st.cspaces == resid0, "destroy_channel post: cspace residency unchanged");
+    assert!(
+        st.cspaces == resid0,
+        "destroy_channel post: cspace residency unchanged"
+    );
     assert_eq!(st.n(), n, "destroy_channel: arena extent unchanged");
     for cs in ring_caps {
-        assert!(st.at(cs).cap.is_empty(), "destroy_channel: every ring cap slot emptied");
+        assert!(
+            st.at(cs).cap.is_empty(),
+            "destroy_channel: every ring cap slot emptied"
+        );
     }
-    assert_eq!(st.refs, expect_refs, "destroy_channel: each binding's notif ref released once");
-    assert!(count_nonempty_exec(st) <= c0, "destroy_channel: count_nonempty non-increase (§6a)");
+    assert_eq!(
+        st.refs, expect_refs,
+        "destroy_channel: each binding's notif ref released once"
+    );
+    assert!(
+        count_nonempty_exec(st) <= c0,
+        "destroy_channel: count_nonempty non-increase (§6a)"
+    );
     if sound0 {
-        assert!(refcount_sound_exec(st), "destroy_channel post: refcount_sound preserved (§6a)");
+        assert!(
+            refcount_sound_exec(st),
+            "destroy_channel post: refcount_sound preserved (§6a)"
+        );
     }
     if consistent0 {
-        assert!(caps_consistent_exec(st), "destroy_channel post: caps_consistent preserved (§6d)");
+        assert!(
+            caps_consistent_exec(st),
+            "destroy_channel post: caps_consistent preserved (§6d)"
+        );
     }
     if end_caps0 {
-        assert!(end_caps_sound_exec(st), "destroy_channel post: end_caps_sound preserved (§6d)");
+        assert!(
+            end_caps_sound_exec(st),
+            "destroy_channel post: end_caps_sound preserved (§6d)"
+        );
     }
 }
 
@@ -1307,7 +1586,10 @@ fn check_destroy_channel(st: &mut ArrayStore, ch: ObjId) {
 // delete just decrements (no `destroy_notif`), isolating the frame.
 fn check_delete_notif(st: &mut ArrayStore, slot: SlotId, n: ObjId) {
     assert!(cspace_wf_exec(st), "delete_notif pre: cspace_wf");
-    assert!(matches!(st.at(slot).cap.kind, CapKind::Notification(_)), "delete_notif pre: notif cap");
+    assert!(
+        matches!(st.at(slot).cap.kind, CapKind::Notification(_)),
+        "delete_notif pre: notif cap"
+    );
     let (n0, c0) = (st.n(), count_nonempty_exec(st));
     let fp = fingerprint(st);
     let tcbs0 = st.tcbs.clone();
@@ -1322,13 +1604,22 @@ fn check_delete_notif(st: &mut ArrayStore, slot: SlotId, n: ObjId) {
     // base `delete` contract
     assert!(cspace_wf_exec(st), "delete_notif post: cspace_wf preserved");
     assert_eq!(st.n(), n0, "delete_notif post: dom preserved");
-    assert!(st.at(slot).cap.is_empty(), "delete_notif post: target slot emptied");
-    assert!(count_nonempty_exec(st) < c0, "delete_notif post: count_nonempty drops");
+    assert!(
+        st.at(slot).cap.is_empty(),
+        "delete_notif post: target slot emptied"
+    );
+    assert!(
+        count_nonempty_exec(st) < c0,
+        "delete_notif post: count_nonempty drops"
+    );
     // the conditional-notification object-view frame
     assert!(st.tcbs == tcbs0, "delete_notif: tcb_view unchanged");
     assert!(st.chans == chans0, "delete_notif: chan_view unchanged");
     assert!(st.timers == timers0, "delete_notif: timer_view unchanged");
-    assert!(st.timer_armed_head == head0, "delete_notif: timer_head_view unchanged");
+    assert!(
+        st.timer_armed_head == head0,
+        "delete_notif: timer_head_view unchanged"
+    );
     assert!(st.notifs == notifs0, "delete_notif: notif_view unchanged");
     // every *other* slot is untouched (a notif delete re-parents nothing — it is a leaf).
     let fp_after = fingerprint(st);
@@ -1348,7 +1639,13 @@ fn check_delete_notif(st: &mut ArrayStore, slot: SlotId, n: ObjId) {
 // the moved cap (or empty on a `None` src) with `src` emptied; and the refs delta —
 // the displaced notification released (`-1`), the moved-in cap net-zero (a move, not a
 // copy, unlike `channel::bind`'s `+1`). The TCB analog of `check_bind`.
-fn check_thread_bind(st: &mut ArrayStore, t: ObjId, which: usize, notif_src: Option<SlotId>, bits: u64) {
+fn check_thread_bind(
+    st: &mut ArrayStore,
+    t: ObjId,
+    which: usize,
+    notif_src: Option<SlotId>,
+    bits: u64,
+) {
     assert!(cspace_wf_exec(st), "thread_bind pre: cspace_wf");
     let slot = st.tcbs[&t.0].bind_slots[which];
     let old_displaced = match st.at(slot).cap.kind {
@@ -1364,21 +1661,36 @@ fn check_thread_bind(st: &mut ArrayStore, t: ObjId, which: usize, notif_src: Opt
     // tcb_view: only bind_bits[which] changed.
     let mut expect_tcbs = tcbs0.clone();
     expect_tcbs.get_mut(&t.0).unwrap().bind_bits[which] = bits;
-    assert!(st.tcbs == expect_tcbs, "thread_bind: only bind_bits[which] changed in tcb_view");
+    assert!(
+        st.tcbs == expect_tcbs,
+        "thread_bind: only bind_bits[which] changed in tcb_view"
+    );
     // slot effect.
     match notif_src {
         Some(src) => {
-            assert!(!st.at(slot).cap.is_empty(), "thread_bind: moved cap now in the bind slot");
-            assert!(st.at(src).cap.is_empty(), "thread_bind: src emptied by the move");
+            assert!(
+                !st.at(slot).cap.is_empty(),
+                "thread_bind: moved cap now in the bind slot"
+            );
+            assert!(
+                st.at(src).cap.is_empty(),
+                "thread_bind: src emptied by the move"
+            );
         }
-        None => assert!(st.at(slot).cap.is_empty(), "thread_bind: unbind leaves the bind slot empty"),
+        None => assert!(
+            st.at(slot).cap.is_empty(),
+            "thread_bind: unbind leaves the bind slot empty"
+        ),
     }
     // refs delta: displaced notif -1; the moved cap is net-zero.
     let mut expect_refs = refs0.clone();
     if let Some(no) = old_displaced {
         *expect_refs.get_mut(&no.0).unwrap() -= 1;
     }
-    assert_eq!(st.refs, expect_refs, "thread_bind: displaced notif -1, move net-zero");
+    assert_eq!(
+        st.refs, expect_refs,
+        "thread_bind: displaced notif -1, move net-zero"
+    );
 }
 
 // `arm`'s ensures against the real body: `timer_wf` preserved; slot/chan/notif/
@@ -1407,12 +1719,18 @@ fn check_arm(st: &mut ArrayStore, t: ObjId, notif: ObjId, bits: u64, deadline: u
     assert!(st.chans == chans, "arm post: chan_view unchanged");
     assert!(st.notifs == notifs, "arm post: notif_view unchanged");
     assert!(st.tcbs == tcbs, "arm post: tcb_view unchanged");
-    assert_eq!(st.refs, expect_refs, "arm: net ref delta (re-arm -1, arm +1)");
+    assert_eq!(
+        st.refs, expect_refs,
+        "arm: net ref delta (re-arm -1, arm +1)"
+    );
     assert!(st.timers[&t.0].armed, "arm: t armed");
     assert!(st.timers[&t.0].notif == Some(notif), "arm: bound to notif");
     assert_eq!(st.timers[&t.0].deadline, deadline, "arm: deadline set");
     assert_eq!(st.timers[&t.0].bits, bits, "arm: bits set");
-    assert!(st.timer_armed_head == Some(t), "arm: pushed onto the list head");
+    assert!(
+        st.timer_armed_head == Some(t),
+        "arm: pushed onto the list head"
+    );
 }
 
 // `disarm`'s ensures against the real body: `timer_wf` preserved; the views
@@ -1440,7 +1758,10 @@ fn check_disarm(st: &mut ArrayStore, t: ObjId) {
     assert!(st.chans == chans, "disarm post: chan_view unchanged");
     assert!(st.notifs == notifs, "disarm post: notif_view unchanged");
     assert!(st.tcbs == tcbs, "disarm post: tcb_view unchanged");
-    assert_eq!(st.refs, expect_refs, "disarm: released the timer's ref iff it was armed");
+    assert_eq!(
+        st.refs, expect_refs,
+        "disarm: released the timer's ref iff it was armed"
+    );
     assert!(!st.timers[&t.0].armed, "disarm: t unarmed");
     assert!(st.timers[&t.0].notif.is_none(), "disarm: notif cleared");
     assert!(st.timers[&t.0].next.is_none(), "disarm: next cleared");
@@ -1468,11 +1789,17 @@ fn check_check_expired(st: &mut ArrayStore, now: u64) {
     let chans = st.chans.clone();
     check_expired(st, now);
     assert!(timer_wf_exec(st), "check_expired post: timer_wf preserved");
-    assert!(fingerprint(st) == fp, "check_expired post: slot_view unchanged");
+    assert!(
+        fingerprint(st) == fp,
+        "check_expired post: slot_view unchanged"
+    );
     assert!(st.chans == chans, "check_expired post: chan_view unchanged");
     let mut cur = st.timer_armed_head;
     while let Some(c) = cur {
-        assert!(st.timers[&c.0].deadline > now, "check_expired: every survivor is unexpired");
+        assert!(
+            st.timers[&c.0].deadline > now,
+            "check_expired: every survivor is unexpired"
+        );
         cur = st.timers[&c.0].next;
     }
 }
@@ -1498,27 +1825,61 @@ fn check_destroy_tcb(st: &mut ArrayStore, t: ObjId) {
     assert_only_empties(&empty0, st, "destroy_tcb post");
     assert!(cspace_wf_exec(st), "destroy_tcb post: cspace_wf preserved");
     // residency is immutable across teardown (the frame obj_unref's Thread arm reads).
-    assert!(st.cspaces == resid0, "destroy_tcb post: cspace residency unchanged");
+    assert!(
+        st.cspaces == resid0,
+        "destroy_tcb post: cspace residency unchanged"
+    );
     // the channel skeleton is immutable — `destroy_tcb` touches no channel layout
     // (it deletes notification bind caps and unrefs cspace/aspace), so `chan_struct_frame`
     // (the ensures the Thread-arm `obj_unref` reads) holds. The real body leaves `chans`
     // wholly unchanged, which implies it.
-    assert!(st.chans == chans0, "destroy_tcb post: channel state (skeleton) unchanged");
+    assert!(
+        st.chans == chans0,
+        "destroy_tcb post: channel state (skeleton) unchanged"
+    );
     assert_eq!(st.n(), n, "destroy_tcb: arena extent unchanged");
-    assert_eq!(st.tcbs[&t.0].state, ThreadState::Halted, "destroy_tcb: t halted");
-    assert!(st.tcbs[&t.0].qnext.is_none(), "destroy_tcb: queue link cleared");
-    assert_eq!(st.tcbs[&t.0].report, report0, "destroy_tcb: report unchanged");
-    assert!(st.at(s0).cap.is_empty(), "destroy_tcb: EXIT bind slot emptied");
-    assert!(st.at(s1).cap.is_empty(), "destroy_tcb: FAULT bind slot emptied");
-    assert!(count_nonempty_exec(st) <= c0, "destroy_tcb: count_nonempty non-increase (§6a)");
+    assert_eq!(
+        st.tcbs[&t.0].state,
+        ThreadState::Halted,
+        "destroy_tcb: t halted"
+    );
+    assert!(
+        st.tcbs[&t.0].qnext.is_none(),
+        "destroy_tcb: queue link cleared"
+    );
+    assert_eq!(
+        st.tcbs[&t.0].report, report0,
+        "destroy_tcb: report unchanged"
+    );
+    assert!(
+        st.at(s0).cap.is_empty(),
+        "destroy_tcb: EXIT bind slot emptied"
+    );
+    assert!(
+        st.at(s1).cap.is_empty(),
+        "destroy_tcb: FAULT bind slot emptied"
+    );
+    assert!(
+        count_nonempty_exec(st) <= c0,
+        "destroy_tcb: count_nonempty non-increase (§6a)"
+    );
     if sound0 {
-        assert!(refcount_sound_exec(st), "destroy_tcb post: refcount_sound preserved (§6a)");
+        assert!(
+            refcount_sound_exec(st),
+            "destroy_tcb post: refcount_sound preserved (§6a)"
+        );
     }
     if consistent0 {
-        assert!(caps_consistent_exec(st), "destroy_tcb post: caps_consistent preserved (§6d)");
+        assert!(
+            caps_consistent_exec(st),
+            "destroy_tcb post: caps_consistent preserved (§6d)"
+        );
     }
     if end_caps0 {
-        assert!(end_caps_sound_exec(st), "destroy_tcb post: end_caps_sound preserved (§6d)");
+        assert!(
+            end_caps_sound_exec(st),
+            "destroy_tcb post: end_caps_sound preserved (§6d)"
+        );
     }
 }
 
@@ -1526,7 +1887,11 @@ fn check_destroy_tcb(st: &mut ArrayStore, t: ObjId) {
 // `with_binding`, slot `1+which` holds a notification cap (ObjId 100, bits 0b101) the
 // thread's death will fire; with `with_waiter`, a separate thread (ObjId 201) is
 // blocked on that notification (holding a queued ref) so the fire takes the wake path.
-fn report_terminal_fixture(which: usize, with_binding: bool, with_waiter: bool) -> (ArrayStore, ObjId) {
+fn report_terminal_fixture(
+    which: usize,
+    with_binding: bool,
+    with_waiter: bool,
+) -> (ArrayStore, ObjId) {
     let mut st = ArrayStore::new(4);
     let t = ObjId(200);
     let mut tcb = TcbState {
@@ -1542,12 +1907,30 @@ fn report_terminal_fixture(which: usize, with_binding: bool, with_waiter: bool) 
             let w = ObjId(201);
             st.tcbs.insert(
                 201,
-                TcbState { state: ThreadState::BlockedNotif, wait_notif: Some(ObjId(100)), ..tcb_state_default() },
+                TcbState {
+                    state: ThreadState::BlockedNotif,
+                    wait_notif: Some(ObjId(100)),
+                    ..tcb_state_default()
+                },
             );
-            st.notifs.insert(100, NotifState { word: 0, wait_head: Some(w), wait_tail: Some(w) });
+            st.notifs.insert(
+                100,
+                NotifState {
+                    word: 0,
+                    wait_head: Some(w),
+                    wait_tail: Some(w),
+                },
+            );
             st.refs.insert(100, 2); // the bind cap's ref + the queued waiter's ref
         } else {
-            st.notifs.insert(100, NotifState { word: 0, wait_head: None, wait_tail: None });
+            st.notifs.insert(
+                100,
+                NotifState {
+                    word: 0,
+                    wait_head: None,
+                    wait_tail: None,
+                },
+            );
             st.refs.insert(100, 1); // the bind cap's ref
         }
     }
@@ -1573,8 +1956,16 @@ fn delete_non_leaf_reparents() {
     // re-parenting case inside delete).
     let target = (0..st.n())
         .map(|i| SlotId(i as u64))
-        .find(|s| !st.at(*s).cap.is_empty() && st.at(*s).first_child.is_some() && st.at(*s).parent.is_some())
-        .or_else(|| (0..st.n()).map(|i| SlotId(i as u64)).find(|s| st.at(*s).first_child.is_some()))
+        .find(|s| {
+            !st.at(*s).cap.is_empty()
+                && st.at(*s).first_child.is_some()
+                && st.at(*s).parent.is_some()
+        })
+        .or_else(|| {
+            (0..st.n())
+                .map(|i| SlotId(i as u64))
+                .find(|s| st.at(*s).first_child.is_some())
+        })
         .expect("a non-leaf node");
     check_delete(&mut st, target);
 }
@@ -1590,12 +1981,35 @@ fn delete_notif_frame() {
     st.slots[1] = detached(notif_cap(100)); // the notification cap to delete
     st.slots[2] = detached(frame_cap(2)); // another unrelated cap
     st.refs.insert(100, 2);
-    st.notifs.insert(100, NotifState { word: 7, wait_head: None, wait_tail: None });
+    st.notifs.insert(
+        100,
+        NotifState {
+            word: 7,
+            wait_head: None,
+            wait_tail: None,
+        },
+    );
     // a second notification + a TCB + a timer, present only to witness the frame.
-    st.notifs.insert(101, NotifState { word: 0, wait_head: None, wait_tail: None });
+    st.notifs.insert(
+        101,
+        NotifState {
+            word: 0,
+            wait_head: None,
+            wait_tail: None,
+        },
+    );
     st.refs.insert(101, 1);
     st.tcbs.insert(200, tcb_state_default());
-    st.timers.insert(300, TimerState { armed: false, deadline: 0, notif: None, bits: 0, next: None });
+    st.timers.insert(
+        300,
+        TimerState {
+            armed: false,
+            deadline: 0,
+            notif: None,
+            bits: 0,
+            next: None,
+        },
+    );
     check_delete_notif(&mut st, SlotId(1), ObjId(100));
 }
 
@@ -1610,14 +2024,37 @@ fn thread_bind_install_rebind_unbind() {
     st.slots[4] = detached(notif_cap(101));
     st.refs.insert(100, 1);
     st.refs.insert(101, 1);
-    st.notifs.insert(100, NotifState { word: 0, wait_head: None, wait_tail: None });
-    st.notifs.insert(101, NotifState { word: 0, wait_head: None, wait_tail: None });
+    st.notifs.insert(
+        100,
+        NotifState {
+            word: 0,
+            wait_head: None,
+            wait_tail: None,
+        },
+    );
+    st.notifs.insert(
+        101,
+        NotifState {
+            word: 0,
+            wait_head: None,
+            wait_tail: None,
+        },
+    );
     let t = ObjId(200);
-    st.tcbs.insert(200, TcbState { bind_slots: [SlotId(1), SlotId(2)], ..tcb_state_default() });
+    st.tcbs.insert(
+        200,
+        TcbState {
+            bind_slots: [SlotId(1), SlotId(2)],
+            ..tcb_state_default()
+        },
+    );
 
     // install onto the unbound EXIT slot: move notif 100 (slot 3) into bind slot 1.
     check_thread_bind(&mut st, t, BIND_EXIT, Some(SlotId(3)), 0b1);
-    assert_eq!(st.refs[&100], 1, "a move keeps the cap's ref (move, not copy — no +1)");
+    assert_eq!(
+        st.refs[&100], 1,
+        "a move keeps the cap's ref (move, not copy — no +1)"
+    );
     assert!(st.at(SlotId(3)).cap.is_empty(), "src slot emptied");
 
     // rebind EXIT to a different notif (slot 4): old notif 100 released, 101 moved in.
@@ -1628,7 +2065,10 @@ fn thread_bind_install_rebind_unbind() {
     // unbind EXIT (None src): displaced notif 101 released, the bind slot empties.
     check_thread_bind(&mut st, t, BIND_EXIT, None, 0);
     assert_eq!(st.refs[&101], 0, "unbind released the displaced notif");
-    assert!(st.at(SlotId(1)).cap.is_empty(), "unbind leaves the bind slot empty");
+    assert!(
+        st.at(SlotId(1)).cap.is_empty(),
+        "unbind leaves the bind slot empty"
+    );
 }
 
 #[test]
@@ -1639,16 +2079,34 @@ fn report_terminal_first_call_wins_and_fires() {
     let (mut st, t) = report_terminal_fixture(BIND_EXIT, true, true);
     let w = ObjId(201);
     report_terminal(&mut st, t, Report::Exited(42));
-    assert_eq!(st.tcbs[&t.0].report, Report::Exited(42), "first call records the report");
-    assert_eq!(st.tcbs[&w.0].state, ThreadState::Runnable, "the bound waiter was woken (binding fired)");
-    assert_eq!(st.tcbs[&w.0].retval, 0b101, "the waiter received the binding bits");
+    assert_eq!(
+        st.tcbs[&t.0].report,
+        Report::Exited(42),
+        "first call records the report"
+    );
+    assert_eq!(
+        st.tcbs[&w.0].state,
+        ThreadState::Runnable,
+        "the bound waiter was woken (binding fired)"
+    );
+    assert_eq!(
+        st.tcbs[&w.0].retval, 0b101,
+        "the waiter received the binding bits"
+    );
     assert_eq!(st.refs[&100], 1, "the woken waiter's queued ref released");
 
     let refs_before = st.refs.clone();
     let tcbs_before = st.tcbs.clone();
     report_terminal(&mut st, t, Report::Exited(99));
-    assert_eq!(st.tcbs[&t.0].report, Report::Exited(42), "second call no-op: report unchanged (absorbing)");
-    assert!(st.refs == refs_before && st.tcbs == tcbs_before, "second call touches nothing");
+    assert_eq!(
+        st.tcbs[&t.0].report,
+        Report::Exited(42),
+        "second call no-op: report unchanged (absorbing)"
+    );
+    assert!(
+        st.refs == refs_before && st.tcbs == tcbs_before,
+        "second call touches nothing"
+    );
 }
 
 #[test]
@@ -1656,9 +2114,23 @@ fn report_terminal_fault_arm_fires_fault_binding() {
     // A Faulted report fires the FAULT binding (BIND_FAULT), not EXIT.
     let (mut st, t) = report_terminal_fixture(BIND_FAULT, true, true);
     let w = ObjId(201);
-    report_terminal(&mut st, t, Report::Faulted { cause: 0x96, far: 0xdead_0000 });
-    assert!(matches!(st.tcbs[&t.0].report, Report::Faulted { .. }), "fault recorded");
-    assert_eq!(st.tcbs[&w.0].state, ThreadState::Runnable, "the FAULT binding fired");
+    report_terminal(
+        &mut st,
+        t,
+        Report::Faulted {
+            cause: 0x96,
+            far: 0xdead_0000,
+        },
+    );
+    assert!(
+        matches!(st.tcbs[&t.0].report, Report::Faulted { .. }),
+        "fault recorded"
+    );
+    assert_eq!(
+        st.tcbs[&w.0].state,
+        ThreadState::Runnable,
+        "the FAULT binding fired"
+    );
 }
 
 #[test]
@@ -1667,7 +2139,10 @@ fn report_terminal_accumulate_no_waiter() {
     let (mut st, t) = report_terminal_fixture(BIND_EXIT, true, false);
     report_terminal(&mut st, t, Report::Exited(7));
     assert_eq!(st.tcbs[&t.0].report, Report::Exited(7), "report recorded");
-    assert_eq!(st.notifs[&100].word, 0b101, "no waiter: the binding bits accumulate in the word");
+    assert_eq!(
+        st.notifs[&100].word, 0b101,
+        "no waiter: the binding bits accumulate in the word"
+    );
 }
 
 #[test]
@@ -1676,7 +2151,11 @@ fn report_terminal_firesafe_empty_slot() {
     // is a no-op, no panic, and the report still records.
     let (mut st, t) = report_terminal_fixture(BIND_EXIT, false, false);
     report_terminal(&mut st, t, Report::Exited(5));
-    assert_eq!(st.tcbs[&t.0].report, Report::Exited(5), "report recorded even with an empty bind slot");
+    assert_eq!(
+        st.tcbs[&t.0].report,
+        Report::Exited(5),
+        "report recorded even with an empty bind slot"
+    );
 }
 
 #[test]
@@ -1684,7 +2163,7 @@ fn cdt_unlink_middle_sibling() {
     // Three siblings under one parent; unlink the middle one.
     let mut st = ArrayStore::new(4);
     st.slots[0] = detached(frame_cap(0)); // parent (root)
-    // children c1=1, c2=2, c3=3 as 0's first_child chain
+                                          // children c1=1, c2=2, c3=3 as 0's first_child chain
     derive(&mut st, SlotId(0), SlotId(3), 0xff, 0xFF).unwrap(); // 0.first_child = 3
     derive(&mut st, SlotId(0), SlotId(2), 0xff, 0xFF).unwrap(); // 0.first_child = 2, 2.next = 3
     derive(&mut st, SlotId(0), SlotId(1), 0xff, 0xFF).unwrap(); // 0.first_child = 1, 1.next = 2
@@ -1706,8 +2185,14 @@ fn derive_preserves_thread_priority_ceiling() {
     match (st.at(SlotId(0)).cap.kind, st.at(SlotId(1)).cap.kind) {
         (CapKind::Thread(po, pmp), CapKind::Thread(co, cmp)) => {
             assert!(co.0 == po.0, "derived thread cap designates the same TCB");
-            assert_eq!(cmp, pmp, "ceiling preserved across derivation (no-reduction sentinel)");
-            assert!(cmp <= pmp, "rev1§5.4 ceiling attenuates monotonically (child <= parent)");
+            assert_eq!(
+                cmp, pmp,
+                "ceiling preserved across derivation (no-reduction sentinel)"
+            );
+            assert!(
+                cmp <= pmp,
+                "rev1§5.4 ceiling attenuates monotonically (child <= parent)"
+            );
         }
         _ => panic!("derived cap is not a thread cap"),
     }
@@ -1729,7 +2214,10 @@ fn derive_attenuates_thread_priority_ceiling() {
             assert!(co.0 == po.0, "derived thread cap designates the same TCB");
             assert_eq!(pmp, 19, "parent ceiling unchanged by the copy");
             assert_eq!(cmp, 5, "child ceiling = min(parent, prio_ceiling) = 5");
-            assert!(cmp <= pmp, "rev1§5.4 ceiling still monotone (child <= parent)");
+            assert!(
+                cmp <= pmp,
+                "rev1§5.4 ceiling still monotone (child <= parent)"
+            );
         }
         _ => panic!("derived cap is not a thread cap"),
     }
@@ -1788,13 +2276,31 @@ fn retype_check_arms() {
     // DestOccupied: dst slot is occupied.
     check_retype_check(&mut st, SlotId(0), ObjType::Frame, SlotId(2), None);
     // Channel Ok: two distinct empty dsts.
-    check_retype_check(&mut st, SlotId(0), ObjType::Channel, SlotId(1), Some(SlotId(3)));
+    check_retype_check(
+        &mut st,
+        SlotId(0),
+        ObjType::Channel,
+        SlotId(1),
+        Some(SlotId(3)),
+    );
     // Channel DestOccupied: dst2 missing.
     check_retype_check(&mut st, SlotId(0), ObjType::Channel, SlotId(1), None);
     // Channel DestOccupied: dst2 aliases dst.
-    check_retype_check(&mut st, SlotId(0), ObjType::Channel, SlotId(1), Some(SlotId(1)));
+    check_retype_check(
+        &mut st,
+        SlotId(0),
+        ObjType::Channel,
+        SlotId(1),
+        Some(SlotId(1)),
+    );
     // Channel DestOccupied: dst2 occupied.
-    check_retype_check(&mut st, SlotId(0), ObjType::Channel, SlotId(1), Some(SlotId(2)));
+    check_retype_check(
+        &mut st,
+        SlotId(0),
+        ObjType::Channel,
+        SlotId(1),
+        Some(SlotId(2)),
+    );
 }
 
 #[test]
@@ -1837,7 +2343,11 @@ fn retype_install_arms() {
         &mut st,
         SlotId(0),
         ObjType::Frame,
-        CapKind::Frame { base: 0x2000, pages: 1, mapping: None },
+        CapKind::Frame {
+            base: 0x2000,
+            pages: 1,
+            mapping: None,
+        },
         0x5000,
         SlotId(1),
         None,
@@ -1867,7 +2377,11 @@ fn retype_install_arms() {
         &mut st,
         SlotId(0),
         ObjType::Untyped,
-        CapKind::Untyped { base: 0x2000, size: 0x1000, watermark: 0 },
+        CapKind::Untyped {
+            base: 0x2000,
+            size: 0x1000,
+            watermark: 0,
+        },
         0x3000,
         SlotId(1),
         None,
@@ -1965,11 +2479,17 @@ fn delete_refcount_above_one_does_not_destroy() {
     st.cspaces.insert(10, vec![SlotId(2)]);
     check_delete(&mut st, SlotId(0));
     assert_eq!(st.refs[&10], 1, "refcount decremented, not destroyed");
-    assert!(!st.at(SlotId(2)).cap.is_empty(), "resident survives (object still live)");
+    assert!(
+        !st.at(SlotId(2)).cap.is_empty(),
+        "resident survives (object still live)"
+    );
     // Now drop the second cap: refcount hits zero and the resident is reclaimed.
     check_delete(&mut st, SlotId(1));
     assert_eq!(st.refs[&10], 0);
-    assert!(st.at(SlotId(2)).cap.is_empty(), "resident reclaimed at last ref");
+    assert!(
+        st.at(SlotId(2)).cap.is_empty(),
+        "resident reclaimed at last ref"
+    );
 }
 
 #[test]
@@ -1997,7 +2517,10 @@ fn checker_has_teeth() {
     let st = mk(&|st| {
         st.slots[0].next_sib = Some(SlotId(1));
     });
-    assert!(!cspace_wf_exec(&st), "half-linked siblings must be rejected");
+    assert!(
+        !cspace_wf_exec(&st),
+        "half-linked siblings must be rejected"
+    );
     // phantom child: names a parent that has no first_child (parent_has_first_child)
     let st = mk(&|st| {
         st.slots[1].parent = Some(SlotId(0));
@@ -2010,7 +2533,13 @@ fn checker_has_teeth() {
         let mut st = ArrayStore::new(3);
         st.slots[0] = detached(frame_cap(0));
         st.slots[0].first_child = Some(SlotId(2)); // a real head, so the ring is "floating"
-        st.slots[2] = CapSlot { cap: frame_cap(2), parent: Some(SlotId(0)), first_child: None, next_sib: None, prev_sib: None };
+        st.slots[2] = CapSlot {
+            cap: frame_cap(2),
+            parent: Some(SlotId(0)),
+            first_child: None,
+            next_sib: None,
+            prev_sib: None,
+        };
         st.slots[1] = detached(frame_cap(1));
         // ring: 1.next=1 self-loop, consistent prev, parented but not the head
         st.slots[1].parent = Some(SlotId(0));
@@ -2018,7 +2547,10 @@ fn checker_has_teeth() {
         st.slots[1].prev_sib = Some(SlotId(1));
         st
     };
-    assert!(!no_cycle(&st, |s| s.next_sib), "sibling self-loop must be a cycle");
+    assert!(
+        !no_cycle(&st, |s| s.next_sib),
+        "sibling self-loop must be a cycle"
+    );
     // sanity: a well-formed two-node parent/child passes
     let st = mk(&|st| {
         st.slots[0].first_child = Some(SlotId(1));
@@ -2040,8 +2572,10 @@ fn randomized_sweep() {
         // delete
         {
             let mut st = gen_forest(seed.wrapping_mul(3).wrapping_add(1), n, edges);
-            let live: Vec<SlotId> =
-                (0..st.n()).map(|i| SlotId(i as u64)).filter(|s| !st.at(*s).cap.is_empty()).collect();
+            let live: Vec<SlotId> = (0..st.n())
+                .map(|i| SlotId(i as u64))
+                .filter(|s| !st.at(*s).cap.is_empty())
+                .collect();
             let pick = live[(seed as usize) % live.len()];
             check_delete(&mut st, pick);
             trials += 1;
@@ -2049,8 +2583,10 @@ fn randomized_sweep() {
         // cdt_unlink
         {
             let mut st = gen_forest(seed.wrapping_mul(5).wrapping_add(2), n, edges);
-            let live: Vec<SlotId> =
-                (0..st.n()).map(|i| SlotId(i as u64)).filter(|s| !st.at(*s).cap.is_empty()).collect();
+            let live: Vec<SlotId> = (0..st.n())
+                .map(|i| SlotId(i as u64))
+                .filter(|s| !st.at(*s).cap.is_empty())
+                .collect();
             let pick = live[(seed as usize * 7) % live.len()];
             check_cdt_unlink(&mut st, pick);
             trials += 1;
@@ -2058,10 +2594,14 @@ fn randomized_sweep() {
         // slot_move
         {
             let mut st = gen_forest(seed.wrapping_mul(7).wrapping_add(3), n, edges);
-            let live: Vec<SlotId> =
-                (0..st.n()).map(|i| SlotId(i as u64)).filter(|s| !st.at(*s).cap.is_empty()).collect();
-            let free: Vec<SlotId> =
-                (0..st.n()).map(|i| SlotId(i as u64)).filter(|s| st.at(*s).cap.is_empty()).collect();
+            let live: Vec<SlotId> = (0..st.n())
+                .map(|i| SlotId(i as u64))
+                .filter(|s| !st.at(*s).cap.is_empty())
+                .collect();
+            let free: Vec<SlotId> = (0..st.n())
+                .map(|i| SlotId(i as u64))
+                .filter(|s| st.at(*s).cap.is_empty())
+                .collect();
             if !free.is_empty() {
                 let src = live[(seed as usize * 11) % live.len()];
                 let dst = free[(seed as usize) % free.len()];
@@ -2070,7 +2610,10 @@ fn randomized_sweep() {
             }
         }
     }
-    assert!(trials > 500, "sweep should exercise hundreds of trials, ran {trials}");
+    assert!(
+        trials > 500,
+        "sweep should exercise hundreds of trials, ran {trials}"
+    );
 }
 
 // ── Channel ghost view ─────────────────────────────────────────────────────
@@ -2083,20 +2626,33 @@ fn signal_frame() {
 
     // No-waiter: the bits accumulate in the word; nothing else moves.
     let (mut st, n) = signal_fixture(false);
-    assert!(chan_wf_exec(&st, ObjId(7)), "fixture channel is well-formed");
+    assert!(
+        chan_wf_exec(&st, ObjId(7)),
+        "fixture channel is well-formed"
+    );
     check_signal_frame(&mut st, n, 0b101);
-    assert_eq!(st.notifs[&100].word, 0b101, "no-waiter signal accumulated the bits");
+    assert_eq!(
+        st.notifs[&100].word, 0b101,
+        "no-waiter signal accumulated the bits"
+    );
 
     // One waiter: the whole word is delivered, cleared, and the queued ref freed
     // — all OUTSIDE the slot/chan frame the contract pins.
     let (mut st, n) = signal_fixture(true);
     check_signal_frame(&mut st, n, 0b110);
     assert_eq!(st.notifs[&100].word, 0, "delivered word cleared");
-    assert_eq!(st.tcbs[&200].retval, 0b110, "waiter received the whole word");
+    assert_eq!(
+        st.tcbs[&200].retval, 0b110,
+        "waiter received the whole word"
+    );
     assert!(st.notifs[&100].wait_head.is_none(), "waiter dequeued");
     assert_eq!(st.refs[&100], 0, "waiter's queued ref released");
     // The `make_runnable` contract, host-checked: the woken thread is Runnable.
-    assert_eq!(st.tcbs[&200].state, ThreadState::Runnable, "woken waiter made Runnable");
+    assert_eq!(
+        st.tcbs[&200].state,
+        ThreadState::Runnable,
+        "woken waiter made Runnable"
+    );
 }
 
 #[test]
@@ -2106,7 +2662,10 @@ fn chan_wf_exec_has_teeth() {
     // one clause; the windowing coupling (out-of-window slot non-empty) is the
     // load-bearing clause.
     let ch = ObjId(7);
-    assert!(chan_wf_exec(&signal_fixture(false).0, ch), "a well-formed channel must be accepted");
+    assert!(
+        chan_wf_exec(&signal_fixture(false).0, ch),
+        "a well-formed channel must be accepted"
+    );
 
     let mut st = signal_fixture(false).0;
     st.chans.get_mut(&7).unwrap().count[1] = 2;
@@ -2124,24 +2683,47 @@ fn chan_wf_exec_has_teeth() {
     // must be empty; make it non-empty.
     let mut st = signal_fixture(false).0;
     st.slots[5] = detached(frame_cap(5));
-    assert!(!chan_wf_exec(&st, ch), "out-of-window non-empty ring cap must be rejected");
+    assert!(
+        !chan_wf_exec(&st, ch),
+        "out-of-window non-empty ring cap must be rejected"
+    );
 
     let mut st = signal_fixture(false).0;
-    st.chans.get_mut(&7).unwrap().ring_cap.insert((1, 0, 0), SlotId(999));
-    assert!(!chan_wf_exec(&st, ch), "ring cap handle outside the arena must be rejected");
+    st.chans
+        .get_mut(&7)
+        .unwrap()
+        .ring_cap
+        .insert((1, 0, 0), SlotId(999));
+    assert!(
+        !chan_wf_exec(&st, ch),
+        "ring cap handle outside the arena must be rejected"
+    );
 
     // Injectivity: (1,0,1) aliases (1,0,0)'s slot 5. Both ring-1 caps are
     // out-of-window and slot 5 is empty, so the windowing clause is satisfied —
     // only the injectivity clause rejects this.
     let mut st = signal_fixture(false).0;
-    st.chans.get_mut(&7).unwrap().ring_cap.insert((1, 0, 1), SlotId(5));
-    assert!(!chan_wf_exec(&st, ch), "two ring positions aliasing one slot must be rejected");
+    st.chans
+        .get_mut(&7)
+        .unwrap()
+        .ring_cap
+        .insert((1, 0, 1), SlotId(5));
+    assert!(
+        !chan_wf_exec(&st, ch),
+        "two ring positions aliasing one slot must be rejected"
+    );
 
     let mut st = signal_fixture(false).0;
     st.chans.get_mut(&7).unwrap().bindings.remove(&(1, 2));
-    assert!(!chan_wf_exec(&st, ch), "incomplete bindings domain must be rejected");
+    assert!(
+        !chan_wf_exec(&st, ch),
+        "incomplete bindings domain must be rejected"
+    );
 
-    assert!(!chan_wf_exec(&signal_fixture(false).0, ObjId(999)), "unknown channel must be rejected");
+    assert!(
+        !chan_wf_exec(&signal_fixture(false).0, ObjId(999)),
+        "unknown channel must be rejected"
+    );
 }
 
 // ── Notification waiter-queue well-formedness ───────────────────────────────
@@ -2151,14 +2733,31 @@ fn chan_wf_exec_has_teeth() {
 fn notif_fixture() -> ArrayStore {
     let mut st = ArrayStore::new(0);
     let n = ObjId(100);
-    st.notifs.insert(100, NotifState { word: 0, wait_head: Some(ObjId(200)), wait_tail: Some(ObjId(201)) });
+    st.notifs.insert(
+        100,
+        NotifState {
+            word: 0,
+            wait_head: Some(ObjId(200)),
+            wait_tail: Some(ObjId(201)),
+        },
+    );
     st.tcbs.insert(
         200,
-        TcbState { state: ThreadState::BlockedNotif, wait_notif: Some(n), qnext: Some(ObjId(201)), ..tcb_state_default() },
+        TcbState {
+            state: ThreadState::BlockedNotif,
+            wait_notif: Some(n),
+            qnext: Some(ObjId(201)),
+            ..tcb_state_default()
+        },
     );
     st.tcbs.insert(
         201,
-        TcbState { state: ThreadState::BlockedNotif, wait_notif: Some(n), qnext: None, ..tcb_state_default() },
+        TcbState {
+            state: ThreadState::BlockedNotif,
+            wait_notif: Some(n),
+            qnext: None,
+            ..tcb_state_default()
+        },
     );
     st
 }
@@ -2169,12 +2768,18 @@ fn notif_wf_exec_has_teeth() {
     // proofs rest on) is only meaningful if it rejects malformed queues. Each shape
     // violates exactly one clause; a well-formed queue is accepted.
     let n = ObjId(100);
-    assert!(notif_wf_exec(&notif_fixture(), n), "a well-formed waiter queue must be accepted");
+    assert!(
+        notif_wf_exec(&notif_fixture(), n),
+        "a well-formed waiter queue must be accepted"
+    );
 
     // empty-queue head/tail disagreement: head Some, tail None.
     let mut st = notif_fixture();
     st.notifs.get_mut(&100).unwrap().wait_tail = None;
-    assert!(!notif_wf_exec(&st, n), "head/tail disagreement must be rejected");
+    assert!(
+        !notif_wf_exec(&st, n),
+        "head/tail disagreement must be rejected"
+    );
 
     // a qnext cycle (201 → 200 → 201 …): the walk never terminates.
     let mut st = notif_fixture();
@@ -2184,24 +2789,39 @@ fn notif_wf_exec_has_teeth() {
     // a charted node naming the wrong notification.
     let mut st = notif_fixture();
     st.tcbs.get_mut(&201).unwrap().wait_notif = Some(ObjId(999));
-    assert!(!notif_wf_exec(&st, n), "a waiter naming another notification must be rejected");
+    assert!(
+        !notif_wf_exec(&st, n),
+        "a waiter naming another notification must be rejected"
+    );
 
     // a charted node not in BlockedNotif.
     let mut st = notif_fixture();
     st.tcbs.get_mut(&201).unwrap().state = ThreadState::Runnable;
-    assert!(!notif_wf_exec(&st, n), "a non-BlockedNotif waiter must be rejected");
+    assert!(
+        !notif_wf_exec(&st, n),
+        "a non-BlockedNotif waiter must be rejected"
+    );
 
     // wait_tail names a node that is not the chain's end.
     let mut st = notif_fixture();
     st.notifs.get_mut(&100).unwrap().wait_tail = Some(ObjId(200));
-    assert!(!notif_wf_exec(&st, n), "wait_tail off the chain end must be rejected");
+    assert!(
+        !notif_wf_exec(&st, n),
+        "wait_tail off the chain end must be rejected"
+    );
 
     // a charted node that is not a live TCB (201 removed, 200 still points at it).
     let mut st = notif_fixture();
     st.tcbs.remove(&201);
-    assert!(!notif_wf_exec(&st, n), "a charted node with no live TCB must be rejected");
+    assert!(
+        !notif_wf_exec(&st, n),
+        "a charted node with no live TCB must be rejected"
+    );
 
-    assert!(!notif_wf_exec(&notif_fixture(), ObjId(999)), "unknown notification must be rejected");
+    assert!(
+        !notif_wf_exec(&notif_fixture(), ObjId(999)),
+        "unknown notification must be rejected"
+    );
 }
 
 // A store exercising **all six** census terms at once, with `refs` set to each
@@ -2212,44 +2832,83 @@ fn refcount_sound_fixture() -> ArrayStore {
     let mut st = ArrayStore::new(7);
     // One designating slot cap per object (slot_refs).
     st.slots[0] = detached(cspace_cap(1));
-    st.slots[1] = detached(Cap { kind: CapKind::Aspace(ObjId(2)), rights: Rights(0xff) });
+    st.slots[1] = detached(Cap {
+        kind: CapKind::Aspace(ObjId(2)),
+        rights: Rights(0xff),
+    });
     st.slots[2] = detached(notif_cap(3));
-    st.slots[3] = detached(Cap { kind: CapKind::Timer(ObjId(4)), rights: Rights(0xff) });
-    st.slots[4] = detached(Cap { kind: CapKind::Channel(ObjId(5), ChanEnd::A), rights: Rights(0xff) });
+    st.slots[3] = detached(Cap {
+        kind: CapKind::Timer(ObjId(4)),
+        rights: Rights(0xff),
+    });
+    st.slots[4] = detached(Cap {
+        kind: CapKind::Channel(ObjId(5), ChanEnd::A),
+        rights: Rights(0xff),
+    });
     st.slots[5] = detached(thread_cap(6, 5));
     // A frame mapped into A → frame_map_refs(A) += 1.
     st.slots[6] = detached(Cap {
-        kind: CapKind::Frame { base: 0x1000, pages: 1, mapping: Some((ObjId(2), 0x4000)) },
+        kind: CapKind::Frame {
+            base: 0x1000,
+            pages: 1,
+            mapping: Some((ObjId(2), 0x4000)),
+        },
         rights: Rights(0xff),
     });
     // A channel binding (end 0, ev 0) naming N → binding_refs(N) += 1.
     let mut bindings = BTreeMap::new();
     for e in 0..2usize {
         for v in 0..3usize {
-            let notif = if (e, v) == (0, 0) { Some(ObjId(3)) } else { None };
+            let notif = if (e, v) == (0, 0) {
+                Some(ObjId(3))
+            } else {
+                None
+            };
             bindings.insert((e, v), Binding { notif, bits: 0 });
         }
     }
-    st.chans.insert(5, ChanState {
-        depth: 0,
-        end_caps: [0, 0],
-        head: [0, 0],
-        count: [0, 0],
-        bindings,
-        msg_len: BTreeMap::new(),
-        ring_cap: BTreeMap::new(),
-    });
+    st.chans.insert(
+        5,
+        ChanState {
+            depth: 0,
+            end_caps: [0, 0],
+            head: [0, 0],
+            count: [0, 0],
+            bindings,
+            msg_len: BTreeMap::new(),
+            ring_cap: BTreeMap::new(),
+        },
+    );
     // TH blocked on N (waiter_refs(N) += 1) and holding C/A (thread_hold).
-    st.notifs.insert(3, NotifState { word: 0, wait_head: Some(ObjId(6)), wait_tail: Some(ObjId(6)) });
-    st.tcbs.insert(6, TcbState {
-        state: ThreadState::BlockedNotif,
-        wait_notif: Some(ObjId(3)),
-        cspace: Some(ObjId(1)),
-        aspace: Some(ObjId(2)),
-        ..tcb_state_default()
-    });
+    st.notifs.insert(
+        3,
+        NotifState {
+            word: 0,
+            wait_head: Some(ObjId(6)),
+            wait_tail: Some(ObjId(6)),
+        },
+    );
+    st.tcbs.insert(
+        6,
+        TcbState {
+            state: ThreadState::BlockedNotif,
+            wait_notif: Some(ObjId(3)),
+            cspace: Some(ObjId(1)),
+            aspace: Some(ObjId(2)),
+            ..tcb_state_default()
+        },
+    );
     // An armed timer bound to N → armed_timer_refs(N) += 1.
-    st.timers.insert(4, TimerState { armed: true, deadline: 0, notif: Some(ObjId(3)), bits: 0, next: None });
+    st.timers.insert(
+        4,
+        TimerState {
+            armed: true,
+            deadline: 0,
+            notif: Some(ObjId(3)),
+            bits: 0,
+            next: None,
+        },
+    );
     st.timer_armed_head = Some(ObjId(4));
     // refs = census: C 1+1=2, A 1+1+1=3, N 1+1+1+1=4, T 1, CH 1, TH 1.
     for (o, r) in [(1u64, 2u32), (2, 3), (3, 4), (4, 1), (5, 1), (6, 1)] {
@@ -2265,7 +2924,10 @@ fn refcount_sound_fixture() -> ArrayStore {
 #[test]
 fn refcount_sound_exec_has_teeth() {
     let base = refcount_sound_fixture();
-    assert!(refcount_sound_exec(&base), "the all-terms fixture must be refcount_sound");
+    assert!(
+        refcount_sound_exec(&base),
+        "the all-terms fixture must be refcount_sound"
+    );
 
     // slot_refs: drop a designating cap without lowering refs.
     let mut st = base.clone();
@@ -2279,7 +2941,13 @@ fn refcount_sound_exec_has_teeth() {
 
     // binding_refs: drop the channel binding's notification.
     let mut st = base.clone();
-    st.chan_mut(ObjId(5)).bindings.insert((0, 0), Binding { notif: None, bits: 0 });
+    st.chan_mut(ObjId(5)).bindings.insert(
+        (0, 0),
+        Binding {
+            notif: None,
+            bits: 0,
+        },
+    );
     assert!(!refcount_sound_exec(&st), "teeth: binding_refs term");
 
     // waiter_refs: empty the waiter chain.
@@ -2310,30 +2978,64 @@ fn caps_consistent_fixture() -> ArrayStore {
     st.cspaces.insert(10, vec![SlotId(4), SlotId(5)]);
     // Notification(20): an empty (and so well-formed) waiter queue.
     st.slots[1] = detached(notif_cap(20));
-    st.notifs.insert(20, NotifState { word: 0, wait_head: None, wait_tail: None });
+    st.notifs.insert(
+        20,
+        NotifState {
+            word: 0,
+            wait_head: None,
+            wait_tail: None,
+        },
+    );
     // Timer(30): disarmed, so the armed chain (empty) is complete and wf.
-    st.slots[2] = detached(Cap { kind: CapKind::Timer(ObjId(30)), rights: Rights(0xff) });
-    st.timers.insert(30, TimerState { armed: false, deadline: 0, notif: None, bits: 0, next: None });
+    st.slots[2] = detached(Cap {
+        kind: CapKind::Timer(ObjId(30)),
+        rights: Rights(0xff),
+    });
+    st.timers.insert(
+        30,
+        TimerState {
+            armed: false,
+            deadline: 0,
+            notif: None,
+            bits: 0,
+            next: None,
+        },
+    );
     // Thread(40): both bind slots in-bounds.
     st.slots[3] = detached(thread_cap(40, 9));
-    st.tcbs.insert(40, TcbState { bind_slots: [SlotId(4), SlotId(5)], ..tcb_state_default() });
+    st.tcbs.insert(
+        40,
+        TcbState {
+            bind_slots: [SlotId(4), SlotId(5)],
+            ..tcb_state_default()
+        },
+    );
     st
 }
 
 #[test]
 fn caps_consistent_exec_has_teeth() {
     let base = caps_consistent_fixture();
-    assert!(caps_consistent_exec(&base), "the all-kinds fixture must be caps_consistent");
+    assert!(
+        caps_consistent_exec(&base),
+        "the all-kinds fixture must be caps_consistent"
+    );
 
     // CSpace arm: a resident handle outside the arena.
     let mut st = base.clone();
     st.cspaces.get_mut(&10).unwrap()[0] = SlotId(999);
-    assert!(!caps_consistent_exec(&st), "teeth: CSpace resident out of arena");
+    assert!(
+        !caps_consistent_exec(&st),
+        "teeth: CSpace resident out of arena"
+    );
 
     // Notification arm: a head/tail disagreement breaks `notif_wf`.
     let mut st = base.clone();
     st.notifs.get_mut(&20).unwrap().wait_head = Some(ObjId(40));
-    assert!(!caps_consistent_exec(&st), "teeth: Notification waiter-chain malformed");
+    assert!(
+        !caps_consistent_exec(&st),
+        "teeth: Notification waiter-chain malformed"
+    );
 
     // Timer arm: an armed timer absent from the (empty) armed chain breaks `timer_wf`.
     let mut st = base.clone();
@@ -2343,22 +3045,32 @@ fn caps_consistent_exec_has_teeth() {
     // Thread arm: a bind slot outside the arena.
     let mut st = base.clone();
     st.tcbs.get_mut(&40).unwrap().bind_slots[0] = SlotId(999);
-    assert!(!caps_consistent_exec(&st), "teeth: Thread bind slot out of arena");
+    assert!(
+        !caps_consistent_exec(&st),
+        "teeth: Thread bind slot out of arena"
+    );
 
     // The designating object missing entirely (CSpace cap with no cspace) also fails.
     let mut st = base.clone();
     st.cspaces.remove(&10);
-    assert!(!caps_consistent_exec(&st), "teeth: CSpace cap with no live cspace");
+    assert!(
+        !caps_consistent_exec(&st),
+        "teeth: CSpace cap with no live cspace"
+    );
 }
 
 // A minimal `end_caps_sound` fixture: channel 7 with `end_caps == [1, 1]` and exactly
 // one `Channel(7, A)` and one `Channel(7, B)` cap in the arena.
 fn end_caps_fixture() -> ArrayStore {
     let mut st = ArrayStore::new(2);
-    st.slots[0] =
-        detached(Cap { kind: CapKind::Channel(ObjId(7), ChanEnd::A), rights: Rights(0xff) });
-    st.slots[1] =
-        detached(Cap { kind: CapKind::Channel(ObjId(7), ChanEnd::B), rights: Rights(0xff) });
+    st.slots[0] = detached(Cap {
+        kind: CapKind::Channel(ObjId(7), ChanEnd::A),
+        rights: Rights(0xff),
+    });
+    st.slots[1] = detached(Cap {
+        kind: CapKind::Channel(ObjId(7), ChanEnd::B),
+        rights: Rights(0xff),
+    });
     st.chans.insert(
         7,
         ChanState {
@@ -2380,15 +3092,24 @@ fn end_caps_fixture() -> ArrayStore {
 #[test]
 fn end_caps_sound_exec_has_teeth() {
     let base = end_caps_fixture();
-    assert!(end_caps_sound_exec(&base), "the matched fixture must be end_caps_sound");
+    assert!(
+        end_caps_sound_exec(&base),
+        "the matched fixture must be end_caps_sound"
+    );
 
     let mut st = base.clone();
     st.chan_mut(ObjId(7)).end_caps[0] = 2;
-    assert!(!end_caps_sound_exec(&st), "teeth: end_caps[A] overcounts the arena");
+    assert!(
+        !end_caps_sound_exec(&st),
+        "teeth: end_caps[A] overcounts the arena"
+    );
 
     let mut st = base.clone();
     st.chan_mut(ObjId(7)).end_caps[1] = 0;
-    assert!(!end_caps_sound_exec(&st), "teeth: end_caps[B] undercounts the arena (stranding)");
+    assert!(
+        !end_caps_sound_exec(&st),
+        "teeth: end_caps[B] undercounts the arena (stranding)"
+    );
 }
 
 // ── Aspace teardown: `unref_aspace` + delete's frame-unmap branch ─────────────
@@ -2401,7 +3122,11 @@ fn mapped_frame_fixture(a: u64, nframes: usize) -> ArrayStore {
     for i in 0..nframes {
         let off = i as u64 * 0x1000;
         st.slots[i] = detached(Cap {
-            kind: CapKind::Frame { base: 0x1000 + off, pages: 1, mapping: Some((ObjId(a), 0x4000 + off)) },
+            kind: CapKind::Frame {
+                base: 0x1000 + off,
+                pages: 1,
+                mapping: Some((ObjId(a), 0x4000 + off)),
+            },
             rights: Rights(0xff),
         });
     }
@@ -2418,8 +3143,15 @@ fn delete_mapped_frame_drops_aspace_ref() {
     let mut st = mapped_frame_fixture(2, 2);
     assert!(refcount_sound_exec(&st), "fixture is refcount_sound");
     check_delete(&mut st, SlotId(0));
-    assert_eq!(st.refs[&2], 1, "delete mapped frame: aspace ref dropped, not destroyed");
-    assert_eq!(obj_census_exec(&st, ObjId(2)), 1, "delete mapped frame: census == refs preserved");
+    assert_eq!(
+        st.refs[&2], 1,
+        "delete mapped frame: aspace ref dropped, not destroyed"
+    );
+    assert_eq!(
+        obj_census_exec(&st, ObjId(2)),
+        1,
+        "delete mapped frame: census == refs preserved"
+    );
 }
 
 // Deleting the *last* mapped frame drives `unref_aspace` to zero, firing
@@ -2429,7 +3161,10 @@ fn delete_last_mapped_frame_destroys_aspace() {
     let mut st = mapped_frame_fixture(2, 1);
     assert!(refcount_sound_exec(&st), "fixture is refcount_sound");
     check_delete(&mut st, SlotId(0));
-    assert!(!st.refs.contains_key(&2), "delete last mapped frame: aspace_destroy removed A");
+    assert!(
+        !st.refs.contains_key(&2),
+        "delete last mapped frame: aspace_destroy removed A"
+    );
 }
 
 // `unref_aspace` on a non-last ref: the off-by-one state (the all-terms census fixture
@@ -2440,7 +3175,10 @@ fn unref_aspace_non_last_decrements() {
     let mut st = refcount_sound_fixture();
     *st.refs.get_mut(&2).unwrap() += 1; // refs[A] = census(A) + 1
     check_unref_aspace(&mut st, ObjId(2));
-    assert!(st.refs.contains_key(&2), "unref_aspace non-last: A still live");
+    assert!(
+        st.refs.contains_key(&2),
+        "unref_aspace non-last: A still live"
+    );
 }
 
 // `unref_aspace` on the last ref: census(A) == 0, refs[A] == 1 (the sole dangling
@@ -2461,8 +3199,12 @@ fn unref_aspace_last_ref_destroys() {
 fn cap_obj_of(cap: Cap) -> Option<ObjId> {
     match cap.kind {
         CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => None,
-        CapKind::Aspace(o) | CapKind::CSpace(o) | CapKind::Thread(o, _)
-        | CapKind::Channel(o, _) | CapKind::Notification(o) | CapKind::Timer(o) => Some(o),
+        CapKind::Aspace(o)
+        | CapKind::CSpace(o)
+        | CapKind::Thread(o, _)
+        | CapKind::Channel(o, _)
+        | CapKind::Notification(o)
+        | CapKind::Timer(o) => Some(o),
     }
 }
 
@@ -2478,21 +3220,39 @@ fn check_obj_unref(st: &mut ArrayStore, cap: Cap) {
             let fp0 = fingerprint(st);
             let refs0 = st.refs.clone();
             obj_unref(st, cap);
-            assert_eq!(fingerprint(st), fp0, "obj_unref(non-designating): slots untouched");
+            assert_eq!(
+                fingerprint(st),
+                fp0,
+                "obj_unref(non-designating): slots untouched"
+            );
             assert_eq!(st.refs, refs0, "obj_unref(non-designating): refs untouched");
         }
         Some(o) => {
             let r0 = st.refs[&o.0];
             assert!(r0 > 0, "obj_unref pre: refs[o] > 0");
-            assert_eq!(obj_census_exec(st, o) + 1, r0, "obj_unref pre: off-by-one census at o");
+            assert_eq!(
+                obj_census_exec(st, o) + 1,
+                r0,
+                "obj_unref pre: off-by-one census at o"
+            );
             for (&x, &r) in &st.refs {
                 if x != o.0 {
-                    assert_eq!(obj_census_exec(st, ObjId(x)), r, "obj_unref pre: sound at every other object");
+                    assert_eq!(
+                        obj_census_exec(st, ObjId(x)),
+                        r,
+                        "obj_unref pre: sound at every other object"
+                    );
                 }
             }
             obj_unref(st, cap);
-            assert!(refcount_sound_exec(st), "obj_unref post: refcount_sound restored");
-            assert!(count_nonempty_exec(st) <= c0, "obj_unref post: count_nonempty non-increase");
+            assert!(
+                refcount_sound_exec(st),
+                "obj_unref post: refcount_sound restored"
+            );
+            assert!(
+                count_nonempty_exec(st) <= c0,
+                "obj_unref post: count_nonempty non-increase"
+            );
         }
     }
 }
@@ -2503,16 +3263,29 @@ fn check_unref_cspace(st: &mut ArrayStore, cs: ObjId) {
     assert!(cspace_wf_exec(st), "unref_cspace pre: cspace_wf");
     let r0 = st.refs[&cs.0];
     assert!(r0 > 0, "unref_cspace pre: refs[cs] > 0");
-    assert_eq!(obj_census_exec(st, cs) + 1, r0, "unref_cspace pre: off-by-one census at cs");
+    assert_eq!(
+        obj_census_exec(st, cs) + 1,
+        r0,
+        "unref_cspace pre: off-by-one census at cs"
+    );
     let residents: Vec<SlotId> = st.cspaces[&cs.0].clone();
     let c0 = count_nonempty_exec(st);
     unref_cspace(st, cs);
     assert!(cspace_wf_exec(st), "unref_cspace post: cspace_wf preserved");
-    assert!(refcount_sound_exec(st), "unref_cspace post: refcount_sound restored");
-    assert!(count_nonempty_exec(st) <= c0, "unref_cspace post: count_nonempty non-increase");
+    assert!(
+        refcount_sound_exec(st),
+        "unref_cspace post: refcount_sound restored"
+    );
+    assert!(
+        count_nonempty_exec(st) <= c0,
+        "unref_cspace post: count_nonempty non-increase"
+    );
     if r0 == 1 {
         for sid in residents {
-            assert!(st.at(sid).cap.is_empty(), "unref_cspace last ref: every resident emptied");
+            assert!(
+                st.at(sid).cap.is_empty(),
+                "unref_cspace last ref: every resident emptied"
+            );
         }
     }
 }
@@ -2522,17 +3295,33 @@ fn check_unref_cspace(st: &mut ArrayStore, cs: ObjId) {
 // `refcount_sound` preserved, the live-slot count non-increasing.
 fn check_destroy_cspace(st: &mut ArrayStore, cs: ObjId) {
     assert!(cspace_wf_exec(st), "destroy_cspace pre: cspace_wf");
-    assert_eq!(st.refs.get(&cs.0).copied().unwrap_or(0), 0, "destroy_cspace pre: refs[cs] == 0");
+    assert_eq!(
+        st.refs.get(&cs.0).copied().unwrap_or(0),
+        0,
+        "destroy_cspace pre: refs[cs] == 0"
+    );
     let residents: Vec<SlotId> = st.cspaces[&cs.0].clone();
     let (c0, sound0) = (count_nonempty_exec(st), refcount_sound_exec(st));
     destroy_cspace(st, cs);
-    assert!(cspace_wf_exec(st), "destroy_cspace post: cspace_wf preserved");
+    assert!(
+        cspace_wf_exec(st),
+        "destroy_cspace post: cspace_wf preserved"
+    );
     for sid in residents {
-        assert!(st.at(sid).cap.is_empty(), "destroy_cspace: every resident emptied");
+        assert!(
+            st.at(sid).cap.is_empty(),
+            "destroy_cspace: every resident emptied"
+        );
     }
-    assert!(count_nonempty_exec(st) <= c0, "destroy_cspace: count_nonempty non-increase");
+    assert!(
+        count_nonempty_exec(st) <= c0,
+        "destroy_cspace: count_nonempty non-increase"
+    );
     if sound0 {
-        assert!(refcount_sound_exec(st), "destroy_cspace post: refcount_sound preserved");
+        assert!(
+            refcount_sound_exec(st),
+            "destroy_cspace post: refcount_sound preserved"
+        );
     }
 }
 
@@ -2581,10 +3370,16 @@ fn unref_cspace_non_last_decrements() {
     st.slots[1] = detached(frame_cap(0x1000)); // a resident of 10
     st.refs.insert(10, 2); // off-by-one: census(10) + 1
     st.cspaces.insert(10, vec![SlotId(1)]);
-    assert!(!refcount_sound_exec(&st), "the off-by-one state is not yet sound at 10");
+    assert!(
+        !refcount_sound_exec(&st),
+        "the off-by-one state is not yet sound at 10"
+    );
     check_unref_cspace(&mut st, ObjId(10));
     assert_eq!(st.refs[&10], 1, "unref_cspace non-last: cspace survives");
-    assert!(!st.at(SlotId(1)).cap.is_empty(), "unref_cspace non-last: resident untouched");
+    assert!(
+        !st.at(SlotId(1)).cap.is_empty(),
+        "unref_cspace non-last: resident untouched"
+    );
 }
 
 // unref_cspace on the last ref: census(10) == 0, refs == 1 (the sole holder), so the
@@ -2596,7 +3391,10 @@ fn unref_cspace_last_ref_destroys() {
     st.refs.insert(10, 1); // census(10) == 0, off-by-one
     st.cspaces.insert(10, vec![SlotId(0)]);
     check_unref_cspace(&mut st, ObjId(10));
-    assert!(!st.refs.contains_key(&10) || st.refs[&10] == 0, "unref_cspace last ref: cspace torn down");
+    assert!(
+        !st.refs.contains_key(&10) || st.refs[&10] == 0,
+        "unref_cspace last ref: cspace torn down"
+    );
 }
 
 // obj_unref on a CSpace cap, last ref (off-by-one ⇒ census(10) == 0): the dispatch fires
@@ -2608,7 +3406,10 @@ fn obj_unref_cspace_last_ref_destroys() {
     st.refs.insert(10, 1); // census(10) == 0, off-by-one
     st.cspaces.insert(10, vec![SlotId(0)]);
     check_obj_unref(&mut st, cspace_cap(10));
-    assert!(st.at(SlotId(0)).cap.is_empty(), "obj_unref(CSpace) last ref: resident emptied");
+    assert!(
+        st.at(SlotId(0)).cap.is_empty(),
+        "obj_unref(CSpace) last ref: resident emptied"
+    );
 }
 
 // obj_unref on a non-designating Frame cap: a pure no-op (the off-by-one bookkeeping
@@ -2626,13 +3427,34 @@ fn wait_consume() {
     let mut st = ArrayStore::new(0);
     let n = ObjId(100);
     st.refs.insert(100, 1);
-    st.notifs.insert(100, NotifState { word: 0b1010, wait_head: None, wait_tail: None });
+    st.notifs.insert(
+        100,
+        NotifState {
+            word: 0b1010,
+            wait_head: None,
+            wait_tail: None,
+        },
+    );
     let cur = ObjId(200);
-    st.tcbs.insert(200, TcbState { state: ThreadState::Runnable, ..tcb_state_default() });
+    st.tcbs.insert(
+        200,
+        TcbState {
+            state: ThreadState::Runnable,
+            ..tcb_state_default()
+        },
+    );
 
-    assert_eq!(wait(&mut st, n, cur), Some(0b1010), "a nonzero word is consumed");
+    assert_eq!(
+        wait(&mut st, n, cur),
+        Some(0b1010),
+        "a nonzero word is consumed"
+    );
     assert_eq!(st.notifs[&100].word, 0, "word cleared");
-    assert_eq!(st.tcbs[&200].state, ThreadState::Runnable, "the thread did not block");
+    assert_eq!(
+        st.tcbs[&200].state,
+        ThreadState::Runnable,
+        "the thread did not block"
+    );
     assert_eq!(st.refs[&100], 1, "no ref acquired on the consume path");
     assert!(st.notifs[&100].wait_head.is_none(), "queue stays empty");
     assert!(notif_wf_exec(&st, n));
@@ -2646,14 +3468,37 @@ fn wait_signal_fifo() {
     let mut st = ArrayStore::new(0);
     let n = ObjId(100);
     st.refs.insert(100, 1);
-    st.notifs.insert(100, NotifState { word: 0, wait_head: None, wait_tail: None });
+    st.notifs.insert(
+        100,
+        NotifState {
+            word: 0,
+            wait_head: None,
+            wait_tail: None,
+        },
+    );
     let t1 = ObjId(200);
     let t2 = ObjId(201);
-    st.tcbs.insert(200, TcbState { state: ThreadState::Runnable, ..tcb_state_default() });
-    st.tcbs.insert(201, TcbState { state: ThreadState::Runnable, ..tcb_state_default() });
+    st.tcbs.insert(
+        200,
+        TcbState {
+            state: ThreadState::Runnable,
+            ..tcb_state_default()
+        },
+    );
+    st.tcbs.insert(
+        201,
+        TcbState {
+            state: ThreadState::Runnable,
+            ..tcb_state_default()
+        },
+    );
 
     // First waiter blocks at the head; acquires a ref.
-    assert_eq!(wait(&mut st, n, t1), None, "word 0 ⇒ the first thread blocks");
+    assert_eq!(
+        wait(&mut st, n, t1),
+        None,
+        "word 0 ⇒ the first thread blocks"
+    );
     assert_eq!(st.tcbs[&200].state, ThreadState::BlockedNotif);
     assert!(st.tcbs[&200].wait_notif == Some(n));
     assert!(st.notifs[&100].wait_head == Some(t1));
@@ -2662,16 +3507,27 @@ fn wait_signal_fifo() {
     assert!(notif_wf_exec(&st, n));
 
     // Second waiter blocks behind the first (FIFO tail), threaded via qnext.
-    assert_eq!(wait(&mut st, n, t2), None, "the second thread blocks behind the first");
+    assert_eq!(
+        wait(&mut st, n, t2),
+        None,
+        "the second thread blocks behind the first"
+    );
     assert!(st.notifs[&100].wait_head == Some(t1), "head unchanged");
-    assert!(st.notifs[&100].wait_tail == Some(t2), "tail is the new waiter");
+    assert!(
+        st.notifs[&100].wait_tail == Some(t2),
+        "tail is the new waiter"
+    );
     assert!(st.tcbs[&200].qnext == Some(t2), "t1 → t2 threaded");
     assert_eq!(st.refs[&100], 3);
     assert!(notif_wf_exec(&st, n));
 
     // First signal wakes the HEAD (t1) — block order — delivering the word; -1 ref.
     signal(&mut st, n, 0b1);
-    assert_eq!(st.tcbs[&200].state, ThreadState::Runnable, "the head t1 wakes first");
+    assert_eq!(
+        st.tcbs[&200].state,
+        ThreadState::Runnable,
+        "the head t1 wakes first"
+    );
     assert_eq!(st.tcbs[&200].retval, 0b1, "t1 received the word");
     assert!(st.notifs[&100].wait_head == Some(t2), "t2 is now the head");
     assert_eq!(st.notifs[&100].word, 0, "delivered word cleared");
@@ -2680,7 +3536,11 @@ fn wait_signal_fifo() {
 
     // Second signal wakes t2, emptying the queue.
     signal(&mut st, n, 0b10);
-    assert_eq!(st.tcbs[&201].state, ThreadState::Runnable, "t2 wakes second");
+    assert_eq!(
+        st.tcbs[&201].state,
+        ThreadState::Runnable,
+        "t2 wakes second"
+    );
     assert_eq!(st.tcbs[&201].retval, 0b10);
     assert!(st.notifs[&100].wait_head.is_none(), "queue now empty");
     assert!(st.notifs[&100].wait_tail.is_none());
@@ -2694,11 +3554,21 @@ fn destroy_notif_noop() {
     let mut st = ArrayStore::new(0);
     let n = ObjId(100);
     st.refs.insert(100, 0);
-    st.notifs.insert(100, NotifState { word: 0, wait_head: None, wait_tail: None });
+    st.notifs.insert(
+        100,
+        NotifState {
+            word: 0,
+            wait_head: None,
+            wait_tail: None,
+        },
+    );
     let before = st.notifs[&100].clone();
     let refs_before = st.refs.clone();
     destroy_notif(&mut st, n);
-    assert!(st.notifs[&100] == before, "destroy_notif leaves the notification untouched");
+    assert!(
+        st.notifs[&100] == before,
+        "destroy_notif leaves the notification untouched"
+    );
     assert_eq!(st.refs, refs_before, "destroy_notif touches no refcount");
 }
 
@@ -2713,9 +3583,17 @@ fn remove_waiter_unlink() {
         st.refs.insert(100, 4); // a binding ref + three queued waiters
         st.notifs.insert(
             100,
-            NotifState { word: 0, wait_head: Some(ObjId(200)), wait_tail: Some(ObjId(202)) },
+            NotifState {
+                word: 0,
+                wait_head: Some(ObjId(200)),
+                wait_tail: Some(ObjId(202)),
+            },
         );
-        for (id, nxt) in [(200u64, Some(ObjId(201))), (201, Some(ObjId(202))), (202, None)] {
+        for (id, nxt) in [
+            (200u64, Some(ObjId(201))),
+            (201, Some(ObjId(202))),
+            (202, None),
+        ] {
             st.tcbs.insert(
                 id,
                 TcbState {
@@ -2732,36 +3610,70 @@ fn remove_waiter_unlink() {
     // Middle: 201 unlinked; 200 re-threads to 202; head/tail unchanged.
     let mut st = mk();
     check_remove_waiter(&mut st, n, ObjId(201), true);
-    assert!(st.notifs[&100].wait_head == Some(ObjId(200)), "head unchanged");
-    assert!(st.notifs[&100].wait_tail == Some(ObjId(202)), "tail unchanged");
-    assert!(st.tcbs[&200].qnext == Some(ObjId(202)), "predecessor re-threaded past 201");
+    assert!(
+        st.notifs[&100].wait_head == Some(ObjId(200)),
+        "head unchanged"
+    );
+    assert!(
+        st.notifs[&100].wait_tail == Some(ObjId(202)),
+        "tail unchanged"
+    );
+    assert!(
+        st.tcbs[&200].qnext == Some(ObjId(202)),
+        "predecessor re-threaded past 201"
+    );
 
     // Head: 200 unlinked; 201 becomes the head.
     let mut st = mk();
     check_remove_waiter(&mut st, n, ObjId(200), true);
-    assert!(st.notifs[&100].wait_head == Some(ObjId(201)), "201 is the new head");
-    assert!(st.notifs[&100].wait_tail == Some(ObjId(202)), "tail unchanged");
+    assert!(
+        st.notifs[&100].wait_head == Some(ObjId(201)),
+        "201 is the new head"
+    );
+    assert!(
+        st.notifs[&100].wait_tail == Some(ObjId(202)),
+        "tail unchanged"
+    );
 
     // Tail: 202 unlinked; tail drops to 201, whose qnext becomes None.
     let mut st = mk();
     check_remove_waiter(&mut st, n, ObjId(202), true);
-    assert!(st.notifs[&100].wait_head == Some(ObjId(200)), "head unchanged");
-    assert!(st.notifs[&100].wait_tail == Some(ObjId(201)), "tail dropped to 201");
+    assert!(
+        st.notifs[&100].wait_head == Some(ObjId(200)),
+        "head unchanged"
+    );
+    assert!(
+        st.notifs[&100].wait_tail == Some(ObjId(201)),
+        "tail dropped to 201"
+    );
     assert!(st.tcbs[&201].qnext.is_none(), "new tail's qnext cleared");
 
     // Absent: a TCB not on the queue — store unchanged.
     let mut st = mk();
-    st.tcbs.insert(300, TcbState { state: ThreadState::Inactive, ..tcb_state_default() });
+    st.tcbs.insert(
+        300,
+        TcbState {
+            state: ThreadState::Inactive,
+            ..tcb_state_default()
+        },
+    );
     let before = st.notifs[&100].clone();
     check_remove_waiter(&mut st, n, ObjId(300), false);
-    assert!(st.notifs[&100] == before, "absent removal leaves the queue untouched");
+    assert!(
+        st.notifs[&100] == before,
+        "absent removal leaves the queue untouched"
+    );
 
     // Single-element queue: removing the sole waiter empties head and tail.
     let mut st = ArrayStore::new(0);
     st.refs.insert(100, 2);
     st.notifs.insert(
         100,
-        NotifState { word: 0, wait_head: Some(ObjId(200)), wait_tail: Some(ObjId(200)) },
+        NotifState {
+            word: 0,
+            wait_head: Some(ObjId(200)),
+            wait_tail: Some(ObjId(200)),
+        },
     );
     st.tcbs.insert(
         200,
@@ -2784,27 +3696,60 @@ fn binding_notif_wf_exec_has_teeth() {
     // `binding_notif_wf_exec` mirrors the named invariant the channel ops carry;
     // it is only meaningful if it rejects bindings naming bad notifications.
     let ch = ObjId(7);
-    assert!(binding_notif_wf_exec(&signal_fixture(false).0, ch),
-        "all-unbound bindings are vacuously well-formed");
+    assert!(
+        binding_notif_wf_exec(&signal_fixture(false).0, ch),
+        "all-unbound bindings are vacuously well-formed"
+    );
 
     // A binding naming the live, well-formed notification 100 ⇒ accepted.
     let mut st = signal_fixture(false).0;
-    st.chans.get_mut(&7).unwrap().bindings
-        .insert((0, EV_READABLE), Binding { notif: Some(ObjId(100)), bits: 1 });
-    assert!(binding_notif_wf_exec(&st, ch), "a binding to a live wf notification is accepted");
+    st.chans.get_mut(&7).unwrap().bindings.insert(
+        (0, EV_READABLE),
+        Binding {
+            notif: Some(ObjId(100)),
+            bits: 1,
+        },
+    );
+    assert!(
+        binding_notif_wf_exec(&st, ch),
+        "a binding to a live wf notification is accepted"
+    );
 
     // A binding naming a non-resident notification ⇒ rejected.
     let mut st = signal_fixture(false).0;
-    st.chans.get_mut(&7).unwrap().bindings
-        .insert((0, EV_READABLE), Binding { notif: Some(ObjId(999)), bits: 1 });
-    assert!(!binding_notif_wf_exec(&st, ch), "a binding to a non-resident notification is rejected");
+    st.chans.get_mut(&7).unwrap().bindings.insert(
+        (0, EV_READABLE),
+        Binding {
+            notif: Some(ObjId(999)),
+            bits: 1,
+        },
+    );
+    assert!(
+        !binding_notif_wf_exec(&st, ch),
+        "a binding to a non-resident notification is rejected"
+    );
 
     // A binding naming a malformed-queue notification (head/tail disagree) ⇒ rejected.
     let mut st = signal_fixture(false).0;
-    st.notifs.insert(100, NotifState { word: 0, wait_head: Some(ObjId(200)), wait_tail: None });
-    st.chans.get_mut(&7).unwrap().bindings
-        .insert((0, EV_READABLE), Binding { notif: Some(ObjId(100)), bits: 1 });
-    assert!(!binding_notif_wf_exec(&st, ch), "a binding to a malformed notification is rejected");
+    st.notifs.insert(
+        100,
+        NotifState {
+            word: 0,
+            wait_head: Some(ObjId(200)),
+            wait_tail: None,
+        },
+    );
+    st.chans.get_mut(&7).unwrap().bindings.insert(
+        (0, EV_READABLE),
+        Binding {
+            notif: Some(ObjId(100)),
+            bits: 1,
+        },
+    );
+    assert!(
+        !binding_notif_wf_exec(&st, ch),
+        "a binding to a malformed notification is rejected"
+    );
 }
 
 // ── Evidence that a "revoked cap survives" rule framed as "`delete` empties only
@@ -2827,8 +3772,14 @@ fn delete_empties_slots_outside_the_deleted_subtree() {
     assert!(st.at(SlotId(0)).first_child.is_none());
     check_delete(&mut st, SlotId(0));
     // Yet slots 1 and 2 — outside slot 0's subtree — were emptied by the teardown.
-    assert!(st.at(SlotId(1)).cap.is_empty(), "resident outside the subtree was emptied");
-    assert!(st.at(SlotId(2)).cap.is_empty(), "resident outside the subtree was emptied");
+    assert!(
+        st.at(SlotId(1)).cap.is_empty(),
+        "resident outside the subtree was emptied"
+    );
+    assert!(
+        st.at(SlotId(2)).cap.is_empty(),
+        "resident outside the subtree was emptied"
+    );
     // => "delete empties only the deleted subtree" is FALSE.
 }
 
@@ -2863,15 +3814,27 @@ fn revoke_can_empty_its_own_root_zombie() {
     // negative witness: `slot 0` IS homed (a resident of cspace 10), so it fails the
     // non-zombie precondition `!is_homed` that `check_revoke_root_survives` relies on — exactly
     // the shape `revoke`'s conditional root-survival theorem excludes.
-    assert!(is_homed_exec(&st, SlotId(0)), "the zombie root is homed (precondition violated)");
+    assert!(
+        is_homed_exec(&st, SlotId(0)),
+        "the zombie root is homed (precondition violated)"
+    );
 
     revoke(&mut st, SlotId(0));
 
-    assert!(cspace_wf_exec(&st), "revoke preserves cspace_wf (its real guarantee)");
-    assert!(st.at(SlotId(0)).first_child.is_none(), "revoke: subtree empty");
+    assert!(
+        cspace_wf_exec(&st),
+        "revoke preserves cspace_wf (its real guarantee)"
+    );
+    assert!(
+        st.at(SlotId(0)).first_child.is_none(),
+        "revoke: subtree empty"
+    );
     // The headline: the revoked root itself was emptied by the cross-object
     // teardown — the documented gap, here a concrete witness.
-    assert!(st.at(SlotId(0)).cap.is_empty(), "revoke emptied its own root (zombie)");
+    assert!(
+        st.at(SlotId(0)).cap.is_empty(),
+        "revoke emptied its own root (zombie)"
+    );
 }
 
 // `is_homed`'s executable mirror: `x` is some object's internal home handle — a
@@ -2879,7 +3842,10 @@ fn revoke_can_empty_its_own_root_zombie() {
 // precondition both ways (the zombie root is homed; the survivor root is not).
 fn is_homed_exec(st: &ArrayStore, x: SlotId) -> bool {
     st.cspaces.values().any(|slots| slots.contains(&x))
-        || st.chans.values().any(|c| c.ring_cap.values().any(|&s| s == x))
+        || st
+            .chans
+            .values()
+            .any(|c| c.ring_cap.values().any(|&s| s == x))
         || st.tcbs.values().any(|t| t.bind_slots.contains(&x))
 }
 
@@ -2909,16 +3875,28 @@ fn check_revoke_root_survives() {
     st.refs.insert(10, 1); // slot 1 is the one (and last) cap to cspace 10
     st.cspaces.insert(10, vec![SlotId(2)]); // cspace 10's resident is slot 2, NOT slot 0
     assert!(cspace_wf_exec(&st), "the non-zombie shape is well-formed");
-    assert!(!is_homed_exec(&st, SlotId(0)), "the revoke root is un-homed (the §6e precondition)");
+    assert!(
+        !is_homed_exec(&st, SlotId(0)),
+        "the revoke root is un-homed (the §6e precondition)"
+    );
 
     revoke(&mut st, SlotId(0));
 
     assert!(cspace_wf_exec(&st), "revoke preserves cspace_wf");
-    assert!(st.at(SlotId(0)).first_child.is_none(), "revoke: subtree empty");
+    assert!(
+        st.at(SlotId(0)).first_child.is_none(),
+        "revoke: subtree empty"
+    );
     // The headline: the un-homed revoked root survives the cross-object teardown.
-    assert!(!st.at(SlotId(0)).cap.is_empty(), "revoke: the un-homed root SURVIVES");
+    assert!(
+        !st.at(SlotId(0)).cap.is_empty(),
+        "revoke: the un-homed root SURVIVES"
+    );
     // …and the teardown genuinely crossed objects (cspace 10's resident was emptied).
-    assert!(st.at(SlotId(2)).cap.is_empty(), "the cross-object teardown fired (resident emptied)");
+    assert!(
+        st.at(SlotId(2)).cap.is_empty(),
+        "the cross-object teardown fired (resident emptied)"
+    );
 }
 
 #[test]
@@ -2956,24 +3934,48 @@ fn check_revoke_root_survives_homed_external_ref() {
     st.slots[2] = detached(cspace_cap(10));
     st.refs.insert(10, 2); // slots 1 and 2 both designate cspace 10
     st.cspaces.insert(10, vec![SlotId(0)]); // cspace 10 homes slot 0 as its resident
-    assert!(cspace_wf_exec(&st), "the resident-with-external-ref shape is well-formed");
+    assert!(
+        cspace_wf_exec(&st),
+        "the resident-with-external-ref shape is well-formed"
+    );
     // `slot 0` IS homed (a resident of cspace 10) — the conservative theorem excludes it.
-    assert!(is_homed_exec(&st, SlotId(0)), "the revoke root is homed (a cspace resident)");
+    assert!(
+        is_homed_exec(&st, SlotId(0)),
+        "the revoke root is homed (a cspace resident)"
+    );
     // `slot 2` is un-homed (no cspace resident / ring cap / bind slot designates it) and external
     // to slot 0's subtree — the live reference that keeps cspace 10 alive.
-    assert!(!is_homed_exec(&st, SlotId(2)), "the external ref is un-homed (outside the subtree)");
+    assert!(
+        !is_homed_exec(&st, SlotId(2)),
+        "the external ref is un-homed (outside the subtree)"
+    );
 
     revoke(&mut st, SlotId(0));
 
     assert!(cspace_wf_exec(&st), "revoke preserves cspace_wf");
-    assert!(st.at(SlotId(0)).first_child.is_none(), "revoke: subtree empty");
+    assert!(
+        st.at(SlotId(0)).first_child.is_none(),
+        "revoke: subtree empty"
+    );
     // The headline: the *homed* revoked root survives because its homing cspace kept a
     // live external reference (no homing object died — the contrapositive of the `ensures`).
-    assert!(!st.at(SlotId(0)).cap.is_empty(), "revoke: the homed root SURVIVES (external ref alive)");
+    assert!(
+        !st.at(SlotId(0)).cap.is_empty(),
+        "revoke: the homed root SURVIVES (external ref alive)"
+    );
     // The subtree cap to cspace 10 was deleted, but cspace 10 stayed alive via the external ref.
-    assert!(st.at(SlotId(1)).cap.is_empty(), "the subtree cap to cspace 10 was revoked");
-    assert!(!st.at(SlotId(2)).cap.is_empty(), "the external cap to cspace 10 survives the revoke");
-    assert_eq!(st.refs[&10], 1, "cspace 10 keeps the external reference (never destroyed)");
+    assert!(
+        st.at(SlotId(1)).cap.is_empty(),
+        "the subtree cap to cspace 10 was revoked"
+    );
+    assert!(
+        !st.at(SlotId(2)).cap.is_empty(),
+        "the external cap to cspace 10 survives the revoke"
+    );
+    assert_eq!(
+        st.refs[&10], 1,
+        "cspace 10 keeps the external reference (never destroyed)"
+    );
 }
 
 #[test]
@@ -3028,24 +4030,56 @@ fn revoke_sees_through_queued_descendant() {
     msg_len.insert((1usize, 0u32), 0u16);
     st.chans.insert(
         7,
-        ChanState { depth: 1, end_caps: [1, 1], head: [0, 0], count: [1, 0], bindings, msg_len, ring_cap },
+        ChanState {
+            depth: 1,
+            end_caps: [1, 1],
+            head: [0, 0],
+            count: [1, 0],
+            bindings,
+            msg_len,
+            ring_cap,
+        },
     );
 
-    assert!(cspace_wf_exec(&st), "the queued-descendant shape is well-formed");
-    assert!(is_homed_exec(&st, SlotId(1)), "slot 1 is a real channel ring cap (genuinely queued)");
-    assert!(!is_homed_exec(&st, SlotId(0)), "the revoke target is un-homed (so it survives)");
-    assert!(!st.at(SlotId(1)).cap.is_empty(), "the queued cap is live before revoke");
+    assert!(
+        cspace_wf_exec(&st),
+        "the queued-descendant shape is well-formed"
+    );
+    assert!(
+        is_homed_exec(&st, SlotId(1)),
+        "slot 1 is a real channel ring cap (genuinely queued)"
+    );
+    assert!(
+        !is_homed_exec(&st, SlotId(0)),
+        "the revoke target is un-homed (so it survives)"
+    );
+    assert!(
+        !st.at(SlotId(1)).cap.is_empty(),
+        "the queued cap is live before revoke"
+    );
 
     revoke(&mut st, SlotId(0));
 
     assert!(cspace_wf_exec(&st), "revoke preserves cspace_wf");
-    assert!(st.at(SlotId(0)).first_child.is_none(), "revoke: subtree empty");
+    assert!(
+        st.at(SlotId(0)).first_child.is_none(),
+        "revoke: subtree empty"
+    );
     // The headline: the real revoke walk reached *through the queue* and destroyed the in-flight cap.
-    assert!(st.at(SlotId(1)).cap.is_empty(), "revoke sees through the queue: the queued cap is destroyed");
+    assert!(
+        st.at(SlotId(1)).cap.is_empty(),
+        "revoke sees through the queue: the queued cap is destroyed"
+    );
     // The ring_cap handle still points at the now-empty slot — the rev1§3.4 null-cap-slot a receiver tolerates.
-    assert!(st.chan_ring_cap(ObjId(7), 0, 0, 0) == SlotId(1), "the ring handle is unchanged (now null)");
+    assert!(
+        st.chan_ring_cap(ObjId(7), 0, 0, 0) == SlotId(1),
+        "the ring handle is unchanged (now null)"
+    );
     // The un-homed target survives (no homing object of slot 0 was destroyed).
-    assert!(!st.at(SlotId(0)).cap.is_empty(), "the un-homed revoke target survives");
+    assert!(
+        !st.at(SlotId(0)).cap.is_empty(),
+        "the un-homed revoke target survives"
+    );
 }
 
 // ── Channel send/recv: the FIFO core, host-differential ─────────────────────
@@ -3086,7 +4120,15 @@ fn chan_fixture(depth: u32, scratch: usize) -> (ArrayStore, ObjId, usize) {
     }
     st.chans.insert(
         7,
-        ChanState { depth, end_caps: [1, 1], head: [0, 0], count: [0, 0], bindings, msg_len, ring_cap },
+        ChanState {
+            depth,
+            end_caps: [1, 1],
+            head: [0, 0],
+            count: [0, 0],
+            bindings,
+            msg_len,
+            ring_cap,
+        },
     );
     (st, ObjId(7), ring_slots)
 }
@@ -3100,10 +4142,22 @@ fn send_recv_roundtrip() {
     let send_cap = SlotId(scratch0 as u64);
     st.slots[scratch0] = detached(frame_cap(99));
     // msg 1: len 3 + a cap in slot 0.
-    assert_eq!(send(&mut st, ch, ChanEnd::A, &[1u8, 2, 3], &[Some(send_cap), None, None, None]), Ok(()));
+    assert_eq!(
+        send(
+            &mut st,
+            ch,
+            ChanEnd::A,
+            &[1u8, 2, 3],
+            &[Some(send_cap), None, None, None]
+        ),
+        Ok(())
+    );
     assert!(chan_wf_exec(&st, ch));
     assert_eq!(st.chan(ch).count[0], 1, "A sends on ring 0");
-    assert!(st.at(send_cap).cap.is_empty(), "sender slot emptied (move totality)");
+    assert!(
+        st.at(send_cap).cap.is_empty(),
+        "sender slot emptied (move totality)"
+    );
     // msg 2: len 5, no caps.
     assert_eq!(send(&mut st, ch, ChanEnd::A, &[0u8; 5], &[None; 4]), Ok(()));
     assert_eq!(st.chan(ch).count[0], 2);
@@ -3112,16 +4166,29 @@ fn send_recv_roundtrip() {
     let dest = SlotId((scratch0 + 1) as u64);
     let mut buf = [0u8; MSG_PAYLOAD];
     assert_eq!(
-        recv(&mut st, ch, ChanEnd::B, &mut buf, &[Some(dest), None, None, None]),
+        recv(
+            &mut st,
+            ch,
+            ChanEnd::B,
+            &mut buf,
+            &[Some(dest), None, None, None]
+        ),
         Ok((3, 0b1)),
         "FIFO head delivered first, carrying its cap (mask bit 0)"
     );
-    assert!(!st.at(dest).cap.is_empty(), "cap delivered to the dest slot");
+    assert!(
+        !st.at(dest).cap.is_empty(),
+        "cap delivered to the dest slot"
+    );
     assert_eq!(st.chan(ch).count[0], 1);
     assert!(chan_wf_exec(&st, ch));
     // msg 2 next, in order.
     let mut buf = [0u8; MSG_PAYLOAD];
-    assert_eq!(recv(&mut st, ch, ChanEnd::B, &mut buf, &[None; 4]), Ok((5, 0)), "second message in order");
+    assert_eq!(
+        recv(&mut st, ch, ChanEnd::B, &mut buf, &[None; 4]),
+        Ok((5, 0)),
+        "second message in order"
+    );
     assert_eq!(st.chan(ch).count[0], 0);
 }
 
@@ -3132,14 +4199,20 @@ fn send_full_and_recv_empty() {
     let (mut st, ch, _) = chan_fixture(1, 0);
     let chans0 = st.chans.clone();
     let mut buf = [0u8; MSG_PAYLOAD];
-    assert_eq!(recv(&mut st, ch, ChanEnd::B, &mut buf, &[None; 4]), Err(ChanError::Empty));
+    assert_eq!(
+        recv(&mut st, ch, ChanEnd::B, &mut buf, &[None; 4]),
+        Err(ChanError::Empty)
+    );
     assert!(st.chans == chans0, "recv Empty: channel unchanged");
 
     assert_eq!(send(&mut st, ch, ChanEnd::A, &[7u8], &[None; 4]), Ok(()));
     assert_eq!(st.chan(ch).count[0], 1);
     let fp = fingerprint(&st);
     let chans1 = st.chans.clone();
-    assert_eq!(send(&mut st, ch, ChanEnd::A, &[8u8], &[None; 4]), Err(ChanError::Full));
+    assert_eq!(
+        send(&mut st, ch, ChanEnd::A, &[8u8], &[None; 4]),
+        Err(ChanError::Full)
+    );
     assert_eq!(fingerprint(&st), fp, "send Full: arena unchanged");
     assert!(st.chans == chans1, "send Full: channel unchanged");
 }
@@ -3151,11 +4224,23 @@ fn recv_nocapslot_atomic() {
     let (mut st, ch, scratch0) = chan_fixture(1, 2);
     let send_cap = SlotId(scratch0 as u64);
     st.slots[scratch0] = detached(frame_cap(42));
-    assert_eq!(send(&mut st, ch, ChanEnd::A, &[1u8], &[Some(send_cap), None, None, None]), Ok(()));
+    assert_eq!(
+        send(
+            &mut st,
+            ch,
+            ChanEnd::A,
+            &[1u8],
+            &[Some(send_cap), None, None, None]
+        ),
+        Ok(())
+    );
     let fp = fingerprint(&st);
     let chans = st.chans.clone();
     let mut buf = [0u8; MSG_PAYLOAD];
-    assert_eq!(recv(&mut st, ch, ChanEnd::B, &mut buf, &[None; 4]), Err(ChanError::NoCapSlot));
+    assert_eq!(
+        recv(&mut st, ch, ChanEnd::B, &mut buf, &[None; 4]),
+        Err(ChanError::NoCapSlot)
+    );
     assert_eq!(fingerprint(&st), fp, "NoCapSlot: arena unchanged");
     assert!(st.chans == chans, "NoCapSlot: message fully queued");
     assert_eq!(st.chan(ch).count[0], 1);
@@ -3168,7 +4253,16 @@ fn recv_null_slot_tolerance() {
     let (mut st, ch, scratch0) = chan_fixture(1, 2);
     let send_cap = SlotId(scratch0 as u64);
     st.slots[scratch0] = detached(frame_cap(7));
-    assert_eq!(send(&mut st, ch, ChanEnd::A, &[0u8; 3], &[Some(send_cap), None, None, None]), Ok(()));
+    assert_eq!(
+        send(
+            &mut st,
+            ch,
+            ChanEnd::A,
+            &[0u8; 3],
+            &[Some(send_cap), None, None, None]
+        ),
+        Ok(())
+    );
     // simulate a revoke emptying the queued ring cap (an in-window slot may be empty).
     let rc = st.chan(ch).ring_cap[&(0, 0, 0)];
     st.slots[rc.0 as usize] = CapSlot::empty();
@@ -3176,11 +4270,20 @@ fn recv_null_slot_tolerance() {
     let dest = SlotId((scratch0 + 1) as u64);
     let mut buf = [0u8; MSG_PAYLOAD];
     assert_eq!(
-        recv(&mut st, ch, ChanEnd::B, &mut buf, &[Some(dest), None, None, None]),
+        recv(
+            &mut st,
+            ch,
+            ChanEnd::B,
+            &mut buf,
+            &[Some(dest), None, None, None]
+        ),
         Ok((3, 0)),
         "null cap delivered as absent (mask 0), no panic"
     );
-    assert!(st.at(dest).cap.is_empty(), "dest stays empty (nothing moved)");
+    assert!(
+        st.at(dest).cap.is_empty(),
+        "dest stays empty (nothing moved)"
+    );
     assert_eq!(st.chan(ch).count[0], 0, "still dequeued");
 }
 
@@ -3198,14 +4301,29 @@ fn recv_installs_exact_caps_and_mask() {
     st.slots[scratch0] = detached(frame_cap(100));
     st.slots[scratch0 + 1] = detached(frame_cap(200));
     assert_eq!(
-        send(&mut st, ch, ChanEnd::A, &[1u8, 2, 3, 4], &[Some(s0), None, Some(s2), None]),
+        send(
+            &mut st,
+            ch,
+            ChanEnd::A,
+            &[1u8, 2, 3, 4],
+            &[Some(s0), None, Some(s2), None]
+        ),
         Ok(())
     );
-    assert!(st.at(s0).cap.is_empty() && st.at(s2).cap.is_empty(), "sources emptied at send");
+    assert!(
+        st.at(s0).cap.is_empty() && st.at(s2).cap.is_empty(),
+        "sources emptied at send"
+    );
 
     let mut buf = [0u8; MSG_PAYLOAD];
     assert_eq!(
-        recv(&mut st, ch, ChanEnd::B, &mut buf, &[Some(d0), None, Some(d2), None]),
+        recv(
+            &mut st,
+            ch,
+            ChanEnd::B,
+            &mut buf,
+            &[Some(d0), None, Some(d2), None]
+        ),
         Ok((4, 0b101)),
         "mask names exactly the filled dests (bits 0 and 2)"
     );
@@ -3239,24 +4357,46 @@ fn randomized_fifo_sweep() {
         let mut model: VecDeque<u16> = VecDeque::new();
         let mut rng = seed.wrapping_mul(2654435761).wrapping_add(1);
         for _ in 0..30 {
-            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let do_send = (rng >> 33) & 1 == 0;
             if do_send && model.len() < depth as usize {
                 let len = ((rng >> 3) % 200) as u16;
-                assert_eq!(send(&mut st, ch, ChanEnd::A, &vec![0u8; len as usize], &[None; 4]), Ok(()));
+                assert_eq!(
+                    send(
+                        &mut st,
+                        ch,
+                        ChanEnd::A,
+                        &vec![0u8; len as usize],
+                        &[None; 4]
+                    ),
+                    Ok(())
+                );
                 model.push_back(len);
                 trials += 1;
             } else if !model.is_empty() {
                 let mut buf = [0u8; MSG_PAYLOAD];
                 let r = recv(&mut st, ch, ChanEnd::B, &mut buf, &[None; 4]);
-                assert_eq!(r, Ok((model.pop_front().unwrap() as usize, 0)), "FIFO head len matches model");
+                assert_eq!(
+                    r,
+                    Ok((model.pop_front().unwrap() as usize, 0)),
+                    "FIFO head len matches model"
+                );
                 trials += 1;
             }
             assert!(chan_wf_exec(&st, ch), "chan_wf preserved through the sweep");
-            assert_eq!(st.chan(ch).count[0], model.len() as u32, "count tracks the model");
+            assert_eq!(
+                st.chan(ch).count[0],
+                model.len() as u32,
+                "count tracks the model"
+            );
         }
     }
-    assert!(trials > 300, "sweep should exercise hundreds of ops, ran {trials}");
+    assert!(
+        trials > 300,
+        "sweep should exercise hundreds of ops, ran {trials}"
+    );
 }
 
 #[test]
@@ -3274,11 +4414,27 @@ fn endpoint_cap_dropped_decrement_and_fire() {
     let (mut st, ch, _) = chan_fixture(1, 0);
     let n = ObjId(100);
     st.refs.insert(100, 1);
-    st.notifs.insert(100, NotifState { word: 0, wait_head: None, wait_tail: None });
-    st.chan_mut(ch).bindings.insert((1, EV_PEER_CLOSED), Binding { notif: Some(n), bits: 0b100 });
+    st.notifs.insert(
+        100,
+        NotifState {
+            word: 0,
+            wait_head: None,
+            wait_tail: None,
+        },
+    );
+    st.chan_mut(ch).bindings.insert(
+        (1, EV_PEER_CLOSED),
+        Binding {
+            notif: Some(n),
+            bits: 0b100,
+        },
+    );
     check_endpoint_cap_dropped(&mut st, ch, ChanEnd::A);
     assert_eq!(st.chan(ch).end_caps, [0, 1]);
-    assert_eq!(st.notifs[&100].word, 0b100, "peer-closed fired into the bound notif");
+    assert_eq!(
+        st.notifs[&100].word, 0b100,
+        "peer-closed fired into the bound notif"
+    );
 }
 
 #[test]
@@ -3325,8 +4481,20 @@ fn destroy_channel_deletes_caps_and_releases_bindings() {
     let n2 = ObjId(101);
     st.refs.insert(100, 3);
     st.refs.insert(101, 3);
-    st.chan_mut(ch).bindings.insert((0, EV_PEER_CLOSED), Binding { notif: Some(n1), bits: 0b1 });
-    st.chan_mut(ch).bindings.insert((1, EV_READABLE), Binding { notif: Some(n2), bits: 0b1 });
+    st.chan_mut(ch).bindings.insert(
+        (0, EV_PEER_CLOSED),
+        Binding {
+            notif: Some(n1),
+            bits: 0b1,
+        },
+    );
+    st.chan_mut(ch).bindings.insert(
+        (1, EV_READABLE),
+        Binding {
+            notif: Some(n2),
+            bits: 0b1,
+        },
+    );
 
     check_destroy_channel(&mut st, ch);
 
@@ -3334,8 +4502,14 @@ fn destroy_channel_deletes_caps_and_releases_bindings() {
     assert_eq!(st.refs[&101], 2, "readable binding's notif released");
     // the proven body **clears** each binding so `binding_refs` falls in lockstep
     // with the `refs -= 1`.
-    assert!(st.chan(ch).bindings[&(0, EV_PEER_CLOSED)].notif.is_none(), "peer-closed binding cleared");
-    assert!(st.chan(ch).bindings[&(1, EV_READABLE)].notif.is_none(), "readable binding cleared");
+    assert!(
+        st.chan(ch).bindings[&(0, EV_PEER_CLOSED)].notif.is_none(),
+        "peer-closed binding cleared"
+    );
+    assert!(
+        st.chan(ch).bindings[&(1, EV_READABLE)].notif.is_none(),
+        "readable binding cleared"
+    );
 }
 
 #[test]
@@ -3349,14 +4523,26 @@ fn destroy_channel_bound_preserves_refcount_sound() {
     st.chan_mut(ch).end_caps = [0, 0]; // no `Channel(ch,_)` caps ⇒ `end_caps_sound` with empty slots
     let n = ObjId(100);
     st.refs.insert(100, 1); // census(n) == 1: the single binding below
-    st.chan_mut(ch).bindings.insert((0, EV_READABLE), Binding { notif: Some(n), bits: 0b1 });
-    assert!(refcount_sound_exec(&st), "fixture is refcount_sound (so the post-check fires)");
+    st.chan_mut(ch).bindings.insert(
+        (0, EV_READABLE),
+        Binding {
+            notif: Some(n),
+            bits: 0b1,
+        },
+    );
+    assert!(
+        refcount_sound_exec(&st),
+        "fixture is refcount_sound (so the post-check fires)"
+    );
     assert!(end_caps_sound_exec(&st), "fixture is end_caps_sound");
 
     check_destroy_channel(&mut st, ch); // asserts refcount_sound preserved (sound0 is true here)
 
     assert_eq!(st.refs[&100], 0, "the binding's notif ref released");
-    assert!(st.chan(ch).bindings[&(0, EV_READABLE)].notif.is_none(), "binding cleared in lockstep");
+    assert!(
+        st.chan(ch).bindings[&(0, EV_READABLE)].notif.is_none(),
+        "binding cleared in lockstep"
+    );
 }
 
 // ── Timer ───────────────────────────────────────────────────────────────────
@@ -3368,7 +4554,11 @@ fn destroy_channel_bound_preserves_refcount_sound() {
 #[test]
 fn timer_wf_exec_has_teeth() {
     let armed = |notif: Option<ObjId>, next: Option<ObjId>| TimerState {
-        armed: true, deadline: 0, notif, bits: 0, next,
+        armed: true,
+        deadline: 0,
+        notif,
+        bits: 0,
+        next,
     };
     // A well-formed singleton list passes.
     let mut ok = ArrayStore::new(0);
@@ -3383,7 +4573,16 @@ fn timer_wf_exec_has_teeth() {
 
     // A node on the chain is not armed.
     let mut unarmed = ArrayStore::new(0);
-    unarmed.timers.insert(300, TimerState { armed: false, deadline: 0, notif: Some(ObjId(100)), bits: 0, next: None });
+    unarmed.timers.insert(
+        300,
+        TimerState {
+            armed: false,
+            deadline: 0,
+            notif: Some(ObjId(100)),
+            bits: 0,
+            next: None,
+        },
+    );
     unarmed.timer_armed_head = Some(ObjId(300));
     assert!(!timer_wf_exec(&unarmed), "a charted node must be armed");
 
@@ -3391,12 +4590,19 @@ fn timer_wf_exec_has_teeth() {
     let mut no_notif = ArrayStore::new(0);
     no_notif.timers.insert(300, armed(None, None));
     no_notif.timer_armed_head = Some(ObjId(300));
-    assert!(!timer_wf_exec(&no_notif), "a charted node must name a notification");
+    assert!(
+        !timer_wf_exec(&no_notif),
+        "a charted node must name a notification"
+    );
 
     // A `next` cycle (300 → 301 → 300).
     let mut cyclic = ArrayStore::new(0);
-    cyclic.timers.insert(300, armed(Some(ObjId(100)), Some(ObjId(301))));
-    cyclic.timers.insert(301, armed(Some(ObjId(100)), Some(ObjId(300))));
+    cyclic
+        .timers
+        .insert(300, armed(Some(ObjId(100)), Some(ObjId(301))));
+    cyclic
+        .timers
+        .insert(301, armed(Some(ObjId(100)), Some(ObjId(300))));
     cyclic.timer_armed_head = Some(ObjId(300));
     assert!(!timer_wf_exec(&cyclic), "a cycle is rejected");
 
@@ -3405,7 +4611,10 @@ fn timer_wf_exec_has_teeth() {
     incomplete.timers.insert(300, armed(Some(ObjId(100)), None));
     incomplete.timers.insert(301, armed(Some(ObjId(101)), None)); // armed but unlinked
     incomplete.timer_armed_head = Some(ObjId(300));
-    assert!(!timer_wf_exec(&incomplete), "an off-chain armed timer is rejected");
+    assert!(
+        !timer_wf_exec(&incomplete),
+        "an off-chain armed timer is rejected"
+    );
 }
 
 // `arm`/`disarm` lifecycle: install, same-notif re-arm (net-zero refs), different-notif
@@ -3417,7 +4626,16 @@ fn arm_disarm_lifecycle() {
     let t = ObjId(300);
     let n1 = ObjId(100);
     let n2 = ObjId(101);
-    st.timers.insert(300, TimerState { armed: false, deadline: 0, notif: None, bits: 0, next: None });
+    st.timers.insert(
+        300,
+        TimerState {
+            armed: false,
+            deadline: 0,
+            notif: None,
+            bits: 0,
+            next: None,
+        },
+    );
     st.refs.insert(100, 1);
     st.refs.insert(101, 1);
 
@@ -3447,25 +4665,74 @@ fn arm_disarm_lifecycle() {
 fn check_expired_wake_and_skip() {
     let now = 100u64;
     let mut st = ArrayStore::new(0);
-    st.timers.insert(301, TimerState { armed: true, deadline: 200, notif: Some(ObjId(101)), bits: 0b10, next: None });
-    st.timers.insert(300, TimerState { armed: true, deadline: 50, notif: Some(ObjId(100)), bits: 0b1, next: Some(ObjId(301)) });
+    st.timers.insert(
+        301,
+        TimerState {
+            armed: true,
+            deadline: 200,
+            notif: Some(ObjId(101)),
+            bits: 0b10,
+            next: None,
+        },
+    );
+    st.timers.insert(
+        300,
+        TimerState {
+            armed: true,
+            deadline: 50,
+            notif: Some(ObjId(100)),
+            bits: 0b1,
+            next: Some(ObjId(301)),
+        },
+    );
     st.timer_armed_head = Some(ObjId(300));
     // notif 100 with a blocked waiter 400 (so the fire takes the wake path).
-    st.tcbs.insert(400, TcbState { state: ThreadState::BlockedNotif, wait_notif: Some(ObjId(100)), ..tcb_state_default() });
-    st.notifs.insert(100, NotifState { word: 0, wait_head: Some(ObjId(400)), wait_tail: Some(ObjId(400)) });
+    st.tcbs.insert(
+        400,
+        TcbState {
+            state: ThreadState::BlockedNotif,
+            wait_notif: Some(ObjId(100)),
+            ..tcb_state_default()
+        },
+    );
+    st.notifs.insert(
+        100,
+        NotifState {
+            word: 0,
+            wait_head: Some(ObjId(400)),
+            wait_tail: Some(ObjId(400)),
+        },
+    );
     st.refs.insert(100, 2); // the timer's ref + the waiter's ref
-    // notif 101, no waiter.
-    st.notifs.insert(101, NotifState { word: 0, wait_head: None, wait_tail: None });
+                            // notif 101, no waiter.
+    st.notifs.insert(
+        101,
+        NotifState {
+            word: 0,
+            wait_head: None,
+            wait_tail: None,
+        },
+    );
     st.refs.insert(101, 1); // the timer's ref
 
     check_check_expired(&mut st, now);
 
     assert!(!st.timers[&300].armed, "the expired timer is disarmed");
-    assert_eq!(st.tcbs[&400].state, ThreadState::Runnable, "its blocked waiter woke");
+    assert_eq!(
+        st.tcbs[&400].state,
+        ThreadState::Runnable,
+        "its blocked waiter woke"
+    );
     assert_eq!(st.tcbs[&400].retval, 0b1, "the timer's bits were delivered");
-    assert_eq!(st.refs[&100], 0, "disarm released the timer ref, the wake the waiter ref");
+    assert_eq!(
+        st.refs[&100], 0,
+        "disarm released the timer ref, the wake the waiter ref"
+    );
     assert!(st.timers[&301].armed, "the unexpired timer survives");
-    assert!(st.timer_armed_head == Some(ObjId(301)), "the survivor is now the list head");
+    assert!(
+        st.timer_armed_head == Some(ObjId(301)),
+        "the survivor is now the list head"
+    );
     assert_eq!(st.refs[&101], 1, "the untouched notif keeps its ref");
 }
 
@@ -3475,7 +4742,16 @@ fn check_expired_wake_and_skip() {
 fn destroy_timer_disarms() {
     let mut st = ArrayStore::new(0);
     let t = ObjId(300);
-    st.timers.insert(300, TimerState { armed: true, deadline: 10, notif: Some(ObjId(100)), bits: 0b1, next: None });
+    st.timers.insert(
+        300,
+        TimerState {
+            armed: true,
+            deadline: 10,
+            notif: Some(ObjId(100)),
+            bits: 0b1,
+            next: None,
+        },
+    );
     st.timer_armed_head = Some(t);
     st.refs.insert(100, 1);
     st.refs.insert(300, 0); // last cap gone (the destroy_timer precondition)
@@ -3483,7 +4759,10 @@ fn destroy_timer_disarms() {
     check_destroy_timer(&mut st, t);
 
     assert!(st.timer_armed_head.is_none(), "the armed list is now empty");
-    assert_eq!(st.refs[&100], 0, "destroy_timer released the notif ref via disarm");
+    assert_eq!(
+        st.refs[&100], 0,
+        "destroy_timer released the notif ref via disarm"
+    );
 }
 
 // `destroy_tcb`'s structural contract: a Runnable thread (200) holding two notification
@@ -3525,7 +4804,10 @@ fn destroy_tcb_structural() {
 // the verified read-only walker (`range_mapped_in`/`lookup`) — the executable
 // counterpart of the `pt_lookup` round-trip.
 
-use crate::aspace::{lookup, map_in, pte_encode, range_mapped_in, unmap_in, MapError, PAGE, PERM_W, USER_VA_BASE, USER_VA_END};
+use crate::aspace::{
+    lookup, map_in, pte_encode, range_mapped_in, unmap_in, MapError, PAGE, PERM_W, USER_VA_BASE,
+    USER_VA_END,
+};
 
 // A fresh aspace: a zeroed L1, an `npools`-table zeroed pool at a page-aligned
 // base, `pool_used == 0`. `pool_base` sits well inside the 48-bit address field.
@@ -3538,10 +4820,20 @@ fn map_in_single_page() {
     let (mut l1, mut pool, mut used, base) = map_fixture(8);
     let mut store = ArrayStore::new(0);
     let (va, pa) = (USER_VA_BASE, 0x4800_0000u64);
-    map_in(&mut l1, &mut pool, &mut used, base, pa, va, 1, PERM_W, &mut store).unwrap();
-    assert!(range_mapped_in(&l1, &pool, base, va, PAGE, true), "mapped writable");
+    map_in(
+        &mut l1, &mut pool, &mut used, base, pa, va, 1, PERM_W, &mut store,
+    )
+    .unwrap();
+    assert!(
+        range_mapped_in(&l1, &pool, base, va, PAGE, true),
+        "mapped writable"
+    );
     let (l3, e) = lookup(&l1, &pool, base, va).expect("present");
-    assert_eq!(pool[l3][e], pte_encode(pa, PERM_W), "leaf is pte_encode(pa, W)");
+    assert_eq!(
+        pool[l3][e],
+        pte_encode(pa, PERM_W),
+        "leaf is pte_encode(pa, W)"
+    );
     assert_eq!(used, 2, "one L2 + one L3 table allocated");
 }
 
@@ -3550,7 +4842,10 @@ fn map_in_multi_page() {
     let (mut l1, mut pool, mut used, base) = map_fixture(8);
     let mut store = ArrayStore::new(0);
     let (va, pa) = (USER_VA_BASE, 0x4800_0000u64);
-    map_in(&mut l1, &mut pool, &mut used, base, pa, va, 4, PERM_W, &mut store).unwrap();
+    map_in(
+        &mut l1, &mut pool, &mut used, base, pa, va, 4, PERM_W, &mut store,
+    )
+    .unwrap();
     assert!(range_mapped_in(&l1, &pool, base, va, 4 * PAGE, true));
     for i in 0..4u64 {
         let (l3, e) = lookup(&l1, &pool, base, va + i * PAGE).expect("present");
@@ -3565,7 +4860,10 @@ fn map_in_carries_l2_index() {
     let (mut l1, mut pool, mut used, base) = map_fixture(8);
     let mut store = ArrayStore::new(0);
     let (va, pa) = (USER_VA_BASE + 511 * PAGE, 0x4800_0000u64);
-    map_in(&mut l1, &mut pool, &mut used, base, pa, va, 2, PERM_W, &mut store).unwrap();
+    map_in(
+        &mut l1, &mut pool, &mut used, base, pa, va, 2, PERM_W, &mut store,
+    )
+    .unwrap();
     assert!(range_mapped_in(&l1, &pool, base, va, 2 * PAGE, true));
     assert_eq!(used, 3, "one L2 + two L3 tables (the L2 carry)");
 }
@@ -3576,16 +4874,36 @@ fn map_in_already_mapped_atomic() {
     let mut store = ArrayStore::new(0);
     let va = USER_VA_BASE;
     let pa1 = 0x4800_0000u64;
-    map_in(&mut l1, &mut pool, &mut used, base, pa1, va, 4, PERM_W, &mut store).unwrap();
+    map_in(
+        &mut l1, &mut pool, &mut used, base, pa1, va, 4, PERM_W, &mut store,
+    )
+    .unwrap();
     // Try to map pages 2..6 with a *different* PA: page 2 overlaps → AlreadyMapped.
     let pa2 = 0x4A00_0000u64;
-    let r = map_in(&mut l1, &mut pool, &mut used, base, pa2, va + 2 * PAGE, 4, PERM_W, &mut store);
+    let r = map_in(
+        &mut l1,
+        &mut pool,
+        &mut used,
+        base,
+        pa2,
+        va + 2 * PAGE,
+        4,
+        PERM_W,
+        &mut store,
+    );
     assert_eq!(r, Err(MapError::AlreadyMapped));
     // Atomic: no leaf of the second request was written — pages 4/5 stay unmapped…
-    assert!(!range_mapped_in(&l1, &pool, base, va + 4 * PAGE, 2 * PAGE, false), "no partial write");
+    assert!(
+        !range_mapped_in(&l1, &pool, base, va + 4 * PAGE, 2 * PAGE, false),
+        "no partial write"
+    );
     // …and the overlapped page keeps pa1's PTE (not overwritten with pa2's).
     let (l3, e) = lookup(&l1, &pool, base, va + 2 * PAGE).expect("present");
-    assert_eq!(pool[l3][e], pte_encode(pa1 + 2 * PAGE, PERM_W), "original mapping intact");
+    assert_eq!(
+        pool[l3][e],
+        pte_encode(pa1 + 2 * PAGE, PERM_W),
+        "original mapping intact"
+    );
 }
 
 #[test]
@@ -3593,9 +4911,22 @@ fn map_in_need_memory() {
     // A pool one table short of the L2+L3 a single page needs → NeedMemory.
     let (mut l1, mut pool, mut used, base) = map_fixture(1);
     let mut store = ArrayStore::new(0);
-    let r = map_in(&mut l1, &mut pool, &mut used, base, 0x4800_0000, USER_VA_BASE, 1, PERM_W, &mut store);
+    let r = map_in(
+        &mut l1,
+        &mut pool,
+        &mut used,
+        base,
+        0x4800_0000,
+        USER_VA_BASE,
+        1,
+        PERM_W,
+        &mut store,
+    );
     assert_eq!(r, Err(MapError::NeedMemory));
-    assert!(!range_mapped_in(&l1, &pool, base, USER_VA_BASE, PAGE, false), "nothing mapped");
+    assert!(
+        !range_mapped_in(&l1, &pool, base, USER_VA_BASE, PAGE, false),
+        "nothing mapped"
+    );
 }
 
 #[test]
@@ -3603,9 +4934,26 @@ fn map_in_readonly_rejects_write() {
     let (mut l1, mut pool, mut used, base) = map_fixture(8);
     let mut store = ArrayStore::new(0);
     let va = USER_VA_BASE;
-    map_in(&mut l1, &mut pool, &mut used, base, 0x4800_0000, va, 1, 0 /* RO */, &mut store).unwrap();
-    assert!(range_mapped_in(&l1, &pool, base, va, PAGE, false), "present for reads");
-    assert!(!range_mapped_in(&l1, &pool, base, va, PAGE, true), "rejected for writes");
+    map_in(
+        &mut l1,
+        &mut pool,
+        &mut used,
+        base,
+        0x4800_0000,
+        va,
+        1,
+        0, /* RO */
+        &mut store,
+    )
+    .unwrap();
+    assert!(
+        range_mapped_in(&l1, &pool, base, va, PAGE, false),
+        "present for reads"
+    );
+    assert!(
+        !range_mapped_in(&l1, &pool, base, va, PAGE, true),
+        "rejected for writes"
+    );
 }
 
 #[test]
@@ -3629,17 +4977,32 @@ fn randomized_map_sweep() {
             if va + pages * PAGE > USER_VA_END {
                 break;
             }
-            match map_in(&mut l1, &mut pool, &mut used, base, pa, va, pages, perms, &mut store) {
+            match map_in(
+                &mut l1, &mut pool, &mut used, base, pa, va, pages, perms, &mut store,
+            ) {
                 Ok(()) => {
-                    assert!(range_mapped_in(&l1, &pool, base, va, pages * PAGE, perms & PERM_W != 0));
+                    assert!(range_mapped_in(
+                        &l1,
+                        &pool,
+                        base,
+                        va,
+                        pages * PAGE,
+                        perms & PERM_W != 0
+                    ));
                     for i in 0..pages {
-                        let (l3, e) = lookup(&l1, &pool, base, va + i * PAGE).expect("new range present");
+                        let (l3, e) =
+                            lookup(&l1, &pool, base, va + i * PAGE).expect("new range present");
                         assert_eq!(pool[l3][e], pte_encode(pa + i * PAGE, perms));
                     }
                     for &(mva, mpages, mpa, mperms) in &mapped {
                         for i in 0..mpages {
-                            let (l3, e) = lookup(&l1, &pool, base, mva + i * PAGE).expect("prior range intact");
-                            assert_eq!(pool[l3][e], pte_encode(mpa + i * PAGE, mperms), "no clobber");
+                            let (l3, e) = lookup(&l1, &pool, base, mva + i * PAGE)
+                                .expect("prior range intact");
+                            assert_eq!(
+                                pool[l3][e],
+                                pte_encode(mpa + i * PAGE, mperms),
+                                "no clobber"
+                            );
                         }
                     }
                     mapped.push((va, pages, pa, perms));
@@ -3650,7 +5013,10 @@ fn randomized_map_sweep() {
             }
         }
     }
-    assert!(trials > 300, "sweep should map hundreds of ranges, ran {trials}");
+    assert!(
+        trials > 300,
+        "sweep should map hundreds of ranges, ran {trials}"
+    );
 }
 
 // ── aspace `unmap_in`: the verified leaf-clear + TLBI effect-log ─────────────
@@ -3669,12 +5035,21 @@ fn unmap_clears_and_logs() {
     let (mut l1, mut pool, mut used, base) = map_fixture(8);
     let mut store = ArrayStore::new(0);
     let (va, pa) = (USER_VA_BASE, 0x4800_0000u64);
-    map_in(&mut l1, &mut pool, &mut used, base, pa, va, 4, PERM_W, &mut store).unwrap();
-    assert!(range_mapped_in(&l1, &pool, base, va, 4 * PAGE, false), "mapped before unmap");
+    map_in(
+        &mut l1, &mut pool, &mut used, base, pa, va, 4, PERM_W, &mut store,
+    )
+    .unwrap();
+    assert!(
+        range_mapped_in(&l1, &pool, base, va, 4 * PAGE, false),
+        "mapped before unmap"
+    );
 
     unmap_in(&l1, &mut pool, base, TEST_ASID, va, 4, &mut store);
     // Every page in the range is now unmapped…
-    assert!(!range_mapped_in(&l1, &pool, base, va, 4 * PAGE, false), "range cleared");
+    assert!(
+        !range_mapped_in(&l1, &pool, base, va, 4 * PAGE, false),
+        "range cleared"
+    );
     for i in 0..4u64 {
         let (l3, e) = lookup(&l1, &pool, base, va + i * PAGE).expect("L3 table still present");
         assert_eq!(pool[l3][e], 0, "leaf {i} zeroed");
@@ -3692,13 +5067,35 @@ fn unmap_absent_l3_region_no_tlbi() {
     // region (l2 slot 1, no L3 table) — no panic, no TLBI.
     let (mut l1, mut pool, mut used, base) = map_fixture(8);
     let mut store = ArrayStore::new(0);
-    map_in(&mut l1, &mut pool, &mut used, base, 0x4800_0000, USER_VA_BASE, 1, PERM_W, &mut store).unwrap();
+    map_in(
+        &mut l1,
+        &mut pool,
+        &mut used,
+        base,
+        0x4800_0000,
+        USER_VA_BASE,
+        1,
+        PERM_W,
+        &mut store,
+    )
+    .unwrap();
     store.tlb_log.clear();
     // USER_VA_BASE + 512*PAGE is the next 2 MiB region — no L2/L3 there.
-    unmap_in(&l1, &mut pool, base, TEST_ASID, USER_VA_BASE + 512 * PAGE, 4, &mut store);
+    unmap_in(
+        &l1,
+        &mut pool,
+        base,
+        TEST_ASID,
+        USER_VA_BASE + 512 * PAGE,
+        4,
+        &mut store,
+    );
     assert!(store.tlb_log.is_empty(), "absent L3 region ⇒ no TLBI");
     // The unrelated mapping is untouched (the frame).
-    assert!(range_mapped_in(&l1, &pool, base, USER_VA_BASE, PAGE, false), "other mapping intact");
+    assert!(
+        range_mapped_in(&l1, &pool, base, USER_VA_BASE, PAGE, false),
+        "other mapping intact"
+    );
 }
 
 #[test]
@@ -3708,13 +5105,37 @@ fn unmap_skips_absent_l3_at_region_boundary() {
     // the L3 table for region 0 (pages 0..511); pages 512.. live in the absent region 1.
     let (mut l1, mut pool, mut used, base) = map_fixture(8);
     let mut store = ArrayStore::new(0);
-    map_in(&mut l1, &mut pool, &mut used, base, 0x4800_0000, USER_VA_BASE, 1, PERM_W, &mut store).unwrap();
+    map_in(
+        &mut l1,
+        &mut pool,
+        &mut used,
+        base,
+        0x4800_0000,
+        USER_VA_BASE,
+        1,
+        PERM_W,
+        &mut store,
+    )
+    .unwrap();
     store.tlb_log.clear();
     // [base+510*PAGE, base+514*PAGE): pages 510,511 (region 0, present) + 512,513 (region 1, absent).
-    unmap_in(&l1, &mut pool, base, TEST_ASID, USER_VA_BASE + 510 * PAGE, 4, &mut store);
-    assert_eq!(store.tlb_log,
-        vec![(TEST_ASID, USER_VA_BASE + 510 * PAGE), (TEST_ASID, USER_VA_BASE + 511 * PAGE)],
-        "only the present-L3 pages are TLBI'd; the absent region is skipped");
+    unmap_in(
+        &l1,
+        &mut pool,
+        base,
+        TEST_ASID,
+        USER_VA_BASE + 510 * PAGE,
+        4,
+        &mut store,
+    );
+    assert_eq!(
+        store.tlb_log,
+        vec![
+            (TEST_ASID, USER_VA_BASE + 510 * PAGE),
+            (TEST_ASID, USER_VA_BASE + 511 * PAGE)
+        ],
+        "only the present-L3 pages are TLBI'd; the absent region is skipped"
+    );
 }
 
 #[test]
@@ -3722,17 +5143,30 @@ fn unmap_partial_overlap_frames_the_rest() {
     let (mut l1, mut pool, mut used, base) = map_fixture(8);
     let mut store = ArrayStore::new(0);
     let (va, pa) = (USER_VA_BASE, 0x4800_0000u64);
-    map_in(&mut l1, &mut pool, &mut used, base, pa, va, 4, PERM_W, &mut store).unwrap();
+    map_in(
+        &mut l1, &mut pool, &mut used, base, pa, va, 4, PERM_W, &mut store,
+    )
+    .unwrap();
     store.tlb_log.clear();
     // Unmap only the middle two pages (1..3).
     unmap_in(&l1, &mut pool, base, TEST_ASID, va + PAGE, 2, &mut store);
     // Pages 1,2 gone; pages 0,3 keep their exact PTEs (the frame).
-    assert!(!range_mapped_in(&l1, &pool, base, va + PAGE, 2 * PAGE, false), "middle cleared");
+    assert!(
+        !range_mapped_in(&l1, &pool, base, va + PAGE, 2 * PAGE, false),
+        "middle cleared"
+    );
     let (l3, e) = lookup(&l1, &pool, base, va).expect("present");
     assert_eq!(pool[l3][e], pte_encode(pa, PERM_W), "page 0 framed");
     let (l3, e) = lookup(&l1, &pool, base, va + 3 * PAGE).expect("present");
-    assert_eq!(pool[l3][e], pte_encode(pa + 3 * PAGE, PERM_W), "page 3 framed");
-    assert_eq!(store.tlb_log, vec![(TEST_ASID, va + PAGE), (TEST_ASID, va + 2 * PAGE)]);
+    assert_eq!(
+        pool[l3][e],
+        pte_encode(pa + 3 * PAGE, PERM_W),
+        "page 3 framed"
+    );
+    assert_eq!(
+        store.tlb_log,
+        vec![(TEST_ASID, va + PAGE), (TEST_ASID, va + 2 * PAGE)]
+    );
 }
 
 #[test]
@@ -3743,13 +5177,38 @@ fn unmap_tlbis_present_l3_including_zero_leaves() {
     let (mut l1, mut pool, mut used, base) = map_fixture(8);
     let mut store = ArrayStore::new(0);
     let va = USER_VA_BASE;
-    map_in(&mut l1, &mut pool, &mut used, base, 0x4800_0000, va, 1, PERM_W, &mut store).unwrap();
-    map_in(&mut l1, &mut pool, &mut used, base, 0x4900_0000, va + 2 * PAGE, 1, PERM_W, &mut store).unwrap();
+    map_in(
+        &mut l1,
+        &mut pool,
+        &mut used,
+        base,
+        0x4800_0000,
+        va,
+        1,
+        PERM_W,
+        &mut store,
+    )
+    .unwrap();
+    map_in(
+        &mut l1,
+        &mut pool,
+        &mut used,
+        base,
+        0x4900_0000,
+        va + 2 * PAGE,
+        1,
+        PERM_W,
+        &mut store,
+    )
+    .unwrap();
     store.tlb_log.clear();
     unmap_in(&l1, &mut pool, base, TEST_ASID, va, 4, &mut store);
     assert!(!range_mapped_in(&l1, &pool, base, va, 4 * PAGE, false));
     let expect: Vec<(u16, u64)> = (0..4).map(|i| (TEST_ASID, va + i * PAGE)).collect();
-    assert_eq!(store.tlb_log, expect, "one TLBI per page of the present L3, in order");
+    assert_eq!(
+        store.tlb_log, expect,
+        "one TLBI per page of the present L3, in order"
+    );
 }
 
 #[test]
@@ -3757,10 +5216,22 @@ fn map_unmap_remap_roundtrip() {
     let (mut l1, mut pool, mut used, base) = map_fixture(8);
     let mut store = ArrayStore::new(0);
     let (va, pa) = (USER_VA_BASE, 0x4800_0000u64);
-    map_in(&mut l1, &mut pool, &mut used, base, pa, va, 3, PERM_W, &mut store).unwrap();
+    map_in(
+        &mut l1, &mut pool, &mut used, base, pa, va, 3, PERM_W, &mut store,
+    )
+    .unwrap();
     unmap_in(&l1, &mut pool, base, TEST_ASID, va, 3, &mut store);
-    assert!(!range_mapped_in(&l1, &pool, base, va, 3 * PAGE, false), "unmapped");
+    assert!(
+        !range_mapped_in(&l1, &pool, base, va, 3 * PAGE, false),
+        "unmapped"
+    );
     // The cleared leaves are reusable: a fresh map of the same range succeeds.
-    map_in(&mut l1, &mut pool, &mut used, base, pa, va, 3, PERM_W, &mut store).unwrap();
-    assert!(range_mapped_in(&l1, &pool, base, va, 3 * PAGE, true), "remapped writable");
+    map_in(
+        &mut l1, &mut pool, &mut used, base, pa, va, 3, PERM_W, &mut store,
+    )
+    .unwrap();
+    assert!(
+        range_mapped_in(&l1, &pool, base, va, 3 * PAGE, true),
+        "remapped writable"
+    );
 }

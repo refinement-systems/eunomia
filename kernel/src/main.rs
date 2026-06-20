@@ -19,7 +19,7 @@ mod user;
 
 use core::fmt::Write;
 use core::ptr::{addr_of, addr_of_mut};
-use cspace::{Cap, CapKind, CapSlot, CSpaceObj, ObjHeader, Rights};
+use cspace::{CSpaceObj, Cap, CapKind, CapSlot, ObjHeader, Rights};
 use kcore::id::ObjId;
 use thread::{Tcb, ThreadState, TrapFrame};
 
@@ -103,7 +103,11 @@ pub extern "C" fn kernel_main() -> ! {
         // driver; phys-read never enters ordinary derivation (rev1§2.5).
         let slot3 = CSpaceObj::slot(root, 3);
         (*slot3).cap = Cap {
-            kind: CapKind::Frame { base: 0x0a00_0000, pages: 4, mapping: None },
+            kind: CapKind::Frame {
+                base: 0x0a00_0000,
+                pages: 4,
+                mapping: None,
+            },
             rights: Rights(Rights::READ | Rights::WRITE | Rights::PHYS),
         };
 
@@ -112,7 +116,11 @@ pub extern "C" fn kernel_main() -> ! {
         // is never touched again; no write authority exists anywhere.
         let slot4 = CSpaceObj::slot(root, 4);
         (*slot4).cap = Cap {
-            kind: CapKind::Frame { base: 0x0901_0000, pages: 1, mapping: None },
+            kind: CapKind::Frame {
+                base: 0x0901_0000,
+                pages: 1,
+                mapping: None,
+            },
             rights: Rights(Rights::READ | Rights::PHYS),
         };
 
@@ -227,8 +235,14 @@ unsafe fn setup_init(
 
     let stack_pa = carve(STACK_PAGES * PAGE);
     core::ptr::write_bytes(stack_pa as *mut u8, 0, (STACK_PAGES * PAGE) as usize);
-    aspace::map(asp, stack_pa, STACK_TOP - STACK_PAGES * PAGE, STACK_PAGES, PERM_W)
-        .expect("mapping init stack");
+    aspace::map(
+        asp,
+        stack_pa,
+        STACK_TOP - STACK_PAGES * PAGE,
+        STACK_PAGES,
+        PERM_W,
+    )
+    .expect("mapping init stack");
 
     (*asp).hdr.refs += 1; // init thread's reference
     (*init).aspace = Some(ObjId(asp as u64));

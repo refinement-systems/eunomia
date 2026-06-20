@@ -79,8 +79,10 @@ impl SpawnRec {
     ///
     /// Returns 0, or the first syscall error encountered.
     pub fn arm(&self, event_notif: u32, scratch: u32) -> i64 {
-        for (which, bit) in [(sys::BIND_EXIT, self.exit_bit), (sys::BIND_FAULT, self.fault_bit)]
-        {
+        for (which, bit) in [
+            (sys::BIND_EXIT, self.exit_bit),
+            (sys::BIND_FAULT, self.fault_bit),
+        ] {
             // Duplicate first (rev1§3.4): the bind below moves the cap out of
             // `scratch` into the TCB, so the parent keeps `event_notif`.
             let r = sys::cap_copy(event_notif, scratch, sys::RIGHTS_ALL);
@@ -108,7 +110,10 @@ impl SpawnRec {
         let (state, v1, v2) = sys::read_report(self.main_thread);
         // The forbidden ordering surfaces as a read failure: the donation
         // (and the TCB under it) already gone. Make it loud, not silent.
-        debug_assert!(state >= 0, "read_report failed in reap — revoke ran before read");
+        debug_assert!(
+            state >= 0,
+            "read_report failed in reap — revoke ran before read"
+        );
         if state < 0 {
             sys::debug_write(b"[urt] BUG: read_report before reclaim failed (ordering?)\n");
         }

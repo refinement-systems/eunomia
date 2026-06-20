@@ -199,10 +199,7 @@ extern "C" fn handle_el0_sync(frame: *mut TrapFrame) {
             (*t).state = crate::thread::ThreadState::Faulted;
             // The registers are already saved by this entry; the record
             // is the rest of the report (rev1§5.1, rev1§5.3).
-            crate::thread::report_terminal(
-                t,
-                crate::thread::Report::Faulted { cause: esr, far },
-            );
+            crate::thread::report_terminal(t, crate::thread::Report::Faulted { cause: esr, far });
             crate::thread::maybe_switch(frame, false);
         },
     }

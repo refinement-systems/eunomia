@@ -34,7 +34,11 @@ fn corpus_files(target: &str) -> Vec<Vec<u8>> {
 fn tlv_entry() {
     for data in corpus_files("tlv_entry") {
         if let Ok(entry) = cas::tlv::decode(&data) {
-            assert_eq!(cas::tlv::encode(&entry), data, "non-canonical entry in corpus");
+            assert_eq!(
+                cas::tlv::encode(&entry),
+                data,
+                "non-canonical entry in corpus"
+            );
         }
     }
 }
@@ -58,7 +62,11 @@ fn index_frame() {
     for data in corpus_files("index_frame") {
         if let Ok((entries, free)) = decode_index(&data) {
             let bytes = encode_index(&entries, &free, 0);
-            assert_eq!(decode_index(&bytes).unwrap(), (entries, free), "index not stable");
+            assert_eq!(
+                decode_index(&bytes).unwrap(),
+                (entries, free),
+                "index not stable"
+            );
         }
     }
 }
@@ -68,7 +76,11 @@ fn superblock() {
     for target in ["superblock", "superblock_fixup"] {
         for data in corpus_files(target) {
             if let Some(sb) = Superblock::decode(&data) {
-                assert_eq!(Superblock::decode(&sb.encode()), Some(sb), "superblock not stable");
+                assert_eq!(
+                    Superblock::decode(&sb.encode()),
+                    Some(sb),
+                    "superblock not stable"
+                );
             }
         }
     }
@@ -92,7 +104,11 @@ fn wal_replay_scan() {
 
 #[test]
 fn chunker() {
-    let params = cas::chunk::ChunkerParams { min: 64, avg: 256, max: 1024 };
+    let params = cas::chunk::ChunkerParams {
+        min: 64,
+        avg: 256,
+        max: 1024,
+    };
     for data in corpus_files("chunker") {
         let cuts = cas::chunk::boundaries(&params, &data);
         let mut prev = 0;

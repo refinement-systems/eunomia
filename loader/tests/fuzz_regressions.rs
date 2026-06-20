@@ -33,7 +33,13 @@ fn elf1_phoff_overflow_rejected() {
 fn elf2_page_rounding_overflow_refused() {
     // (a) The arithmetic, on the audit's witness: vaddr + memsz == u64::MAX, so
     // the `+ (PAGE-1)` round-up overflows. Clean Err, no panic.
-    let seg = elf::Segment { vaddr: u64::MAX - 8, offset: 0, filesz: 8, memsz: 8, flags: 0 };
+    let seg = elf::Segment {
+        vaddr: u64::MAX - 8,
+        offset: 0,
+        filesz: 8,
+        memsz: 8,
+        flags: 0,
+    };
     assert_eq!(seg.page_layout(), Err(elf::ElfError::BadSegment));
 
     // (b) A full ELF whose single PT_LOAD carries that vaddr/memsz: `parse`

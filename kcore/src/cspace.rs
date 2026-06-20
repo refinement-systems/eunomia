@@ -1545,7 +1545,7 @@ pub open spec fn ring_fifo(cv: ChanView, sv: Map<SlotId, CapSlot>, ring: int)
 // back-pointer, so the doubly-consistent membership trick does not apply — the clean
 // model is an explicit FIFO `Seq` witness (the `ring_fifo` analog). `wait` pushes
 // the tail (`Seq::push`, 4b), `signal` pops the head (`Seq::drop_first`, 4b),
-// `remove_waiter` splices out one element — so "wake order = block order" 
+// `remove_waiter` splices out one element — so "wake order = block order"
 // is FIFO-ness of `waiter_seq`.
 
 // A generic singly-linked-list acyclicity rank over an abstract successor map — the

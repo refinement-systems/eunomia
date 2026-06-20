@@ -28,7 +28,10 @@ fn built_image_mounts_and_matches_source() {
 
     let store = Store::mount(FileDev::open(&img).unwrap(), StoreOptions::default()).unwrap();
     assert_eq!(store.read(b"main", &p(&["a.txt"])).unwrap().unwrap(), small);
-    assert_eq!(store.read(b"main", &p(&["sub", "b.bin"])).unwrap().unwrap(), big);
+    assert_eq!(
+        store.read(b"main", &p(&["sub", "b.bin"])).unwrap().unwrap(),
+        big
+    );
 
     // mkfs takes snapshot #1, retention class keep.
     let snaps: Vec<_> = store.snapshots(b"main").collect();
@@ -39,7 +42,10 @@ fn built_image_mounts_and_matches_source() {
     // Snapshot reads resolve through the snapshot root.
     let root = store.snapshot_root(b"main", 1).unwrap();
     assert_eq!(
-        store.read_at_root(&root, &p(&["sub", "b.bin"])).unwrap().unwrap(),
+        store
+            .read_at_root(&root, &p(&["sub", "b.bin"]))
+            .unwrap()
+            .unwrap(),
         big
     );
 

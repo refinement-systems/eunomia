@@ -16,7 +16,7 @@
 //! is the statically allocated root cspace, which is morally init's memory
 //! baked into the image.
 
-use crate::cspace::{self, Cap, CapKind, ChanEnd, CSpaceObj, Rights};
+use crate::cspace::{self, CSpaceObj, Cap, CapKind, ChanEnd, Rights};
 // `StoreSpec` carries the `Store` ghost-view extension (`slot_view`/`refs_view`/
 // `chan_view`) the retype contracts quantify over. Only referenced from
 // `requires`/`ensures`, which erase in a normal build — hence unused there. The spec

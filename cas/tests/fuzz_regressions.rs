@@ -14,7 +14,11 @@ use cas::store::{Store, StoreError, StoreOptions};
 fn small_opts() -> StoreOptions {
     StoreOptions {
         wal_len: 4096,
-        chunker: ChunkerParams { min: 64, avg: 256, max: 1024 },
+        chunker: ChunkerParams {
+            min: 64,
+            avg: 256,
+            max: 1024,
+        },
         overlay_budget: 16 * 1024,
     }
 }
@@ -66,7 +70,9 @@ fn ovl1_write_extent_beyond_capacity_rejected() {
 /// A small committed image, dumped to raw bytes for forging.
 fn image() -> Vec<u8> {
     let mut store = fresh();
-    store.write(b"main", &vec![b"f".to_vec()], 0, b"hello", 1).unwrap();
+    store
+        .write(b"main", &vec![b"f".to_vec()], 0, b"hello", 1)
+        .unwrap();
     store.sync_all().unwrap();
     let dev = store.into_dev();
     let mut img = vec![0u8; dev.len() as usize];
@@ -109,7 +115,10 @@ fn mnt1_forged_chunk_tail_rejected() {
     replace_sb(&mut img, slot, &sb);
     let r = mount(img).err();
     assert!(
-        matches!(r, Some(StoreError::Corrupt("committed chunk region exceeds device"))),
+        matches!(
+            r,
+            Some(StoreError::Corrupt("committed chunk region exceeds device"))
+        ),
         "got {r:?}"
     );
 
@@ -121,7 +130,10 @@ fn mnt1_forged_chunk_tail_rejected() {
     replace_sb(&mut img, slot, &sb);
     let r = mount(img).err();
     assert!(
-        matches!(r, Some(StoreError::Corrupt("committed chunk region exceeds device"))),
+        matches!(
+            r,
+            Some(StoreError::Corrupt("committed chunk region exceeds device"))
+        ),
         "got {r:?}"
     );
 }
@@ -138,7 +150,10 @@ fn mnt1_forged_generation_max_rejected() {
     replace_sb(&mut img, slot, &sb);
     let r = mount(img).err();
     assert!(
-        matches!(r, Some(StoreError::Corrupt("superblock generation exhausted"))),
+        matches!(
+            r,
+            Some(StoreError::Corrupt("superblock generation exhausted"))
+        ),
         "got {r:?}"
     );
 }
@@ -169,7 +184,10 @@ fn mnt1_forged_index_off_rejected() {
     replace_sb(&mut img, slot, &sb);
     let r = mount(img).err();
     assert!(
-        matches!(r, Some(StoreError::Corrupt("index frame outside committed region"))),
+        matches!(
+            r,
+            Some(StoreError::Corrupt("index frame outside committed region"))
+        ),
         "got {r:?}"
     );
 }
@@ -239,7 +257,10 @@ fn mnt1_forged_wal_record_extent_rejected() {
     img[at..at + rec.len()].copy_from_slice(&rec);
     let r = mount(img).err();
     assert!(
-        matches!(r, Some(StoreError::Corrupt("wal record extent out of range"))),
+        matches!(
+            r,
+            Some(StoreError::Corrupt("wal record extent out of range"))
+        ),
         "got {r:?}"
     );
 }
@@ -260,7 +281,11 @@ fn mnt1_forged_index_entry_wrap_rejected() {
     let (mut entries, free) = decode_index(payload).unwrap();
     entries.insert(
         Hash::of(b"poison"),
-        IndexEntry { off: u64::MAX - 4, len: 16, birth: 1 },
+        IndexEntry {
+            off: u64::MAX - 4,
+            len: 16,
+            birth: 1,
+        },
     );
     let forged = encode_index(&entries, &free, 0);
     let frame = encode_chunk_frame(&forged, birth, &Hash::of(&forged));

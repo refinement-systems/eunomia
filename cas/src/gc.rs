@@ -39,8 +39,7 @@ pub fn mark(
                     Content::Inline(_) => {}
                     Content::ChunkList(h) => {
                         if live.insert(h) {
-                            let list =
-                                store.get(&h).ok_or(FormatError::MissingNode(h))?;
+                            let list = store.get(&h).ok_or(FormatError::MissingNode(h))?;
                             for (chunk, _) in chunk_list_entries(&list)? {
                                 live.insert(chunk);
                             }
@@ -62,7 +61,11 @@ mod tests {
     use crate::prolly::{Dir, MemStore};
     use crate::tree;
 
-    const TEST_PARAMS: ChunkerParams = ChunkerParams { min: 64, avg: 256, max: 1024 };
+    const TEST_PARAMS: ChunkerParams = ChunkerParams {
+        min: 64,
+        avg: 256,
+        max: 1024,
+    };
 
     /// Serves only marked objects — reads through it succeed exactly when
     /// the mark set is sufficient.
@@ -77,7 +80,10 @@ mod tests {
         }
 
         fn get(&self, hash: &Hash) -> Option<alloc::vec::Vec<u8>> {
-            self.live.contains(hash).then(|| self.inner.get(hash)).flatten()
+            self.live
+                .contains(hash)
+                .then(|| self.inner.get(hash))
+                .flatten()
         }
     }
 
@@ -100,10 +106,17 @@ mod tests {
         assert!(live.len() < store.len());
         // ...while everything reachable stays readable through the mark
         // set alone.
-        let filtered = LiveOnly { inner: &store, live: &live };
-        let e = tree::lookup(&filtered, &root, &[b"small"]).unwrap().unwrap();
+        let filtered = LiveOnly {
+            inner: &store,
+            live: &live,
+        };
+        let e = tree::lookup(&filtered, &root, &[b"small"])
+            .unwrap()
+            .unwrap();
         assert_eq!(read_file(&filtered, &e.content, e.size).unwrap(), b"tiny");
-        let e = tree::lookup(&filtered, &root, &[b"deep", b"er", b"big"]).unwrap().unwrap();
+        let e = tree::lookup(&filtered, &root, &[b"deep", b"er", b"big"])
+            .unwrap()
+            .unwrap();
         assert_eq!(read_file(&filtered, &e.content, e.size).unwrap(), big_data);
     }
 }

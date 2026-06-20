@@ -32,23 +32,23 @@
 // only by the `static TIME_PAGE` page-location cell, which is real-build-only
 // (neither model can put an atomic in a `static`); the seqlock protocol both
 // models check needs only the four field atomics + fence.
+#[cfg(all(not(loom), not(shuttle)))]
+use core::sync::atomic::{fence, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 #[cfg(loom)]
 use loom::sync::atomic::{fence, AtomicI64, AtomicU64, Ordering};
 #[cfg(shuttle)]
 use shuttle::sync::atomic::{fence, AtomicI64, AtomicU64, Ordering};
-#[cfg(all(not(loom), not(shuttle)))]
-use core::sync::atomic::{fence, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 
 // The reader's seqlock spin hint rides the same seam: loom's and shuttle's
 // mocked spin_loop yield to their scheduler (a raw core::hint::spin_loop is
 // opaque to them and blows loom's branch budget / never preempts under
 // shuttle); native keeps the CPU hint.
+#[cfg(all(not(loom), not(shuttle)))]
+use core::hint::spin_loop;
 #[cfg(loom)]
 use loom::hint::spin_loop;
 #[cfg(shuttle)]
 use shuttle::hint::spin_loop;
-#[cfg(all(not(loom), not(shuttle)))]
-use core::hint::spin_loop;
 
 // Verus: the `verus!{}` macro + ghost vocabulary for the host-side proof of the
 // tick→ns conversion (`Sample::utc_ns_at`, below). Erases under every ordinary
@@ -321,7 +321,11 @@ impl TimePage {
             // a torn sample would pass the check.
             fence(Ordering::Acquire);
             if self.seq.load(Ordering::Relaxed) == s1 {
-                return Sample { wall_base_ns, cntvct_base, cntfrq };
+                return Sample {
+                    wall_base_ns,
+                    cntvct_base,
+                    cntfrq,
+                };
             }
         }
     }
@@ -415,7 +419,11 @@ mod tests {
 
     #[test]
     fn conversion_at_boot_is_wall_base() {
-        let s = Sample { wall_base_ns: 1_700_000_000_000_000_000, cntvct_base: 12345, cntfrq: 62_500_000 };
+        let s = Sample {
+            wall_base_ns: 1_700_000_000_000_000_000,
+            cntvct_base: 12345,
+            cntfrq: 62_500_000,
+        };
         assert_eq!(s.utc_ns_at(12345), 1_700_000_000_000_000_000);
     }
 
@@ -423,20 +431,35 @@ mod tests {
     fn conversion_survives_the_five_minute_overflow() {
         // Six minutes at 62.5 MHz: delta·10⁹ has already overflowed u64.
         let f = 62_500_000u64;
-        let s = Sample { wall_base_ns: 1_700_000_000_000_000_000, cntvct_base: 0, cntfrq: f };
+        let s = Sample {
+            wall_base_ns: 1_700_000_000_000_000_000,
+            cntvct_base: 0,
+            cntfrq: f,
+        };
         let delta = 360 * f;
-        assert_eq!(s.utc_ns_at(delta), 1_700_000_000_000_000_000 + 360 * 1_000_000_000);
+        assert_eq!(
+            s.utc_ns_at(delta),
+            1_700_000_000_000_000_000 + 360 * 1_000_000_000
+        );
     }
 
     #[test]
     fn conversion_is_exact_at_one_tick() {
-        let s = Sample { wall_base_ns: 0, cntvct_base: 0, cntfrq: 62_500_000 };
+        let s = Sample {
+            wall_base_ns: 0,
+            cntvct_base: 0,
+            cntfrq: 62_500_000,
+        };
         assert_eq!(s.utc_ns_at(1), 16); // 1/62.5 MHz = 16 ns
     }
 
     #[test]
     fn earlier_counter_saturates_to_wall_base() {
-        let s = Sample { wall_base_ns: 1_000, cntvct_base: 500, cntfrq: 1_000_000 };
+        let s = Sample {
+            wall_base_ns: 1_000,
+            cntvct_base: 500,
+            cntfrq: 1_000_000,
+        };
         assert_eq!(s.utc_ns_at(100), 1_000);
     }
 
@@ -452,7 +475,14 @@ mod tests {
     #[test]
     fn write_once_page_reads_back() {
         let p = TimePage::new(7, 8, 9);
-        assert_eq!(p.sample(), Sample { wall_base_ns: 7, cntvct_base: 8, cntfrq: 9 });
+        assert_eq!(
+            p.sample(),
+            Sample {
+                wall_base_ns: 7,
+                cntvct_base: 8,
+                cntfrq: 9
+            }
+        );
     }
 
     /// The retry path, exercised today even though the OS won't write the
@@ -506,11 +536,14 @@ mod tests {
             }
         }
         let s = page.sample();
-        assert_eq!(s, Sample {
-            wall_base_ns: iters,
-            cntvct_base: 2 * iters as u64,
-            cntfrq: (3 * iters + 1) as u64,
-        });
+        assert_eq!(
+            s,
+            Sample {
+                wall_base_ns: iters,
+                cntvct_base: 2 * iters as u64,
+                cntfrq: (3 * iters + 1) as u64,
+            }
+        );
         writer.join().unwrap();
     }
 
@@ -620,8 +653,16 @@ mod loom_tests {
             // The invariant `cntvct == 2·wall && cntfrq == 3·wall + 1` holds for
             // both epochs (0,0,1) and (1,2,4); any torn mix of the two breaks it.
             let s = page.sample();
-            assert_eq!(s.cntvct_base, 2 * s.wall_base_ns as u64, "torn sample: {s:?}");
-            assert_eq!(s.cntfrq, (3 * s.wall_base_ns + 1) as u64, "torn sample: {s:?}");
+            assert_eq!(
+                s.cntvct_base,
+                2 * s.wall_base_ns as u64,
+                "torn sample: {s:?}"
+            );
+            assert_eq!(
+                s.cntfrq,
+                (3 * s.wall_base_ns + 1) as u64,
+                "torn sample: {s:?}"
+            );
 
             writer.join().unwrap();
         });
@@ -666,8 +707,16 @@ mod shuttle_tests {
                 };
 
                 let s = page.sample();
-                assert_eq!(s.cntvct_base, 2 * s.wall_base_ns as u64, "torn sample: {s:?}");
-                assert_eq!(s.cntfrq, (3 * s.wall_base_ns + 1) as u64, "torn sample: {s:?}");
+                assert_eq!(
+                    s.cntvct_base,
+                    2 * s.wall_base_ns as u64,
+                    "torn sample: {s:?}"
+                );
+                assert_eq!(
+                    s.cntfrq,
+                    (3 * s.wall_base_ns + 1) as u64,
+                    "torn sample: {s:?}"
+                );
 
                 writer.join().unwrap();
             },

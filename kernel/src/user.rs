@@ -162,7 +162,15 @@ unsafe fn cap_install(cspace: u64, src: u64, dst_index: u64) -> i64 {
 
 #[inline(always)]
 unsafe fn chan_send(chan: u64, data: &[u8], caps: *const [u32; 4]) -> i64 {
-    sys(8, chan, data.as_ptr() as u64, data.len() as u64, caps as u64, 0, 0)
+    sys(
+        8,
+        chan,
+        data.as_ptr() as u64,
+        data.len() as u64,
+        caps as u64,
+        0,
+        0,
+    )
 }
 
 #[inline(always)]
@@ -386,7 +394,10 @@ pub extern "C" fn user_main(_arg: u64) -> ! {
         // grant) — the witness that the reducing `derive` ABI
         // (`cap_copy_prio`) runs end-to-end; the ceiling is
         // orthogonal to the rights gating checked just below.
-        check(cap_copy_prio(TCB2, TCB2_WEAK, RIGHT_READ | RIGHT_WRITE, 3), b'!');
+        check(
+            cap_copy_prio(TCB2, TCB2_WEAK, RIGHT_READ | RIGHT_WRITE, 3),
+            b'!',
+        );
         let r_bind = thread_bind(TCB2_WEAK, 0, SLOT_NONE as u64, 0);
         let (r_weak, _, _) = read_report(TCB2_WEAK);
         if r_bind >= 0 || r_weak >= 0 {
@@ -408,8 +419,14 @@ pub extern "C" fn user_main(_arg: u64) -> ! {
         check(retype(UNTYPED, OBJ_UNTYPED, 0x10000, UA, 0), b'H');
         check(retype(UNTYPED2, OBJ_NOTIF, 0, PC_NOTIF, 0), b'I');
         check(retype(UA, OBJ_CHANNEL, 4, PC_CHAN_A, PC_CHAN_B), b'J');
-        check(chan_bind(PC_CHAN_A, EV_PEER_CLOSED, PC_NOTIF, BIT_PC_A), b'K');
-        check(chan_bind(PC_CHAN_B, EV_PEER_CLOSED, PC_NOTIF, BIT_PC_B), b'L');
+        check(
+            chan_bind(PC_CHAN_A, EV_PEER_CLOSED, PC_NOTIF, BIT_PC_A),
+            b'K',
+        );
+        check(
+            chan_bind(PC_CHAN_B, EV_PEER_CLOSED, PC_NOTIF, BIT_PC_B),
+            b'L',
+        );
         check(cap_revoke(UA), b'M');
         // Both fires land in one word: T1 never blocked, so the bits
         // accumulate and the first wait returns the whole word.

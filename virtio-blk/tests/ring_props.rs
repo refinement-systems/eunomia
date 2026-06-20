@@ -21,7 +21,10 @@ const MAX_K: usize = 8;
 fn make_driver(sectors: usize) -> VirtioBlk<FakeBlock, HostBacking> {
     let mem = SharedMem::new(256 * 1024);
     let fake = FakeBlock::new(mem.clone(), DEV_BASE, sectors);
-    let pool = DmaPool::new(HostBacking { mem, device_base: DEV_BASE });
+    let pool = DmaPool::new(HostBacking {
+        mem,
+        device_base: DEV_BASE,
+    });
     VirtioBlk::new(fake, pool, 64 * 1024).unwrap()
 }
 
@@ -39,7 +42,10 @@ fn op_strategy() -> impl Strategy<Value = Op> {
     prop_oneof![
         (lba.clone(), 1usize..=MAX_K)
             .prop_flat_map(|(lba, k)| {
-                (Just(lba), proptest::collection::vec(any::<u8>(), k * SECTOR))
+                (
+                    Just(lba),
+                    proptest::collection::vec(any::<u8>(), k * SECTOR),
+                )
             })
             .prop_map(|(lba, data)| Op::Write { lba, data }),
         (lba, 1usize..=MAX_K).prop_map(|(lba, k)| Op::Read { lba, k }),
@@ -129,6 +135,9 @@ fn index_wrap_no_desync() {
         blk.write_sectors(lba, &sector).unwrap();
         let mut back = [0u8; SECTOR];
         blk.read_sectors(lba, &mut back).unwrap();
-        assert_eq!([back[0], back[1], back[2]], [sector[0], sector[1], sector[2]]);
+        assert_eq!(
+            [back[0], back[1], back[2]],
+            [sector[0], sector[1], sector[2]]
+        );
     }
 }

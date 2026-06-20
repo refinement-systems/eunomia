@@ -9,7 +9,13 @@ use loader::elf::{ElfError, Segment, PAGE};
 use proptest::prelude::*;
 
 fn seg(vaddr: u64, memsz: u64) -> Segment {
-    Segment { vaddr, offset: 0, filesz: 0, memsz, flags: 0 }
+    Segment {
+        vaddr,
+        offset: 0,
+        filesz: 0,
+        memsz,
+        flags: 0,
+    }
 }
 
 /// `u64` strategy that samples the full range but biases toward the I-5
@@ -94,7 +100,10 @@ fn old_unchecked_formula_would_wrap_on_i5_witness() {
     // The old round-up, reproduced with wrapping to model what an unchecked `+`
     // does in release (and what overflow-checks would abort on in dev).
     let old_va_end = vaddr.wrapping_add(memsz).wrapping_add(PAGE - 1) & !(PAGE - 1);
-    assert!(old_va_end < va_start, "expected the unchecked round-up to wrap below va_start");
+    assert!(
+        old_va_end < va_start,
+        "expected the unchecked round-up to wrap below va_start"
+    );
     // The checked path refuses the same input cleanly, with no panic.
     assert_eq!(seg(vaddr, memsz).page_layout(), Err(ElfError::BadSegment));
 }

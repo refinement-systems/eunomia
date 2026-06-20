@@ -28,15 +28,34 @@ fn corpus_files(target: &str) -> Vec<Vec<u8>> {
 fn fresh() -> (Server<MemDev>, u64) {
     let opts = StoreOptions {
         wal_len: 4096,
-        chunker: ChunkerParams { min: 64, avg: 256, max: 1024 },
+        chunker: ChunkerParams {
+            min: 64,
+            avg: 256,
+            max: 1024,
+        },
         overlay_budget: 16 * 1024,
     };
     let mut store = Store::format(MemDev::new(64 * 1024), opts).unwrap();
     store.create_ref(b"main").unwrap();
-    store.write(b"main", &vec![b"etc".to_vec(), b"conf".to_vec()], 0, b"hello", 1).unwrap();
+    store
+        .write(
+            b"main",
+            &vec![b"etc".to_vec(), b"conf".to_vec()],
+            0,
+            b"hello",
+            1,
+        )
+        .unwrap();
     store.sync_all().unwrap();
-    store.snapshot(b"main", b"seed", b"v1", cas::disk::CLASS_AUTO, 10).unwrap();
-    let gen = store.refs().find(|(n, _)| n.as_slice() == b"main").unwrap().1.generation;
+    store
+        .snapshot(b"main", b"seed", b"v1", cas::disk::CLASS_AUTO, 10)
+        .unwrap();
+    let gen = store
+        .refs()
+        .find(|(n, _)| n.as_slice() == b"main")
+        .unwrap()
+        .1
+        .generation;
     let snap_root = store.snapshot_root(b"main", 1).unwrap();
     // Same handle layout as the request_dispatch harness (handles 0,1,2).
     let mut server = Server::new(store, 0xA5A5_A5A5);
@@ -62,7 +81,9 @@ fn fresh() -> (Server<MemDev>, u64) {
 #[test]
 fn request_dispatch() {
     for data in corpus_files("request_dispatch") {
-        let Ok(req) = wire::decode_request(&data) else { continue };
+        let Ok(req) = wire::decode_request(&data) else {
+            continue;
+        };
         if cfg!(miri) {
             continue; // decoder exercised above; skip the hashing dispatch
         }

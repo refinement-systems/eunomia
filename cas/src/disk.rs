@@ -426,7 +426,10 @@ pub fn encode_index(
     }
     out.extend_from_slice(&(pad as u32).to_le_bytes());
     out.resize(out.len() + pad, 0);
-    debug_assert_eq!(out.len(), index_payload_len(entries.len(), free.len()) + pad);
+    debug_assert_eq!(
+        out.len(),
+        index_payload_len(entries.len(), free.len()) + pad
+    );
     out
 }
 
@@ -506,7 +509,13 @@ impl WalOp {
             }
         };
         match self {
-            WalOp::Write { ref_name, path, offset, mtime, data } => {
+            WalOp::Write {
+                ref_name,
+                path,
+                offset,
+                mtime,
+                data,
+            } => {
                 out.push(1);
                 out.push(ref_name.len() as u8);
                 out.extend_from_slice(ref_name);
@@ -516,7 +525,11 @@ impl WalOp {
                 out.extend_from_slice(&(data.len() as u32).to_le_bytes());
                 out.extend_from_slice(data);
             }
-            WalOp::Unlink { ref_name, path, mtime } => {
+            WalOp::Unlink {
+                ref_name,
+                path,
+                mtime,
+            } => {
                 out.push(2);
                 out.push(ref_name.len() as u8);
                 out.extend_from_slice(ref_name);
@@ -547,14 +560,24 @@ impl WalOp {
                 let mtime = r.u64()?;
                 let dl = r.u32()? as usize;
                 let data = r.take(dl)?.to_vec();
-                WalOp::Write { ref_name, path, offset, mtime, data }
+                WalOp::Write {
+                    ref_name,
+                    path,
+                    offset,
+                    mtime,
+                    data,
+                }
             }
             2 => {
                 let rl = r.u8()? as usize;
                 let ref_name = r.take(rl)?.to_vec();
                 let path = take_path(&mut r)?;
                 let mtime = r.u64()?;
-                WalOp::Unlink { ref_name, path, mtime }
+                WalOp::Unlink {
+                    ref_name,
+                    path,
+                    mtime,
+                }
             }
             _ => return Err(FormatError::BadNode("bad wal op tag")),
         };
@@ -712,7 +735,14 @@ impl RefTable {
             let root = r.hash()?;
             let generation = r.u64()?;
             let next_snap_id = r.u64()?;
-            t.refs.insert(name, RefEntry { root, generation, next_snap_id });
+            t.refs.insert(
+                name,
+                RefEntry {
+                    root,
+                    generation,
+                    next_snap_id,
+                },
+            );
         }
         let nsnaps = r.u32()?;
         for _ in 0..nsnaps {
@@ -816,13 +846,30 @@ mod tests {
     #[test]
     fn index_roundtrip_and_strictness() {
         let mut entries = BTreeMap::new();
-        entries.insert(Hash::of(b"a"), IndexEntry { off: 48, len: 100, birth: 1 });
-        entries.insert(Hash::of(b"b"), IndexEntry { off: 196, len: 7, birth: 3 });
+        entries.insert(
+            Hash::of(b"a"),
+            IndexEntry {
+                off: 48,
+                len: 100,
+                birth: 1,
+            },
+        );
+        entries.insert(
+            Hash::of(b"b"),
+            IndexEntry {
+                off: 196,
+                len: 7,
+                birth: 3,
+            },
+        );
         let mut free = BTreeMap::new();
         free.insert(300u64, 64u64);
         for pad in [0usize, 17] {
             let enc = encode_index(&entries, &free, pad);
-            assert_eq!(enc.len(), index_payload_len(entries.len(), free.len()) + pad);
+            assert_eq!(
+                enc.len(),
+                index_payload_len(entries.len(), free.len()) + pad
+            );
             assert_eq!(decode_index(&enc), Ok((entries.clone(), free.clone())));
 
             assert!(decode_index(&enc[..enc.len() - 1]).is_err());
@@ -869,7 +916,11 @@ mod tests {
         let mut t = RefTable::default();
         t.refs.insert(
             b"main".to_vec(),
-            RefEntry { root: Hash::of(b"r"), generation: 3, next_snap_id: 2 },
+            RefEntry {
+                root: Hash::of(b"r"),
+                generation: 3,
+                next_snap_id: 2,
+            },
         );
         t.snaps.insert(
             (b"main".to_vec(), 1),

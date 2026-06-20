@@ -198,11 +198,19 @@ mod tests {
 
     #[test]
     fn known_calls_decode() {
-        assert_eq!(decode(0, [b'x' as u64, 0, 0, 0, 0, 0]), Ok(Sys::DebugPutc { ch: b'x' as u64 }));
+        assert_eq!(
+            decode(0, [b'x' as u64, 0, 0, 0, 0, 0]),
+            Ok(Sys::DebugPutc { ch: b'x' as u64 })
+        );
         assert_eq!(decode(2, [0; 6]), Ok(Sys::Yield));
         assert_eq!(
             decode(8, [1, 0x1000, MSG_PAYLOAD as u64, 0, 0, 0]),
-            Ok(Sys::ChanSend { chan: 1, buf: 0x1000, len: MSG_PAYLOAD as u64, caps: 0 })
+            Ok(Sys::ChanSend {
+                chan: 1,
+                buf: 0x1000,
+                len: MSG_PAYLOAD as u64,
+                caps: 0
+            })
         );
     }
 
@@ -210,15 +218,31 @@ mod tests {
     fn validation_rejects() {
         assert_eq!(decode(99, [0; 6]), Err(SysError::UnknownCall));
         assert_eq!(decode(3, [0, 99, 0, 0, 0, 0]), Err(SysError::BadObjType)); // bad ObjType
-        assert_eq!(decode(8, [0, 0, MSG_PAYLOAD as u64 + 1, 0, 0, 0]), Err(SysError::MsgTooLong));
+        assert_eq!(
+            decode(8, [0, 0, MSG_PAYLOAD as u64 + 1, 0, 0, 0]),
+            Err(SysError::MsgTooLong)
+        );
         assert_eq!(decode(10, [0, 3, 0, 0, 0, 0]), Err(SysError::BadEvent)); // event > 2
         assert_eq!(decode(21, [0, 2, 0, 0, 0, 0]), Err(SysError::BadWhich)); // which > 1
-        assert_eq!(decode(13, [0, 0, 0, 0, NUM_PRIOS as u64, 0]), Err(SysError::BadPrio));
+        assert_eq!(
+            decode(13, [0, 0, 0, 0, NUM_PRIOS as u64, 0]),
+            Err(SysError::BadPrio)
+        );
     }
 
     #[test]
     fn prio_is_masked_then_bounded() {
         // Low byte < NUM_PRIOS decodes; the high bits are ignored.
-        assert_eq!(decode(13, [0, 0, 0, 0, 0xFF00 | 5, 0]), Ok(Sys::ThreadStart { tcb: 0, cspace: 0, entry: 0, sp: 0, prio: 5, arg: 0 }));
+        assert_eq!(
+            decode(13, [0, 0, 0, 0, 0xFF00 | 5, 0]),
+            Ok(Sys::ThreadStart {
+                tcb: 0,
+                cspace: 0,
+                entry: 0,
+                sp: 0,
+                prio: 5,
+                arg: 0
+            })
+        );
     }
 }

@@ -46,7 +46,12 @@ pub struct TrapFrame {
 
 impl TrapFrame {
     pub const fn zeroed() -> TrapFrame {
-        TrapFrame { x: [0; 31], sp_el0: 0, elr: 0, spsr: 0 }
+        TrapFrame {
+            x: [0; 31],
+            sp_el0: 0,
+            elr: 0,
+            spsr: 0,
+        }
     }
 }
 

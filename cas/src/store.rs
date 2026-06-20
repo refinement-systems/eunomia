@@ -86,7 +86,10 @@ impl core::fmt::Display for StoreError {
             StoreError::Format(e) => write!(f, "format: {e}"),
             StoreError::NoSuperblock => write!(f, "no valid superblock"),
             StoreError::UnsupportedVersion(v) => {
-                write!(f, "unsupported format version {v} (re-create the image with mkfs)")
+                write!(
+                    f,
+                    "unsupported format version {v} (re-create the image with mkfs)"
+                )
             }
             StoreError::NoSuchRef => write!(f, "no such ref"),
             StoreError::NoSuchSnapshot => write!(f, "no such snapshot"),
@@ -216,8 +219,7 @@ impl<D: BlockDev> ChunkStore<D> {
     /// (live after the flip); the caller commits via the superblock.
     fn write_index_frame(&mut self) -> Result<((u64, u64), BTreeMap<u64, u64>), StoreError> {
         let bound_extents = self.free.len() + self.pending_free.len() + 1;
-        let need =
-            (CHUNK_HEADER + disk::index_payload_len(self.index.len(), bound_extents)) as u64;
+        let need = (CHUNK_HEADER + disk::index_payload_len(self.index.len(), bound_extents)) as u64;
         let chosen = self
             .free
             .iter()
@@ -958,7 +960,10 @@ impl<D: BlockDev> Store<D> {
         let mut buf_b = vec![0u8; SB_SIZE];
         dev.read(SB_A_OFF, &mut buf_a)?;
         dev.read(SB_B_OFF, &mut buf_b)?;
-        let (ra, rb) = (Superblock::decode_checked(&buf_a), Superblock::decode_checked(&buf_b));
+        let (ra, rb) = (
+            Superblock::decode_checked(&buf_a),
+            Superblock::decode_checked(&buf_b),
+        );
         // The survivor decision is the Verus-verified `pick_survivor`:
         // the valid slot of higher generation, the TLA+ `LiveSlot`. The version-
         // error distinction below stays plain Rust — it only shapes the refusal,
@@ -995,7 +1000,8 @@ impl<D: BlockDev> Store<D> {
         // use; honest code never writes out-of-device geometry, so a
         // violation is corruption or forgery, never a slot to silently
         // fall back from.
-        sb.validate_geometry(dev.len()).map_err(StoreError::Corrupt)?;
+        sb.validate_geometry(dev.len())
+            .map_err(StoreError::Corrupt)?;
         // Geometry is not the only forgeable scalar: `generation` feeds
         // `birth_gen = generation + 1` here and `generation + 1` at every
         // commit. u64::MAX is 2^64 commits past honest — reject it rather
@@ -1067,7 +1073,10 @@ impl<D: BlockDev> Store<D> {
 
         let mut store = Store {
             chunks,
-            opts: StoreOptions { wal_len: sb.wal_len, ..opts },
+            opts: StoreOptions {
+                wal_len: sb.wal_len,
+                ..opts
+            },
             sb: sb.clone(),
             sb_in_b,
             table,
@@ -1148,7 +1157,11 @@ impl<D: BlockDev> Store<D> {
         self.check_io()?;
         self.table.refs.insert(
             name.to_vec(),
-            RefEntry { root: empty_root, generation: 0, next_snap_id: 1 },
+            RefEntry {
+                root: empty_root,
+                generation: 0,
+                next_snap_id: 1,
+            },
         );
         self.commit()
     }
@@ -1187,7 +1200,12 @@ impl<D: BlockDev> Store<D> {
         now: u64,
     ) -> Result<u64, StoreError> {
         self.flush_ref(ref_name)?;
-        let entry = self.table.refs.get(ref_name).ok_or(StoreError::NoSuchRef)?.clone();
+        let entry = self
+            .table
+            .refs
+            .get(ref_name)
+            .ok_or(StoreError::NoSuchRef)?
+            .clone();
         let id = entry.next_snap_id;
         let last = self.snapshots(ref_name).last().map(|r| (r.id, r.timestamp));
         let row = SnapRow {
@@ -1218,7 +1236,11 @@ impl<D: BlockDev> Store<D> {
             .ok_or(StoreError::NoSuchSnapshot)?
             .root;
         self.flush_ref(ref_name)?;
-        self.table.refs.get_mut(ref_name).ok_or(StoreError::NoSuchRef)?.root = root;
+        self.table
+            .refs
+            .get_mut(ref_name)
+            .ok_or(StoreError::NoSuchRef)?
+            .root = root;
         self.commit()
     }
 
@@ -1226,7 +1248,9 @@ impl<D: BlockDev> Store<D> {
         if !self.table.snaps.contains_key(&(ref_name.to_vec(), snap_id)) {
             return Err(StoreError::NoSuchSnapshot);
         }
-        self.table.tags.insert(name.to_vec(), (ref_name.to_vec(), snap_id));
+        self.table
+            .tags
+            .insert(name.to_vec(), (ref_name.to_vec(), snap_id));
         self.commit()
     }
 
@@ -1257,12 +1281,14 @@ impl<D: BlockDev> Store<D> {
             }
             let comps: Vec<&[u8]> = prefix.iter().map(|c| c.as_slice()).collect();
             match tree::lookup(&self.chunks, &entry.root, &comps)? {
-                Some(Entry { kind: EntryKind::Dir, .. }) if is_final => {
-                    return Err(StoreError::NotAFile)
-                }
-                Some(Entry { kind: EntryKind::File, .. }) if !is_final => {
-                    return Err(StoreError::NotAFile)
-                }
+                Some(Entry {
+                    kind: EntryKind::Dir,
+                    ..
+                }) if is_final => return Err(StoreError::NotAFile),
+                Some(Entry {
+                    kind: EntryKind::File,
+                    ..
+                }) if !is_final => return Err(StoreError::NotAFile),
                 _ => {}
             }
         }
@@ -1299,14 +1325,13 @@ impl<D: BlockDev> Store<D> {
         self.log_then_apply(op)
     }
 
-    pub fn unlink(
-        &mut self,
-        ref_name: &[u8],
-        path: &Path,
-        mtime: u64,
-    ) -> Result<(), StoreError> {
+    pub fn unlink(&mut self, ref_name: &[u8], path: &Path, mtime: u64) -> Result<(), StoreError> {
         self.validate_mutation_path(ref_name, path)?;
-        let op = WalOp::Unlink { ref_name: ref_name.to_vec(), path: path.clone(), mtime };
+        let op = WalOp::Unlink {
+            ref_name: ref_name.to_vec(),
+            path: path.clone(),
+            mtime,
+        };
         self.log_then_apply(op)
     }
 
@@ -1360,7 +1385,13 @@ impl<D: BlockDev> Store<D> {
     fn apply_to_overlay(&mut self, op: &WalOp) {
         let overlay = self.overlays.entry(op.ref_name().to_vec()).or_default();
         match op {
-            WalOp::Write { path, offset, mtime, data, .. } => {
+            WalOp::Write {
+                path,
+                offset,
+                mtime,
+                data,
+                ..
+            } => {
                 overlay.write(path, *offset, data, *mtime);
             }
             WalOp::Unlink { path, mtime, .. } => {
@@ -1371,11 +1402,7 @@ impl<D: BlockDev> Store<D> {
 
     // ── Read path (overlay first, tree below — rev1§4.3) ────────────────
 
-    pub fn read(
-        &self,
-        ref_name: &[u8],
-        path: &Path,
-    ) -> Result<Option<Vec<u8>>, StoreError> {
+    pub fn read(&self, ref_name: &[u8], path: &Path) -> Result<Option<Vec<u8>>, StoreError> {
         let entry = self.table.refs.get(ref_name).ok_or(StoreError::NoSuchRef)?;
         let state = self
             .overlays
@@ -1398,11 +1425,7 @@ impl<D: BlockDev> Store<D> {
 
     /// Read a file out of a committed/flushed tree root (also used for
     /// snapshot reads, where no overlay applies).
-    pub fn read_at_root(
-        &self,
-        root: &Hash,
-        path: &Path,
-    ) -> Result<Option<Vec<u8>>, StoreError> {
+    pub fn read_at_root(&self, root: &Hash, path: &Path) -> Result<Option<Vec<u8>>, StoreError> {
         self.read_from_tree(root, path)
     }
 
@@ -1426,12 +1449,12 @@ impl<D: BlockDev> Store<D> {
         Ok(tree::lookup(&self.chunks, root, comps)?)
     }
 
-    pub fn list_dir_node(
-        &self,
-        node: &Hash,
-    ) -> Result<Vec<(Vec<u8>, EntryKind, u64)>, StoreError> {
+    pub fn list_dir_node(&self, node: &Hash) -> Result<Vec<(Vec<u8>, EntryKind, u64)>, StoreError> {
         let dir = Dir::load(&self.chunks, node)?;
-        Ok(dir.iter().map(|e| (e.name.clone(), e.kind, e.size)).collect())
+        Ok(dir
+            .iter()
+            .map(|e| (e.name.clone(), e.kind, e.size))
+            .collect())
     }
 
     pub fn snapshot_root(&self, ref_name: &[u8], snap_id: u64) -> Result<Hash, StoreError> {
@@ -1447,7 +1470,10 @@ impl<D: BlockDev> Store<D> {
         let comps: Vec<&[u8]> = path.iter().map(|c| c.as_slice()).collect();
         match tree::lookup(&self.chunks, root, &comps)? {
             None => Ok(None),
-            Some(Entry { kind: EntryKind::Dir, .. }) => Err(StoreError::NotAFile),
+            Some(Entry {
+                kind: EntryKind::Dir,
+                ..
+            }) => Err(StoreError::NotAFile),
             Some(e) => Ok(Some(read_file(&self.chunks, &e.content, e.size)?)),
         }
     }
@@ -1465,7 +1491,10 @@ impl<D: BlockDev> Store<D> {
             Some(entry.root)
         } else {
             match tree::lookup(&self.chunks, &entry.root, &comps)? {
-                Some(Entry { content: Content::DirRoot(h), .. }) => Some(h),
+                Some(Entry {
+                    content: Content::DirRoot(h),
+                    ..
+                }) => Some(h),
                 Some(_) => return Err(StoreError::NotAFile),
                 // Directory only exists in the overlay (or not at all).
                 None => None,
@@ -1516,7 +1545,12 @@ impl<D: BlockDev> Store<D> {
         if overlay.is_empty() {
             return Ok(());
         }
-        let mut root = self.table.refs.get(ref_name).ok_or(StoreError::NoSuchRef)?.root;
+        let mut root = self
+            .table
+            .refs
+            .get(ref_name)
+            .ok_or(StoreError::NoSuchRef)?
+            .root;
 
         for path in overlay.unlinks() {
             let comps: Vec<&[u8]> = path.iter().map(|c| c.as_slice()).collect();
@@ -1529,16 +1563,26 @@ impl<D: BlockDev> Store<D> {
             let (dir, name) = comps.split_at(comps.len() - 1);
             let old = tree::lookup(&self.chunks, &root, &comps)?;
             let base = match (&old, fo.fresh) {
-                (Some(Entry { kind: EntryKind::Dir, .. }), _) => {
-                    return Err(StoreError::NotAFile)
-                }
+                (
+                    Some(Entry {
+                        kind: EntryKind::Dir,
+                        ..
+                    }),
+                    _,
+                ) => return Err(StoreError::NotAFile),
                 (Some(e), false) => read_file(&self.chunks, &e.content, e.size)?,
                 _ => Vec::new(),
             };
             let content = fo.apply(base);
             let flags = old.map(|e| e.flags).unwrap_or(0);
-            let mut entry =
-                make_file_entry(&mut self.chunks, &self.opts.chunker, name[0], &content, fo.mtime, flags);
+            let mut entry = make_file_entry(
+                &mut self.chunks,
+                &self.opts.chunker,
+                name[0],
+                &content,
+                fo.mtime,
+                flags,
+            );
             self.check_io()?;
             entry.mtime = fo.mtime;
             root = tree::put(&mut self.chunks, &root, dir, entry, fo.mtime)?;
@@ -1683,7 +1727,11 @@ impl<D: BlockDev> Store<D> {
     pub fn space(&self) -> SpaceInfo {
         let total = self.chunks.region_len();
         let free = self.chunks.free_bytes();
-        SpaceInfo { total, used: total - free, free }
+        SpaceInfo {
+            total,
+            used: total - free,
+            free,
+        }
     }
 
     /// History rewriting (rev1§4.6): drop one snapshot row, re-pointing
@@ -1692,7 +1740,11 @@ impl<D: BlockDev> Store<D> {
     /// mass is reclaimed by the next GC, not here — this op is O(small).
     pub fn delete_snapshot(&mut self, ref_name: &[u8], snap_id: u64) -> Result<(), StoreError> {
         let key = (ref_name.to_vec(), snap_id);
-        let row = self.table.snaps.get(&key).ok_or(StoreError::NoSuchSnapshot)?;
+        let row = self
+            .table
+            .snaps
+            .get(&key)
+            .ok_or(StoreError::NoSuchSnapshot)?;
         if self
             .table
             .tags
@@ -1721,7 +1773,9 @@ impl<D: BlockDev> Store<D> {
         class: u8,
     ) -> Result<(), StoreError> {
         if class > disk::CLASS_EPHEMERAL {
-            return Err(StoreError::Format(FormatError::BadEntry("bad retention class")));
+            return Err(StoreError::Format(FormatError::BadEntry(
+                "bad retention class",
+            )));
         }
         self.table
             .snaps
@@ -1755,7 +1809,11 @@ mod tests {
     fn test_opts() -> StoreOptions {
         StoreOptions {
             wal_len: 8 * 1024,
-            chunker: ChunkerParams { min: 64, avg: 256, max: 1024 },
+            chunker: ChunkerParams {
+                min: 64,
+                avg: 256,
+                max: 1024,
+            },
             overlay_budget: 32 * 1024,
         }
     }
@@ -1768,15 +1826,28 @@ mod tests {
     fn write_read_sync_remount() {
         let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
         store.create_ref(b"main").unwrap();
-        store.write(b"main", &p(&["etc", "conf"]), 0, b"hello", 1).unwrap();
-        store.write(b"main", &p(&["etc", "conf"]), 5, b" world", 2).unwrap();
-        assert_eq!(store.read(b"main", &p(&["etc", "conf"])).unwrap().unwrap(), b"hello world");
+        store
+            .write(b"main", &p(&["etc", "conf"]), 0, b"hello", 1)
+            .unwrap();
+        store
+            .write(b"main", &p(&["etc", "conf"]), 5, b" world", 2)
+            .unwrap();
+        assert_eq!(
+            store.read(b"main", &p(&["etc", "conf"])).unwrap().unwrap(),
+            b"hello world"
+        );
 
         store.sync_ref(b"main").unwrap();
-        assert_eq!(store.read(b"main", &p(&["etc", "conf"])).unwrap().unwrap(), b"hello world");
+        assert_eq!(
+            store.read(b"main", &p(&["etc", "conf"])).unwrap().unwrap(),
+            b"hello world"
+        );
 
         let store2 = Store::mount(store.into_dev(), test_opts()).unwrap();
-        assert_eq!(store2.read(b"main", &p(&["etc", "conf"])).unwrap().unwrap(), b"hello world");
+        assert_eq!(
+            store2.read(b"main", &p(&["etc", "conf"])).unwrap().unwrap(),
+            b"hello world"
+        );
         let ls = store2.list(b"main", &p(&["etc"])).unwrap();
         assert_eq!(ls, vec![(b"conf".to_vec(), EntryKind::File, 11)]);
     }
@@ -1785,45 +1856,79 @@ mod tests {
     fn acked_write_survives_crash_without_sync() {
         let mut store = Store::format(CrashDev::new(1 << 20), test_opts()).unwrap();
         store.create_ref(b"main").unwrap();
-        store.write(b"main", &p(&["a"]), 0, b"acked data", 1).unwrap();
+        store
+            .write(b"main", &p(&["a"]), 0, b"acked data", 1)
+            .unwrap();
         // No sync: the tree never saw this write — only the fsynced WAL has it.
         let mut dev = store.into_dev();
         dev.crash(0xDEAD);
         let store2 = Store::mount(dev, test_opts()).unwrap();
-        assert_eq!(store2.read(b"main", &p(&["a"])).unwrap().unwrap(), b"acked data");
+        assert_eq!(
+            store2.read(b"main", &p(&["a"])).unwrap().unwrap(),
+            b"acked data"
+        );
     }
 
     #[test]
     fn unlink_and_resurrect() {
         let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
         store.create_ref(b"main").unwrap();
-        store.write(b"main", &p(&["f"]), 0, b"version one", 1).unwrap();
+        store
+            .write(b"main", &p(&["f"]), 0, b"version one", 1)
+            .unwrap();
         store.sync_ref(b"main").unwrap();
         store.unlink(b"main", &p(&["f"]), 2).unwrap();
         assert_eq!(store.read(b"main", &p(&["f"])).unwrap(), None);
         store.write(b"main", &p(&["f"]), 2, b"x", 3).unwrap();
         // Fresh file after unlink: old content must not bleed through.
-        assert_eq!(store.read(b"main", &p(&["f"])).unwrap().unwrap(), vec![0, 0, b'x']);
+        assert_eq!(
+            store.read(b"main", &p(&["f"])).unwrap().unwrap(),
+            vec![0, 0, b'x']
+        );
         store.sync_ref(b"main").unwrap();
-        assert_eq!(store.read(b"main", &p(&["f"])).unwrap().unwrap(), vec![0, 0, b'x']);
+        assert_eq!(
+            store.read(b"main", &p(&["f"])).unwrap().unwrap(),
+            vec![0, 0, b'x']
+        );
     }
 
     #[test]
     fn snapshot_rollback() {
         let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
         store.create_ref(b"main").unwrap();
-        store.write(b"main", &p(&["doc"]), 0, b"original", 10).unwrap();
-        let snap = store.snapshot(b"main", b"session=test", b"before edit", disk::CLASS_KEEP, 100).unwrap();
-        store.write(b"main", &p(&["doc"]), 0, b"MODIFIED", 11).unwrap();
+        store
+            .write(b"main", &p(&["doc"]), 0, b"original", 10)
+            .unwrap();
+        let snap = store
+            .snapshot(
+                b"main",
+                b"session=test",
+                b"before edit",
+                disk::CLASS_KEEP,
+                100,
+            )
+            .unwrap();
+        store
+            .write(b"main", &p(&["doc"]), 0, b"MODIFIED", 11)
+            .unwrap();
         store.sync_ref(b"main").unwrap();
-        assert_eq!(store.read(b"main", &p(&["doc"])).unwrap().unwrap(), b"MODIFIED");
+        assert_eq!(
+            store.read(b"main", &p(&["doc"])).unwrap().unwrap(),
+            b"MODIFIED"
+        );
 
         // Snapshot reads see the old root.
         let root = store.snapshot_root(b"main", snap).unwrap();
-        assert_eq!(store.read_at_root(&root, &p(&["doc"])).unwrap().unwrap(), b"original");
+        assert_eq!(
+            store.read_at_root(&root, &p(&["doc"])).unwrap().unwrap(),
+            b"original"
+        );
 
         store.rollback(b"main", snap).unwrap();
-        assert_eq!(store.read(b"main", &p(&["doc"])).unwrap().unwrap(), b"original");
+        assert_eq!(
+            store.read(b"main", &p(&["doc"])).unwrap().unwrap(),
+            b"original"
+        );
 
         // Snapshot identity is the per-ref sequence number (rev1§4.7).
         let rows: Vec<u64> = store.snapshots(b"main").map(|r| r.id).collect();
@@ -1837,7 +1942,9 @@ mod tests {
         // Each record is ~100 bytes; 8 KiB WAL forces several resets.
         for i in 0..200u32 {
             let path = p(&[&format!("f{}", i % 7)]);
-            store.write(b"main", &path, (i as u64) * 16, &i.to_le_bytes(), i as u64).unwrap();
+            store
+                .write(b"main", &path, (i as u64) * 16, &i.to_le_bytes(), i as u64)
+                .unwrap();
         }
         let store2 = Store::mount(store.into_dev(), test_opts()).unwrap();
         for i in 193..200u32 {
@@ -1852,7 +1959,9 @@ mod tests {
     fn torn_superblock_recovers_older_commit() {
         let mut store = Store::format(CrashDev::new(1 << 20), test_opts()).unwrap();
         store.create_ref(b"main").unwrap();
-        store.write(b"main", &p(&["a"]), 0, b"committed", 1).unwrap();
+        store
+            .write(b"main", &p(&["a"]), 0, b"committed", 1)
+            .unwrap();
         store.sync_ref(b"main").unwrap();
 
         // Second commit: cut power during it, at every possible point.
@@ -1868,7 +1977,9 @@ mod tests {
                 test_opts(),
             )
             .unwrap();
-            store.write(b"main", &p(&["a"]), 0, b"NEWERDATA", 2).unwrap();
+            store
+                .write(b"main", &p(&["a"]), 0, b"NEWERDATA", 2)
+                .unwrap();
             store.dev_mut().set_fail_after(fail_at);
             let _ = store.sync_ref(b"main");
             let mut dev = store.into_dev();
@@ -1903,7 +2014,9 @@ mod tests {
         let mut used_after_first = 0;
         for i in 0..10u8 {
             let data: Vec<u8> = (0..20_000).map(|j| (j as u8).wrapping_add(i)).collect();
-            store.write(b"main", &p(&["churn"]), 0, &data, i as u64).unwrap();
+            store
+                .write(b"main", &p(&["churn"]), 0, &data, i as u64)
+                .unwrap();
             store.sync_ref(b"main").unwrap();
             let stats = store.gc().unwrap();
             if i == 0 {
@@ -1922,9 +2035,15 @@ mod tests {
 
         // The store still works and survives a remount with its free list.
         let expect: Vec<u8> = (0..20_000).map(|j| (j as u8).wrapping_add(9)).collect();
-        assert_eq!(store.read(b"main", &p(&["churn"])).unwrap().unwrap(), expect);
+        assert_eq!(
+            store.read(b"main", &p(&["churn"])).unwrap().unwrap(),
+            expect
+        );
         let store2 = Store::mount(store.into_dev(), test_opts()).unwrap();
-        assert_eq!(store2.read(b"main", &p(&["churn"])).unwrap().unwrap(), expect);
+        assert_eq!(
+            store2.read(b"main", &p(&["churn"])).unwrap().unwrap(),
+            expect
+        );
     }
 
     #[test]
@@ -1933,7 +2052,9 @@ mod tests {
         store.create_ref(b"main").unwrap();
         let old: Vec<u8> = (0..30_000).map(|j| (j % 251) as u8).collect();
         store.write(b"main", &p(&["data"]), 0, &old, 1).unwrap();
-        let snap = store.snapshot(b"main", b"t", b"v1", disk::CLASS_AUTO, 10).unwrap();
+        let snap = store
+            .snapshot(b"main", b"t", b"v1", disk::CLASS_AUTO, 10)
+            .unwrap();
         let new: Vec<u8> = (0..30_000).map(|j| (j % 13) as u8).collect();
         store.write(b"main", &p(&["data"]), 0, &new, 2).unwrap();
         store.sync_ref(b"main").unwrap();
@@ -1941,7 +2062,10 @@ mod tests {
         // The snapshot pins the old root: GC must keep it readable.
         store.gc().unwrap();
         let root = store.snapshot_root(b"main", snap).unwrap();
-        assert_eq!(store.read_at_root(&root, &p(&["data"])).unwrap().unwrap(), old);
+        assert_eq!(
+            store.read_at_root(&root, &p(&["data"])).unwrap().unwrap(),
+            old
+        );
 
         // Dropping the snapshot is a ref-table edit; the next GC reclaims
         // the now-unreachable mass (rev1§4.6 "history rewriting").
@@ -1961,19 +2085,30 @@ mod tests {
     fn canonical_roots_shared_across_snapshots_survive_partial_delete() {
         let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
         store.create_ref(b"main").unwrap();
-        store.write(b"main", &p(&["f"]), 0, &[7u8; 5000], 1).unwrap();
+        store
+            .write(b"main", &p(&["f"]), 0, &[7u8; 5000], 1)
+            .unwrap();
         // Two snapshots of unchanged content share one root (rev1§4.7: same
         // root for different events is normal under canonical trees).
-        let s1 = store.snapshot(b"main", b"t", b"a", disk::CLASS_AUTO, 10).unwrap();
-        let s2 = store.snapshot(b"main", b"t", b"b", disk::CLASS_AUTO, 11).unwrap();
-        store.write(b"main", &p(&["f"]), 0, &[9u8; 5000], 2).unwrap();
+        let s1 = store
+            .snapshot(b"main", b"t", b"a", disk::CLASS_AUTO, 10)
+            .unwrap();
+        let s2 = store
+            .snapshot(b"main", b"t", b"b", disk::CLASS_AUTO, 11)
+            .unwrap();
+        store
+            .write(b"main", &p(&["f"]), 0, &[9u8; 5000], 2)
+            .unwrap();
         store.sync_ref(b"main").unwrap();
 
         store.delete_snapshot(b"main", s1).unwrap();
         store.gc().unwrap();
         // s2 still pins the shared root.
         let root = store.snapshot_root(b"main", s2).unwrap();
-        assert_eq!(store.read_at_root(&root, &p(&["f"])).unwrap().unwrap(), [7u8; 5000]);
+        assert_eq!(
+            store.read_at_root(&root, &p(&["f"])).unwrap().unwrap(),
+            [7u8; 5000]
+        );
 
         store.delete_snapshot(b"main", s2).unwrap();
         let stats = store.gc().unwrap();
@@ -1985,11 +2120,17 @@ mod tests {
         let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
         store.create_ref(b"main").unwrap();
         store.write(b"main", &p(&["f"]), 0, b"1", 1).unwrap();
-        let s1 = store.snapshot(b"main", b"t", b"", disk::CLASS_AUTO, 10).unwrap();
+        let s1 = store
+            .snapshot(b"main", b"t", b"", disk::CLASS_AUTO, 10)
+            .unwrap();
         store.write(b"main", &p(&["f"]), 0, b"2", 2).unwrap();
-        let s2 = store.snapshot(b"main", b"t", b"", disk::CLASS_AUTO, 20).unwrap();
+        let s2 = store
+            .snapshot(b"main", b"t", b"", disk::CLASS_AUTO, 20)
+            .unwrap();
         store.write(b"main", &p(&["f"]), 0, b"3", 3).unwrap();
-        let s3 = store.snapshot(b"main", b"t", b"", disk::CLASS_AUTO, 30).unwrap();
+        let s3 = store
+            .snapshot(b"main", b"t", b"", disk::CLASS_AUTO, 30)
+            .unwrap();
 
         // Prune the middle: the child re-points to the grandparent (rev1§4.7).
         store.delete_snapshot(b"main", s2).unwrap();
@@ -2005,7 +2146,9 @@ mod tests {
         ));
 
         // Retention class is an editable row field (rev1§4.7).
-        store.set_snapshot_class(b"main", s3, disk::CLASS_KEEP).unwrap();
+        store
+            .set_snapshot_class(b"main", s3, disk::CLASS_KEEP)
+            .unwrap();
         assert_eq!(
             store.snapshots(b"main").find(|r| r.id == s3).unwrap().class,
             disk::CLASS_KEEP
@@ -2018,10 +2161,18 @@ mod tests {
         // and a deleted file whose chunks are reclaimable garbage.
         let mut store = Store::format(CrashDev::new(1 << 20), test_opts()).unwrap();
         store.create_ref(b"main").unwrap();
-        store.write(b"main", &p(&["keepme"]), 0, b"pinned by snap", 1).unwrap();
-        let snap = store.snapshot(b"main", b"t", b"", disk::CLASS_KEEP, 10).unwrap();
-        store.write(b"main", &p(&["keepme"]), 0, b"current state!", 2).unwrap();
-        store.write(b"main", &p(&["junk"]), 0, &[0xAB; 3000], 3).unwrap();
+        store
+            .write(b"main", &p(&["keepme"]), 0, b"pinned by snap", 1)
+            .unwrap();
+        let snap = store
+            .snapshot(b"main", b"t", b"", disk::CLASS_KEEP, 10)
+            .unwrap();
+        store
+            .write(b"main", &p(&["keepme"]), 0, b"current state!", 2)
+            .unwrap();
+        store
+            .write(b"main", &p(&["junk"]), 0, &[0xAB; 3000], 3)
+            .unwrap();
         store.sync_all().unwrap();
         store.unlink(b"main", &p(&["junk"]), 4).unwrap();
         store.sync_all().unwrap();
@@ -2196,13 +2347,27 @@ mod tests {
     fn crash_does_not_graft_seq_onto_stale_wal_record() {
         // (selector, offset, data, is_unlink); selectors ≥12 are maintenance.
         let ops: &[(u8, u64, &[u8], bool)] = &[
-            (12, 0, &[0], false), (0, 0, &[0], false), (4, 0, &[0], false),
-            (7, 0, &[0], false), (13, 0, &[0], false), (0, 0, &[0], false),
-            (0, 0, &[0], false), (3, 0, &[0], true), (12, 0, &[0], false),
-            (4, 0, &[0], false), (4, 0, &[0], false), (0, 0, &[0], false),
-            (0, 0, &[0], false), (13, 0, &[0], false), (7, 0, &[0], false),
-            (9, 0, &[0], false), (6, 0, &[0], true), (11, 0, &[0], true),
-            (4, 0, &[0], true), (12, 0, &[0], false), (15, 0, &[0], false),
+            (12, 0, &[0], false),
+            (0, 0, &[0], false),
+            (4, 0, &[0], false),
+            (7, 0, &[0], false),
+            (13, 0, &[0], false),
+            (0, 0, &[0], false),
+            (0, 0, &[0], false),
+            (3, 0, &[0], true),
+            (12, 0, &[0], false),
+            (4, 0, &[0], false),
+            (4, 0, &[0], false),
+            (0, 0, &[0], false),
+            (0, 0, &[0], false),
+            (13, 0, &[0], false),
+            (7, 0, &[0], false),
+            (9, 0, &[0], false),
+            (6, 0, &[0], true),
+            (11, 0, &[0], true),
+            (4, 0, &[0], true),
+            (12, 0, &[0], false),
+            (15, 0, &[0], false),
             (8, 0, &[0], true),
         ];
         let fail_at = 70u64;
@@ -2282,8 +2447,13 @@ mod tests {
         for (path, expect) in &model {
             let got = recovered.read(b"main", path).unwrap();
             let ok = got == *expect
-                || inflight.as_ref().is_some_and(|(ip, iv)| ip == path && got == *iv);
-            assert!(ok, "path {path:?}: got {got:?}, want {expect:?} (inflight {inflight:?})");
+                || inflight
+                    .as_ref()
+                    .is_some_and(|(ip, iv)| ip == path && got == *iv);
+            assert!(
+                ok,
+                "path {path:?}: got {got:?}, want {expect:?} (inflight {inflight:?})"
+            );
         }
     }
 
@@ -2299,7 +2469,9 @@ mod tests {
         let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
         store.create_ref(b"main").unwrap();
         store.write(b"main", &p(&["f"]), 0, b"data", 1).unwrap();
-        store.snapshot(b"main", b"t", b"image", disk::CLASS_KEEP, 100).unwrap();
+        store
+            .snapshot(b"main", b"t", b"image", disk::CLASS_KEEP, 100)
+            .unwrap();
         let dev = store.into_dev();
         let mut img = vec![0u8; dev.len() as usize];
         dev.read(0, &mut img).unwrap();
@@ -2313,7 +2485,10 @@ mod tests {
         let err = Store::mount(MemDev::from_bytes(img), test_opts())
             .err()
             .expect("a v2 image must not mount");
-        assert!(matches!(err, StoreError::UnsupportedVersion(2)), "got {err:?}");
+        assert!(
+            matches!(err, StoreError::UnsupportedVersion(2)),
+            "got {err:?}"
+        );
     }
 
     /// rev1§4.7: `ts = max(now, predecessor_ts + 1)` — an RTC that regressed
@@ -2323,13 +2498,21 @@ mod tests {
         let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
         store.create_ref(b"main").unwrap();
         store.write(b"main", &p(&["f"]), 0, b"x", 1).unwrap();
-        let a = store.snapshot(b"main", b"t", b"first", disk::CLASS_KEEP, 1000).unwrap();
+        let a = store
+            .snapshot(b"main", b"t", b"first", disk::CLASS_KEEP, 1000)
+            .unwrap();
         // The clock went backwards; order must survive anyway.
-        let b = store.snapshot(b"main", b"t", b"second", disk::CLASS_KEEP, 500).unwrap();
+        let b = store
+            .snapshot(b"main", b"t", b"second", disk::CLASS_KEEP, 500)
+            .unwrap();
         // Same instant as the first: still strictly after its parent.
-        let c = store.snapshot(b"main", b"t", b"third", disk::CLASS_KEEP, 1000).unwrap();
-        let rows: Vec<(u64, u64)> =
-            store.snapshots(b"main").map(|r| (r.id, r.timestamp)).collect();
+        let c = store
+            .snapshot(b"main", b"t", b"third", disk::CLASS_KEEP, 1000)
+            .unwrap();
+        let rows: Vec<(u64, u64)> = store
+            .snapshots(b"main")
+            .map(|r| (r.id, r.timestamp))
+            .collect();
         assert_eq!(rows, vec![(a, 1000), (b, 1001), (c, 1002)]);
     }
 }

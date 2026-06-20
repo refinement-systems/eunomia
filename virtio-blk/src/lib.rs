@@ -133,7 +133,11 @@ pub struct VirtioBlk<M: Mmio, B: DmaBacking> {
 impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
     /// Probe, negotiate VERSION_1, build queue 0 from pool memory,
     /// DRIVER_OK. `max_transfer` bounds a single request's data size.
-    pub fn new(mut mmio: M, mut pool: DmaPool<B>, max_transfer: usize) -> Result<Self, VirtioError> {
+    pub fn new(
+        mut mmio: M,
+        mut pool: DmaPool<B>,
+        max_transfer: usize,
+    ) -> Result<Self, VirtioError> {
         if mmio.read32(reg::MAGIC) != MAGIC_VIRT {
             return Err(VirtioError::BadMagic);
         }
@@ -178,7 +182,9 @@ impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
         let avail = pool.alloc(6 + 2 * n, 2).ok_or(VirtioError::NoMemory)?;
         let used = pool.alloc(6 + 8 * n, 4).ok_or(VirtioError::NoMemory)?;
         let hdr = pool.alloc(16, 16).ok_or(VirtioError::NoMemory)?;
-        let data = pool.alloc(max_transfer, SECTOR).ok_or(VirtioError::NoMemory)?;
+        let data = pool
+            .alloc(max_transfer, SECTOR)
+            .ok_or(VirtioError::NoMemory)?;
         let stat = pool.alloc(1, 1).ok_or(VirtioError::NoMemory)?;
         for buf in [&desc, &avail, &used] {
             let len = buf.len();
@@ -189,14 +195,26 @@ impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
             mmio.write32(low, addr as u32);
             mmio.write32(high, (addr >> 32) as u32);
         };
-        w64(reg::QUEUE_DESC_LOW, reg::QUEUE_DESC_HIGH, desc.device_addr().0);
-        w64(reg::QUEUE_DRIVER_LOW, reg::QUEUE_DRIVER_HIGH, avail.device_addr().0);
-        w64(reg::QUEUE_DEVICE_LOW, reg::QUEUE_DEVICE_HIGH, used.device_addr().0);
+        w64(
+            reg::QUEUE_DESC_LOW,
+            reg::QUEUE_DESC_HIGH,
+            desc.device_addr().0,
+        );
+        w64(
+            reg::QUEUE_DRIVER_LOW,
+            reg::QUEUE_DRIVER_HIGH,
+            avail.device_addr().0,
+        );
+        w64(
+            reg::QUEUE_DEVICE_LOW,
+            reg::QUEUE_DEVICE_HIGH,
+            used.device_addr().0,
+        );
         mmio.write32(reg::QUEUE_READY, 1);
         mmio.write32(reg::STATUS, st | status::DRIVER_OK);
 
-        let capacity = (mmio.read32(reg::CONFIG) as u64)
-            | ((mmio.read32(reg::CONFIG + 4) as u64) << 32);
+        let capacity =
+            (mmio.read32(reg::CONFIG) as u64) | ((mmio.read32(reg::CONFIG + 4) as u64) << 32);
 
         Ok(VirtioBlk {
             mmio,
@@ -234,8 +252,13 @@ impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
     }
 
     /// One synchronous request: submit the chain and block on completion.
-    fn request(&mut self, req_type: u32, sector: u64, data_len: usize, device_writes: bool)
-        -> Result<(), VirtioError> {
+    fn request(
+        &mut self,
+        req_type: u32,
+        sector: u64,
+        data_len: usize,
+        device_writes: bool,
+    ) -> Result<(), VirtioError> {
         self.submit(req_type, sector, data_len, device_writes);
         self.complete()
     }
@@ -257,7 +280,13 @@ impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
         let data_flags = if device_writes { DESC_F_WRITE } else { 0 };
         if data_len > 0 {
             self.write_desc(0, self.hdr.device_addr().0, 16, DESC_F_NEXT, 1);
-            self.write_desc(1, self.data.device_addr().0, data_len as u32, data_flags | DESC_F_NEXT, 2);
+            self.write_desc(
+                1,
+                self.data.device_addr().0,
+                data_len as u32,
+                data_flags | DESC_F_NEXT,
+                2,
+            );
             self.write_desc(2, self.status.device_addr().0, 1, DESC_F_WRITE, 0);
         } else {
             self.write_desc(0, self.hdr.device_addr().0, 16, DESC_F_NEXT, 1);
@@ -366,7 +395,10 @@ impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
     /// `cas::dev::access_range`).
     fn check_capacity(&self, lba: u64, len: usize) -> Result<(), VirtioError> {
         let nsectors = (len / SECTOR) as u64;
-        if lba.checked_add(nsectors).is_none_or(|end| end > self.capacity) {
+        if lba
+            .checked_add(nsectors)
+            .is_none_or(|end| end > self.capacity)
+        {
             return Err(VirtioError::OutOfRange);
         }
         Ok(())

@@ -10,8 +10,8 @@
 //! is exactly the forgery the real system must reject.
 
 use crate::disk::{
-    decode_index, encode_index, index_payload_len, Superblock, CHUNK_HEADER, CHUNK_MAGIC,
-    SB_A_OFF, SB_BODY, SB_B_OFF, SB_MAGIC, SB_SIZE, SB_VERSION, WAL_HEADER, WAL_MAGIC, WAL_OFF,
+    decode_index, encode_index, index_payload_len, Superblock, CHUNK_HEADER, CHUNK_MAGIC, SB_A_OFF,
+    SB_BODY, SB_B_OFF, SB_MAGIC, SB_SIZE, SB_VERSION, WAL_HEADER, WAL_MAGIC, WAL_OFF,
 };
 use crate::hash::Hash;
 
@@ -95,9 +95,8 @@ pub fn reseal_image(img: &mut [u8]) {
             fixup_superblock_checksum(block);
         }
     }
-    let decode_slot = |img: &[u8], off: usize| {
-        img.get(off..off + SB_SIZE).and_then(Superblock::decode)
-    };
+    let decode_slot =
+        |img: &[u8], off: usize| img.get(off..off + SB_SIZE).and_then(Superblock::decode);
     let (mut sb, slot) = match (
         decode_slot(img, SB_A_OFF as usize),
         decode_slot(img, SB_B_OFF as usize),
@@ -133,8 +132,7 @@ pub fn reseal_image(img: &mut [u8]) {
                     let d = (chunk_off + e.off) as usize;
                     let true_hash = Hash::of(&img[d..d + e.len as usize]);
                     let body = index_payload_len(entries.len(), free.len());
-                    if true_hash != sb.ref_table && !entries.contains_key(&true_hash) && n >= body
-                    {
+                    if true_hash != sb.ref_table && !entries.contains_key(&true_hash) && n >= body {
                         entries.remove(&sb.ref_table);
                         entries.insert(true_hash, e);
                         sb.ref_table = true_hash;

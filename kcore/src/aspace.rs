@@ -2405,7 +2405,9 @@ mod tests {
     #[test]
     fn range_mapped_fully_mapped_rw() {
         let va = USER_VA_BASE;
-        let (l1, pool, base) = build_table(va, 4, |i| pte_encode(0x4800_0000 + (i as u64) * PAGE, PERM_W));
+        let (l1, pool, base) = build_table(va, 4, |i| {
+            pte_encode(0x4800_0000 + (i as u64) * PAGE, PERM_W)
+        });
         // Writable mapping: present for both read and write queries.
         assert!(range_mapped_in(&l1, &pool, base, va, 4 * PAGE, false));
         assert!(range_mapped_in(&l1, &pool, base, va, 4 * PAGE, true));
@@ -2417,7 +2419,8 @@ mod tests {
     #[test]
     fn range_mapped_readonly_rejects_write() {
         let va = USER_VA_BASE;
-        let (l1, pool, base) = build_table(va, 4, |i| pte_encode(0x4800_0000 + (i as u64) * PAGE, 0));
+        let (l1, pool, base) =
+            build_table(va, 4, |i| pte_encode(0x4800_0000 + (i as u64) * PAGE, 0));
         // Read-only mapping: present for reads, rejected for writes.
         assert!(range_mapped_in(&l1, &pool, base, va, 4 * PAGE, false));
         assert!(!range_mapped_in(&l1, &pool, base, va, 4 * PAGE, true));
@@ -2428,12 +2431,23 @@ mod tests {
         let va = USER_VA_BASE;
         // Page 2 is a hole (pte == 0); the rest are RW.
         let (l1, pool, base) = build_table(va, 4, |i| {
-            if i == 2 { 0 } else { pte_encode(0x4800_0000 + (i as u64) * PAGE, PERM_W) }
+            if i == 2 {
+                0
+            } else {
+                pte_encode(0x4800_0000 + (i as u64) * PAGE, PERM_W)
+            }
         });
         // A range covering the hole is rejected; ranges that avoid it pass.
         assert!(!range_mapped_in(&l1, &pool, base, va, 4 * PAGE, false));
         assert!(range_mapped_in(&l1, &pool, base, va, 2 * PAGE, false));
-        assert!(!range_mapped_in(&l1, &pool, base, va + 2 * PAGE, PAGE, false));
+        assert!(!range_mapped_in(
+            &l1,
+            &pool,
+            base,
+            va + 2 * PAGE,
+            PAGE,
+            false
+        ));
     }
 
     #[test]
@@ -2441,7 +2455,14 @@ mod tests {
         // L1 present but no L2 table installed: the walk dead-ends → not mapped.
         let pool: Vec<[u64; 512]> = vec![[0u64; 512]; 2];
         let l1 = [0u64; 512];
-        assert!(!range_mapped_in(&l1, &pool, 0x4900_0000, USER_VA_BASE, PAGE, false));
+        assert!(!range_mapped_in(
+            &l1,
+            &pool,
+            0x4900_0000,
+            USER_VA_BASE,
+            PAGE,
+            false
+        ));
     }
 
     #[test]
@@ -2449,17 +2470,45 @@ mod tests {
         let (l1, pool, base) = build_table(USER_VA_BASE, 1, |_| pte_encode(0x4800_0000, PERM_W));
         // len == 0 reduces to bare [USER_VA_BASE, USER_VA_END) membership of va.
         assert!(range_mapped_in(&l1, &pool, base, USER_VA_BASE, 0, false));
-        assert!(!range_mapped_in(&l1, &pool, base, USER_VA_BASE - PAGE, 0, false));
+        assert!(!range_mapped_in(
+            &l1,
+            &pool,
+            base,
+            USER_VA_BASE - PAGE,
+            0,
+            false
+        ));
         assert!(!range_mapped_in(&l1, &pool, base, USER_VA_END, 0, false));
         // Below base / past the top are rejected regardless of the tables.
-        assert!(!range_mapped_in(&l1, &pool, base, USER_VA_BASE - PAGE, PAGE, false));
-        assert!(!range_mapped_in(&l1, &pool, base, USER_VA_END - PAGE, 2 * PAGE, false));
+        assert!(!range_mapped_in(
+            &l1,
+            &pool,
+            base,
+            USER_VA_BASE - PAGE,
+            PAGE,
+            false
+        ));
+        assert!(!range_mapped_in(
+            &l1,
+            &pool,
+            base,
+            USER_VA_END - PAGE,
+            2 * PAGE,
+            false
+        ));
     }
 
     #[test]
     fn range_mapped_overflow_rejected() {
         let (l1, pool, base) = build_table(USER_VA_BASE, 1, |_| pte_encode(0x4800_0000, PERM_W));
         // va + len overflows u64 → checked_add is None → rejected, no panic.
-        assert!(!range_mapped_in(&l1, &pool, base, u64::MAX - 100, 200, false));
+        assert!(!range_mapped_in(
+            &l1,
+            &pool,
+            base,
+            u64::MAX - 100,
+            200,
+            false
+        ));
     }
 }

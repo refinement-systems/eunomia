@@ -35,7 +35,10 @@ pub struct Binding {
 }
 
 impl Binding {
-    pub const UNBOUND: Binding = Binding { notif: None, bits: 0 };
+    pub const UNBOUND: Binding = Binding {
+        notif: None,
+        bits: 0,
+    };
 }
 
 /// The abstract kernel-object store the verified core runs against. All methods

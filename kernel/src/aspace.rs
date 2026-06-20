@@ -36,7 +36,10 @@ unsafe fn l1_view(this: *mut AspaceObj) -> &'static mut [u64; 512] {
     &mut *((*this).l1 as *mut [u64; 512])
 }
 unsafe fn pool_view(this: *mut AspaceObj) -> &'static mut [[u64; 512]] {
-    core::slice::from_raw_parts_mut((*this).pool_base as *mut [u64; 512], (*this).pool_pages as usize)
+    core::slice::from_raw_parts_mut(
+        (*this).pool_base as *mut [u64; 512],
+        (*this).pool_pages as usize,
+    )
 }
 
 /// pre:  `this` points at bytes_for(pool_pages) of 4 KiB-aligned writable
@@ -49,7 +52,9 @@ pub unsafe fn init(this: *mut AspaceObj, pool_pages: u64) {
     // Shared kernel entries from the boot identity map.
     let kernel_l1 = crate::mmu::kernel_l1();
     (l1 as *mut u64).write((kernel_l1 as *const u64).read());
-    (l1 as *mut u64).add(1).write((kernel_l1 as *const u64).add(1).read());
+    (l1 as *mut u64)
+        .add(1)
+        .write((kernel_l1 as *const u64).add(1).read());
 
     let asid = NEXT_ASID;
     NEXT_ASID = NEXT_ASID.wrapping_add(1);
@@ -112,8 +117,10 @@ pub unsafe fn unmap(this: *mut AspaceObj, va: u64, pages: u64) {
 pub unsafe fn range_mapped(this: *mut AspaceObj, va: u64, len: u64, write: bool) -> bool {
     let base = (*this).pool_base;
     let l1: &[u64; 512] = &*((*this).l1 as *const [u64; 512]);
-    let pool: &[[u64; 512]] =
-        core::slice::from_raw_parts((*this).pool_base as *const [u64; 512], (*this).pool_pages as usize);
+    let pool: &[[u64; 512]] = core::slice::from_raw_parts(
+        (*this).pool_base as *const [u64; 512],
+        (*this).pool_pages as usize,
+    );
     kcore::aspace::range_mapped_in(l1, pool, base, va, len, write)
 }
 

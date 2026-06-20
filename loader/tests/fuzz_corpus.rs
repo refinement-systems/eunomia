@@ -29,12 +29,17 @@ fn elf_parse() {
         let Ok(img) = elf::parse(&data) else { continue };
         assert!(img.nsegments <= elf::MAX_SEGMENTS);
         for seg in &img.segments[..img.nsegments] {
-            let end = seg.offset.checked_add(seg.filesz).expect("file extent overflow");
+            let end = seg
+                .offset
+                .checked_add(seg.filesz)
+                .expect("file extent overflow");
             assert!(end <= data.len() as u64);
             assert!(seg.filesz <= seg.memsz);
             assert!(seg.vaddr.checked_add(seg.memsz).is_some());
             // Parse↔layout agreement: anything parse accepts, prepare lays out.
-            let l = seg.page_layout().expect("parse accepted an unlayout-able segment");
+            let l = seg
+                .page_layout()
+                .expect("parse accepted an unlayout-able segment");
             assert_eq!(l.pages.checked_mul(elf::PAGE), Some(l.va_end - l.va_start));
         }
     }
@@ -59,7 +64,13 @@ fn segment_layout() {
             .checked_add(memsz)
             .and_then(|e| e.checked_add(elf::PAGE - 1))
             .is_none();
-        let seg = elf::Segment { vaddr, offset: 0, filesz: 0, memsz, flags: 0 };
+        let seg = elf::Segment {
+            vaddr,
+            offset: 0,
+            filesz: 0,
+            memsz,
+            flags: 0,
+        };
         match seg.page_layout() {
             Ok(l) => {
                 assert!(!overflows);

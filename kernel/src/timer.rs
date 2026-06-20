@@ -40,7 +40,13 @@ pub fn freq() -> u64 {
 
 /// See [`kcore::timer::arm`].
 pub unsafe fn arm(t: *mut TimerObj, notif: *mut NotifObj, bits: u64, deadline: u64) {
-    kcore::timer::arm(&mut KernelStore, ObjId(t as u64), ObjId(notif as u64), bits, deadline);
+    kcore::timer::arm(
+        &mut KernelStore,
+        ObjId(t as u64),
+        ObjId(notif as u64),
+        bits,
+        deadline,
+    );
 }
 
 /// See [`kcore::timer::check_expired`].

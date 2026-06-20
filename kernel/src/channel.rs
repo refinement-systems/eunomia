@@ -30,7 +30,13 @@ pub unsafe fn send(
     data: &[u8],
     caps: &[*mut CapSlot; MSG_CAPS],
 ) -> Result<(), ChanError> {
-    kcore::channel::send(&mut KernelStore, ObjId(ch as u64), end, data, &slot_ids(caps))
+    kcore::channel::send(
+        &mut KernelStore,
+        ObjId(ch as u64),
+        end,
+        data,
+        &slot_ids(caps),
+    )
 }
 
 /// See [`kcore::channel::recv`].
@@ -40,5 +46,11 @@ pub unsafe fn recv(
     buf: &mut [u8; MSG_PAYLOAD],
     dests: &[*mut CapSlot; MSG_CAPS],
 ) -> Result<(usize, u8), ChanError> {
-    kcore::channel::recv(&mut KernelStore, ObjId(ch as u64), end, buf, &slot_ids(dests))
+    kcore::channel::recv(
+        &mut KernelStore,
+        ObjId(ch as u64),
+        end,
+        buf,
+        &slot_ids(dests),
+    )
 }

@@ -147,7 +147,11 @@ pub fn validate_name(name: &[u8]) -> Result<(), FormatError> {
         && !name.iter().any(|&b| b == 0 || b == 0x2F)
         && name != b"."
         && name != b"..";
-    if ok { Ok(()) } else { Err(FormatError::BadName) }
+    if ok {
+        Ok(())
+    } else {
+        Err(FormatError::BadName)
+    }
 }
 
 fn validate_entry(e: &Entry) -> Result<(), FormatError> {
@@ -201,7 +205,11 @@ fn entry_to_raw(e: &Entry) -> RawEntry {
 fn raw_to_entry(raw: RawEntry) -> Entry {
     Entry {
         // `decode_raw` rejects any kind byte other than 0/1.
-        kind: if raw.kind == 0 { EntryKind::File } else { EntryKind::Dir },
+        kind: if raw.kind == 0 {
+            EntryKind::File
+        } else {
+            EntryKind::Dir
+        },
         flags: raw.flags,
         size: raw.size,
         mtime: raw.mtime,
@@ -457,7 +465,10 @@ fn load_node(
     out: &mut Vec<Entry>,
 ) -> Result<(), FormatError> {
     let bytes = store.get(hash).ok_or(FormatError::MissingNode(*hash))?;
-    let mut r = Reader { buf: &bytes, pos: 0 };
+    let mut r = Reader {
+        buf: &bytes,
+        pos: 0,
+    };
     let level = r.u8()?;
     if let Some(expect) = expected_level {
         if level != expect {
@@ -1187,7 +1198,10 @@ mod tests {
             assert_eq!(d.upsert(e), Err(FormatError::BadName), "{bad:?}");
         }
         let long = vec![b'a'; 256];
-        assert_eq!(d.upsert(file_entry(&long, b"x", 0, 0)), Err(FormatError::BadName));
+        assert_eq!(
+            d.upsert(file_entry(&long, b"x", 0, 0)),
+            Err(FormatError::BadName)
+        );
     }
 
     #[test]
@@ -1213,12 +1227,14 @@ mod tests {
         let mut dir = Dir::new();
         for i in 0..1000u32 {
             let name = format!("file-{i:05}");
-            dir.upsert(file_entry(name.as_bytes(), &i.to_le_bytes(), 1, 0)).unwrap();
+            dir.upsert(file_entry(name.as_bytes(), &i.to_le_bytes(), 1, 0))
+                .unwrap();
         }
         dir.save(&mut store);
         let before = store.len();
 
-        dir.upsert(file_entry(b"file-00500", b"changed", 2, 0)).unwrap();
+        dir.upsert(file_entry(b"file-00500", b"changed", 2, 0))
+            .unwrap();
         dir.save(&mut store);
         let new_nodes = store.len() - before;
         // A one-entry edit rewrites the leaf holding it (the split decision

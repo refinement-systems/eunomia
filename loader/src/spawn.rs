@@ -24,7 +24,11 @@ pub enum SpawnError {
 }
 
 fn check(r: i64) -> Result<(), SpawnError> {
-    if r < 0 { Err(SpawnError::Sys(r)) } else { Ok(()) }
+    if r < 0 {
+        Err(SpawnError::Sys(r))
+    } else {
+        Ok(())
+    }
 }
 
 /// Slot layout the spawner consumes: `base` .. `base+3+nsegments+1` in
@@ -52,7 +56,13 @@ pub fn prepare(
     // Table pool: 16 pages covers several GiB-crossing mappings at MVP scale.
     check(sys::retype(untyped, OBJ_ASPACE, 16, aspace_slot, 0))?;
     check(sys::retype(untyped, OBJ_THREAD, 0, tcb_slot, 0))?;
-    check(sys::retype(untyped, OBJ_CSPACE, child_cspace_slots, cspace_slot, 0))?;
+    check(sys::retype(
+        untyped,
+        OBJ_CSPACE,
+        child_cspace_slots,
+        cspace_slot,
+        0,
+    ))?;
 
     for (i, seg) in img.segments[..img.nsegments].iter().enumerate() {
         let frame_slot = base + 3 + i as u32;

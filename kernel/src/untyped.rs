@@ -10,7 +10,7 @@ pub use kcore::untyped::*;
 use crate::store::KernelStore;
 use kcore::aspace::AspaceObj;
 use kcore::channel::Channel;
-use kcore::cspace::{CapKind, CapSlot, ChanEnd, CSpaceObj};
+use kcore::cspace::{CSpaceObj, CapKind, CapSlot, ChanEnd};
 use kcore::id::{ObjId, SlotId};
 use kcore::notification::NotifObj;
 use kcore::thread::Tcb;
@@ -38,7 +38,11 @@ pub unsafe fn retype(
     // nullable for every non-channel type → `None`.
     let ut_id = SlotId(ut_slot as u64);
     let dst_id = SlotId(dst as u64);
-    let dst2_id = if dst2.is_null() { None } else { Some(SlotId(dst2 as u64)) };
+    let dst2_id = if dst2.is_null() {
+        None
+    } else {
+        Some(SlotId(dst2 as u64))
+    };
 
     let (base, size, watermark) = retype_check(&mut KernelStore, ut_id, ty, dst_id, dst2_id)?;
     let c = carve(base, size, watermark, ty, param)?;
@@ -78,14 +82,22 @@ pub unsafe fn retype(
             // Zeroed: frames flow into fresh address spaces; leaking prior
             // contents across processes would break confinement.
             core::ptr::write_bytes(c.start as *mut u8, 0, c.bytes as usize);
-            CapKind::Frame { base: c.start, pages: param, mapping: None }
+            CapKind::Frame {
+                base: c.start,
+                pages: param,
+                mapping: None,
+            }
         }
         ObjType::Aspace => {
             let p = c.start as *mut AspaceObj;
             crate::aspace::init(p, param);
             CapKind::Aspace(ObjId(p as u64))
         }
-        ObjType::Untyped => CapKind::Untyped { base: c.start, size: c.bytes, watermark: 0 },
+        ObjType::Untyped => CapKind::Untyped {
+            base: c.start,
+            size: c.bytes,
+            watermark: 0,
+        },
     };
 
     retype_install(&mut KernelStore, ut_id, ty, kind, c.end, dst_id, dst2_id);

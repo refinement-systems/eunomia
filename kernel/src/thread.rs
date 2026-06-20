@@ -16,9 +16,9 @@
 pub use kcore::thread::*;
 
 use crate::store::KernelStore;
+use core::ptr;
 use kcore::cspace::CapSlot;
 use kcore::id::{ObjId, SlotId};
-use core::ptr;
 
 // Canonical definition lives in kcore::sysabi (shared with the syscall
 // decoder's priority-range check).
@@ -33,7 +33,11 @@ unsafe fn as_tcb(o: Option<ObjId>) -> *mut Tcb {
 }
 #[inline]
 unsafe fn tcb_id(t: *mut Tcb) -> Option<ObjId> {
-    if t.is_null() { None } else { Some(ObjId(t as u64)) }
+    if t.is_null() {
+        None
+    } else {
+        Some(ObjId(t as u64))
+    }
 }
 
 /// See [`kcore::thread::report_terminal`].
@@ -43,7 +47,11 @@ pub unsafe fn report_terminal(t: *mut Tcb, r: Report) {
 
 /// See [`kcore::thread::bind`].
 pub unsafe fn bind(t: *mut Tcb, which: usize, notif_src: *mut CapSlot, bits: u64) {
-    let src = if notif_src.is_null() { None } else { Some(SlotId(notif_src as u64)) };
+    let src = if notif_src.is_null() {
+        None
+    } else {
+        Some(SlotId(notif_src as u64))
+    };
     kcore::thread::bind(&mut KernelStore, ObjId(t as u64), which, src, bits);
 }
 
@@ -60,7 +68,10 @@ struct Queue {
     tail: *mut Tcb,
 }
 
-const EMPTY_QUEUE: Queue = Queue { head: ptr::null_mut(), tail: ptr::null_mut() };
+const EMPTY_QUEUE: Queue = Queue {
+    head: ptr::null_mut(),
+    tail: ptr::null_mut(),
+};
 
 static mut READY: [Queue; NUM_PRIOS] = [EMPTY_QUEUE; NUM_PRIOS];
 static mut READY_BITMAP: u32 = 0;

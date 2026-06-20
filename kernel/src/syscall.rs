@@ -9,7 +9,7 @@
 //! is deferred (rev1§3.7, rev1§8).
 
 use crate::channel::{self, ChanError, MSG_CAPS, MSG_PAYLOAD};
-use crate::cspace::{self, CapKind, CapSlot, CSpaceObj, Rights};
+use crate::cspace::{self, CSpaceObj, CapKind, CapSlot, Rights};
 use crate::mmu::{USER_BASE, USER_SIZE};
 use crate::notification;
 use crate::store::KernelStore;
@@ -81,7 +81,9 @@ unsafe fn user_range_ok(ptr: u64, len: u64) -> bool {
         None => {
             len <= USER_SIZE
                 && ptr >= USER_BASE
-                && ptr.checked_add(len).is_some_and(|end| end <= USER_BASE + USER_SIZE)
+                && ptr
+                    .checked_add(len)
+                    .is_some_and(|end| end <= USER_BASE + USER_SIZE)
         }
         Some(a) => crate::aspace::range_mapped(aspace_ptr(a), ptr, len, false),
     }
@@ -200,7 +202,13 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             thread::maybe_switch(frame, true);
             None
         }
-        Sys::Retype { ut, ty, param, dst, dst2 } => {
+        Sys::Retype {
+            ut,
+            ty,
+            param,
+            dst,
+            dst2,
+        } => {
             let ut = cur_slot(ut);
             let dst = cur_slot(dst);
             if ut.is_null() || dst.is_null() {
@@ -226,22 +234,29 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
         // cap_copy — derive, monotone (rev1§2.3). `prio_ceiling` attenuates a thread-cap
         // copy's rev1§5.4 ceiling to `min(parent, prio_ceiling)` (the supervision grant);
         // `NO_PRIO_CEILING` (0xFF) from the default `cap_copy` leaves it unchanged.
-        Sys::CapCopy { src, dst, mask, prio_ceiling } => {
+        Sys::CapCopy {
+            src,
+            dst,
+            mask,
+            prio_ceiling,
+        } => {
             let src = cur_slot(src);
             let dst = cur_slot(dst);
             if src.is_null() || dst.is_null() {
                 return Some(ERR_BADSLOT);
             }
-            Some(match cspace::derive(
-                &mut KernelStore,
-                SlotId(src as u64),
-                SlotId(dst as u64),
-                mask as u8,
-                prio_ceiling as u8,
-            ) {
-                Ok(()) => 0,
-                Err(()) => ERR_NOSLOT,
-            })
+            Some(
+                match cspace::derive(
+                    &mut KernelStore,
+                    SlotId(src as u64),
+                    SlotId(dst as u64),
+                    mask as u8,
+                    prio_ceiling as u8,
+                ) {
+                    Ok(()) => 0,
+                    Err(()) => ERR_NOSLOT,
+                },
+            )
         }
         Sys::CapDelete { slot } => {
             let s = cur_slot(slot);
@@ -285,7 +300,12 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
         }
         // chan_send: `len` is already <= MSG_PAYLOAD (decode), so the
         // `data.len() as u16` inside channel::send is lossless.
-        Sys::ChanSend { chan, buf, len, caps } => {
+        Sys::ChanSend {
+            chan,
+            buf,
+            len,
+            caps,
+        } => {
             let s = cur_slot(chan);
             if s.is_null() {
                 return Some(ERR_BADSLOT);
@@ -346,7 +366,12 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             }
         }
         // chan_bind: `event` is already <= 2 (decode).
-        Sys::ChanBind { chan, event, notif, bits } => {
+        Sys::ChanBind {
+            chan,
+            event,
+            notif,
+            bits,
+        } => {
             let s = cur_slot(chan);
             let ns = cur_slot(notif);
             if s.is_null() || ns.is_null() {
@@ -396,7 +421,14 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             }
         }
         // thread_start: `prio` is already masked + < NUM_PRIOS (decode).
-        Sys::ThreadStart { tcb, cspace, entry, sp, prio, arg } => {
+        Sys::ThreadStart {
+            tcb,
+            cspace,
+            entry,
+            sp,
+            prio,
+            arg,
+        } => {
             let ts = cur_slot(tcb);
             let cs_slot = cur_slot(cspace);
             if ts.is_null() || cs_slot.is_null() {
@@ -439,7 +471,12 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             Some(0)
         }
         // timer_arm
-        Sys::TimerArm { timer, notif, bits, delta } => {
+        Sys::TimerArm {
+            timer,
+            notif,
+            bits,
+            delta,
+        } => {
             let ts = cur_slot(timer);
             let ns = cur_slot(notif);
             if ts.is_null() || ns.is_null() {
@@ -454,7 +491,12 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if !(*ns).cap.rights.has(Rights::WRITE) {
                 return Some(ERR_PERM);
             }
-            timer::arm(timer_ptr(t), notif_ptr(n), bits, timer::counter().saturating_add(delta));
+            timer::arm(
+                timer_ptr(t),
+                notif_ptr(n),
+                bits,
+                timer::counter().saturating_add(delta),
+            );
             Some(0)
         }
         // thread_exit — the only voluntary stop (rev1§5.1). The kernel records
@@ -471,7 +513,12 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
         // map(aspace, frame, va, perms) — rev1§2.5: the mapping lives in the
         // frame cap; mapping an already-mapped cap fails (copy the cap to
         // map the frame twice).
-        Sys::Map { aspace, frame: fr, va, perms } => {
+        Sys::Map {
+            aspace,
+            frame: fr,
+            va,
+            perms,
+        } => {
             let asp_slot = cur_slot(aspace);
             let fr_slot = cur_slot(fr);
             if asp_slot.is_null() || fr_slot.is_null() {
@@ -483,7 +530,12 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if !(*asp_slot).cap.rights.has(Rights::WRITE) {
                 return Some(ERR_PERM);
             }
-            let CapKind::Frame { base, pages, mapping } = (*fr_slot).cap.kind else {
+            let CapKind::Frame {
+                base,
+                pages,
+                mapping,
+            } = (*fr_slot).cap.kind
+            else {
                 return Some(ERR_TYPE);
             };
             if mapping.is_some() {
@@ -501,7 +553,11 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             match crate::aspace::map(asp_ptr, base, va, pages, perms) {
                 Ok(()) => {
                     (*asp_ptr).hdr.refs += 1;
-                    (*fr_slot).cap.kind = CapKind::Frame { base, pages, mapping: Some((asp, va)) };
+                    (*fr_slot).cap.kind = CapKind::Frame {
+                        base,
+                        pages,
+                        mapping: Some((asp, va)),
+                    };
                     Some(0)
                 }
                 Err(crate::aspace::MapError::NeedMemory) => Some(ERR_NOMEM),
@@ -512,7 +568,12 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
         // frame_write(frame, offset, buf, len) — spawn-time program loading.
         // The offset+len overflow / bounds check stays here: it is against the
         // frame cap's `pages` (live state) and is already panic-safe.
-        Sys::FrameWrite { frame: fr, off, buf, len } => {
+        Sys::FrameWrite {
+            frame: fr,
+            off,
+            buf,
+            len,
+        } => {
             let fr_slot = cur_slot(fr);
             if fr_slot.is_null() {
                 return Some(ERR_BADSLOT);
@@ -533,7 +594,14 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             Some(0)
         }
         // thread_start_as: `prio` already masked + < NUM_PRIOS (decode).
-        Sys::ThreadStartAs { tcb, cspace, aspace, entry, sp, prio } => {
+        Sys::ThreadStartAs {
+            tcb,
+            cspace,
+            aspace,
+            entry,
+            sp,
+            prio,
+        } => {
             let ts = cur_slot(tcb);
             let cs_slot = cur_slot(cspace);
             let asp_slot = cur_slot(aspace);
@@ -602,7 +670,12 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
         // cap moves into the TCB's CDT-visible slot; notif = SLOT_NONE
         // unbinds. A child holds no cap to its own threads, so it can neither
         // silence nor forge its own death notice.
-        Sys::ThreadBind { tcb, which, notif, bits } => {
+        Sys::ThreadBind {
+            tcb,
+            which,
+            notif,
+            bits,
+        } => {
             let ts = cur_slot(tcb);
             if ts.is_null() {
                 return Some(ERR_BADSLOT);

@@ -71,7 +71,12 @@ pub trait Transport {
 
     /// Non-blocking receive (rev1§3.3): caps land in `dests`; `Empty`/`NoSlot` per
     /// `RecvErr`. `buf` must hold a full inline payload (256 bytes, rev1§3.1).
-    fn recv_nb(&self, ch: Chan, buf: &mut [u8], dests: Option<&[u32; 4]>) -> Result<RecvOk, RecvErr>;
+    fn recv_nb(
+        &self,
+        ch: Chan,
+        buf: &mut [u8],
+        dests: Option<&[u32; 4]>,
+    ) -> Result<RecvOk, RecvErr>;
 
     /// Bind a channel event to `(notif, bits)` (rev1§3.6). Persistent: a later
     /// event ORs `bits` into the notification word.
@@ -114,10 +119,18 @@ impl Transport for SyscallTransport {
         }
     }
 
-    fn recv_nb(&self, ch: Chan, buf: &mut [u8], dests: Option<&[u32; 4]>) -> Result<RecvOk, RecvErr> {
+    fn recv_nb(
+        &self,
+        ch: Chan,
+        buf: &mut [u8],
+        dests: Option<&[u32; 4]>,
+    ) -> Result<RecvOk, RecvErr> {
         let (r, mask) = sys::chan_recv(ch, buf.as_mut_ptr(), dests);
         if r >= 0 {
-            Ok(RecvOk { len: r as usize, cap_mask: mask })
+            Ok(RecvOk {
+                len: r as usize,
+                cap_mask: mask,
+            })
         } else if r == sys::ERR_EMPTY {
             Err(RecvErr::Empty)
         } else if r == sys::ERR_NOSLOT {

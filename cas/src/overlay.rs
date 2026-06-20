@@ -150,9 +150,9 @@ impl Overlay {
         &'a self,
         dir: &'a [Vec<u8>],
     ) -> impl Iterator<Item = (&'a Path, &'a FileOverlay)> + 'a {
-        self.files.iter().filter(move |(p, _)| {
-            p.len() == dir.len() + 1 && p[..dir.len()] == *dir
-        })
+        self.files
+            .iter()
+            .filter(move |(p, _)| p.len() == dir.len() + 1 && p[..dir.len()] == *dir)
     }
 
     pub fn unlinked_in_dir<'a>(
@@ -181,7 +181,9 @@ mod tests {
         o.write(&p, 0, b"aaaaaaaa", 1);
         o.write(&p, 2, b"bb", 2);
         o.write(&p, 6, b"cccc", 3);
-        let FileState::Dirty(fo) = o.state(&p) else { panic!() };
+        let FileState::Dirty(fo) = o.state(&p) else {
+            panic!()
+        };
         assert_eq!(fo.apply(Vec::new()), b"aabbaacccc".to_vec());
         assert_eq!(o.bytes(), 10);
     }
@@ -193,7 +195,9 @@ mod tests {
         o.unlink(&p, 1);
         assert!(matches!(o.state(&p), FileState::Unlinked));
         o.write(&p, 1, b"x", 2);
-        let FileState::Dirty(fo) = o.state(&p) else { panic!() };
+        let FileState::Dirty(fo) = o.state(&p) else {
+            panic!()
+        };
         assert!(fo.fresh);
         assert_eq!(fo.apply(b"old content".to_vec()), vec![0, b'x']);
     }

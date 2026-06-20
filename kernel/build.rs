@@ -26,7 +26,9 @@ fn build_user(
     for (k, v) in envs {
         cmd.env(k, v);
     }
-    let status = cmd.status().unwrap_or_else(|e| panic!("spawning cargo for {pkg}: {e}"));
+    let status = cmd
+        .status()
+        .unwrap_or_else(|e| panic!("spawning cargo for {pkg}: {e}"));
     assert!(status.success(), "building user/{pkg} failed");
     target_dir.join(triple).join("release").join(bin)
 }

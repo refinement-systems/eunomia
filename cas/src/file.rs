@@ -4,21 +4,17 @@
 //! function of content, preserving canonical form.
 
 use crate::chunk::{boundaries, ChunkerParams};
-use alloc::vec;
-use alloc::vec::Vec;
 use crate::hash::Hash;
 use crate::prolly::{Content, Entry, EntryKind, FormatError, NodeStore, INLINE_MAX};
+use alloc::vec;
+use alloc::vec::Vec;
 
 /// Chunk-list objects share the content-addressed keyspace with tree nodes;
 /// the leading byte keeps the decoders from confusing them (tree nodes
 /// start with their level, capped well below this).
 const CHUNK_LIST_MAGIC: u8 = 0xC1;
 
-pub fn store_file(
-    store: &mut impl NodeStore,
-    params: &ChunkerParams,
-    data: &[u8],
-) -> Content {
+pub fn store_file(store: &mut impl NodeStore, params: &ChunkerParams, data: &[u8]) -> Content {
     if data.len() <= INLINE_MAX {
         return Content::Inline(data.to_vec());
     }
@@ -114,7 +110,11 @@ mod tests {
     use crate::prolly::MemStore;
     use proptest::prelude::*;
 
-    const TEST_PARAMS: ChunkerParams = ChunkerParams { min: 64, avg: 256, max: 1024 };
+    const TEST_PARAMS: ChunkerParams = ChunkerParams {
+        min: 64,
+        avg: 256,
+        max: 1024,
+    };
 
     proptest! {
         // Miri: a few cases cover the same paths; native keeps the full sweep.

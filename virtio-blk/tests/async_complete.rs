@@ -26,7 +26,10 @@ const DEV_BASE: u64 = 0x4000_0000;
 fn deferred_driver(sectors: usize) -> VirtioBlk<FakeBlock, HostBacking> {
     let mem = SharedMem::new(256 * 1024);
     let fake = FakeBlock::new(mem.clone(), DEV_BASE, sectors);
-    let pool = DmaPool::new(HostBacking { mem, device_base: DEV_BASE });
+    let pool = DmaPool::new(HostBacking {
+        mem,
+        device_base: DEV_BASE,
+    });
     let mut blk = VirtioBlk::new(fake, pool, 64 * 1024).unwrap();
     blk.mmio_mut().set_deferred(true);
     blk
@@ -40,7 +43,10 @@ fn write_completes_after_stale_poll() {
     blk.submit(REQ_OUT, 7, data.len(), false);
 
     // Device has not run yet: the poll observes a stale used-index.
-    assert!(blk.try_complete().is_none(), "submit must not complete eagerly");
+    assert!(
+        blk.try_complete().is_none(),
+        "submit must not complete eagerly"
+    );
 
     // Let the device drain the staged queue, then the next poll completes.
     blk.mmio_mut().device_step();
@@ -59,7 +65,10 @@ fn read_completes_after_stale_poll() {
     blk.mmio_mut().disk[off..off + data.len()].copy_from_slice(&data);
 
     blk.submit(REQ_IN, 9, data.len(), true);
-    assert!(blk.try_complete().is_none(), "submit must not complete eagerly");
+    assert!(
+        blk.try_complete().is_none(),
+        "submit must not complete eagerly"
+    );
     blk.mmio_mut().device_step();
     assert_eq!(blk.try_complete(), Some(Ok(())));
 
@@ -73,7 +82,10 @@ fn flush_completes_after_stale_poll() {
     // The 2-descriptor (no-data) chain.
     let mut blk = deferred_driver(64);
     blk.submit(REQ_FLUSH, 0, 0, false);
-    assert!(blk.try_complete().is_none(), "submit must not complete eagerly");
+    assert!(
+        blk.try_complete().is_none(),
+        "submit must not complete eagerly"
+    );
     blk.mmio_mut().device_step();
     assert_eq!(blk.try_complete(), Some(Ok(())));
     assert_eq!(blk.mmio_mut().flush_count, 1);

@@ -65,7 +65,13 @@ pub fn encode<B: Serialize>(
     body: &B,
 ) -> Result<Vec<u8>, WireError> {
     let body = Postcard::encode_body(body)?;
-    let header = Header { proto, version, opcode, flags, body_len: body.len() as u32 };
+    let header = Header {
+        proto,
+        version,
+        opcode,
+        flags,
+        body_len: body.len() as u32,
+    };
     let mut out = Vec::with_capacity(HEADER_SIZE + body.len());
     out.extend_from_slice(&header.encode());
     out.extend_from_slice(&body);
@@ -117,7 +123,10 @@ mod tests {
 
     #[test]
     fn roundtrip_carries_header_and_body() {
-        let b = Body::B { x: 42, name: String::from("etc/conf") };
+        let b = Body::B {
+            x: 42,
+            name: String::from("etc/conf"),
+        };
         let bytes = enc(&b);
         let (h, got) = decode::<Body>(&bytes).unwrap();
         assert_eq!((h.proto, h.version, h.opcode), (7, 1, 9));
@@ -127,14 +136,20 @@ mod tests {
 
     #[test]
     fn rejects_short_header() {
-        assert_eq!(decode::<Body>(&[0u8; HEADER_SIZE - 1]), Err(WireError::Header));
+        assert_eq!(
+            decode::<Body>(&[0u8; HEADER_SIZE - 1]),
+            Err(WireError::Header)
+        );
     }
 
     #[test]
     fn rejects_truncated_body() {
         let bytes = enc(&Body::C(vec![1, 2, 3, 4]));
         // Drop a body byte: frame is now shorter than the declared body_len.
-        assert_eq!(decode::<Body>(&bytes[..bytes.len() - 1]), Err(WireError::Body));
+        assert_eq!(
+            decode::<Body>(&bytes[..bytes.len() - 1]),
+            Err(WireError::Body)
+        );
     }
 
     #[test]

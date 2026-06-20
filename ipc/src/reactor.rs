@@ -104,7 +104,13 @@ pub struct Reactor<'t, T: Transport> {
 impl<'t, T: Transport> Reactor<'t, T> {
     /// A reactor over `notif`, the notification all its sources bind into.
     pub fn new(transport: &'t T, notif: Notif) -> Reactor<'t, T> {
-        Reactor { transport, notif, slots: [None; WORD_BITS], used: 0, pending: 0 }
+        Reactor {
+            transport,
+            notif,
+            slots: [None; WORD_BITS],
+            used: 0,
+            pending: 0,
+        }
     }
 
     /// The lowest free bit, marking it allocated; `None` when the 64-bit word is
@@ -123,7 +129,12 @@ impl<'t, T: Transport> Reactor<'t, T> {
     /// first `wait` polls the source (the "poll once", catching a pre-bind
     /// message). Idempotent re-registration is not supported — each call consumes
     /// a bit.
-    pub fn register(&mut self, source: Chan, signals: Signals, key: Key) -> Result<(), RegisterErr> {
+    pub fn register(
+        &mut self,
+        source: Chan,
+        signals: Signals,
+        key: Key,
+    ) -> Result<(), RegisterErr> {
         let bit = self.alloc_bit().ok_or(RegisterErr::Full)?;
         let mask = 1u64 << bit;
 
@@ -170,13 +181,18 @@ impl<'t, T: Transport> Reactor<'t, T> {
             let bit = bits.trailing_zeros() as usize;
             bits &= bits - 1;
             // Bound sources carry no channel signals; the key alone names them.
-            self.slots[bit] = Some(Reg { key, signals: Signals(0) });
+            self.slots[bit] = Some(Reg {
+                key,
+                signals: Signals(0),
+            });
         }
         Ok(())
     }
 
     fn bind(&self, source: Chan, ev: Event, mask: u64) -> Result<(), RegisterErr> {
-        self.transport.bind(source, ev, self.notif, mask).map_err(RegisterErr::Bind)
+        self.transport
+            .bind(source, ev, self.notif, mask)
+            .map_err(RegisterErr::Bind)
     }
 
     /// Block until a registered source is ready, returning its `(key, signals)`.

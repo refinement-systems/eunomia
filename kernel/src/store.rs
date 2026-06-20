@@ -14,7 +14,7 @@
 use core::ptr;
 use kcore::aspace::AspaceObj;
 use kcore::channel::{Channel, MSG_PAYLOAD};
-use kcore::cspace::{CapSlot, CSpaceObj, ObjHeader};
+use kcore::cspace::{CSpaceObj, CapSlot, ObjHeader};
 use kcore::id::{ObjId, SlotId};
 use kcore::notification::NotifObj;
 use kcore::store::{Binding, Store};
@@ -119,14 +119,22 @@ impl Store for KernelStore {
         unsafe {
             let msg = Channel::slot(obj_ptr::<Channel>(ch), ring, i);
             let n = data.len().min(MSG_PAYLOAD);
-            ptr::copy_nonoverlapping(data.as_ptr(), ptr::addr_of_mut!((*msg).payload).cast::<u8>(), n);
+            ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                ptr::addr_of_mut!((*msg).payload).cast::<u8>(),
+                n,
+            );
         }
     }
     fn chan_msg_read(&self, ch: ObjId, ring: usize, i: u32, len: usize, buf: &mut [u8]) {
         unsafe {
             let msg = Channel::slot(obj_ptr::<Channel>(ch), ring, i);
             let n = len.min(MSG_PAYLOAD).min(buf.len());
-            ptr::copy_nonoverlapping(ptr::addr_of!((*msg).payload).cast::<u8>(), buf.as_mut_ptr(), n);
+            ptr::copy_nonoverlapping(
+                ptr::addr_of!((*msg).payload).cast::<u8>(),
+                buf.as_mut_ptr(),
+                n,
+            );
         }
     }
 

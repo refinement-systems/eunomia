@@ -107,36 +107,95 @@ impl Session {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
 pub enum Request {
-    Read { handle: HandleId, path: TreePath, offset: u64, len: u32 },
-    Write { handle: HandleId, path: TreePath, offset: u64, data: Vec<u8> },
-    Unlink { handle: HandleId, path: TreePath },
-    List { handle: HandleId, path: TreePath },
+    Read {
+        handle: HandleId,
+        path: TreePath,
+        offset: u64,
+        len: u32,
+    },
+    Write {
+        handle: HandleId,
+        path: TreePath,
+        offset: u64,
+        data: Vec<u8>,
+    },
+    Unlink {
+        handle: HandleId,
+        path: TreePath,
+    },
+    List {
+        handle: HandleId,
+        path: TreePath,
+    },
     /// Attenuate: sub-subtree + rights mask, in one step (rev1§2.4 delegation).
-    OpenChild { handle: HandleId, path: TreePath, rights_mask: u8 },
-    Close { handle: HandleId },
-    Sync { handle: HandleId },
-    Snapshot { handle: HandleId, message: Vec<u8>, class: u8 },
-    ListSnapshots { handle: HandleId },
+    OpenChild {
+        handle: HandleId,
+        path: TreePath,
+        rights_mask: u8,
+    },
+    Close {
+        handle: HandleId,
+    },
+    Sync {
+        handle: HandleId,
+    },
+    Snapshot {
+        handle: HandleId,
+        message: Vec<u8>,
+        class: u8,
+    },
+    ListSnapshots {
+        handle: HandleId,
+    },
     /// A snapshot handle from a ref handle's history, subtree-scoped.
-    OpenSnapshot { handle: HandleId, snap_id: u64, path: TreePath, rights_mask: u8 },
-    Rollback { handle: HandleId, snap_id: u64 },
+    OpenSnapshot {
+        handle: HandleId,
+        snap_id: u64,
+        path: TreePath,
+        rights_mask: u8,
+    },
+    Rollback {
+        handle: HandleId,
+        snap_id: u64,
+    },
     /// Mass revocation: bump the ref's generation; every outstanding
     /// handle on it (all sessions) goes stale on next use (rev1§2.2).
-    RevokeRef { handle: HandleId },
-    MintTicket { handle: HandleId, ttl_nanos: u64 },
-    RedeemTicket { ticket: [u8; 16] },
+    RevokeRef {
+        handle: HandleId,
+    },
+    MintTicket {
+        handle: HandleId,
+        ttl_nanos: u64,
+    },
+    RedeemTicket {
+        ticket: [u8; 16],
+    },
     /// Size of a file (None response = absent).
-    Stat { handle: HandleId, path: TreePath },
+    Stat {
+        handle: HandleId,
+        path: TreePath,
+    },
     EnumerateSession,
     /// History rewriting (rev1§4.6-4.7): drop one snapshot row. Sets the
     /// post-rewrite GC trigger; the reclamation itself is asynchronous.
-    DeleteSnapshot { handle: HandleId, snap_id: u64 },
+    DeleteSnapshot {
+        handle: HandleId,
+        snap_id: u64,
+    },
     /// Edit a snapshot's retention class (the "mark survivors keep" flow).
-    SetClass { handle: HandleId, snap_id: u64, class: u8 },
+    SetClass {
+        handle: HandleId,
+        snap_id: u64,
+        class: u8,
+    },
     /// Run a GC cycle now (the manual trigger).
-    Gc { handle: HandleId },
+    Gc {
+        handle: HandleId,
+    },
     /// Chunk-region space accounting.
-    Statfs { handle: HandleId },
+    Statfs {
+        handle: HandleId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,8 +228,16 @@ pub enum Response {
     Ticket([u8; 16]),
     SessionDump(Vec<(HandleId, String)>),
     Err(ErrorCode),
-    GcReport { live_objects: u64, freed_objects: u64, freed_bytes: u64 },
-    Space { total: u64, used: u64, free: u64 },
+    GcReport {
+        live_objects: u64,
+        freed_objects: u64,
+        freed_bytes: u64,
+    },
+    Space {
+        total: u64,
+        used: u64,
+        free: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,7 +345,11 @@ impl<D: BlockDev> Server<D> {
     /// without the liveness/generation check that `lookup` performs (a caller
     /// that needs the stale check goes through a request).
     pub fn handle_rights(&self, session: SessionId, handle: HandleId) -> Option<u8> {
-        self.sessions.get(&session)?.handles.get(&handle).map(|e| e.rights)
+        self.sessions
+            .get(&session)?
+            .handles
+            .get(&handle)
+            .map(|e| e.rights)
     }
 
     /// The privileged init/maintenance grant: a full-rights handle at a
@@ -329,7 +400,10 @@ impl<D: BlockDev> Server<D> {
     ) -> Result<HandleEntry, ErrorCode> {
         let s = self.sessions.get(&session).ok_or(ErrorCode::BadHandle)?;
         let e = s.handles.get(&handle).ok_or(ErrorCode::BadHandle)?.clone();
-        if let HandleTarget::Ref { name, gen_at_grant, .. } = &e.target {
+        if let HandleTarget::Ref {
+            name, gen_at_grant, ..
+        } = &e.target
+        {
             let current = self
                 .store
                 .refs()
@@ -379,7 +453,12 @@ impl<D: BlockDev> Server<D> {
             _ => {}
         }
         match req {
-            Request::Read { handle, path, offset, len } => {
+            Request::Read {
+                handle,
+                path,
+                offset,
+                len,
+            } => {
                 let e = self.lookup(session, handle, R_READ)?;
                 let data = match &e.target {
                     HandleTarget::Ref { name, subtree, .. } => self
@@ -399,7 +478,12 @@ impl<D: BlockDev> Server<D> {
                     None => Response::NotFound,
                 })
             }
-            Request::Write { handle, path, offset, data } => {
+            Request::Write {
+                handle,
+                path,
+                offset,
+                data,
+            } => {
                 let e = self.lookup(session, handle, R_WRITE)?;
                 let HandleTarget::Ref { name, subtree, .. } = &e.target else {
                     return Err(ErrorCode::ReadOnly); // snapshots are immutable
@@ -439,7 +523,11 @@ impl<D: BlockDev> Server<D> {
                         .collect(),
                 ))
             }
-            Request::OpenChild { handle, path, rights_mask } => {
+            Request::OpenChild {
+                handle,
+                path,
+                rights_mask,
+            } => {
                 let e = self.lookup(session, handle, 0)?;
                 // Monotone derivation (rev1§2.3): intersection only. This is
                 // also what strips `R_STAT_STORE` from delegated children — a
@@ -447,7 +535,11 @@ impl<D: BlockDev> Server<D> {
                 // it survives only when the holder has it AND sets bit 5.
                 let rights = attenuate(e.rights, rights_mask);
                 let entry = match &e.target {
-                    HandleTarget::Ref { name, subtree, gen_at_grant } => {
+                    HandleTarget::Ref {
+                        name,
+                        subtree,
+                        gen_at_grant,
+                    } => {
                         // The subtree must currently resolve to a directory.
                         let full = Self::full_path(subtree, &path);
                         self.resolve_ref_dir(name, &full)?;
@@ -468,11 +560,17 @@ impl<D: BlockDev> Server<D> {
                         }
                     }
                 };
-                let s = self.sessions.get_mut(&session).ok_or(ErrorCode::BadHandle)?;
+                let s = self
+                    .sessions
+                    .get_mut(&session)
+                    .ok_or(ErrorCode::BadHandle)?;
                 Ok(Response::Handle(s.insert(entry)))
             }
             Request::Close { handle } => {
-                let s = self.sessions.get_mut(&session).ok_or(ErrorCode::BadHandle)?;
+                let s = self
+                    .sessions
+                    .get_mut(&session)
+                    .ok_or(ErrorCode::BadHandle)?;
                 s.handles.remove(&handle).ok_or(ErrorCode::BadHandle)?;
                 Ok(Response::Ok)
             }
@@ -484,7 +582,11 @@ impl<D: BlockDev> Server<D> {
                 self.store.sync_ref(&name.clone()).map_err(store_err)?;
                 Ok(Response::Ok)
             }
-            Request::Snapshot { handle, message, class } => {
+            Request::Snapshot {
+                handle,
+                message,
+                class,
+            } => {
                 let e = self.lookup(session, handle, R_SNAPSHOT)?;
                 let HandleTarget::Ref { name, .. } = &e.target else {
                     return Err(ErrorCode::ReadOnly);
@@ -515,7 +617,12 @@ impl<D: BlockDev> Server<D> {
                         .collect(),
                 ))
             }
-            Request::OpenSnapshot { handle, snap_id, path, rights_mask } => {
+            Request::OpenSnapshot {
+                handle,
+                snap_id,
+                path,
+                rights_mask,
+            } => {
                 let e = self.lookup(session, handle, R_READ)?;
                 let HandleTarget::Ref { name, subtree, .. } = &e.target else {
                     return Err(ErrorCode::ReadOnly);
@@ -539,7 +646,10 @@ impl<D: BlockDev> Server<D> {
                 // Masking to read/enumerate also drops `R_STAT_STORE`:
                 // snapshot handles never carry store-global observation.
                 let rights = attenuate(attenuate(e.rights, rights_mask), R_READ | R_ENUMERATE);
-                let s = self.sessions.get_mut(&session).ok_or(ErrorCode::BadHandle)?;
+                let s = self
+                    .sessions
+                    .get_mut(&session)
+                    .ok_or(ErrorCode::BadHandle)?;
                 Ok(Response::Handle(s.insert(HandleEntry {
                     target: HandleTarget::Snapshot { root: child },
                     rights,
@@ -570,7 +680,9 @@ impl<D: BlockDev> Server<D> {
                 if !subtree.is_empty() {
                     return Err(ErrorCode::Denied);
                 }
-                self.store.bump_generation(&name.clone()).map_err(store_err)?;
+                self.store
+                    .bump_generation(&name.clone())
+                    .map_err(store_err)?;
                 Ok(Response::Ok)
             }
             Request::MintTicket { handle, ttl_nanos } => {
@@ -587,7 +699,10 @@ impl<D: BlockDev> Server<D> {
                 ticket.copy_from_slice(&digest.as_bytes()[..16]);
                 self.tickets.insert(
                     ticket,
-                    PendingTicket { entry: e, expires: now.saturating_add(ttl) },
+                    PendingTicket {
+                        entry: e,
+                        expires: now.saturating_add(ttl),
+                    },
                 );
                 Ok(Response::Ticket(ticket))
             }
@@ -597,7 +712,10 @@ impl<D: BlockDev> Server<D> {
                 if now > pending.expires {
                     return Err(ErrorCode::BadTicket);
                 }
-                let s = self.sessions.get_mut(&session).ok_or(ErrorCode::BadHandle)?;
+                let s = self
+                    .sessions
+                    .get_mut(&session)
+                    .ok_or(ErrorCode::BadHandle)?;
                 Ok(Response::Handle(s.insert(pending.entry)))
             }
             Request::Stat { handle, path } => {
@@ -623,23 +741,26 @@ impl<D: BlockDev> Server<D> {
                 if !s.handles.values().any(|h| h.rights & R_ENUMERATE != 0) {
                     return Err(ErrorCode::Denied);
                 }
-                let mut dump: Vec<(HandleId, String)> = s
-                    .handles
-                    .iter()
-                    .map(|(id, h)| (*id, describe(h)))
-                    .collect();
+                let mut dump: Vec<(HandleId, String)> =
+                    s.handles.iter().map(|(id, h)| (*id, describe(h))).collect();
                 dump.sort();
                 Ok(Response::SessionDump(dump))
             }
             Request::DeleteSnapshot { handle, snap_id } => {
                 let name = self.rewrite_target(session, handle)?;
-                self.store.delete_snapshot(&name, snap_id).map_err(store_err)?;
+                self.store
+                    .delete_snapshot(&name, snap_id)
+                    .map_err(store_err)?;
                 // Post-rewrite trigger (rev1§4.6): reclamation follows
                 // promptly while this op stays O(small).
                 self.gc_requested = true;
                 Ok(Response::Ok)
             }
-            Request::SetClass { handle, snap_id, class } => {
+            Request::SetClass {
+                handle,
+                snap_id,
+                class,
+            } => {
                 let name = self.rewrite_target(session, handle)?;
                 self.store
                     .set_snapshot_class(&name, snap_id, class)
@@ -663,7 +784,11 @@ impl<D: BlockDev> Server<D> {
                 // is intentionally ignored: this right's scope is the store.
                 self.lookup(session, handle, R_STAT_STORE)?;
                 let sp = self.store.space();
-                Ok(Response::Space { total: sp.total, used: sp.used, free: sp.free })
+                Ok(Response::Space {
+                    total: sp.total,
+                    used: sp.used,
+                    free: sp.free,
+                })
             }
         }
     }
@@ -671,11 +796,7 @@ impl<D: BlockDev> Server<D> {
     /// Common gate for history rewriting: a live ref handle with the
     /// `may-rewrite-history` right, at the ref root (surgery from a
     /// subtree view is not a thing). Returns the ref name.
-    fn rewrite_target(
-        &self,
-        session: SessionId,
-        handle: HandleId,
-    ) -> Result<Vec<u8>, ErrorCode> {
+    fn rewrite_target(&self, session: SessionId, handle: HandleId) -> Result<Vec<u8>, ErrorCode> {
         let e = self.lookup(session, handle, R_REWRITE_HISTORY)?;
         let HandleTarget::Ref { name, subtree, .. } = &e.target else {
             return Err(ErrorCode::ReadOnly);
@@ -703,7 +824,10 @@ impl<D: BlockDev> Server<D> {
     fn resolve_snap_dir(&self, root: &Hash, path: &TreePath) -> Result<Hash, ErrorCode> {
         let comps: Vec<&[u8]> = path.iter().map(|c| c.as_slice()).collect();
         match self.store.lookup_at_root(root, &comps) {
-            Ok(Some(Entry { content: Content::DirRoot(h), .. })) => Ok(h),
+            Ok(Some(Entry {
+                content: Content::DirRoot(h),
+                ..
+            })) => Ok(h),
             Ok(Some(_)) => Err(ErrorCode::NotADir),
             Ok(None) => Err(ErrorCode::BadPath),
             Err(_) => Err(ErrorCode::Internal),

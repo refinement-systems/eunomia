@@ -461,7 +461,10 @@ mod tests {
 
     #[test]
     fn grant_reply_roundtrip() {
-        let g = GrantReply::Grant(WindowGrant { window: 0, size: 8192 });
+        let g = GrantReply::Grant(WindowGrant {
+            window: 0,
+            size: 8192,
+        });
         let (b, n) = g.encode();
         assert_eq!(GrantReply::decode(&b[..n]), Some(g));
 
@@ -494,7 +497,7 @@ mod tests {
         assert_eq!(adm.remaining(), 5); // refusal leaves the quota untouched
         assert_eq!(adm.admit(5), Ok(WindowGrant { window: 0, size: 5 }));
         assert_eq!(adm.admit(1), Err(ConnectErr::Refused)); // exhausted
-        // The invariant: a flood of requests never pushes granted past budget.
+                                                            // The invariant: a flood of requests never pushes granted past budget.
         let mut adm = Admission::new(3);
         for _ in 0..100 {
             let _ = adm.admit(1);

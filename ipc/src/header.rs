@@ -190,13 +190,25 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let h = Header { proto: 0x51, version: 2, opcode: 7, flags: 0x8000, body_len: 123 };
+        let h = Header {
+            proto: 0x51,
+            version: 2,
+            opcode: 7,
+            flags: 0x8000,
+            body_len: 123,
+        };
         assert_eq!(Header::decode(&h.encode()), Ok(h));
     }
 
     #[test]
     fn wrong_length_rejected() {
-        assert_eq!(Header::decode(&[0u8; HEADER_SIZE - 1]), Err(HeaderError::BadLength));
-        assert_eq!(Header::decode(&[0u8; HEADER_SIZE + 1]), Err(HeaderError::BadLength));
+        assert_eq!(
+            Header::decode(&[0u8; HEADER_SIZE - 1]),
+            Err(HeaderError::BadLength)
+        );
+        assert_eq!(
+            Header::decode(&[0u8; HEADER_SIZE + 1]),
+            Err(HeaderError::BadLength)
+        );
     }
 }

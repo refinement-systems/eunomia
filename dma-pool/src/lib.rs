@@ -1328,7 +1328,10 @@ pub struct DmaPool<B: DmaBacking> {
 impl<B: DmaBacking> DmaPool<B> {
     pub fn new(backing: B) -> DmaPool<B> {
         let len = backing.len();
-        DmaPool { fl: FreeList::new(len), backing }
+        DmaPool {
+            fl: FreeList::new(len),
+            backing,
+        }
     }
 
     pub fn alloc(&mut self, len: usize, align: usize) -> Option<DmaBuf> {
@@ -1353,7 +1356,7 @@ impl<B: DmaBacking> DmaPool<B> {
         // restores the original `assert!(nfree < MAX_FREE_RANGES)` the audit found
         // demoted to a no-op Verus precondition.
         assert!(buf.len > 0, "dma-pool: zero-length buffer"); // n > 0
-        // nfree < N: `!is_full()` plus the always-held `wf` invariant (`nfree <= N`).
+                                                              // nfree < N: `!is_full()` plus the always-held `wf` invariant (`nfree <= N`).
         assert!(
             !self.fl.is_full(),
             "dma-pool: free-list fragmentation cap (MAX_FREE_RANGES)"
@@ -1402,7 +1405,10 @@ impl<B: DmaBacking> DmaPool<B> {
             .offset
             .checked_add(sub_end)
             .expect("dma-pool: buffer range overflows usize");
-        assert!(abs_end <= self.backing.len(), "dma-pool: buffer range outside pool arena");
+        assert!(
+            abs_end <= self.backing.len(),
+            "dma-pool: buffer range outside pool arena"
+        );
         // SAFETY: `buf.offset + offset <= abs_end <= backing.len()`, and the access
         // spans `len` bytes ending at `abs_end`. `cpu_base()` addresses
         // `backing.len()` valid, pinned bytes (the `DmaBacking` contract), so the
@@ -1460,8 +1466,8 @@ impl<B: DmaBacking> DmaPool<B> {
 #[cfg(any(feature = "std", test))]
 pub mod host {
     use super::*;
-    use std::rc::Rc;
     use std::cell::UnsafeCell;
+    use std::rc::Rc;
 
     #[derive(Clone)]
     pub struct SharedMem(Rc<UnsafeCell<Vec<u8>>>);
@@ -1517,7 +1523,10 @@ mod tests {
     use std::panic;
 
     fn pool(len: usize) -> DmaPool<HostBacking> {
-        DmaPool::new(HostBacking { mem: SharedMem::new(len), device_base: 0x4000_0000 })
+        DmaPool::new(HostBacking {
+            mem: SharedMem::new(len),
+            device_base: 0x4000_0000,
+        })
     }
 
     #[test]
@@ -1546,13 +1555,15 @@ mod tests {
     #[test]
     fn data_roundtrip_and_device_view() {
         let mem = SharedMem::new(4096);
-        let mut p = DmaPool::new(HostBacking { mem: mem.clone(), device_base: 0 });
+        let mut p = DmaPool::new(HostBacking {
+            mem: mem.clone(),
+            device_base: 0,
+        });
         let buf = p.alloc(16, 4).unwrap();
         p.write(&buf, 0, b"dma works fine!!");
         // The "device" sees the same bytes at the device address.
-        let dev_view = unsafe {
-            core::slice::from_raw_parts(mem.raw().add(buf.device_addr().0 as usize), 16)
-        };
+        let dev_view =
+            unsafe { core::slice::from_raw_parts(mem.raw().add(buf.device_addr().0 as usize), 16) };
         assert_eq!(dev_view, b"dma works fine!!");
         let mut back = [0u8; 16];
         p.read(&buf, 0, &mut back);
@@ -1685,7 +1696,11 @@ mod tests {
     #[should_panic(expected = "zero-length buffer")]
     fn zero_length_free_panics() {
         let mut p = pool(4096);
-        let bogus = DmaBuf { offset: 0, len: 0, device_addr: DeviceAddress(0x4000_0000) };
+        let bogus = DmaBuf {
+            offset: 0,
+            len: 0,
+            device_addr: DeviceAddress(0x4000_0000),
+        };
         p.free(bogus);
     }
 

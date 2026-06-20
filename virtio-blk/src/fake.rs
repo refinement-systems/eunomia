@@ -133,8 +133,10 @@ impl FakeBlock {
                 .map(|(_, l, _)| *l)
                 .sum();
             let ue = self.used_addr + 4 + (self.used_idx as u64 % qsize) * 8;
-            self.guest(ue, 4).copy_from_slice(&(head as u32).to_le_bytes());
-            self.guest(ue + 4, 4).copy_from_slice(&written.to_le_bytes());
+            self.guest(ue, 4)
+                .copy_from_slice(&(head as u32).to_le_bytes());
+            self.guest(ue + 4, 4)
+                .copy_from_slice(&written.to_le_bytes());
             self.used_idx = self.used_idx.wrapping_add(1);
             self.guest(self.used_addr + 2, 2)
                 .copy_from_slice(&self.used_idx.to_le_bytes());

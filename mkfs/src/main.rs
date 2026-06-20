@@ -70,7 +70,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // A modest WAL: recovery replay buffers the whole region, and the
     // on-OS server has megabytes of heap, not gigabytes. (Streaming
     // replay remains future work, tracked in store.rs.)
-    let opts = StoreOptions { wal_len: 1024 * 1024, ..StoreOptions::default() };
+    let opts = StoreOptions {
+        wal_len: 1024 * 1024,
+        ..StoreOptions::default()
+    };
     let mut store = Store::format(dev, opts)?;
     store.create_ref(b"main")?;
 
@@ -80,7 +83,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let now = std::time::SystemTime::now()
         .duration_since(UNIX_EPOCH)?
         .as_nanos() as u64;
-    let snap = store.snapshot(b"main", b"mkfs", b"initial image", cas::disk::CLASS_KEEP, now)?;
+    let snap = store.snapshot(
+        b"main",
+        b"mkfs",
+        b"initial image",
+        cas::disk::CLASS_KEEP,
+        now,
+    )?;
 
     println!(
         "{}: {} files from {}, snapshot #{} on ref \"main\"",

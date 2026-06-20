@@ -22,12 +22,21 @@ fn p(parts: &[&str]) -> Vec<Vec<u8>> {
 /// Same `top.txt` / `pub/readme` / `pub/deep/leaf` tree the `sessions.rs`
 /// example tests use, so the directory shape the chains descend is familiar.
 fn new_server() -> Server<MemDev> {
-    let opts = StoreOptions { wal_len: 64 * 1024, ..StoreOptions::default() };
+    let opts = StoreOptions {
+        wal_len: 64 * 1024,
+        ..StoreOptions::default()
+    };
     let mut store = Store::format(MemDev::new(1 << 20), opts).unwrap();
     store.create_ref(b"main").unwrap();
-    store.write(b"main", &p(&["top.txt"]), 0, b"top secret", 1).unwrap();
-    store.write(b"main", &p(&["pub", "readme"]), 0, b"public info", 2).unwrap();
-    store.write(b"main", &p(&["pub", "deep", "leaf"]), 0, b"leaf data", 3).unwrap();
+    store
+        .write(b"main", &p(&["top.txt"]), 0, b"top secret", 1)
+        .unwrap();
+    store
+        .write(b"main", &p(&["pub", "readme"]), 0, b"public info", 2)
+        .unwrap();
+    store
+        .write(b"main", &p(&["pub", "deep", "leaf"]), 0, b"leaf data", 3)
+        .unwrap();
     store.sync_all().unwrap();
     Server::new(store, 0xC0FFEE)
 }
@@ -207,8 +216,11 @@ fn stat_store_scope_ignores_subtree() {
     assert_eq!(srv.handle_rights(session, deep), Some(R_ALL | R_STAT_STORE));
 
     // statfs through the deep handle observes the whole store, not the subtree.
-    let Response::Space { total: t2, used: u2, free: f2 } =
-        srv.handle(session, Request::Statfs { handle: deep }, 3)
+    let Response::Space {
+        total: t2,
+        used: u2,
+        free: f2,
+    } = srv.handle(session, Request::Statfs { handle: deep }, 3)
     else {
         panic!("deep statfs denied — stat-store should have survived the descent");
     };
