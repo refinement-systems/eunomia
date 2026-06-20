@@ -1272,26 +1272,65 @@ impl<B: DmaBacking> DmaPool<B> {
         self.fl.free(buf.offset, buf.len);
     }
 
+    /// The CPU pointer at `buf.offset + offset`, after proving the `len`-byte
+    /// access lies wholly inside this pool's backing. This is the one place a raw
+    /// pointer into DMA memory is formed (rev1§2.5: the single place PAs are
+    /// visible), so the soundness obligation of every `from_raw_parts`/
+    /// `read_volatile` below is discharged here, ONCE, for any `DmaBuf` — foreign
+    /// or not. `DmaBuf` is `Copy` with private fields, so a buffer carved from a
+    /// *different* pool can reach this method; the checked bounds make that a
+    /// defined panic (a driver bug inside the isolation TCB, rev1§2.5), never the
+    /// out-of-bounds read/write the audit flagged.
+    fn range_ptr(&self, buf: &DmaBuf, offset: usize, len: usize) -> *mut u8 {
+        // (a) The sub-range must lie within the buffer's own extent. `read`/
+        //     `write` get this bound for free from slice indexing on `bytes`/
+        //     `bytes_mut`; checking it here gives `read_volatile` the same
+        //     buffer-level bound (it forms the pointer directly).
+        let sub_end = offset
+            .checked_add(len)
+            .expect("dma-pool: sub-range length overflows usize");
+        assert!(sub_end <= buf.len, "dma-pool: sub-range outside buffer");
+        // (b) The accessed range must lie within this pool's backing. This is the
+        //     foreign-`DmaBuf` guard: a buffer from a larger pool whose range
+        //     overruns this (smaller) pool is rejected here instead of forming an
+        //     out-of-bounds slice.
+        let abs_end = buf
+            .offset
+            .checked_add(sub_end)
+            .expect("dma-pool: buffer range overflows usize");
+        assert!(abs_end <= self.backing.len(), "dma-pool: buffer range outside pool arena");
+        // SAFETY: `buf.offset + offset <= abs_end <= backing.len()`, and the access
+        // spans `len` bytes ending at `abs_end`. `cpu_base()` addresses
+        // `backing.len()` valid, pinned bytes (the `DmaBacking` contract), so the
+        // returned pointer is in-range for `len` bytes — exactly what the
+        // `from_raw_parts` / `read_volatile` callers below require.
+        unsafe { self.backing.cpu_base().add(buf.offset + offset) }
+    }
+
     /// CPU view of a buffer (or a sub-range of it). The pool mediates all
     /// CPU access; drivers never hold raw pointers into DMA memory.
     pub fn bytes(&self, buf: &DmaBuf) -> &[u8] {
         // Volatile-correctness note: QEMU DMA is host memcpy and
         // cache-coherent (rev1§2.5 real-hardware debt: cache maintenance owed
         // with real hardware, alongside barriers tighter than these).
-        unsafe { core::slice::from_raw_parts(self.backing.cpu_base().add(buf.offset), buf.len) }
+        let p = self.range_ptr(buf, 0, buf.len);
+        unsafe { core::slice::from_raw_parts(p, buf.len) }
     }
 
     pub fn bytes_mut(&mut self, buf: &DmaBuf) -> &mut [u8] {
-        unsafe {
-            core::slice::from_raw_parts_mut(self.backing.cpu_base().add(buf.offset), buf.len)
-        }
+        let p = self.range_ptr(buf, 0, buf.len);
+        unsafe { core::slice::from_raw_parts_mut(p, buf.len) }
     }
 
     pub fn write(&mut self, buf: &DmaBuf, offset: usize, data: &[u8]) {
+        // Bound inherited from `bytes_mut` (`range_ptr`): the `[offset..]` index
+        // panics on overrun of the validated `&mut [u8]`, never UB.
         self.bytes_mut(buf)[offset..offset + data.len()].copy_from_slice(data);
     }
 
     pub fn read(&self, buf: &DmaBuf, offset: usize, out: &mut [u8]) {
+        // Bound inherited from `bytes` (`range_ptr`): the `[offset..]` index
+        // panics on overrun of the validated `&[u8]`, never UB.
         out.copy_from_slice(&self.bytes(buf)[offset..offset + out.len()]);
     }
 
@@ -1304,7 +1343,7 @@ impl<B: DmaBacking> DmaPool<B> {
     /// cache-maintenance/barrier debt is separate and tracked there; on the
     /// QEMU target memory is coherent and only the compiler hazard is live.)
     pub fn read_volatile(&self, buf: &DmaBuf, offset: usize, out: &mut [u8]) {
-        let base = unsafe { self.backing.cpu_base().add(buf.offset + offset) };
+        let base = self.range_ptr(buf, offset, out.len());
         for (i, b) in out.iter_mut().enumerate() {
             *b = unsafe { base.add(i).read_volatile() };
         }
@@ -1412,5 +1451,83 @@ mod tests {
         let mut back = [0u8; 16];
         p.read(&buf, 0, &mut back);
         assert_eq!(&back, b"dma works fine!!");
+    }
+
+    // --- B4A: extent-guarded CPU access (rev1§2.5) ---
+
+    /// A 64-byte buffer allocated from an 8192-byte pool at an offset past 256,
+    /// so its range lies entirely outside a 256-byte pool — the audit's
+    /// cross-pool UB witness ("a `DmaBuf` from a larger pool used against a
+    /// smaller pool"). `DmaBuf` is `Copy` and outlives its pool, exactly as the
+    /// escaped buffer would.
+    fn foreign_buf() -> DmaBuf {
+        let mut big = pool(8192);
+        let _pad = big.alloc(1024, 1).unwrap(); // push the next alloc to offset 1024
+        let far = big.alloc(64, 1).unwrap();
+        assert!(far.offset > 256 && far.offset + far.len > 256);
+        far
+    }
+
+    #[test]
+    #[should_panic(expected = "outside pool arena")]
+    fn cross_pool_bytes_panics() {
+        let small = pool(256);
+        let _ = small.bytes(&foreign_buf());
+    }
+
+    #[test]
+    #[should_panic(expected = "outside pool arena")]
+    fn cross_pool_bytes_mut_panics() {
+        let mut small = pool(256);
+        let _ = small.bytes_mut(&foreign_buf());
+    }
+
+    #[test]
+    #[should_panic(expected = "outside pool arena")]
+    fn cross_pool_read_volatile_panics() {
+        let small = pool(256);
+        let mut out = [0u8; 4];
+        small.read_volatile(&foreign_buf(), 0, &mut out);
+    }
+
+    #[test]
+    fn subrange_exact_boundary_roundtrips() {
+        let mut p = pool(4096);
+        let buf = p.alloc(16, 1).unwrap();
+        p.write(&buf, 0, b"0123456789abcdef"); // offset 0 + len 16 == buf.len
+        let mut tail = [0u8; 8];
+        p.read(&buf, 8, &mut tail); // 8 + 8 == 16: exact end
+        assert_eq!(&tail, b"89abcdef");
+        let mut v = [0u8; 4];
+        p.read_volatile(&buf, 12, &mut v); // 12 + 4 == 16: exact end
+        assert_eq!(&v, b"cdef");
+    }
+
+    #[test]
+    #[should_panic(expected = "outside buffer")]
+    fn read_volatile_subrange_overrun_panics() {
+        let mut p = pool(4096);
+        let buf = p.alloc(16, 1).unwrap();
+        // 12 + 8 = 20 > buf.len (16) but well within the 4096-byte pool, so only
+        // range_ptr's buffer-level bound catches it — not the pool bound.
+        let mut out = [0u8; 8];
+        p.read_volatile(&buf, 12, &mut out);
+    }
+
+    #[test]
+    #[should_panic]
+    fn read_subrange_overrun_panics() {
+        let mut p = pool(4096);
+        let buf = p.alloc(16, 1).unwrap();
+        let mut out = [0u8; 8];
+        p.read(&buf, 12, &mut out); // 12 + 8 > 16: slice-index panic via bytes()
+    }
+
+    #[test]
+    #[should_panic]
+    fn write_subrange_overrun_panics() {
+        let mut p = pool(4096);
+        let buf = p.alloc(16, 1).unwrap();
+        p.write(&buf, 12, b"00000000"); // 12 + 8 > 16: slice-index panic via bytes_mut()
     }
 }
