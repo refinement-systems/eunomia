@@ -801,6 +801,7 @@ dependencies = [
  "cas",
  "ipc",
  "postcard",
+ "proptest",
  "serde",
 ]
 

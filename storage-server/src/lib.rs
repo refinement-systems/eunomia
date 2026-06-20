@@ -53,6 +53,14 @@ pub const R_STAT_STORE: u8 = 1 << 5;
 /// numeric value is stable — the committed fuzz corpora depend on it.
 pub const R_ALL: u8 = 0b1_1111;
 
+/// Monotone rights attenuation (rev1§2.3): a derived handle's rights are the
+/// intersection of the parent's rights with the requested mask — never a
+/// superset. The sole arithmetic by which delegation narrows authority; it is
+/// also what strips `R_STAT_STORE` when a mask omits bit 5.
+pub const fn attenuate(parent: u8, mask: u8) -> u8 {
+    parent & mask
+}
+
 pub type SessionId = u64;
 pub type HandleId = u32;
 
@@ -259,6 +267,14 @@ impl<D: BlockDev> Server<D> {
         self.sessions.remove(&id);
     }
 
+    /// Effective rights bits currently granted on a handle, or `None` if the
+    /// session/handle is absent. Inspection only — reports the stored grant
+    /// without the liveness/generation check that `lookup` performs (a caller
+    /// that needs the stale check goes through a request).
+    pub fn handle_rights(&self, session: SessionId, handle: HandleId) -> Option<u8> {
+        self.sessions.get(&session)?.handles.get(&handle).map(|e| e.rights)
+    }
+
     /// The privileged init/maintenance grant: a full-rights handle at a
     /// ref's root. This is the **sole origin** of `R_STAT_STORE` (rev1§2.3) —
     /// every other handle is derived by intersection, which strips it. init
@@ -423,7 +439,7 @@ impl<D: BlockDev> Server<D> {
                 // also what strips `R_STAT_STORE` from delegated children — a
                 // mask of `R_ALL` (which omits bit 5) clears it for free, so
                 // it survives only when the holder has it AND sets bit 5.
-                let rights = e.rights & rights_mask;
+                let rights = attenuate(e.rights, rights_mask);
                 let entry = match &e.target {
                     HandleTarget::Ref { name, subtree, gen_at_grant } => {
                         // The subtree must currently resolve to a directory.
@@ -516,7 +532,7 @@ impl<D: BlockDev> Server<D> {
                 };
                 // Masking to read/enumerate also drops `R_STAT_STORE`:
                 // snapshot handles never carry store-global observation.
-                let rights = e.rights & rights_mask & (R_READ | R_ENUMERATE);
+                let rights = attenuate(attenuate(e.rights, rights_mask), R_READ | R_ENUMERATE);
                 let s = self.sessions.get_mut(&session).ok_or(ErrorCode::BadHandle)?;
                 Ok(Response::Handle(s.insert(HandleEntry {
                     target: HandleTarget::Snapshot { root: child },
