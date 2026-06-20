@@ -51,6 +51,7 @@ fn main() {
     println!("seeding cas fuzz corpora:");
     tlv_entry_seeds();
     tree_node_seeds();
+    gc_mark_seeds();
     index_frame_seeds();
     superblock_seeds();
     wal_seeds();
@@ -150,6 +151,32 @@ fn tree_node_seeds() {
             write_seed("tree_node", "wide_leaf", &store.get(child).unwrap());
         }
     }
+}
+
+/// Recipe seeds for the `gc_mark` target (the mark walk over adversarial tree
+/// structure). The input is a `cas::gc::build_recipe` stream of 1-byte commands
+/// (`op = byte % 6`: inline-leaf, dir-root link, wide node, chunked-file leaf,
+/// dangling reference, mixed leaf); these warm the fuzzer on the structural
+/// shapes mutation struggles to assemble — deep chains, wide fanout, sharing,
+/// chunk lists, and the clean-refusal (dangling) path.
+fn gc_mark_seeds() {
+    // A long run of dir-root links → a deep `DirRoot` chain (the stack-overflow
+    // shape the bounded walk must complete).
+    write_seed("gc_mark", "deep_chain", &vec![1u8; 300]);
+    // Four chain nodes, then one wide node referencing them (fanout + sharing).
+    write_seed(
+        "gc_mark",
+        "wide_fanout",
+        &[1, 1, 1, 1, 2, 8, 0, 1, 2, 3, 0, 1, 2, 3, 0],
+    );
+    // One node, then a wide node pointing every entry at it (shared subtree).
+    write_seed("gc_mark", "shared_subtree", &[1, 2, 5, 0, 0, 0, 0, 0, 0]);
+    // Chunked-file leaf → mixed leaf → chain link (drives the chunk-list walk).
+    write_seed("gc_mark", "chunked_mixed", &[3, 5, 5, 7, 1]);
+    // A lone inline-file leaf.
+    write_seed("gc_mark", "inline", &[0, 3, 9, 9, 9]);
+    // A dangling reference: `mark` must refuse with `MissingNode`, not fault.
+    write_seed("gc_mark", "dangling", &[4]);
 }
 
 fn index_frame_seeds() {

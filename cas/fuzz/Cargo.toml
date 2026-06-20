@@ -39,6 +39,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "gc_mark"
+path = "fuzz_targets/gc_mark.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "index_frame"
 path = "fuzz_targets/index_frame.rs"
 test = false
