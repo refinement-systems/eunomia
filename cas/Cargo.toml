@@ -9,11 +9,20 @@ edition.workspace = true
 default = ["std"]
 std = ["blake3/std"]
 # Exposes `fuzz_support` (checksum re-sealing helpers for the cargo-fuzz
-# harnesses in cas/fuzz). Never enabled in normal builds.
-fuzzing = []
+# harnesses in cas/fuzz) and derives `Arbitrary` on the shared `RefEdit`
+# vocabulary so the storage server's structured-request fuzzer can build a
+# guarded batch. Only ever enabled alongside `std` (the cas/fuzz and
+# storage-server fuzz crates pass both); `arbitrary` is a std crate, and it is
+# off entirely under `cargo verus verify --no-default-features`.
+fuzzing = ["dep:arbitrary"]
+# Derives serde on `RefEdit` so it can travel inside the storage wire
+# `Request::Apply`. Off under verify (no_std + no optional deps).
+serde = ["dep:serde"]
 
 [dependencies]
 blake3 = { version = "1", default-features = false, features = ["pure"] }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"], optional = true }
+arbitrary = { version = "1", features = ["derive"], optional = true }
 
 # vstd is the *Verus* dependency (see doc/guidelines/verus.md):
 # the `verus!{}` macro + ghost vocabulary for the rev1§4.7 host-chokepoint proofs —

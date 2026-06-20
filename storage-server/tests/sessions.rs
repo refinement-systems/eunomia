@@ -919,3 +919,270 @@ fn session_cleanup_and_audit() {
         Response::Err(ErrorCode::BadHandle)
     );
 }
+
+/// rev1§4.7 / I-2 (S-1): the guarded batch closes the retention read-then-act
+/// race over a session. X enumerates (getting the edit version); Y snapshots,
+/// advancing it; X's `Apply` at the stale version is refused carrying the
+/// current version (no edit applied); X re-reads and re-applies at the current
+/// version, which now lands. This is the documented remedy demonstrably
+/// closing the window the audit names.
+#[test]
+fn apply_batch_closes_read_then_act_race() {
+    let mut srv = new_server();
+    let root = srv.root_grant(b"main").unwrap();
+    let x = srv.open_session(vec![root.clone()]);
+    let y = srv.open_session(vec![root]);
+
+    // X creates a base snapshot (class KEEP=0) and enumerates to get v.
+    let Response::SnapId(snap) = srv.handle(
+        x,
+        Request::Snapshot {
+            handle: 0,
+            message: b"base".to_vec(),
+            class: 0,
+        },
+        10,
+    ) else {
+        panic!()
+    };
+    let Response::Snapshots {
+        edit_version: v, ..
+    } = srv.handle(x, Request::ListSnapshots { handle: 0 }, 11)
+    else {
+        panic!()
+    };
+
+    // Y snapshots concurrently — the ref's edit version advances under X.
+    assert!(matches!(
+        srv.handle(
+            y,
+            Request::Snapshot {
+                handle: 0,
+                message: b"concurrent".to_vec(),
+                class: 0,
+            },
+            12,
+        ),
+        Response::SnapId(_)
+    ));
+
+    // X acts on the now-stale version: refused, carrying the current version,
+    // and nothing is applied (the snapshot's class stays KEEP).
+    let edits = vec![RefEdit::SetClass { id: snap, class: 2 }]; // -> EPHEMERAL
+    assert_eq!(
+        srv.handle(
+            x,
+            Request::Apply {
+                handle: 0,
+                expected_version: v,
+                edits: edits.clone(),
+            },
+            13,
+        ),
+        Response::VersionMismatch {
+            edit_version: v + 1
+        }
+    );
+    let Response::Snapshots {
+        snaps,
+        edit_version: v2,
+    } = srv.handle(x, Request::ListSnapshots { handle: 0 }, 14)
+    else {
+        panic!()
+    };
+    assert_eq!(v2, v + 1, "Y's snapshot advanced the version");
+    assert_eq!(
+        snaps.iter().find(|r| r.id == snap).unwrap().class,
+        0,
+        "the stale batch applied nothing"
+    );
+
+    // X re-reads and retries at the current version → applied.
+    assert_eq!(
+        srv.handle(
+            x,
+            Request::Apply {
+                handle: 0,
+                expected_version: v2,
+                edits,
+            },
+            15,
+        ),
+        Response::Applied {
+            edit_version: v2 + 1
+        }
+    );
+    let Response::Snapshots { snaps, .. } = srv.handle(x, Request::ListSnapshots { handle: 0 }, 16)
+    else {
+        panic!()
+    };
+    assert_eq!(
+        snaps.iter().find(|r| r.id == snap).unwrap().class,
+        2,
+        "the retried batch applied the edit"
+    );
+}
+
+/// rev1§4.7: a guarded batch is history rewriting, gated by
+/// `may-rewrite-history` (the `DeleteSnapshot`/`Gc` right), deny-by-default.
+#[test]
+fn apply_batch_requires_rewrite_history_right() {
+    let mut srv = new_server();
+    let root = srv.root_grant(b"main").unwrap();
+    let s = srv.open_session(vec![root]);
+    let Response::SnapId(snap) = srv.handle(
+        s,
+        Request::Snapshot {
+            handle: 0,
+            message: b"m".to_vec(),
+            class: 0,
+        },
+        10,
+    ) else {
+        panic!()
+    };
+    let Response::Snapshots {
+        edit_version: v, ..
+    } = srv.handle(s, Request::ListSnapshots { handle: 0 }, 11)
+    else {
+        panic!()
+    };
+    let edits = vec![RefEdit::SetClass { id: snap, class: 2 }];
+
+    // A handle without may-rewrite-history is denied (before any version
+    // check), even with a correct expected_version.
+    let limited = HandleEntry {
+        rights: R_READ | R_WRITE | R_SNAPSHOT,
+        ..srv.root_grant(b"main").unwrap()
+    };
+    let s2 = srv.open_session(vec![limited]);
+    assert_eq!(
+        srv.handle(
+            s2,
+            Request::Apply {
+                handle: 0,
+                expected_version: v,
+                edits: edits.clone(),
+            },
+            12,
+        ),
+        Response::Err(ErrorCode::Denied)
+    );
+
+    // With the right, it applies.
+    assert_eq!(
+        srv.handle(
+            s,
+            Request::Apply {
+                handle: 0,
+                expected_version: v,
+                edits,
+            },
+            13,
+        ),
+        Response::Applied {
+            edit_version: v + 1
+        }
+    );
+}
+
+/// rev1§4.7: a guarded batch is all-or-nothing over the wire. A batch that
+/// creates a tag and then deletes the snapshot it just pinned is rejected with
+/// `Pinned` (the staged tag pins the staged snapshot) — and *nothing* persists:
+/// no class edit, no version bump, and not even the tag (so a later
+/// `DeleteSnapshot` of that snapshot succeeds).
+#[test]
+fn apply_batch_all_or_nothing_over_wire() {
+    let mut srv = new_server();
+    let root = srv.root_grant(b"main").unwrap();
+    let s = srv.open_session(vec![root]);
+    let Response::SnapId(s1) = srv.handle(
+        s,
+        Request::Snapshot {
+            handle: 0,
+            message: b"a".to_vec(),
+            class: 0,
+        },
+        10,
+    ) else {
+        panic!()
+    };
+    assert_eq!(
+        srv.handle(
+            s,
+            Request::Write {
+                handle: 0,
+                path: p(&["top.txt"]),
+                offset: 0,
+                data: b"x".to_vec(),
+            },
+            11,
+        ),
+        Response::Ok
+    );
+    let Response::SnapId(s2) = srv.handle(
+        s,
+        Request::Snapshot {
+            handle: 0,
+            message: b"b".to_vec(),
+            class: 0,
+        },
+        12,
+    ) else {
+        panic!()
+    };
+    let Response::Snapshots {
+        edit_version: v, ..
+    } = srv.handle(s, Request::ListSnapshots { handle: 0 }, 13)
+    else {
+        panic!()
+    };
+
+    let edits = vec![
+        RefEdit::CreateTag {
+            name: b"rel".to_vec(),
+            snap_id: s1,
+        },
+        RefEdit::SetClass { id: s2, class: 2 },
+        RefEdit::DeleteSnapshot { id: s1 }, // pinned by the staged tag
+    ];
+    assert_eq!(
+        srv.handle(
+            s,
+            Request::Apply {
+                handle: 0,
+                expected_version: v,
+                edits,
+            },
+            14,
+        ),
+        Response::Err(ErrorCode::Pinned)
+    );
+
+    // Nothing persisted: version unchanged, s2's class unchanged.
+    let Response::Snapshots {
+        snaps,
+        edit_version: v2,
+    } = srv.handle(s, Request::ListSnapshots { handle: 0 }, 15)
+    else {
+        panic!()
+    };
+    assert_eq!(v2, v, "rejected batch did not commit");
+    assert_eq!(
+        snaps.iter().find(|r| r.id == s2).unwrap().class,
+        0,
+        "rejected batch applied no edit"
+    );
+    // The tag never persisted either, so s1 is not pinned and deletes cleanly.
+    assert_eq!(
+        srv.handle(
+            s,
+            Request::DeleteSnapshot {
+                handle: 0,
+                snap_id: s1,
+            },
+            16,
+        ),
+        Response::Ok
+    );
+}

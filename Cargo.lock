@@ -101,8 +101,10 @@ dependencies = [
 name = "cas"
 version = "0.1.0"
 dependencies = [
+ "arbitrary",
  "blake3",
  "proptest",
+ "serde",
  "vstd",
 ]
 

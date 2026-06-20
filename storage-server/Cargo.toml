@@ -8,10 +8,13 @@ edition.workspace = true
 [features]
 default = ["std", "serde"]
 std = ["cas/std"]
-serde = ["dep:serde", "dep:postcard"]
+# Forwards `cas/serde` so the shared `cas::store::RefEdit` carried inside
+# `Request::Apply` serializes over the wire (rev1§4.7 guarded batch).
+serde = ["dep:serde", "dep:postcard", "cas/serde"]
 # Derives `Arbitrary` on the wire message types for the structured
-# (typed-input) fuzz target. Never enabled in normal builds.
-fuzzing = ["dep:arbitrary"]
+# (typed-input) fuzz target. Forwards `cas/fuzzing` so `RefEdit` is `Arbitrary`
+# too. Never enabled in normal builds.
+fuzzing = ["dep:arbitrary", "cas/fuzzing"]
 
 [dependencies]
 ipc  = { path = "../ipc" }
