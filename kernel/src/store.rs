@@ -16,6 +16,7 @@ use kcore::aspace::AspaceObj;
 use kcore::channel::{Channel, MSG_PAYLOAD};
 use kcore::cspace::{CSpaceObj, CapSlot, ObjHeader};
 use kcore::id::{ObjId, SlotId};
+use kcore::irq::IrqObj;
 use kcore::notification::NotifObj;
 use kcore::store::{Binding, Store};
 use kcore::thread::{Report, Tcb, ThreadState};
@@ -244,6 +245,35 @@ impl Store for KernelStore {
     }
     fn set_timer_next(&mut self, t: ObjId, n: Option<ObjId>) {
         unsafe { (*obj_ptr::<TimerObj>(t)).next = n }
+    }
+
+    // ── IRQ-handler object (B-IRQ): the `TimerObj` deref pattern, on `IrqObj` ─
+    fn irq_intid(&self, i: ObjId) -> u32 {
+        unsafe { (*obj_ptr::<IrqObj>(i)).intid }
+    }
+    fn irq_notif(&self, i: ObjId) -> Option<ObjId> {
+        unsafe { (*obj_ptr::<IrqObj>(i)).notif }
+    }
+    fn set_irq_notif(&mut self, i: ObjId, n: Option<ObjId>) {
+        unsafe { (*obj_ptr::<IrqObj>(i)).notif = n }
+    }
+    fn irq_bits(&self, i: ObjId) -> u64 {
+        unsafe { (*obj_ptr::<IrqObj>(i)).bits }
+    }
+    fn set_irq_bits(&mut self, i: ObjId, v: u64) {
+        unsafe { (*obj_ptr::<IrqObj>(i)).bits = v }
+    }
+    fn irq_bound(&self, i: ObjId) -> bool {
+        unsafe { (*obj_ptr::<IrqObj>(i)).bound }
+    }
+    fn set_irq_bound(&mut self, i: ObjId, v: bool) {
+        unsafe { (*obj_ptr::<IrqObj>(i)).bound = v }
+    }
+    fn irq_masked(&self, i: ObjId) -> bool {
+        unsafe { (*obj_ptr::<IrqObj>(i)).masked }
+    }
+    fn set_irq_masked(&mut self, i: ObjId, v: bool) {
+        unsafe { (*obj_ptr::<IrqObj>(i)).masked = v }
     }
 
     // ── hardware / scheduler seam ─────────────────────────────────────────

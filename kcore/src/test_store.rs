@@ -30,6 +30,7 @@ use crate::store::{Binding, Store};
 use crate::thread::{
     bind as thread_bind, destroy_tcb, report_terminal, Report, ThreadState, BIND_EXIT, BIND_FAULT,
 };
+use crate::irq::{destroy_irq, irq_bind, irq_unbind};
 use crate::timer::{arm, check_expired, destroy_timer, disarm};
 use crate::untyped::{reset, retype_check, retype_install, ObjType, RetypeError};
 use std::collections::{BTreeMap, VecDeque};
@@ -90,6 +91,17 @@ struct TimerState {
     next: Option<ObjId>,
 }
 
+// The IRQ-handler object's executable backing (B-IRQ): the `TimerState` twin, minus the
+// armed-list `next`. `intid` rides the object; `masked` is the GIC line-state bit.
+#[derive(Clone, PartialEq)]
+struct IrqState {
+    intid: u32,
+    notif: Option<ObjId>,
+    bits: u64,
+    bound: bool,
+    masked: bool,
+}
+
 #[derive(Clone)]
 struct ArrayStore {
     slots: Vec<CapSlot>,
@@ -100,6 +112,7 @@ struct ArrayStore {
     tcbs: BTreeMap<u64, TcbState>,
     timers: BTreeMap<u64, TimerState>,
     timer_armed_head: Option<ObjId>,
+    irqs: BTreeMap<u64, IrqState>,
     // The 32-level ready queue: per-level head/tail + a presence bitmap — the
     // executable counterpart of the `ready_view` ghost view (the `READY`/`READY_BITMAP`
     // kernel statics). `ready_enqueue`/`dequeue`/`unqueue`/`top_ready` run against these.
@@ -124,6 +137,7 @@ impl ArrayStore {
             tcbs: BTreeMap::new(),
             timers: BTreeMap::new(),
             timer_armed_head: None,
+            irqs: BTreeMap::new(),
             ready_heads: vec![None; crate::sysabi::NUM_PRIOS],
             ready_tails: vec![None; crate::sysabi::NUM_PRIOS],
             ready_bitmap: 0,
@@ -341,6 +355,34 @@ impl Store for ArrayStore {
     fn set_timer_next(&mut self, t: ObjId, n: Option<ObjId>) {
         self.timers.get_mut(&t.0).unwrap().next = n;
     }
+    // ── IRQ-handler object (B-IRQ): the timer accessors' twin over `irqs` ──
+    fn irq_intid(&self, i: ObjId) -> u32 {
+        self.irqs[&i.0].intid
+    }
+    fn irq_notif(&self, i: ObjId) -> Option<ObjId> {
+        self.irqs[&i.0].notif
+    }
+    fn set_irq_notif(&mut self, i: ObjId, n: Option<ObjId>) {
+        self.irqs.get_mut(&i.0).unwrap().notif = n;
+    }
+    fn irq_bits(&self, i: ObjId) -> u64 {
+        self.irqs[&i.0].bits
+    }
+    fn set_irq_bits(&mut self, i: ObjId, v: u64) {
+        self.irqs.get_mut(&i.0).unwrap().bits = v;
+    }
+    fn irq_bound(&self, i: ObjId) -> bool {
+        self.irqs[&i.0].bound
+    }
+    fn set_irq_bound(&mut self, i: ObjId, v: bool) {
+        self.irqs.get_mut(&i.0).unwrap().bound = v;
+    }
+    fn irq_masked(&self, i: ObjId) -> bool {
+        self.irqs[&i.0].masked
+    }
+    fn set_irq_masked(&mut self, i: ObjId, v: bool) {
+        self.irqs.get_mut(&i.0).unwrap().masked = v;
+    }
     // B8C: `make_runnable`/`unqueue_ready` are now **faithful** — they route through the verified
     // `ready_enqueue`/`ready_unqueue` ops so the host model realizes the seam contracts Verus
     // assumes (the ready-queue linkage now lives in `ready_view`, not below the abstract view).
@@ -499,7 +541,8 @@ fn cap_obj_exec(cap: Cap) -> Option<ObjId> {
         | CapKind::Thread(o, _)
         | CapKind::Channel(o, _)
         | CapKind::Notification(o)
-        | CapKind::Timer(o) => Some(o),
+        | CapKind::Timer(o)
+        | CapKind::Irq(o) => Some(o),
         CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => None,
     }
 }
@@ -562,6 +605,12 @@ fn obj_census_exec(st: &ArrayStore, o: ObjId) -> u32 {
     // armed_timer_refs.
     for tm in st.timers.values() {
         if tm.armed && tm.notif == Some(o) {
+            total += 1;
+        }
+    }
+    // irq_binding_refs (B-IRQ): each bound IRQ naming `o` holds one ref.
+    for ir in st.irqs.values() {
+        if ir.bound && ir.notif == Some(o) {
             total += 1;
         }
     }
@@ -718,6 +767,13 @@ fn timer_wf_exec(st: &ArrayStore) -> bool {
         }
     }
     true
+}
+
+// The exec mirror of `irq_wf` (B-IRQ): a bound IRQ names a notification. No list, so no
+// chain/completeness sweep — a pure pointwise check (the `irq_view` twin of the timer's
+// `armed ⇒ notif is Some`, minus the armed-list reachability the timer needs).
+fn irq_wf_exec(st: &ArrayStore) -> bool {
+    st.irqs.values().all(|ir| !ir.bound || ir.notif.is_some())
 }
 
 // ── The ready-queue mirrors (B8C) ───────────────────────────────────────────
@@ -1930,6 +1986,81 @@ fn check_destroy_timer(st: &mut ArrayStore, t: ObjId) {
     destroy_timer(st, t);
     assert!(timer_wf_exec(st), "destroy_timer post: timer_wf preserved");
     assert!(!st.timers[&t.0].armed, "destroy_timer: disarmed");
+}
+
+// ── IRQ object check harnesses (B-IRQ): the timer harnesses' twin ───────────
+
+// `irq_bind`'s ensures against the real body: `irq_wf` preserved; slot/chan/notif/tcb/timer
+// views framed; `i` ends bound to `notif` with the programmed bits; and the net ref delta is
+// `irq_unbind`'s -1 (on rebind) plus bind's +1 — net-zero on a same-notif rebind.
+fn check_irq_bind(st: &mut ArrayStore, i: ObjId, notif: ObjId, bits: u64) {
+    assert!(irq_wf_exec(st), "irq_bind pre: irq_wf");
+    let fp = fingerprint(st);
+    let chans = st.chans.clone();
+    let notifs = st.notifs.clone();
+    let tcbs = st.tcbs.clone();
+    let timers = st.timers.clone();
+    let was_bound = st.irqs[&i.0].bound;
+    let old_notif = st.irqs[&i.0].notif;
+    let mut expect_refs = st.refs.clone();
+    if was_bound {
+        if let Some(m) = old_notif {
+            *expect_refs.get_mut(&m.0).unwrap() -= 1;
+        }
+    }
+    *expect_refs.get_mut(&notif.0).unwrap() += 1;
+
+    irq_bind(st, i, notif, bits);
+
+    assert!(irq_wf_exec(st), "irq_bind post: irq_wf preserved");
+    assert!(fingerprint(st) == fp, "irq_bind post: slot_view unchanged");
+    assert!(st.chans == chans, "irq_bind post: chan_view unchanged");
+    assert!(st.notifs == notifs, "irq_bind post: notif_view unchanged");
+    assert!(st.tcbs == tcbs, "irq_bind post: tcb_view unchanged");
+    assert!(st.timers == timers, "irq_bind post: timer_view unchanged");
+    assert_eq!(st.refs, expect_refs, "irq_bind: net ref delta (rebind -1, bind +1)");
+    assert!(st.irqs[&i.0].bound, "irq_bind: i bound");
+    assert!(st.irqs[&i.0].notif == Some(notif), "irq_bind: bound to notif");
+    assert_eq!(st.irqs[&i.0].bits, bits, "irq_bind: bits set");
+}
+
+// `irq_unbind`'s ensures against the real body: `irq_wf` preserved; the views framed; `i`
+// cleared (bound/notif); its notif ref released iff it was bound.
+fn check_irq_unbind(st: &mut ArrayStore, i: ObjId) {
+    assert!(irq_wf_exec(st), "irq_unbind pre: irq_wf");
+    let fp = fingerprint(st);
+    let chans = st.chans.clone();
+    let notifs = st.notifs.clone();
+    let tcbs = st.tcbs.clone();
+    let timers = st.timers.clone();
+    let was_bound = st.irqs[&i.0].bound;
+    let old_notif = st.irqs[&i.0].notif;
+    let mut expect_refs = st.refs.clone();
+    if was_bound {
+        if let Some(m) = old_notif {
+            *expect_refs.get_mut(&m.0).unwrap() -= 1;
+        }
+    }
+
+    irq_unbind(st, i);
+
+    assert!(irq_wf_exec(st), "irq_unbind post: irq_wf preserved");
+    assert!(fingerprint(st) == fp, "irq_unbind post: slot_view unchanged");
+    assert!(st.chans == chans, "irq_unbind post: chan_view unchanged");
+    assert!(st.notifs == notifs, "irq_unbind post: notif_view unchanged");
+    assert!(st.tcbs == tcbs, "irq_unbind post: tcb_view unchanged");
+    assert!(st.timers == timers, "irq_unbind post: timer_view unchanged");
+    assert_eq!(st.refs, expect_refs, "irq_unbind: released the ref iff it was bound");
+    assert!(!st.irqs[&i.0].bound, "irq_unbind: i unbound");
+    assert!(st.irqs[&i.0].notif.is_none(), "irq_unbind: notif cleared");
+}
+
+// `destroy_irq` (refs == 0): `irq_unbind` of the IRQ object, `irq_wf` preserved.
+fn check_destroy_irq(st: &mut ArrayStore, i: ObjId) {
+    assert!(irq_wf_exec(st), "destroy_irq pre: irq_wf");
+    destroy_irq(st, i);
+    assert!(irq_wf_exec(st), "destroy_irq post: irq_wf preserved");
+    assert!(!st.irqs[&i.0].bound, "destroy_irq: unbound");
 }
 
 // `check_expired`'s ensures against the real body: `timer_wf` preserved, slot/
@@ -3452,7 +3583,8 @@ fn cap_obj_of(cap: Cap) -> Option<ObjId> {
         | CapKind::Thread(o, _)
         | CapKind::Channel(o, _)
         | CapKind::Notification(o)
-        | CapKind::Timer(o) => Some(o),
+        | CapKind::Timer(o)
+        | CapKind::Irq(o) => Some(o),
     }
 }
 
@@ -5044,6 +5176,87 @@ fn arm_disarm_lifecycle() {
 
     check_disarm(&mut st, t); // idempotent no-op
     assert_eq!(st.refs[&101], 1, "a second disarm touches no ref");
+}
+
+// B-IRQ: the IRQ object's bind/rebind/unbind lifecycle — the `arm_disarm_lifecycle` twin.
+// Exercises bind (+1 on the notif ref AND irq_binding_refs), a same-notif rebind (net-zero),
+// a different-notif rebind (release old, acquire new), and unbind (release), checking
+// `refcount_sound_exec` (the census round-trip) holds end to end.
+#[test]
+fn irq_bind_unbind_lifecycle() {
+    let mut st = ArrayStore::new(0);
+    let i = ObjId(400);
+    let n1 = ObjId(100);
+    let n2 = ObjId(101);
+    st.irqs.insert(
+        400,
+        IrqState { intid: 33, notif: None, bits: 0, bound: false, masked: false },
+    );
+    // Start sound: `refs[n] == census(n) == 0` (no cap/binding yet), so every bind/unbind
+    // below preserves `refcount_sound` — the census round-trip the test pins down.
+    st.refs.insert(100, 0);
+    st.refs.insert(101, 0);
+    assert!(refcount_sound_exec(&st), "lifecycle: sound at entry");
+
+    check_irq_bind(&mut st, i, n1, 0b1);
+    assert_eq!(st.refs[&100], 1, "bind +1 on n1");
+    assert!(refcount_sound_exec(&st), "sound after bind (census(n1) == 1)");
+
+    check_irq_bind(&mut st, i, n1, 0b10); // same-notif rebind
+    assert_eq!(st.refs[&100], 1, "same-notif rebind is net-zero");
+    assert_eq!(st.irqs[&400].bits, 0b10, "rebind reprogrammed the bits");
+    assert!(refcount_sound_exec(&st), "sound after same-notif rebind");
+
+    check_irq_bind(&mut st, i, n2, 0b100); // different-notif rebind
+    assert_eq!(st.refs[&100], 0, "rebind released n1");
+    assert_eq!(st.refs[&101], 1, "rebind acquired n2");
+    assert!(refcount_sound_exec(&st), "sound after different-notif rebind");
+
+    check_irq_unbind(&mut st, i);
+    assert_eq!(st.refs[&101], 0, "unbind released n2");
+    assert!(refcount_sound_exec(&st), "sound after unbind");
+
+    check_irq_unbind(&mut st, i); // idempotent no-op
+    assert_eq!(st.refs[&101], 0, "a second unbind touches no ref");
+    let _ = i;
+    assert_eq!(st.irqs[&400].intid, 33, "intid rides the object, untouched by bind/unbind");
+}
+
+// B-IRQ: `destroy_irq` of a bound IRQ (its last cap gone): `irq_unbind`, releasing the
+// notif ref. The `destroy_timer_disarms` twin; closes the accounting (refs return to 0).
+#[test]
+fn destroy_irq_unbinds() {
+    let mut st = ArrayStore::new(0);
+    let i = ObjId(400);
+    st.irqs.insert(
+        400,
+        IrqState { intid: 33, notif: Some(ObjId(100)), bits: 0b1, bound: true, masked: false },
+    );
+    st.refs.insert(100, 1);
+    st.refs.insert(400, 0); // last cap gone (the destroy_irq precondition)
+    assert!(refcount_sound_exec(&st), "destroy_irq: sound at entry");
+
+    check_destroy_irq(&mut st, i);
+
+    assert!(!st.irqs[&400].bound, "destroy_irq: unbound");
+    assert_eq!(st.refs[&100], 0, "destroy_irq released the notif ref via unbind");
+    assert!(refcount_sound_exec(&st), "destroy_irq: sound after teardown");
+}
+
+// B-IRQ: `refcount_sound_exec` has teeth on the `irq_binding_refs` term — a bound IRQ
+// naming N without the matching ref on N is caught (the term is genuinely summed).
+#[test]
+fn refcount_sound_exec_irq_teeth() {
+    let mut st = ArrayStore::new(0);
+    st.irqs.insert(
+        400,
+        IrqState { intid: 33, notif: Some(ObjId(100)), bits: 0, bound: true, masked: false },
+    );
+    st.refs.insert(100, 1); // bound IRQ ⇒ census(100) == 1, sound
+    assert!(refcount_sound_exec(&st), "sound: refs[100] == irq_binding_refs(100)");
+    // Drop the IRQ's ref without unbinding: now census(100) == 1 but refs[100] == 0.
+    st.refs.insert(100, 0);
+    assert!(!refcount_sound_exec(&st), "teeth: irq_binding_refs term");
 }
 
 // `check_expired`: a sweep over `300 → 301` where 300 (deadline 50) is expired and binds a

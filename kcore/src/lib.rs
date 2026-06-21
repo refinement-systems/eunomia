@@ -52,6 +52,7 @@ pub mod aspace;
 pub mod channel;
 pub mod cspace;
 pub mod id;
+pub mod irq;
 pub mod notification;
 pub mod ready;
 pub mod store;

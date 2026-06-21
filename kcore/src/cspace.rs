@@ -115,6 +115,11 @@ pub enum CapKind {
     Channel(crate::id::ObjId, ChanEnd),
     Notification(crate::id::ObjId),
     Timer(crate::id::ObjId),
+    // The rev1§1 IRQ-handler cap (B-IRQ): a plain designating handle to an `IrqObj`, the
+    // timer's twin. The `intid` rides the object, not the discriminant, so this is uniform
+    // with `Notification`/`Timer` — `derived_kind`'s `_ => k` fallthrough makes it a faithful
+    // designating copy with no new arm, and `cap_max_prio` returns `None` (it carries no ceiling).
+    Irq(crate::id::ObjId),
 }
 
 #[derive(Clone, Copy)]
@@ -395,6 +400,25 @@ pub struct TimerView {
     pub next: Option<ObjId>,
 }
 
+// The IRQ-handler object (rev1§1, rev1§3.6): the timer's **census twin**, minus the
+// armed list. An IRQ cap binds a (notification, bits) pair exactly as a timer does
+// (`bound` for `armed`, `notif`/`bits` shared), and a hardware interrupt signals that
+// notification — but delivery is by direct INTID→object lookup (B-IRQ-B), not by sweeping
+// a chain, so there is **no `next` field** and no armed-list analog. `intid` rides the
+// object (the cap is a plain designating handle, uniform with `Notification`/`Timer`);
+// `masked` is the line-state bit the GIC shell toggles on deliver/ack (B-IRQ-B) — bind/
+// unbind/teardown never touch it. The binding holds a ref on `notif` (the
+// `irq_binding_refs` census term), so revoking the notif cap cannot free it under a bound
+// IRQ — the exact hazard `armed_timer_refs` guards for timers.
+#[verifier::ext_equal]
+pub struct IrqView {
+    pub intid: u32,
+    pub notif: Option<ObjId>,
+    pub bits: u64,
+    pub bound: bool,
+    pub masked: bool,
+}
+
 // The 32-level ready queue (rev1§5.4): one intrusive `Tcb.qnext` list per priority
 // level + a `u32` presence bitmap. Per-level head/tail (the waiter-queue shape, ×32)
 // plus the `timer_head_view`-style global-scalar bitmap. A thread is on the
@@ -461,6 +485,11 @@ pub trait ExStore {
     // The armed-timer list head — a `Store`-seam scalar (the kernel static,
     // store.rs:130); the list *logic* is in `crate::timer` (phase 4e).
     spec fn timer_head_view(&self) -> Option<ObjId>;
+    // The IRQ-handler arena (B-IRQ): handle → ghost view, the `timer_view` twin minus the
+    // armed-list scalar (delivery is by direct INTID lookup, not a chain). Framed unchanged
+    // by every object setter exactly as `timer_view` is; changed only by the verified
+    // `crate::irq` bind/unbind/destroy ops. The `irq_binding_refs` census term reads it.
+    spec fn irq_view(&self) -> Map<ObjId, IrqView>;
     // The 32-level ready queue (per-level head/tail + presence bitmap) — `Store`-seam
     // state (the `READY`/`READY_BITMAP` kernel statics); the list *logic* is the
     // verified `crate::ready` ops (B8C). Framed unchanged by every object setter
@@ -490,7 +519,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     fn obj_refs(&self, o: ObjId) -> (r: u32)
         requires self.refs_view().dom().contains(o),
@@ -507,7 +537,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     // ── cspace residents ─────────────────────────────────────────
     //
@@ -564,7 +595,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     fn chan_head(&self, ch: ObjId, ring: usize) -> (r: u32)
         requires
@@ -591,7 +623,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     fn chan_count(&self, ch: ObjId, ring: usize) -> (r: u32)
         requires
@@ -618,7 +651,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     fn chan_binding(&self, ch: ObjId, end: usize, ev: usize) -> (r: Binding)
         requires
@@ -646,7 +680,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     // The ring cap-slot handle — immutable channel layout, so getter only.
     fn chan_ring_cap(&self, ch: ObjId, ring: usize, i: u32, c: usize) -> (r: SlotId)
@@ -680,7 +715,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     // Payload is abstracted out, so the write is a frame-only no-op on the
     // abstract state; `chan_msg_read` is `&self` (no obligation, omitted).
@@ -694,7 +730,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     // `&self` (only `buf` is written), so the store is unchanged automatically; the
     // payload is abstracted out, so no spec on `buf`. Needed in `verus!` since 3d's
@@ -722,7 +759,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     fn notif_wait_head(&self, n: ObjId) -> (r: Option<ObjId>)
         requires self.notif_view().dom().contains(n),
@@ -740,7 +778,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     fn notif_wait_tail(&self, n: ObjId) -> (r: Option<ObjId>)
         requires self.notif_view().dom().contains(n),
@@ -758,7 +797,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     // ── thread (TCB) accessors ───────────────────────────────────
     //
@@ -783,7 +823,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     fn tcb_qnext(&self, t: ObjId) -> (r: Option<ObjId>)
         requires self.tcb_view().dom().contains(t),
@@ -801,7 +842,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     fn tcb_wait_notif(&self, t: ObjId) -> (r: Option<ObjId>)
         requires self.tcb_view().dom().contains(t),
@@ -819,7 +861,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     fn tcb_report(&self, t: ObjId) -> (r: Report)
         requires self.tcb_view().dom().contains(t),
@@ -837,7 +880,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     fn tcb_priority(&self, t: ObjId) -> (r: u8)
         requires self.tcb_view().dom().contains(t),
@@ -855,7 +899,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     fn tcb_bind_slot(&self, t: ObjId, which: usize) -> (r: SlotId)
         requires
@@ -887,7 +932,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     fn tcb_cspace(&self, t: ObjId) -> (r: Option<ObjId>)
         requires self.tcb_view().dom().contains(t),
@@ -905,7 +951,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     fn tcb_aspace(&self, t: ObjId) -> (r: Option<ObjId>)
         requires self.tcb_view().dom().contains(t),
@@ -923,7 +970,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     fn set_tcb_retval(&mut self, t: ObjId, v: u64)
         requires old(self).tcb_view().dom().contains(t),
@@ -937,7 +985,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     // ── timer accessors (the armed-list logic) ──────────────────────────────
     //
@@ -959,7 +1008,8 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     fn timer_deadline(&self, t: ObjId) -> (r: u64)
         requires self.timer_view().dom().contains(t),
@@ -977,7 +1027,8 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     fn timer_notif(&self, t: ObjId) -> (r: Option<ObjId>)
         requires self.timer_view().dom().contains(t),
@@ -995,7 +1046,8 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     fn timer_bits(&self, t: ObjId) -> (r: u64)
         requires self.timer_view().dom().contains(t),
@@ -1013,7 +1065,8 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     fn timer_next(&self, t: ObjId) -> (r: Option<ObjId>)
         requires self.timer_view().dom().contains(t),
@@ -1031,7 +1084,8 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     fn timer_armed_head(&self) -> (r: Option<ObjId>)
         ensures r == self.timer_head_view();
@@ -1045,6 +1099,94 @@ pub trait ExStore {
             final(self).notif_view() == old(self).notif_view(),
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
+            final(self).ready_view() == old(self).ready_view(),
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
+
+    // ── IRQ-handler object (B-IRQ) ──────────────────────────────────────────
+    //
+    // The timer accessors' twin, minus the armed-list (`next`/head) seam: by-handle
+    // getters/setters over `irq_view`, each setter `insert`ing one IRQ and framing every
+    // other view. `intid` is boot-static (a getter only — no setter). The verified
+    // `crate::irq` ops run against these; production derefs an `IrqObj` (kernel/src/store.rs),
+    // host tests use the array backing (`test_store`).
+    fn irq_intid(&self, i: ObjId) -> (r: u32)
+        requires self.irq_view().dom().contains(i),
+        ensures r == self.irq_view()[i].intid;
+
+    fn irq_notif(&self, i: ObjId) -> (r: Option<ObjId>)
+        requires self.irq_view().dom().contains(i),
+        ensures r == self.irq_view()[i].notif;
+
+    fn set_irq_notif(&mut self, i: ObjId, n: Option<ObjId>)
+        requires old(self).irq_view().dom().contains(i),
+        ensures
+            final(self).irq_view() == old(self).irq_view().insert(
+                i, IrqView { notif: n, ..old(self).irq_view()[i] }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
+            final(self).cspace_view() == old(self).cspace_view();
+
+    fn irq_bits(&self, i: ObjId) -> (r: u64)
+        requires self.irq_view().dom().contains(i),
+        ensures r == self.irq_view()[i].bits;
+
+    fn set_irq_bits(&mut self, i: ObjId, v: u64)
+        requires old(self).irq_view().dom().contains(i),
+        ensures
+            final(self).irq_view() == old(self).irq_view().insert(
+                i, IrqView { bits: v, ..old(self).irq_view()[i] }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
+            final(self).cspace_view() == old(self).cspace_view();
+
+    fn irq_bound(&self, i: ObjId) -> (r: bool)
+        requires self.irq_view().dom().contains(i),
+        ensures r == self.irq_view()[i].bound;
+
+    fn set_irq_bound(&mut self, i: ObjId, v: bool)
+        requires old(self).irq_view().dom().contains(i),
+        ensures
+            final(self).irq_view() == old(self).irq_view().insert(
+                i, IrqView { bound: v, ..old(self).irq_view()[i] }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view(),
+            final(self).ready_view() == old(self).ready_view(),
+            final(self).cspace_view() == old(self).cspace_view();
+
+    fn irq_masked(&self, i: ObjId) -> (r: bool)
+        requires self.irq_view().dom().contains(i),
+        ensures r == self.irq_view()[i].masked;
+
+    fn set_irq_masked(&mut self, i: ObjId, v: bool)
+        requires old(self).irq_view().dom().contains(i),
+        ensures
+            final(self).irq_view() == old(self).irq_view().insert(
+                i, IrqView { masked: v, ..old(self).irq_view()[i] }),
+            final(self).slot_view() == old(self).slot_view(),
+            final(self).refs_view() == old(self).refs_view(),
+            final(self).chan_view() == old(self).chan_view(),
+            final(self).notif_view() == old(self).notif_view(),
+            final(self).tcb_view() == old(self).tcb_view(),
+            final(self).timer_view() == old(self).timer_view(),
+            final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
@@ -1074,7 +1216,8 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     fn ready_tail(&self, level: usize) -> (r: Option<ObjId>)
         requires level < crate::sysabi::NUM_PRIOS,
@@ -1094,7 +1237,8 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     fn ready_bitmap(&self) -> (r: u32)
         ensures r == self.ready_view().bitmap;
@@ -1109,7 +1253,8 @@ pub trait ExStore {
             final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     // ── scheduler seam (B8C: faithful ready-queue ops) ─────────────────────
     //
@@ -1136,6 +1281,7 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view(),
             final(self).tcb_view().dom() == old(self).tcb_view().dom(),
             ready_wf(final(self).ready_view(), final(self).tcb_view()),
             ready_complete(final(self).ready_view(), final(self).tcb_view()),
@@ -1187,6 +1333,7 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view(),
             final(self).tcb_view().dom() == old(self).tcb_view().dom(),
             ready_wf(final(self).ready_view(), final(self).tcb_view()),
             ready_complete_except(final(self).ready_view(), final(self).tcb_view(), t),
@@ -1244,6 +1391,7 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view(),
             final(self).tlb_log_view() == old(self).tlb_log_view();
 
     // ── unmap hardware seam (the `aspace::unmap_in` TLBI ordering) ────────────
@@ -1264,7 +1412,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     // The trailing `dsb`/`isb` after the per-page TLBIs — a pure fence, framing
     // every object view *and* the accumulated TLBI log (so the loop's final log
@@ -1280,6 +1429,7 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view(),
             final(self).tlb_log_view() == old(self).tlb_log_view();
 
     // ── aspace teardown seam (the cross-object-teardown seam) ──────
@@ -1303,7 +1453,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     // The map-time twin of `aspace_unmap` (B8A, rev1§6.1(c)). Like the unmap, it is page-table
     // maintenance — no object state — so it frames every object view + `refs_view` +
@@ -1322,7 +1473,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 
     fn aspace_destroy(&mut self, a: ObjId)
         requires
@@ -1337,7 +1489,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).irq_view() == old(self).irq_view();
 }
 
 // The refcounted object a cap designates (the spec mirror of `Cap::obj`).
@@ -1350,6 +1503,7 @@ pub open spec fn cap_obj(c: Cap) -> Option<ObjId> {
         CapKind::Channel(o, _) => Some(o),
         CapKind::Notification(o) => Some(o),
         CapKind::Timer(o) => Some(o),
+        CapKind::Irq(o) => Some(o),
     }
 }
 
@@ -2381,6 +2535,7 @@ pub proof fn lemma_caps_consistent_frame_thread_offchain<S: Store>(s0: &S, s1: &
         s1.timer_view() == s0.timer_view(),
         s1.timer_head_view() == s0.timer_head_view(),
         s1.cspace_view() == s0.cspace_view(),
+        s1.irq_view() == s0.irq_view(),
         s1.notif_view() == s0.notif_view(),
         s1.tcb_view().dom() == s0.tcb_view().dom(),
         forall|k: ObjId| #[trigger] s1.tcb_view()[k].bind_slots == s0.tcb_view()[k].bind_slots,
@@ -2464,6 +2619,7 @@ pub proof fn lemma_caps_consistent_frame_thread_dequeued<S: Store>(s0: &S, s1: &
         s1.timer_view() == s0.timer_view(),
         s1.timer_head_view() == s0.timer_head_view(),
         s1.cspace_view() == s0.cspace_view(),
+        s1.irq_view() == s0.irq_view(),
         s1.notif_view() == s0.notif_view(),
         s1.tcb_view().dom() == s0.tcb_view().dom(),
         forall|k: ObjId| k != t ==> #[trigger] s1.tcb_view()[k] == s0.tcb_view()[k],
@@ -2558,6 +2714,7 @@ pub proof fn lemma_caps_consistent_frame_thread_halt_clear<S: Store>(s0: &S, s1:
         s1.timer_view() == s0.timer_view(),
         s1.timer_head_view() == s0.timer_head_view(),
         s1.cspace_view() == s0.cspace_view(),
+        s1.irq_view() == s0.irq_view(),
         s1.notif_view() == s0.notif_view(),
         s1.tcb_view().dom() == s0.tcb_view().dom(),
         forall|k: ObjId| k != t ==> #[trigger] s1.tcb_view()[k] == s0.tcb_view()[k],
@@ -4138,6 +4295,40 @@ pub proof fn lemma_armed_timer_refs_pos(tmv: Map<ObjId, TimerView>, t: ObjId, o:
     }
 }
 
+// IRQ-object well-formedness (B-IRQ): a bound IRQ names a notification — the per-object
+// invariant the `irq_binding_refs` term and `destroy_irq`'s release rest on (the
+// `armed ⇒ notif is Some` timer fact, minus the chain). No list, so no head/`timer_wf`
+// existential — a pure pointwise predicate.
+pub open spec fn irq_wf(irqv: Map<ObjId, IrqView>) -> bool {
+    forall|k: ObjId| #[trigger] irqv.dom().contains(k) ==> (irqv[k].bound ==> irqv[k].notif is Some)
+}
+
+// IRQ bindings naming `o`: each bound IRQ holds one ref on its notification `o` (the
+// irq-binding term — the `armed_timer_refs` twin, filtering on `bound && notif == Some(o)`).
+pub open spec fn irq_binding_refs(irqv: Map<ObjId, IrqView>, o: ObjId) -> nat {
+    irqv.dom().filter(|k: ObjId| irqv[k].bound && irqv[k].notif == Some(o)).len()
+}
+
+// A bound IRQ naming `o` witnesses a positive irq-binding count — the `delete`/`obj_unref`
+// Irq branch uses it to discharge the bound-notif-live precondition from the census
+// (the `lemma_armed_timer_refs_pos` twin).
+pub proof fn lemma_irq_binding_refs_pos(irqv: Map<ObjId, IrqView>, i: ObjId, o: ObjId)
+    requires
+        irqv.dom().finite(),
+        irqv.dom().contains(i),
+        irqv[i].bound,
+        irqv[i].notif == Some(o),
+    ensures
+        irq_binding_refs(irqv, o) >= 1,
+{
+    let f = irqv.dom().filter(|k: ObjId| irqv[k].bound && irqv[k].notif == Some(o));
+    assert(f.contains(i));
+    assert(f.finite());
+    if f.len() == 0 {
+        assert(f =~= Set::empty());
+    }
+}
+
 // A reference making `census(n) >= 1` forces `refs[n] > 0` under a census off by one at any
 // `z`: `refs[n] == census(n) + (1 if n == z else 0) >= 1`. `delete` uses it to discharge the
 // refs-coupled preconditions of `endpoint_cap_dropped` (`binding_refs_ok`) and `obj_unref`
@@ -4193,8 +4384,8 @@ pub open spec fn obj_census<S: Store>(store: &S, o: ObjId) -> nat {
         store.notif_view(),
         store.tcb_view(),
         o,
-    ) + armed_timer_refs(store.timer_view(), o) + frame_map_refs(store.slot_view(), o)
-        + thread_hold_refs(store.tcb_view(), o)
+    ) + armed_timer_refs(store.timer_view(), o) + irq_binding_refs(store.irq_view(), o)
+        + frame_map_refs(store.slot_view(), o) + thread_hold_refs(store.tcb_view(), o)
 }
 
 // Every live object's stored refcount equals its census. The teardown family
@@ -4818,6 +5009,10 @@ pub proof fn lemma_emptied_via_dead_home_compose<S: Store>(a: &S, b: &S, c: &S, 
 // TCB's immutable `bind_slots` fixed. Every teardown member ensures this (the leaves frame the
 // views whole; the recursive members compose it).
 pub open spec fn home_views_frozen<S: Store>(s0: &S, s1: &S) -> bool {
+    // Note: this deliberately frames only the *home/residency* maps (cspace + chan skeleton +
+    // tcb dom/bind_slots), NOT the object views — it is established *across* destructors that
+    // change object state (incl. `destroy_irq`, which mutates `irq_view`), so no `irq_view`
+    // conjunct belongs here (the `timer_view`/`notif_view` precedent).
     &&& s1.cspace_view() == s0.cspace_view()
     &&& chan_struct_frame(s0.chan_view(), s1.chan_view())
     &&& s1.tcb_view().dom() == s0.tcb_view().dom()
@@ -4983,6 +5178,7 @@ pub proof fn lemma_sysinv_frame_equal_views<S: Store>(s0: &S, s1: &S)
         s1.timer_view() == s0.timer_view(),
         s1.timer_head_view() == s0.timer_head_view(),
         s1.cspace_view() == s0.cspace_view(),
+        s1.irq_view() == s0.irq_view(),
     ensures
         refcount_sound(s1),
         caps_consistent(s1),
@@ -5328,6 +5524,11 @@ pub open spec fn cap_consistent<S: Store>(store: &S, c: Cap) -> bool {
             &&& store.timer_view().dom().finite()
             &&& timer_wf(store.timer_view(), store.timer_head_view())
         }
+        CapKind::Irq(o) => {
+            &&& store.irq_view().dom().contains(o)
+            &&& store.irq_view().dom().finite()
+            &&& irq_wf(store.irq_view())
+        }
         // Empty / Untyped / Frame / Aspace designate no destructor-bearing object here:
         // `obj_unref` is a no-op (Frame/Untyped/Empty) or the `unref_aspace` leaf (Aspace),
         // neither of which reads an object well-formedness term.
@@ -5349,6 +5550,11 @@ pub open spec fn caps_consistent<S: Store>(store: &S) -> bool {
     // structural like the slot/chan companions; every mutator frames `tcb_view` or `insert`s
     // one TCB, both finiteness-preserving.
     &&& store.tcb_view().dom().finite()
+    // The IRQ arena is finite too (B-IRQ): the `irq_binding_refs` recount is a
+    // `dom().filter().len()`, so the lockstep census delta the bind/unbind/destroy ops export
+    // needs it. Refs-free and structural like the slot/chan/tcb companions; every mutator
+    // frames `irq_view` or `insert`s one IRQ, both finiteness-preserving.
+    &&& store.irq_view().dom().finite()
     &&& forall|s: SlotId| #![trigger store.slot_view()[s]]
             store.slot_view().dom().contains(s) && !is_empty_cap(store.slot_view()[s].cap)
             ==> cap_consistent(store, store.slot_view()[s].cap)
@@ -5370,6 +5576,7 @@ pub proof fn lemma_caps_consistent_frame<S: Store>(s0: &S, s1: &S, n: ObjId)
         s1.timer_view() == s0.timer_view(),
         s1.timer_head_view() == s0.timer_head_view(),
         s1.cspace_view() == s0.cspace_view(),
+        s1.irq_view() == s0.irq_view(),
         s1.notif_view() == s0.notif_view().insert(n, s1.notif_view()[n]),
         s1.tcb_view().dom() == s0.tcb_view().dom(),
         notif_wf(s1.notif_view(), s1.tcb_view(), n),
@@ -5703,6 +5910,7 @@ pub proof fn lemma_clear_slot_obj_census<S: Store>(
         s_new.notif_view() == s_old.notif_view(),
         s_new.tcb_view() == s_old.tcb_view(),
         s_new.timer_view() == s_old.timer_view(),
+        s_new.irq_view() == s_old.irq_view(),
     ensures
         // Additive form (no `nat` underflow): the deleted designating slot accounts for exactly
         // the one census unit lost — at `cap_obj(cap)`, else at `cap_frame_aspace(cap)`.
@@ -5836,6 +6044,7 @@ pub proof fn lemma_set_slot_obj_census<S: Store>(
         s_new.notif_view() == s_old.notif_view(),
         s_new.tcb_view() == s_old.tcb_view(),
         s_new.timer_view() == s_old.timer_view(),
+        s_new.irq_view() == s_old.irq_view(),
     ensures
         obj_census(s_new, x) == obj_census(s_old, x) + (if cap_obj(v.cap) == Some(x)
             || cap_frame_aspace(v.cap) == Some(x) {
@@ -5949,6 +6158,7 @@ pub proof fn lemma_map_frame_census<S: Store>(
         s_new.notif_view() == s_old.notif_view(),
         s_new.tcb_view() == s_old.tcb_view(),
         s_new.timer_view() == s_old.timer_view(),
+        s_new.irq_view() == s_old.irq_view(),
     ensures
         obj_census(s_new, x) == obj_census(s_old, x) + (if cap_frame_aspace(v.cap) == Some(x) {
             1nat
@@ -6008,6 +6218,7 @@ pub proof fn lemma_map_frame_caps_consistent<S: Store>(
         s_new.notif_view() == s_old.notif_view(),
         s_new.tcb_view() == s_old.tcb_view(),
         s_new.timer_view() == s_old.timer_view(),
+        s_new.irq_view() == s_old.irq_view(),
         s_new.timer_head_view() == s_old.timer_head_view(),
         s_new.cspace_view() == s_old.cspace_view(),
     ensures
@@ -6305,6 +6516,65 @@ pub proof fn lemma_armed_timer_retarget(
     }
 }
 
+// IRQ-binding **retarget**, the general single-IRQ transition (B-IRQ; the
+// `lemma_armed_timer_retarget` twin). `i`'s `(bound, notif)` may change arbitrarily (bind,
+// unbind, or rebind) while every other IRQ keeps both fields. The IRQ ops are single-key
+// edits at `i` (no list splice), so this one lemma covers `irq_bind` (post bound), `irq_unbind`
+// (post unbound), and `destroy_irq` (via unbind) uniformly: the delta at `o` is the symmetric
+// indicator form, so a consumer reads `o`'s census change off `i`'s membership transition.
+pub proof fn lemma_irq_binding_retarget(
+    pre: Map<ObjId, IrqView>,
+    post: Map<ObjId, IrqView>,
+    i: ObjId,
+    o: ObjId,
+)
+    requires
+        pre.dom().finite(),
+        post.dom() == pre.dom(),
+        pre.dom().contains(i),
+        forall|j: ObjId| #![trigger post[j]]
+            j != i ==> post[j].bound == pre[j].bound && post[j].notif == pre[j].notif,
+    ensures
+        irq_binding_refs(post, o)
+            + (if pre[i].bound && pre[i].notif == Some(o) { 1nat } else { 0nat })
+            == irq_binding_refs(pre, o)
+            + (if post[i].bound && post[i].notif == Some(o) { 1nat } else { 0nat }),
+{
+    let f1 = pre.dom().filter(|j: ObjId| pre[j].bound && pre[j].notif == Some(o));
+    let f2 = post.dom().filter(|j: ObjId| post[j].bound && post[j].notif == Some(o));
+    let pre_in = pre[i].bound && pre[i].notif == Some(o);
+    let post_in = post[i].bound && post[i].notif == Some(o);
+    if pre_in && post_in {
+        assert forall|j: ObjId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.contains(j) by {
+            if j != i { assert(post[j].bound == pre[j].bound && post[j].notif == pre[j].notif); }
+        }
+        assert(f2 =~= f1);
+    } else if pre_in && !post_in {
+        assert(!f2.contains(i));
+        assert forall|j: ObjId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.remove(i).contains(j) by {
+            if j != i { assert(post[j].bound == pre[j].bound && post[j].notif == pre[j].notif); }
+        }
+        assert(f2 =~= f1.remove(i));
+        assert(f1.contains(i));
+        assert(f1.finite());
+    } else if !pre_in && post_in {
+        assert(!f1.contains(i));
+        assert forall|j: ObjId| #![trigger f1.contains(j)] f1.contains(j) <==> f2.remove(i).contains(j) by {
+            if j != i { assert(post[j].bound == pre[j].bound && post[j].notif == pre[j].notif); }
+        }
+        assert(f1 =~= f2.remove(i));
+        assert(f2.contains(i));
+        assert(f2.finite());
+    } else {
+        assert(!f1.contains(i));
+        assert(!f2.contains(i));
+        assert forall|j: ObjId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.contains(j) by {
+            if j != i { assert(post[j].bound == pre[j].bound && post[j].notif == pre[j].notif); }
+        }
+        assert(f2 =~= f1);
+    }
+}
+
 // Thread-hold bump (cspace edit): a thread newly holding `o` as its cspace raises
 // `o`'s thread-hold census (the aspace half is framed unchanged at `k`).
 proof fn lemma_thread_hold_cspace_bump(m: Map<ObjId, TcbView>, k: ObjId, v: TcbView, o: ObjId)
@@ -6477,6 +6747,7 @@ pub proof fn lemma_census_after_hold_clear<S: Store>(s0: &S, s1: &S, t: ObjId, c
         s1.chan_view() == s0.chan_view(),
         s1.notif_view() == s0.notif_view(),
         s1.timer_view() == s0.timer_view(),
+        s1.irq_view() == s0.irq_view(),
         s1.refs_view() == s0.refs_view(),
         s1.tcb_view() == s0.tcb_view().insert(
             t, TcbView { cspace: None, ..s0.tcb_view()[t] }),
@@ -6569,6 +6840,7 @@ pub proof fn lemma_census_after_hold_clear_aspace<S: Store>(s0: &S, s1: &S, t: O
         s1.chan_view() == s0.chan_view(),
         s1.notif_view() == s0.notif_view(),
         s1.timer_view() == s0.timer_view(),
+        s1.irq_view() == s0.irq_view(),
         s1.refs_view() == s0.refs_view(),
         s1.tcb_view() == s0.tcb_view().insert(
             t, TcbView { aspace: None, ..s0.tcb_view()[t] }),
@@ -6652,6 +6924,7 @@ pub proof fn lemma_census_frame_thread_halt<S: Store>(s0: &S, s1: &S, t: ObjId)
         s1.chan_view() == s0.chan_view(),
         s1.notif_view() == s0.notif_view(),
         s1.timer_view() == s0.timer_view(),
+        s1.irq_view() == s0.irq_view(),
         s1.tcb_view().dom() == s0.tcb_view().dom(),
         forall|k: ObjId| k != t ==> #[trigger] s1.tcb_view()[k] == s0.tcb_view()[k],
         s1.tcb_view()[t].cspace == s0.tcb_view()[t].cspace,
@@ -8707,6 +8980,7 @@ pub fn obj_ref<S: Store>(store: &mut S, cap: Cap)
         final(store).timer_head_view() == old(store).timer_head_view(),
             final(store).ready_view() == old(store).ready_view(),
         final(store).cspace_view() == old(store).cspace_view(),
+        final(store).irq_view() == old(store).irq_view(),
 {
     match cap.kind {
         CapKind::Aspace(o)
@@ -8714,7 +8988,8 @@ pub fn obj_ref<S: Store>(store: &mut S, cap: Cap)
         | CapKind::Thread(o, _)
         | CapKind::Channel(o, _)
         | CapKind::Notification(o)
-        | CapKind::Timer(o) => {
+        | CapKind::Timer(o)
+        | CapKind::Irq(o) => {
             let r = store.obj_refs(o);
             store.set_obj_refs(o, r + 1);
         }
@@ -8761,6 +9036,7 @@ pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
         final(store).timer_head_view() == old(store).timer_head_view(),
             final(store).ready_view() == old(store).ready_view(),
         final(store).cspace_view() == old(store).cspace_view(),
+        final(store).irq_view() == old(store).irq_view(),
         forall|k: SlotId| #[trigger] old(store).slot_view().dom().contains(k)
             ==> final(store).slot_view()[k].cap == old(store).slot_view()[k].cap,
         final(store).slot_view()[child].cap == old(store).slot_view()[child].cap,
@@ -9014,7 +9290,8 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_
         | CapKind::Thread(o, _)
         | CapKind::Channel(o, _)
         | CapKind::Notification(o)
-        | CapKind::Timer(o) => Some(o),
+        | CapKind::Timer(o)
+        | CapKind::Irq(o) => Some(o),
         CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => None,
     };
     assert(obj_opt == cap_obj(cap));
@@ -9182,6 +9459,7 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
         final(store).timer_head_view() == old(store).timer_head_view(),
             final(store).ready_view() == old(store).ready_view(),
         final(store).cspace_view() == old(store).cspace_view(),
+        final(store).irq_view() == old(store).irq_view(),
 {
     let ghost m0 = old(store).slot_view();
     let ghost r0 = old(store).refs_view();
@@ -9228,6 +9506,7 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
             store.timer_head_view() == old(store).timer_head_view(),
             store.ready_view() == old(store).ready_view(),
             store.cspace_view() == old(store).cspace_view(),
+            store.irq_view() == old(store).irq_view(),
             cspace_wf(m0),
             valid_srank(m0, srk),
             parent == m0[slot].parent,
@@ -9497,6 +9776,9 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
         final(store).tcb_view() == old(store).tcb_view(),
         final(store).timer_view() == old(store).timer_view(),
         final(store).timer_head_view() == old(store).timer_head_view(),
+        // B-IRQ: `set_slot` frames `irq_view` too, so a queued-cap move preserves it (and
+        // hence the `irq_binding_refs` census term — `thread::bind`'s relocation reads it off).
+        final(store).irq_view() == old(store).irq_view(),
             final(store).ready_view() == old(store).ready_view(),
         final(store).slot_view()[dst].cap == old(store).slot_view()[src].cap,
         is_empty_cap(final(store).slot_view()[src].cap),
@@ -9514,6 +9796,7 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
     let ghost tv0 = old(store).tcb_view();
     let ghost tmv0 = old(store).timer_view();
     let ghost th0 = old(store).timer_head_view();
+    let ghost irqv0 = old(store).irq_view();
     let ghost srk = choose|s: Map<SlotId, nat>| valid_srank(m0, s);
     // The transposition renaming. Every slot but `src` lands on `rl[k]`; `src`
     // ends emptied (cleared below). `rl[dst] == m0[src]` (lemma_dst_relabeled).
@@ -9716,6 +9999,7 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
             store.tcb_view() == tv0,
             store.timer_view() == tmv0,
             store.timer_head_view() == th0,
+            store.irq_view() == irqv0,
             store.ready_view() == old(store).ready_view(),
             cspace_wf(m0),
             valid_srank(m0, srk),
@@ -9835,6 +10119,9 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
         lemma_move_count(m0, mfin, src, dst);
         // dst inherits src's cap (rl[dst] == m0[src]).
         assert(mfin[dst] == m0[src]);
+        // B-IRQ: every mutation is `set_slot`, which frames `irq_view`, so the IRQ arena is
+        // untouched end to end (the `timer_view` frame's twin).
+        assert(store.irq_view() == old(store).irq_view());
     }
 }
 
@@ -9888,6 +10175,7 @@ pub(crate) fn dec_ref<S: Store>(store: &mut S, o: ObjId)
         final(store).timer_head_view() == old(store).timer_head_view(),
             final(store).ready_view() == old(store).ready_view(),
         final(store).cspace_view() == old(store).cspace_view(),
+        final(store).irq_view() == old(store).irq_view(),
         caps_consistent(final(store)),
         end_caps_sound(final(store)),
         census_dom_complete(final(store)),
@@ -9956,6 +10244,8 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
         // Residency is immutable: the resident `delete`s frame `cspace_view`, and emptying a
         // resident never re-homes it, so the residency map rides through.
         final(store).cspace_view() == old(store).cspace_view(),
+        // (No `irq_view` frame: a resident may be an `Irq` cap, whose `delete` runs
+        // `destroy_irq` and mutates `irq_view` — the `timer_view` precedent.)
         // The channel skeleton rides through every resident `delete`.
         chan_struct_frame(old(store).chan_view(), final(store).chan_view()),
         // Dead, queue-detached TCBs are frozen across the resident loop: each `delete`
@@ -10006,6 +10296,8 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
             // Residency is immutable — `delete` frames `cspace_view`, and dom is preserved,
             // so `cs`'s residents stay live and the getters stay in-bounds across the loop.
             store.cspace_view() == old(store).cspace_view(),
+            // (No `irq_view` invariant: a resident may be an `Irq` cap, whose `delete` runs
+            // `destroy_irq` and mutates `irq_view` — the `timer_view` precedent.)
             // The channel skeleton composes across the resident deletes.
             chan_struct_frame(old(store).chan_view(), store.chan_view()),
             // Dead, queue-detached TCBs are frozen across the resident deletes so far
@@ -10128,6 +10420,18 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                         old(store).refs_view().dom().contains(n)
                         && old(store).refs_view()[n] > 0))
         },
+        cap.kind matches CapKind::Irq(o) ==> {
+            &&& old(store).irq_view().dom().contains(o)
+            &&& old(store).irq_view().dom().finite()
+            &&& irq_wf(old(store).irq_view())
+            // `o`'s own binding names a live notification (the `destroy_irq` invariant). The
+            // census rules out `o == n` (a self-bound IRQ would make `census(o) >= 1`, but the
+            // zero branch has `census(o) == 0`), so the `-1` on `refs[o]` never touches `refs[n]`.
+            &&& (old(store).irq_view()[o].bound ==>
+                    (old(store).irq_view()[o].notif matches Some(n) ==>
+                        old(store).refs_view().dom().contains(n)
+                        && old(store).refs_view()[n] > 0))
+        },
         // The system cap→object invariant: needed for the `destroy_channel`/
         // `destroy_tcb` arms (which delete arbitrary caps) and preserved through the `-1`.
         caps_consistent(old(store)),
@@ -10161,6 +10465,8 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
         // its residency map). `delete` reads it off to discharge its own residency frame
         //.
         final(store).cspace_view() == old(store).cspace_view(),
+        // Note: `obj_unref` does NOT frame `irq_view` — its Irq arm runs `destroy_irq`, which
+        // mutates it (exactly as the Timer arm mutates `timer_view`, which is likewise not framed).
         // The channel skeleton survives every arm (each destructor preserves it — the
         // recursive ones carry it, `destroy_notif`/`destroy_timer` frame `chan_view` whole);
         // `delete` reads it off.
@@ -10194,6 +10500,7 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             &&& final(store).timer_view() == old(store).timer_view()
             &&& final(store).timer_head_view() == old(store).timer_head_view()
             &&& final(store).cspace_view() == old(store).cspace_view()
+            &&& final(store).irq_view() == old(store).irq_view()
         },
         // Dropping a **notification** cap is robustly clean: `dec_ref` drops only `refs[n]`,
         // and at zero `destroy_notif` is a model view no-op, so every object view *and* every
@@ -10206,6 +10513,7 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             &&& final(store).tcb_view() == old(store).tcb_view()
             &&& final(store).timer_view() == old(store).timer_view()
             &&& final(store).timer_head_view() == old(store).timer_head_view()
+            &&& final(store).irq_view() == old(store).irq_view()
         },
     // SCC measure: `obj_unref` is the top of the height order — its
     // `dec_ref`-then-destructor calls are count-flat, so the descent to the destructors is by height.
@@ -10412,6 +10720,52 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                 }
             }
         }
+        CapKind::Irq(o) => {
+            // The `Timer(o)` arm, term-for-term (the IRQ object is the timer's census twin):
+            // `dec_ref` then, at zero, `destroy_irq`. `irq_binding_refs` replaces
+            // `armed_timer_refs` in the no-self-bind argument; the frame-lemma cascade is identical
+            // (`destroy_irq` frames `slot_view` + every object view exactly as `destroy_timer` does).
+            dec_ref(store, o);
+            let ghost st1 = *store;
+            proof {
+                lemma_dead_tcb_frozen_dec_ref(&st0, store, o);
+                lemma_ready_inv_frame(&st0, store);
+                lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
+                lemma_home_views_frozen_refl(&st0, store);
+                lemma_emptied_via_dead_home_free_from_slot_eq(&st0, store);
+                lemma_refs_death_persist_dec_ref(&st0, store, o);
+            }
+            if store.obj_refs(o) == 0 {
+                proof {
+                    // census(o) == 0 ⟹ irq_binding_refs(o) == 0 ⟹ no IRQ is bound to `o`; in
+                    // particular `o` is not self-bound, so `destroy_irq`'s bound-notif-live
+                    // precondition (`o.notif == Some(n)` ⟹ n live, n ≠ o) is discharged.
+                    assert(store.refs_view()[o] == obj_census(store, o));
+                    let bound = store.irq_view().dom().filter(
+                        |k: ObjId| store.irq_view()[k].bound && store.irq_view()[k].notif == Some(o));
+                    assert(irq_binding_refs(store.irq_view(), o) == 0);
+                    assert(bound.finite());
+                    assert(bound.len() == 0);
+                    assert(!bound.contains(o));
+                    assert(!(store.irq_view()[o].bound && store.irq_view()[o].notif == Some(o)));
+                    // dec_ref framed the irq view and dropped only refs[o] (to 0).
+                    assert(store.irq_view() == old(store).irq_view());
+                    assert(store.refs_view() == old(store).refs_view().insert(o, 0));
+                }
+                crate::irq::destroy_irq(store, o);
+                proof {
+                    lemma_dead_tcb_frozen_trans(&st0, &st1, store);
+                    lemma_ready_inv_frame(&st1, store);
+                    lemma_unhomed_frozen_free_from_slot_eq(&st1, store);
+                    lemma_unhomed_frozen_free_trans(&st0, &st1, store);
+                    lemma_home_views_frozen_refl(&st1, store);
+                    lemma_home_views_frozen_trans(&st0, &st1, store);
+                    lemma_emptied_via_dead_home_free_from_slot_eq(&st1, store);
+                    lemma_emptied_via_dead_home_free_trans(&st0, &st1, store);
+                    lemma_refs_death_persist_trans(&st0, &st1, store);
+                }
+            }
+        }
         CapKind::Aspace(o) => {
             // Decrement-then-maybe-`aspace_destroy` — exactly `unref_aspace`'s body, reused.
             unref_aspace(store, o);
@@ -10485,6 +10839,8 @@ pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId)
         // Residency is immutable: `dec_ref` and `destroy_cspace` both frame `cspace_view`, so
         // `destroy_tcb`'s cspace release carries it.
         final(store).cspace_view() == old(store).cspace_view(),
+        // (No `irq_view` frame: the at-zero `destroy_cspace` may `delete` an `Irq` resident,
+        // which runs `destroy_irq` and mutates `irq_view` — the `timer_view` precedent.)
         // The channel skeleton rides through (`dec_ref` frames `chan_view`; `destroy_cspace`
         // carries the skeleton) — `destroy_tcb`'s cspace release reads it.
         chan_struct_frame(old(store).chan_view(), final(store).chan_view()),
@@ -10585,6 +10941,7 @@ pub fn unref_aspace<S: Store>(store: &mut S, a: ObjId)
         final(store).timer_head_view() == old(store).timer_head_view(),
             final(store).ready_view() == old(store).ready_view(),
         final(store).cspace_view() == old(store).cspace_view(),
+        final(store).irq_view() == old(store).irq_view(),
         // Aspaces appear in no `cap_consistent` arm and every object view is framed, so the
         // invariant is preserved.
         caps_consistent(final(store)),
@@ -10680,6 +11037,7 @@ pub fn ref_aspace<S: Store>(store: &mut S, a: ObjId)
         final(store).timer_head_view() == old(store).timer_head_view(),
             final(store).ready_view() == old(store).ready_view(),
         final(store).cspace_view() == old(store).cspace_view(),
+        final(store).irq_view() == old(store).irq_view(),
         // Aspaces appear in no `cap_consistent` arm and every object view is framed, so the
         // invariant is preserved (the `unref_aspace` argument, unchanged by the `+1`).
         caps_consistent(final(store)),
@@ -10766,6 +11124,7 @@ pub fn map_frame<S: Store>(store: &mut S, frame_slot: SlotId, asp: ObjId, va: u6
                 &&& final(store).timer_view() == old(store).timer_view()
                 &&& final(store).timer_head_view() == old(store).timer_head_view()
                 &&& final(store).cspace_view() == old(store).cspace_view()
+                &&& final(store).irq_view() == old(store).irq_view()
             }),
         res is Err ==> {
             &&& final(store).slot_view() == old(store).slot_view()
@@ -10776,6 +11135,7 @@ pub fn map_frame<S: Store>(store: &mut S, frame_slot: SlotId, asp: ObjId, va: u6
             &&& final(store).timer_view() == old(store).timer_view()
             &&& final(store).timer_head_view() == old(store).timer_head_view()
             &&& final(store).cspace_view() == old(store).cspace_view()
+            &&& final(store).irq_view() == old(store).irq_view()
         },
 {
     let cs = store.slot(frame_slot);
@@ -10892,6 +11252,7 @@ fn delete_prepare<S: Store>(store: &mut S, slot: SlotId) -> (cap: Cap)
         final(store).timer_head_view() == old(store).timer_head_view(),
             final(store).ready_view() == old(store).ready_view(),
         final(store).cspace_view() == old(store).cspace_view(),
+        final(store).irq_view() == old(store).irq_view(),
         forall|x: SlotId| final(store).slot_view().dom().contains(x) && x != slot
             ==> #[trigger] final(store).slot_view()[x].cap == old(store).slot_view()[x].cap,
         caps_consistent(final(store)),
@@ -11120,6 +11481,8 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         // arm); `destroy_cspace`'s resident loop (6c) reads `cspace_view[cs]` across its
         // `delete` calls, so the frame is load-bearing there.
         final(store).cspace_view() == old(store).cspace_view(),
+        // Note: `delete` does NOT frame `irq_view` — tearing down an `Irq` cap runs
+        // `destroy_irq` (via `obj_unref`), which mutates it (the `timer_view` precedent).
         // The channel skeleton (`ring_cap`/`depth`/dom) is immutable across teardown: the
         // recursive `obj_unref` only clears bindings / drops `end_caps` / deletes ring caps,
         // never re-homing a channel or moving its slot handles. This is the frame
@@ -11165,6 +11528,7 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
             &&& final(store).notif_view() == old(store).notif_view()
             &&& final(store).timer_view() == old(store).timer_view()
             &&& final(store).timer_head_view() == old(store).timer_head_view()
+            &&& final(store).irq_view() == old(store).irq_view()
             &&& forall|x: SlotId| old(store).slot_view().dom().contains(x) && x != slot
                     ==> #[trigger] final(store).slot_view()[x].cap == old(store).slot_view()[x].cap
         },
@@ -11330,6 +11694,18 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
                     lemma_armed_timer_refs_pos(store.timer_view(), o, nn);
                     // The armed binding makes `census(nn) >= 1`, so refs-domain completeness
                     // places `nn` in `refs.dom()`; the off-by-one then makes `refs[nn] > 0`.
+                    assert(obj_census(store, nn) >= 1);
+                    lemma_in_refs_from_census(store, nn);
+                    lemma_refs_pos_from_off_by_one(store, o, nn);
+                }
+            }
+        }
+        // Discharge `obj_unref`'s Irq bound-notif-live precondition from the census (the
+        // Timer block's twin: a bound IRQ makes `irq_binding_refs(nn) >= 1`, hence `census(nn) >= 1`).
+        if let CapKind::Irq(o) = cap.kind {
+            if store.irq_view()[o].bound {
+                if let Some(nn) = store.irq_view()[o].notif {
+                    lemma_irq_binding_refs_pos(store.irq_view(), o, nn);
                     assert(obj_census(store, nn) >= 1);
                     lemma_in_refs_from_census(store, nn);
                     lemma_refs_pos_from_off_by_one(store, o, nn);
@@ -11662,6 +12038,7 @@ pub proof fn lemma_set_revoking_frames<S: Store>(s0: &S, s1: &S, slot: SlotId, v
         s1.timer_head_view() == s0.timer_head_view(),
         s1.ready_view() == s0.ready_view(),
         s1.cspace_view() == s0.cspace_view(),
+        s1.irq_view() == s0.irq_view(),
         cspace_wf(s0.slot_view()),
         refcount_sound(s0),
         caps_consistent(s0),

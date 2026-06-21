@@ -263,6 +263,7 @@ pub fn set_priority<S: Store>(store: &mut S, t: ObjId, prio: u8, ceiling: u8) ->
         final(store).timer_view() == old(store).timer_view(),
         final(store).timer_head_view() == old(store).timer_head_view(),
         final(store).cspace_view() == old(store).cspace_view(),
+        final(store).irq_view() == old(store).irq_view(),
 {
     if prio > ceiling {
         return Err(());
@@ -399,6 +400,9 @@ pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<S
             assert(store.notif_view() == st2.notif_view());
             assert(store.tcb_view() == st2.tcb_view());
             assert(store.timer_view() == st2.timer_view());
+            // B-IRQ: `slot_move` frames `irq_view`, so `irq_binding_refs` (the 7th census term)
+            // is unchanged too.
+            assert(store.irq_view() == st2.irq_view());
             assert forall|x: ObjId| #[trigger] cspace::obj_census(store, x)
                 == cspace::obj_census(&st2, x) by {
                 cspace::lemma_cap_move_census(st2.slot_view(), store.slot_view(), src, slot, x);
@@ -518,6 +522,8 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         // `set_tcb_*` all frame `cspace_view` (a destroyed cspace keeps its residency map —
         // its resident caps are emptied, not re-homed), so `obj_unref`'s Thread arm carries it.
         final(store).cspace_view() == old(store).cspace_view(),
+        // (No `irq_view` frame: the recursive `unref_cspace` may `delete` an `Irq` resident,
+        // which runs `destroy_irq` and mutates `irq_view` — the `timer_view` precedent.)
         // The channel skeleton (`ring_cap`/`depth`/dom) is immutable: the body deletes bind
         // caps and unrefs cspace/aspace, never touching channel layout.
         cspace::chan_struct_frame(old(store).chan_view(), final(store).chan_view()),

@@ -20,7 +20,10 @@ bounded `revoke_step`, the revoke-in-progress `revoking` marker on the root, and
 ancestor-guard that refuses growth into a revoking subtree, all per-step-verified in Verus, B9A;
 its cross-restart interleaving safety and completion-under-the-guard liveness modeled in the TLA
 `CapRevocation` model, B9C), untyped retype, channel FIFO, notification
-waiter queue, timer armed list, the **32-level ready queue** (its per-level
+waiter queue, timer armed list, the **IRQ-handler object** (the timer object's census twin —
+the verified `irq_bind`/`irq_unbind`/`destroy_irq` ops and the `irq_binding_refs` census term,
+*minus* the armed list: delivery is by direct INTID lookup, so there is no chain to verify;
+B-IRQ-A), the **32-level ready queue** (its per-level
 `ready_chain`/`ready_seq` witnesses, `u32` bitmap-coherence invariant, and the four ops
 `top_ready`/`ready_enqueue`/`ready_dequeue`/`ready_unqueue`, integrated through the
 `make_runnable`/`unqueue_ready` seams and threaded across `signal`/`fire`/the IPC fast path
@@ -137,7 +140,7 @@ Any phase touching these must re-establish them at ≥ the prior numbers.
 
 | Surface | Command | Result |
 |---|---|---|
-| kcore object core | `cargo verus verify -p kcore` | 384 verified, 0 errors |
+| kcore object core | `cargo verus verify -p kcore` | 389 verified, 0 errors |
 | CAS decode + recovery cores | `cargo verus verify -p cas --no-default-features` | 65 verified, 0 errors |
 | IPC header + session codecs | `cargo verus verify -p ipc` | 58 verified, 0 errors |
 | DMA-pool `FreeList` (core + `is_full`/`is_allocated` wrapper-guard accessors) | `cargo verus verify -p dma-pool` | 29 verified, 0 errors |
