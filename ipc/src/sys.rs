@@ -237,6 +237,31 @@ pub fn map(aspace: u32, frame: u32, va: u64, perms: u64) -> i64 {
     unsafe { syscall(16, aspace as u64, frame as u64, va, perms, 0, 0) }
 }
 
+/// Grow `aspace`'s page-table pool by `pages` tables, carved from `ut` (B10B,
+/// rev1§2.5 "accepts top-ups"). `ut` must be the untyped whose free region
+/// abuts the pool's current end (`ERR_ARG` otherwise; `ERR_NOMEM` if it has no
+/// room). Answers the recoverable `ERR_NOMEM` a full pool returns from `map`.
+pub fn aspace_topup(aspace: u32, ut: u32, pages: u64) -> i64 {
+    unsafe { syscall(24, aspace as u64, ut as u64, pages, 0, 0, 0) }
+}
+
+/// Map `frame` at `va`, topping up `aspace`'s pool from `ut` and retrying once
+/// if `map` fails for lack of pool memory — the userspace shape of the
+/// recoverable `NEED_MEMORY` story (B10B). `ut` must abut the pool (see
+/// [`aspace_topup`]); `step` is how many tables to add per top-up. The retry is
+/// safe: a `map` that fails with `ERR_NOMEM` leaves the frame cap unmapped.
+pub fn map_grow(aspace: u32, ut: u32, frame: u32, va: u64, perms: u64, step: u64) -> i64 {
+    let r = map(aspace, frame, va, perms);
+    if r != ERR_NOMEM {
+        return r;
+    }
+    let t = aspace_topup(aspace, ut, step);
+    if t != 0 {
+        return t;
+    }
+    map(aspace, frame, va, perms)
+}
+
 pub fn frame_write(frame: u32, offset: u64, data: &[u8]) -> i64 {
     unsafe {
         syscall(
