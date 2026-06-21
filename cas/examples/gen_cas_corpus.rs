@@ -43,7 +43,8 @@ fn small_opts() -> StoreOptions {
             avg: 256,
             max: 1024,
         },
-        overlay_budget: 16 * 1024,
+        global_budget: 16 * 1024,
+        ..StoreOptions::default()
     }
 }
 
