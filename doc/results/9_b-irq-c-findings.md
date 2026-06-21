@@ -2,15 +2,17 @@
 
 Implementation notes from B-IRQ-C (`doc/plans/11_birq-detail.md`): the conformance closeout that
 grants init the PL011 device caps (rev1§1: init "holds all device resources … MMIO frames, IRQ
-caps"), proves the device-IRQ→notification path end to end in QEMU, adds the revoke/teardown
-accounting test, and finalizes the ledger. Builds on B-IRQ-A's verified kcore object (PR #144) and
-B-IRQ-B's GIC/delivery/syscall shell (PR #145).
+caps") on the m1-test init, proves the device-IRQ→notification path end to end in QEMU, adds the
+revoke/teardown accounting test, and finalizes the ledger. Builds on B-IRQ-A's verified kcore object
+(PR #144) and B-IRQ-B's GIC/delivery/syscall shell (PR #145). The real-boot init grant is deferred to
+C-M9 (its cspace is full — §2).
 
 **Results:** `cargo verus verify -p kcore` **389/0 (unchanged)**; `cargo test -p kcore` **109 green**
 (108 → 109, the new `delete_irq_cap_releases_notif_ref`); `cargo build` (real-boot kernel, with the
-user binaries) + `cargo build --features m1-test` + `cargo build -p ipc` clean; the M1 smoke
-(`scripts/m1-test.sh`) reaches **`1234567M1 PASS`** — the new marker `7` is a bound PL011 IRQ
-signalling its notification through the real GIC + exception path, an ack, and a second delivery.
+user binaries) + `cargo build --features m1-test` + `cargo build -p ipc` clean; **both QEMU smokes
+pass** — `scripts/m1-test.sh` reaches **`1234567M1 PASS`** (marker `7` is a bound PL011 IRQ signalling
+its notification through the real GIC + exception path, an ack, and a second delivery), and
+`scripts/spawn-test.sh` (the real-boot init→storaged→shell path) is green.
 B-IRQ-C adds **no verified items** and **no ledger numeric edits** (the boot grant is trusted shell;
 the accounting test is `#[cfg(test)]`).
 
@@ -42,26 +44,37 @@ is deasserted (no real device driving it), one `ISPENDR` write yields **exactly 
 pending state clears on activation and there is no asserted line to re-pend it. So two kicks (one on
 bind, one on ack) give two clean deliveries, no storms.
 
-## 2. The boot grant is two high cspace slots, beside the existing device frames
+## 2. The boot grant is m1-test-only — the real-boot init's cspace has no room (and no consumer yet)
 
 init's device-MMIO frames are boot-static slots in `kernel_main` (slot 3 virtio, slot 4 PL031 RTC),
-not retyped from untyped. B-IRQ-C adds the PL011's two resources the same way (Design decision 3):
+not retyped from untyped. B-IRQ-C adds the PL011's two resources the same way (Design decision 3) at
+**slot 23** (MMIO frame, `CapKind::Frame { base: 0x0900_0000, pages: 1 }`, `R|W|PHYS`) and **slot 24**
+(IRQ-handler cap, `CapKind::Irq(irq::pl011_objid())`, `R|W`) — but the grant is **gated to
+`#[cfg(feature = "m1-test")]`**, not unconditional. The reason is the load-bearing finding here:
 
-- **Slot 23** — the PL011 MMIO frame (`CapKind::Frame { base: 0x0900_0000, pages: 1 }`, `R|W|PHYS`).
-- **Slot 24** — the PL011 IRQ-handler cap (`CapKind::Irq(irq::pl011_objid())`, `R|W`).
+**`ROOT_CSPACE` is shared by both boot paths, and the real-boot init's 64-slot cspace is fully
+hand-packed.** `user/init/src/main.rs` lays out: kernel-bestowed 0..=5, its own allocations 6..=18,
+then *spawn windows* — `SD_SPAWN_BASE = 20` for storaged and `SH_SPAWN_BASE = 40` for the shell.
+`spawn::prepare(elf, untyped, base, …)` consumes init slots from `base`: `base` = aspace, `base+1` =
+tcb, `base+2` = cspace, **`base+3+i`** = the i-th ELF segment frame, then the stack. So storaged's
+segment frames land at slots **23, 24, …** — exactly where an unconditional grant put the PL011 caps.
+The first cut *was* unconditional, and CI's spawn-test caught it: `retype(OBJ_FRAME, …, slot 23)`
+failed on the occupied slot → `[init] FAILED: prepare storaged`. There is no fixed slot pair free in
+*both* layouts (the real init leaves only slot 19 free; the m1-test exerciser uses 6..=22), so a
+shared fixed-slot unconditional grant is impossible.
 
-**Why slots 23/24 and not 6/7 beside the other device frames:** the m1-test exerciser (`user.rs`)
-*retypes into slots 6..=22*, so the next free indices above its range avoid a collision. The grant is
-written **unconditionally** in `kernel_main` (shared by both boot paths), so the real-boot init also
-holds them — correct per rev1§1, harmless (unused) until C-M9 delegates them to the console driver.
-The real-boot `setup_init` ignores `_root` (writes no cspace slots itself), so there is no layout
-conflict. `irq::pl011_objid()` is the one new public surface on the kernel shell: it wraps the
-private `IRQ_TABLE[PL011]` address into the `ObjId` the `Store::irq_*` accessors resolve back through
-— the same handle `irq::bind` forms, so bind/ack/teardown all name the same object.
+The real-boot init also has **no consumer** for these caps until the console driver exists. So the
+real-boot grant — and the init-cspace restructuring it needs (a dedicated slot range, or delegation
+straight into a spawned console driver) — belongs with **C-M9**, which spawns the driver and delegates
+the PL011 caps. B-IRQ-C proves the *mechanism* on the m1-test init, whose `ROOT_CSPACE` is free above
+the exerciser's retype range. `pl011_objid()` carries `#[allow(dead_code)]` so the non-m1-test build
+stays clean while keeping the accessor available for C-M9.
 
-The IRQ-cap rights are `R|W`, but note the `IrqBind`/`IrqAck` handlers gate on the cap **kind**, not
-its rights (`syscall.rs`); the rights matter only for delegation/attenuation when C-M9 hands an
-attenuated copy to the driver.
+`irq::pl011_objid()` is the one new public surface on the kernel shell: it wraps the private
+`IRQ_TABLE[PL011]` address into the `ObjId` the `Store::irq_*` accessors resolve back through — the
+same handle `irq::bind` forms, so bind/ack/teardown all name the same object. The IRQ-cap rights are
+`R|W`, but the `IrqBind`/`IrqAck` handlers gate on the cap **kind**, not its rights (`syscall.rs`); the
+rights matter only for delegation/attenuation when C-M9 hands an attenuated copy to the driver.
 
 ## 3. The EL0 segment is the timer segment's twin — bind, observe, ack, observe again
 

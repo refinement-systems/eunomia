@@ -40,6 +40,10 @@ unsafe fn slot(i: usize) -> *mut IrqObj {
 /// (C-M9). The `ObjId` is the table entry's address — exactly what `Store::irq_*`
 /// resolves back through (the boot-static device-frame precedent, Design
 /// decision 3), uniform with how `irq::bind` forms the handle below.
+///
+/// Used by the m1-test boot grant today; the real-boot grant (and so the other
+/// caller) lands with C-M9 — hence `allow(dead_code)` for the non-m1-test build.
+#[allow(dead_code)]
 pub fn pl011_objid() -> ObjId {
     unsafe { ObjId(slot(PL011) as u64) }
 }
