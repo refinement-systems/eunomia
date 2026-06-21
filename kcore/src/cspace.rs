@@ -146,6 +146,16 @@ pub struct CapSlot {
     pub first_child: Option<crate::id::SlotId>,
     pub next_sib: Option<crate::id::SlotId>,
     pub prev_sib: Option<crate::id::SlotId>,
+    /// Revoke-in-progress marker (B9). Set on the *root* of an in-flight,
+    /// preemptible `revoke_step` walk and cleared when the subtree is empty;
+    /// `derive` refuses any derivation whose source's ancestor chain reaches a
+    /// `revoking` root, so the multi-call walk terminates under concurrent
+    /// derivation (rev1§2.2 "preemptible and restartable"). It is *not* a CDT
+    /// link nor part of the cap: no structural (`cdt_wf`/`acyclic`) or census
+    /// (`count_nonempty`/`refcount_sound`) predicate reads it — they key off
+    /// `.cap` and the four links — so flipping it frames every invariant
+    /// (`lemma_set_revoking_frames`).
+    pub revoking: bool,
 }
 
 impl CapSlot {
@@ -156,6 +166,7 @@ impl CapSlot {
             first_child: None,
             next_sib: None,
             prev_sib: None,
+            revoking: false,
         }
     }
 }
@@ -1434,7 +1445,8 @@ pub assume_specification [ CapSlot::empty ]() -> (r: CapSlot)
         r.parent is None,
         r.first_child is None,
         r.next_sib is None,
-        r.prev_sib is None;
+        r.prev_sib is None,
+        !r.revoking;
 
 // ── Structural well-formedness of the CDT (the executable `TypeOK`, now total
 // and unbounded). Acyclicity is tracked separately where termination needs
@@ -7298,6 +7310,7 @@ pub open spec fn relabeled(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId) ->
                 first_child: ren(b.first_child, src, dst),
                 next_sib: ren(b.next_sib, src, dst),
                 prev_sib: ren(b.prev_sib, src, dst),
+                revoking: b.revoking,
             }
         },
     )
@@ -7817,16 +7830,16 @@ proof fn lemma_child_relabeled(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId
 // etc. (kept explicit rather than `..` struct-update to stay portable across
 // the Verus spec subset). Used to write the straight-line intermediate maps.
 pub open spec fn set_parent(s: CapSlot, p: Option<SlotId>) -> CapSlot {
-    CapSlot { cap: s.cap, parent: p, first_child: s.first_child, next_sib: s.next_sib, prev_sib: s.prev_sib }
+    CapSlot { cap: s.cap, parent: p, first_child: s.first_child, next_sib: s.next_sib, prev_sib: s.prev_sib, revoking: s.revoking }
 }
 pub open spec fn set_first_child(s: CapSlot, f: Option<SlotId>) -> CapSlot {
-    CapSlot { cap: s.cap, parent: s.parent, first_child: f, next_sib: s.next_sib, prev_sib: s.prev_sib }
+    CapSlot { cap: s.cap, parent: s.parent, first_child: f, next_sib: s.next_sib, prev_sib: s.prev_sib, revoking: s.revoking }
 }
 pub open spec fn set_next_sib(s: CapSlot, n: Option<SlotId>) -> CapSlot {
-    CapSlot { cap: s.cap, parent: s.parent, first_child: s.first_child, next_sib: n, prev_sib: s.prev_sib }
+    CapSlot { cap: s.cap, parent: s.parent, first_child: s.first_child, next_sib: n, prev_sib: s.prev_sib, revoking: s.revoking }
 }
 pub open spec fn set_prev_sib(s: CapSlot, p: Option<SlotId>) -> CapSlot {
-    CapSlot { cap: s.cap, parent: s.parent, first_child: s.first_child, next_sib: s.next_sib, prev_sib: p }
+    CapSlot { cap: s.cap, parent: s.parent, first_child: s.first_child, next_sib: s.next_sib, prev_sib: p, revoking: s.revoking }
 }
 
 // The transposition value at `dst`: exactly `m[src]` (unrenamed). `src`'s links
@@ -7951,7 +7964,7 @@ pub open spec fn unlinked(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<Sl
     Map::new(
         |k: SlotId| m.dom().contains(k),
         |k: SlotId| if k == slot {
-            CapSlot { cap: m[slot].cap, parent: None, first_child: None, next_sib: None, prev_sib: None }
+            CapSlot { cap: m[slot].cap, parent: None, first_child: None, next_sib: None, prev_sib: None, revoking: m[slot].revoking }
         } else if m[k].parent == Some(slot) {
             CapSlot {
                 cap: m[k].cap,
@@ -7959,6 +7972,7 @@ pub open spec fn unlinked(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<Sl
                 first_child: m[k].first_child,
                 next_sib: if m[k].next_sib is None { nx } else { m[k].next_sib },
                 prev_sib: if m[k].prev_sib is None { pv } else { m[k].prev_sib },
+                revoking: m[k].revoking,
             }
         } else {
             CapSlot {
@@ -7971,6 +7985,7 @@ pub open spec fn unlinked(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<Sl
                 } else {
                     m[k].prev_sib
                 },
+                revoking: m[k].revoking,
             }
         },
     )
@@ -8823,6 +8838,60 @@ pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
     }
 }
 
+/// B9 derive guard: walk up `start`'s `parent` chain and report whether `start`
+/// itself or any ancestor carries the revoke-in-progress marker. `derive` refuses
+/// (returns `Err`) on a hit, so no derivation grows the subtree of an in-flight
+/// `revoke_step` — which is what keeps the multi-call walk terminating under
+/// concurrent derivation (the cross-call liveness is mechanized in the
+/// `CapRevocation` TLA model). The walk is the upward mirror of `descend_to_leaf`;
+/// it **terminates** by the acyclicity rank — each step moves to a strictly
+/// higher-ranked parent, so the already-visited set strictly grows toward the
+/// finite domain (`decreases slot_view().dom().difference(visited).len()`). It is
+/// read-only (`&S`), so on a hit `derive`'s `Err` path is an exact no-op.
+pub fn ancestor_or_self_revoking<S: Store>(store: &S, start: SlotId) -> (res: bool)
+    requires
+        cdt_wf(store.slot_view()),
+        acyclic(store.slot_view()),
+        store.slot_view().dom().finite(),
+        store.slot_view().dom().contains(start),
+{
+    let ghost m = store.slot_view();
+    let ghost rank = choose|rk: Map<SlotId, nat>| valid_prank(m, rk);
+    let mut cur = start;
+    let ghost visited: Set<SlotId> = Set::empty();
+    loop
+        invariant
+            store.slot_view() == m,
+            valid_prank(m, rank),
+            m.dom().finite(),
+            m.dom().contains(cur),
+            visited.subset_of(m.dom()),
+            forall|y: SlotId| visited.contains(y) ==> rank[y] < rank[cur],
+            !visited.contains(cur),
+        decreases m.dom().difference(visited).len(),
+    {
+        if store.slot(cur).revoking {
+            return true;
+        }
+        match store.slot(cur).parent {
+            None => return false,
+            Some(p) => {
+                proof {
+                    // `cur` claims `p` as parent, so `p` is live and strictly higher-
+                    // ranked — `cur != p` and `p` is not yet visited (every visited node
+                    // ranks below `cur` < `p`). Adding `cur` shrinks the remaining set.
+                    assert(m[cur].parent == Some(p));
+                    assert(m.dom().contains(p));
+                    assert(rank[cur] < rank[p]);
+                    m.dom().lemma_set_insert_diff_decreases(visited, cur);
+                    visited = visited.insert(cur);
+                }
+                cur = p;
+            }
+        }
+    }
+}
+
 /// Derive a child cap (rev1§2.3): copy with rights intersected — the only
 /// derivation; there is no amplification path.
 ///
@@ -8903,6 +8972,11 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_
         refcount_sound(old(store)) ==> refcount_sound(final(store)),
 {
     let ghost m0 = old(store).slot_view();
+    // B9 guard: refuse derivation into the subtree of an in-flight revoke. The walk
+    // is read-only, so this `Err` is a no-op (the `res is Err` frame holds).
+    if ancestor_or_self_revoking(store, src) {
+        return Err(());
+    }
     let s = store.slot(src);
     if matches!(s.cap.kind, CapKind::Empty) || matches!(s.cap.kind, CapKind::Untyped { .. }) {
         return Err(());
@@ -9068,6 +9142,12 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_
 /// (`lemma_child_on_chain` completeness; `next_reach` for per-iteration progress
 /// and termination); `last` is the chain tail (`lemma_unique_tail`). The contract
 /// is also host-test-checked (test_store). `pub(crate)`: no callers outside `kcore`.
+// B9: adding the (CDT-inert) `revoking` field to `CapSlot` widens every slot
+// equality the merge proof carries, nudging this body over the default rlimit on
+// macOS. Isolate it in its own solver (`spinoff_prover`) with headroom — the same
+// treatment the other heavy cspace bodies already use.
+#[verifier::spinoff_prover]
+#[verifier::rlimit(60)]
 pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
     requires
         cspace_wf(old(store).slot_view()),
@@ -9460,6 +9540,11 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
     d.first_child = s.first_child;
     d.next_sib = s.next_sib;
     d.prev_sib = s.prev_sib;
+    // B9: the transposition copies the whole slot (incl. the revoke marker), so
+    // `d == m0[src]` holds for all six fields. A queued/moved cap is never a
+    // revoke root, so this only ever moves `revoking: false`, but the proof needs
+    // the exact-slot equality.
+    d.revoking = s.revoking;
     proof {
         assert(d == m0[src]);
         assert(rl[dst] == m0[src]);
@@ -11536,6 +11621,306 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
     // so the whole subtree — in-flight queued caps included — is provably gone (rev1§3.4).
     proof {
         lemma_childless_no_descendant(store.slot_view(), slot);
+    }
+}
+
+/// The status of one bounded `revoke_step` quantum (B9, rev1§2.2 "preemptible and
+/// restartable"): `Done` when `slot`'s subtree is empty (the walk is complete),
+/// `More` when the budget was spent with descendants still attached (re-issue from
+/// the same root to continue). The kernel shell maps `More` to the `EAGAIN` retry
+/// code and loops (B9B); the verified core only reports which it is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RevokeStatus {
+    Done,
+    More,
+}
+
+/// B9 marker frame: a single-slot edit that flips only the `revoking` bit — keeping
+/// the slot's cap and all four CDT links, and framing every non-slot view — is
+/// invisible to every cspace invariant. No structural (`cdt_wf`/`acyclic`) or census
+/// (`obj_census`/`end_cap_count`/`cap_consistent`) predicate reads `revoking`; they
+/// key off `.cap`, the links, and the framed object views, all unchanged here. This
+/// is what lets `revoke_step` set/clear the marker on the root between quanta without
+/// disturbing the loop's invariants. The structural half reuses
+/// `lemma_local_cap_edit_preserves_cspace_wf`; the census/consistency halves ride the
+/// cap-filter and emptiness-frame precedents (`lemma_map_frame_*`).
+pub proof fn lemma_set_revoking_frames<S: Store>(s0: &S, s1: &S, slot: SlotId, v: CapSlot)
+    requires
+        s1.slot_view() == s0.slot_view().insert(slot, v),
+        s0.slot_view().dom().contains(slot),
+        s0.slot_view().dom().finite(),
+        v.cap == s0.slot_view()[slot].cap,
+        v.parent == s0.slot_view()[slot].parent,
+        v.first_child == s0.slot_view()[slot].first_child,
+        v.next_sib == s0.slot_view()[slot].next_sib,
+        v.prev_sib == s0.slot_view()[slot].prev_sib,
+        s1.refs_view() == s0.refs_view(),
+        s1.chan_view() == s0.chan_view(),
+        s1.notif_view() == s0.notif_view(),
+        s1.tcb_view() == s0.tcb_view(),
+        s1.timer_view() == s0.timer_view(),
+        s1.timer_head_view() == s0.timer_head_view(),
+        s1.ready_view() == s0.ready_view(),
+        s1.cspace_view() == s0.cspace_view(),
+        cspace_wf(s0.slot_view()),
+        refcount_sound(s0),
+        caps_consistent(s0),
+        end_caps_sound(s0),
+        census_dom_complete(s0),
+    ensures
+        s1.slot_view().dom() == s0.slot_view().dom(),
+        cspace_wf(s1.slot_view()),
+        count_nonempty(s1.slot_view()) == count_nonempty(s0.slot_view()),
+        only_empties(s0.slot_view(), s1.slot_view()),
+        only_empties(s1.slot_view(), s0.slot_view()),
+        forall|x: SlotId| s0.slot_view().dom().contains(x)
+            ==> #[trigger] s1.slot_view()[x].cap == s0.slot_view()[x].cap,
+        refcount_sound(s1),
+        caps_consistent(s1),
+        end_caps_sound(s1),
+        census_dom_complete(s1),
+{
+    let m0 = s0.slot_view();
+    let m1 = s1.slot_view();
+    assert(m1 =~= m0.insert(slot, v));
+    assert(m1.dom() =~= m0.dom());
+    // Pointwise cap + link equality (the edited `slot` by hypothesis, every other
+    // slot untouched by the insert). Everything downstream rides this.
+    assert forall|x: SlotId| m0.dom().contains(x) implies {
+        &&& #[trigger] m1[x].cap == m0[x].cap
+        &&& m1[x].parent == m0[x].parent
+        &&& m1[x].first_child == m0[x].first_child
+        &&& m1[x].next_sib == m0[x].next_sib
+        &&& m1[x].prev_sib == m0[x].prev_sib
+    } by {
+        if x != slot {
+            assert(m1[x] == m0[x]);
+        }
+    }
+    // Structural well-formedness: links identical, cap-emptiness identical.
+    lemma_local_cap_edit_preserves_cspace_wf(m0, slot, v);
+    // count_nonempty + only_empties: the live-cap filter is identical (caps equal).
+    assert(m1.dom().filter(|k: SlotId| !is_empty_cap(m1[k].cap))
+        =~= m0.dom().filter(|k: SlotId| !is_empty_cap(m0[k].cap)));
+    // Census: `slot_refs`/`frame_map_refs` are cap-filters (identical); the binding /
+    // waiter / timer / hold terms read framed views (equal) — so `obj_census` is fixed.
+    assert forall|o: ObjId| #[trigger] obj_census(s1, o) == obj_census(s0, o) by {
+        assert(m1.dom().filter(|k: SlotId| cap_obj(m1[k].cap) == Some(o))
+            =~= m0.dom().filter(|k: SlotId| cap_obj(m0[k].cap) == Some(o)));
+        assert(m1.dom().filter(|k: SlotId| cap_frame_aspace(m1[k].cap) == Some(o))
+            =~= m0.dom().filter(|k: SlotId| cap_frame_aspace(m0[k].cap) == Some(o)));
+    }
+    lemma_refcount_sound_from_census_eq(s0, s1);
+    // census_dom_complete: census fixed + refs domain fixed.
+    assert forall|o: ObjId| #[trigger] obj_census(s1, o) >= 1 implies
+        s1.refs_view().dom().contains(o) by {
+        assert(obj_census(s0, o) >= 1);
+    }
+    // caps_consistent: `cap_consistent` reads `slot_view` only via `.dom()` plus the
+    // framed object views; a Channel cap's `chan_wf` rides the emptiness frame.
+    assert forall|s: SlotId| #![trigger m1[s]]
+        m1.dom().contains(s) && !is_empty_cap(m1[s].cap)
+        implies cap_consistent(s1, m1[s].cap) by {
+        assert(m1[s].cap == m0[s].cap);
+        assert(cap_consistent(s0, m0[s].cap));
+        if let CapKind::Channel(o, _) = m0[s].cap.kind {
+            lemma_chan_wf_emptiness_frame(s0.chan_view(), s1.chan_view(), m0, m1, o);
+        }
+    }
+    // end_caps_sound: `end_cap_count` is a cap-filter (identical); `chan_view` framed.
+    assert forall|ch: ObjId, e: int|
+        s1.chan_view().dom().contains(ch) && s1.chan_view()[ch].end_caps.len() == 2 && 0 <= e < 2
+        implies #[trigger] s1.chan_view()[ch].end_caps[e] == end_cap_count(m1, ch, e) by {
+        assert(m1.dom().filter(|k: SlotId| cap_chan_end(m1[k].cap) == Some((ch, e)))
+            =~= m0.dom().filter(|k: SlotId| cap_chan_end(m0[k].cap) == Some((ch, e))));
+        assert(s0.chan_view()[ch].end_caps[e] == end_cap_count(m0, ch, e));
+    }
+}
+
+/// B9 death-provenance carry across the marker write: the final `set_slot` keeps
+/// `slot`'s cap and frames `refs_view`, so the loop invariant's witness (a homing
+/// object dead at `s_pre`) is still a homing object dead at `s_new` — `dead_obj` reads
+/// only `refs_view`. Lets `revoke_step`'s always-`ensures` carry the death-provenance
+/// implication across the marker write in both the `More` and `Done` arms.
+pub proof fn lemma_revoke_step_death_provenance<S: Store>(s_old: &S, s_pre: &S, s_new: &S, slot: SlotId)
+    requires
+        s_new.slot_view()[slot].cap == s_pre.slot_view()[slot].cap,
+        s_new.refs_view() == s_pre.refs_view(),
+        is_empty_cap(s_pre.slot_view()[slot].cap)
+            ==> exists|o: ObjId| homes(s_old, o, slot) && dead_obj(s_pre, o),
+    ensures
+        is_empty_cap(s_new.slot_view()[slot].cap)
+            ==> exists|o: ObjId| homes(s_old, o, slot) && dead_obj(s_new, o),
+{
+    if is_empty_cap(s_new.slot_view()[slot].cap) {
+        let o = choose|o: ObjId| homes(s_old, o, slot) && dead_obj(s_pre, o);
+        assert(homes(s_old, o, slot) && dead_obj(s_new, o));
+    }
+}
+
+/// Revoke a **bounded quantum** of `slot`'s subtree, restartably (B9, rev1§2.2). Does
+/// at most `budget` leaf-deletions of the unbounded `revoke` walk, returning `Done`
+/// when the subtree is empty and `More` when the budget runs out with descendants
+/// still attached. A `More` return leaves the **revoke-in-progress marker** set on the
+/// root (`derive` refuses growth into the subtree, so the multi-call walk terminates —
+/// the cross-call liveness is mechanized in the `CapRevocation` TLA model); `Done`
+/// clears it. The marker rides the last `set_slot`, *after* the loop, so the per-leaf
+/// teardown (`delete`/`cdt_unlink`) is untouched and never has to frame it.
+///
+/// Each call re-establishes the full precondition bundle (so it is verifiably
+/// restartable from the same root), exports the same descendant-deletion completeness
+/// and root-survival/death-provenance theorems as `revoke` on `Done`, and a
+/// **partial-progress** fact (`count_nonempty` strictly dropped) on `More`.
+///
+/// **Terminates per call** (`decreases budget - n`): a bounded counted loop.
+pub fn revoke_step<S: Store>(store: &mut S, slot: SlotId, budget: usize) -> (res: RevokeStatus)
+    requires
+        cspace_wf(old(store).slot_view()),
+        old(store).slot_view().dom().finite(),
+        old(store).slot_view().dom().contains(slot),
+        !is_empty_cap(old(store).slot_view()[slot].cap),
+        refcount_sound(old(store)),
+        caps_consistent(old(store)),
+        end_caps_sound(old(store)),
+        census_dom_complete(old(store)),
+        ready_wf(old(store).ready_view(), old(store).tcb_view()),
+        ready_complete(old(store).ready_view(), old(store).tcb_view()),
+        budget >= 1,
+    ensures
+        // ── Always (Done and More): the maintained invariant bundle, re-establishing
+        // the next call's `requires` — this is what makes `revoke_step` restartable. ──
+        cspace_wf(final(store).slot_view()),
+        final(store).slot_view().dom().finite(),
+        final(store).slot_view().dom().contains(slot),
+        refcount_sound(final(store)),
+        caps_consistent(final(store)),
+        end_caps_sound(final(store)),
+        census_dom_complete(final(store)),
+        ready_wf(final(store).ready_view(), final(store).tcb_view()),
+        ready_complete(final(store).ready_view(), final(store).tcb_view()),
+        only_empties(old(store).slot_view(), final(store).slot_view()),
+        // Conditional root-survival + death-provenance (hold at every preemption point).
+        !is_homed(old(store), slot) ==> !is_empty_cap(final(store).slot_view()[slot].cap),
+        is_empty_cap(final(store).slot_view()[slot].cap)
+            ==> exists|o: ObjId| homes(old(store), o, slot) && dead_obj(final(store), o),
+        // ── Done: the subtree is empty (the `revoke` postcondition) and the marker is clear. ──
+        res is Done ==> final(store).slot_view()[slot].first_child is None,
+        res is Done ==> no_live_descendant(final(store).slot_view(), slot),
+        res is Done ==> !final(store).slot_view()[slot].revoking,
+        // ── More: descendants remain, the marker is set, and the walk made progress. ──
+        res is More ==> final(store).slot_view()[slot].first_child is Some,
+        res is More ==> !is_empty_cap(final(store).slot_view()[slot].cap),
+        res is More ==> final(store).slot_view()[slot].revoking,
+        res is More ==>
+            count_nonempty(final(store).slot_view()) < count_nonempty(old(store).slot_view()),
+{
+    let mut n: usize = 0;
+    // The bounded form of `revoke`'s walk: the loop body is identical (descend to a
+    // leaf, delete it), counted by `n` and capped at `budget`. The invariant is
+    // `revoke`'s plus the counter and the count-progress accumulator.
+    while n < budget && store.slot(slot).first_child.is_some()
+        invariant
+            cspace_wf(store.slot_view()),
+            store.slot_view().dom().finite(),
+            store.slot_view().dom().contains(slot),
+            store.slot_view().dom() == old(store).slot_view().dom(),
+            only_empties(old(store).slot_view(), store.slot_view()),
+            refcount_sound(store),
+            caps_consistent(store),
+            end_caps_sound(store),
+            census_dom_complete(store),
+            ready_wf(store.ready_view(), store.tcb_view()),
+            ready_complete(store.ready_view(), store.tcb_view()),
+            is_homed(store, slot) == is_homed(old(store), slot),
+            !is_homed(old(store), slot) ==> !is_empty_cap(store.slot_view()[slot].cap),
+            home_views_frozen(old(store), store),
+            refs_death_persist(old(store), store),
+            is_empty_cap(store.slot_view()[slot].cap)
+                ==> exists|o: ObjId| homes(old(store), o, slot) && dead_obj(store, o),
+            // B9: the bounded-quantum bookkeeping.
+            n <= budget,
+            count_nonempty(store.slot_view()) + n <= count_nonempty(old(store).slot_view()),
+        decreases budget - n,
+    {
+        let first = store.slot(slot).first_child.unwrap();
+        proof {
+            assert(store.slot_view()[first].parent == Some(slot));
+            assert(!is_empty_cap(store.slot_view()[first].cap));
+        }
+        let leaf = descend_to_leaf(store, first);
+        let ghost pre = *store;
+        delete(store, leaf);
+        proof {
+            // `slot != leaf`: `slot` has a child (loop guard) while `descend_to_leaf`
+            // returns a childless `leaf`.
+            assert(pre.slot_view()[slot].first_child is Some);
+            assert(pre.slot_view()[leaf].first_child is None);
+            assert(slot != leaf);
+            lemma_is_homed_stable(&pre, store, slot);
+            if !is_homed(old(store), slot) {
+                assert(store.slot_view()[slot].cap == pre.slot_view()[slot].cap);
+            }
+            lemma_home_views_frozen_trans(old(store), &pre, store);
+            lemma_refs_death_persist_trans(old(store), &pre, store);
+            lemma_only_empties_trans(old(store).slot_view(), pre.slot_view(), store.slot_view());
+            // Root provenance witness (identical to `revoke`).
+            if is_empty_cap(store.slot_view()[slot].cap) {
+                if is_empty_cap(pre.slot_view()[slot].cap) {
+                    let o = choose|o: ObjId| homes(old(store), o, slot) && dead_obj(&pre, o);
+                    assert(dead_obj(store, o));
+                } else {
+                    let o = choose|o: ObjId| homes(&pre, o, slot) && dead_obj(store, o);
+                    lemma_homes_stable(old(store), &pre, o, slot);
+                    assert(homes(old(store), o, slot) && dead_obj(store, o));
+                }
+            }
+            // B9 progress: `delete` strictly dropped the live count, so the accumulator
+            // carries with `n + 1`.
+            assert(count_nonempty(store.slot_view()) < count_nonempty(pre.slot_view()));
+        }
+        n = n + 1;
+    }
+    // ── The quantum is over. Set the marker (More) or clear it (Done) in one final
+    // `set_slot`. The cap and links are untouched, so `lemma_set_revoking_frames`
+    // carries every invariant across this write. ──
+    let ghost s_pre = *store;
+    let mut root = store.slot(slot);
+    if root.first_child.is_some() {
+        // More: the loop exited with children remaining, so `n == budget` (the only way
+        // the `&&` guard fails while `first_child` is Some), hence `budget >= 1`
+        // deletions happened — strict progress.
+        proof {
+            assert(n == budget);
+            // `slot` has a child, so by `empty_slots_detached` it is non-empty.
+            assert(!is_empty_cap(store.slot_view()[slot].cap));
+        }
+        root.revoking = true;
+        store.set_slot(slot, root);
+        proof {
+            lemma_set_revoking_frames(&s_pre, store, slot, root);
+            lemma_only_empties_trans(
+                old(store).slot_view(),
+                s_pre.slot_view(),
+                store.slot_view(),
+            );
+            lemma_revoke_step_death_provenance(old(store), &s_pre, store, slot);
+        }
+        RevokeStatus::More
+    } else {
+        // Done: the subtree is empty. Clear the marker and read off no-live-descendant.
+        root.revoking = false;
+        store.set_slot(slot, root);
+        proof {
+            lemma_set_revoking_frames(&s_pre, store, slot, root);
+            lemma_only_empties_trans(
+                old(store).slot_view(),
+                s_pre.slot_view(),
+                store.slot_view(),
+            );
+            lemma_revoke_step_death_provenance(old(store), &s_pre, store, slot);
+            lemma_childless_no_descendant(store.slot_view(), slot);
+        }
+        RevokeStatus::Done
     }
 }
 

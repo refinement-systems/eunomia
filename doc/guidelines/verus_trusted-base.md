@@ -129,7 +129,7 @@ Any phase touching these must re-establish them at ≥ the prior numbers.
 
 | Surface | Command | Result |
 |---|---|---|
-| kcore object core | `cargo verus verify -p kcore` | 374 verified, 0 errors |
+| kcore object core | `cargo verus verify -p kcore` | 381 verified, 0 errors |
 | CAS decode + recovery cores | `cargo verus verify -p cas --no-default-features` | 65 verified, 0 errors |
 | IPC header + session codecs | `cargo verus verify -p ipc` | 58 verified, 0 errors |
 | DMA-pool `FreeList` (core + `is_full`/`is_allocated` wrapper-guard accessors) | `cargo verus verify -p dma-pool` | 29 verified, 0 errors |

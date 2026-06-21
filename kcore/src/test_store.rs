@@ -20,8 +20,9 @@ use crate::channel::{
     EV_READABLE, MSG_PAYLOAD,
 };
 use crate::cspace::{
-    cdt_unlink, delete, derive, destroy_cspace, map_frame, obj_unref, revoke, slot_move,
-    unref_aspace, unref_cspace, Cap, CapKind, CapSlot, ChanEnd, Rights,
+    ancestor_or_self_revoking, cdt_unlink, delete, derive, destroy_cspace, map_frame, obj_unref,
+    revoke, revoke_step, slot_move, unref_aspace, unref_cspace, Cap, CapKind, CapSlot, ChanEnd,
+    RevokeStatus, Rights,
 };
 use crate::id::{ObjId, SlotId};
 use crate::notification::{destroy_notif, remove_waiter, signal, wait};
@@ -906,6 +907,7 @@ fn detached(cap: Cap) -> CapSlot {
         first_child: None,
         next_sib: None,
         prev_sib: None,
+        revoking: false,
     }
 }
 // A blank TCB (the `Tcb::empty` analog) so fixtures set only the fields under test
@@ -2497,6 +2499,7 @@ fn reset_arms() {
         first_child: Some(SlotId(1)),
         next_sib: None,
         prev_sib: None,
+        revoking: false,
     };
     st.slots[1] = CapSlot {
         cap: frame_cap(1),
@@ -2504,6 +2507,7 @@ fn reset_arms() {
         first_child: None,
         next_sib: None,
         prev_sib: None,
+        revoking: false,
     };
     check_reset(&mut st, SlotId(0));
 
@@ -2718,6 +2722,7 @@ fn checker_has_teeth() {
             first_child: None,
             next_sib: None,
             prev_sib: None,
+            revoking: false,
         };
         st.slots[1] = detached(frame_cap(1));
         // ring: 1.next=1 self-loop, consistent prev, parented but not the head
@@ -4043,6 +4048,7 @@ fn revoke_can_empty_its_own_root_zombie() {
         first_child: Some(SlotId(1)),
         next_sib: None,
         prev_sib: None,
+        revoking: false,
     };
     st.slots[1] = CapSlot {
         cap: cspace_cap(10),
@@ -4050,6 +4056,7 @@ fn revoke_can_empty_its_own_root_zombie() {
         first_child: None,
         next_sib: None,
         prev_sib: None,
+        revoking: false,
     };
     st.refs.insert(10, 1); // slot 1 is the one (and last) cap to cspace 10
     st.cspaces.insert(10, vec![SlotId(0)]); // cspace 10 contains slot 0 as a resident
@@ -4106,6 +4113,7 @@ fn check_revoke_root_survives() {
         first_child: Some(SlotId(1)),
         next_sib: None,
         prev_sib: None,
+        revoking: false,
     };
     st.slots[1] = CapSlot {
         cap: cspace_cap(10),
@@ -4113,6 +4121,7 @@ fn check_revoke_root_survives() {
         first_child: None,
         next_sib: None,
         prev_sib: None,
+        revoking: false,
     };
     st.slots[2] = detached(frame_cap(2));
     st.refs.insert(10, 1); // slot 1 is the one (and last) cap to cspace 10
@@ -4165,6 +4174,7 @@ fn check_revoke_root_survives_homed_external_ref() {
         first_child: Some(SlotId(1)),
         next_sib: None,
         prev_sib: None,
+        revoking: false,
     };
     st.slots[1] = CapSlot {
         cap: cspace_cap(10),
@@ -4172,6 +4182,7 @@ fn check_revoke_root_survives_homed_external_ref() {
         first_child: None,
         next_sib: None,
         prev_sib: None,
+        revoking: false,
     };
     // slot 2: an external, un-homed cap to cspace 10 — keeps refs[10] alive across the revoke.
     st.slots[2] = detached(cspace_cap(10));
@@ -4243,6 +4254,7 @@ fn revoke_sees_through_queued_descendant() {
         first_child: Some(SlotId(1)),
         next_sib: None,
         prev_sib: None,
+        revoking: false,
     };
     // slot 1: the in-flight queued cap — a CDT child of the revoke target AND channel 7's ring cap.
     st.slots[1] = CapSlot {
@@ -4251,6 +4263,7 @@ fn revoke_sees_through_queued_descendant() {
         first_child: None,
         next_sib: None,
         prev_sib: None,
+        revoking: false,
     };
     // Register the depth-1 channel's ring caps: ring 0 / idx 0 / cap 0 is the queued slot 1; the
     // remaining 7 ring slots (2..=8) are empty (a single-cap in-window message, ring 1 idle).
@@ -4323,6 +4336,139 @@ fn revoke_sees_through_queued_descendant() {
         !st.at(SlotId(0)).cap.is_empty(),
         "the un-homed revoke target survives"
     );
+}
+
+// ── B9: the bounded, restartable revoke step + the revoke-in-progress marker ───
+//
+// `revoke_step`/`ancestor_or_self_revoking` carry full Verus contracts (bounded
+// per-call termination, the same descendant-deletion completeness as `revoke` on
+// `Done`, partial progress on `More`, and the no-op-on-refusal guard). These run the
+// real bodies on `ArrayStore` and assert the *observable* multi-call behaviour the
+// `EAGAIN` syscall surface (B9B) and the `CapRevocation` TLA liveness model (B9C)
+// build on: a deep subtree empties in ⌈descendants/budget⌉ quanta, the marker is set
+// across a `More` and cleared on `Done`, and a `derive` into a revoking subtree is
+// refused without touching the store.
+
+// Build a linear CDT chain of depth `n` rooted at slot 0 with the *verified* `derive`:
+// 0 → 1 → 2 → … → n-1, each node the sole child of its predecessor. Returns the store;
+// slot 0 is the un-homed root (survives revoke), slots 1..n-1 its descendants.
+fn gen_chain(n: usize) -> ArrayStore {
+    let mut st = ArrayStore::new(n);
+    st.slots[0] = detached(frame_cap(0));
+    for i in 1..n as u64 {
+        // derive(parent=i-1, child=i): the empty slot i becomes (i-1)'s first_child,
+        // extending the chain (derive copies the parent's Frame cap into the child).
+        derive(&mut st, SlotId(i - 1), SlotId(i), 0xff, 0xFF).expect("derive chain link");
+    }
+    assert!(cspace_wf_exec(&st), "gen_chain produced a non-cspace_wf chain");
+    st
+}
+
+#[test]
+fn revoke_step_bounded_completion() {
+    // A deep chain (root + 23 descendants) revokes to empty across ⌈23/budget⌉
+    // `revoke_step` quanta: `More` until the last, `Done` exactly once, with the live
+    // count strictly dropping on every `More` and the un-homed root surviving.
+    const DESC: usize = 23;
+    const BUDGET: usize = 5;
+    let mut st = gen_chain(DESC + 1);
+    assert!(!is_homed_exec(&st, SlotId(0)), "the chain root is un-homed");
+
+    let mut calls = 0;
+    let mut prev_live = count_nonempty_exec(&st);
+    loop {
+        let status = revoke_step(&mut st, SlotId(0), BUDGET);
+        calls += 1;
+        assert!(cspace_wf_exec(&st), "revoke_step preserves cspace_wf");
+        let live = count_nonempty_exec(&st);
+        match status {
+            RevokeStatus::More => {
+                assert!(
+                    st.at(SlotId(0)).first_child.is_some(),
+                    "More: descendants remain"
+                );
+                assert!(
+                    st.at(SlotId(0)).revoking,
+                    "More: the marker is set on the root"
+                );
+                assert!(live < prev_live, "More: the live count strictly dropped");
+                prev_live = live;
+            }
+            RevokeStatus::Done => {
+                assert!(
+                    st.at(SlotId(0)).first_child.is_none(),
+                    "Done: the subtree is empty"
+                );
+                assert!(!st.at(SlotId(0)).revoking, "Done: the marker is cleared");
+                break;
+            }
+        }
+        assert!(calls <= DESC + 2, "revoke_step must terminate in ⌈n/budget⌉ calls");
+    }
+
+    // ⌈23/5⌉ = 5 quanta total (4 × More + 1 × Done).
+    assert_eq!(calls, (DESC + BUDGET - 1) / BUDGET, "exactly ⌈descendants/budget⌉ quanta");
+    // The un-homed root survives; every descendant is gone.
+    assert!(!st.at(SlotId(0)).cap.is_empty(), "the un-homed root survives");
+    for i in 1..(DESC + 1) as u64 {
+        assert!(
+            st.at(SlotId(i)).cap.is_empty(),
+            "every descendant is revoked"
+        );
+    }
+}
+
+#[test]
+fn revoke_step_single_quantum_done() {
+    // A budget at least the subtree size completes in one `Done` call with the marker
+    // never left set (it is cleared on the same call).
+    let mut st = gen_chain(4); // root + 3 descendants
+    let status = revoke_step(&mut st, SlotId(0), 64);
+    assert!(status == RevokeStatus::Done, "ample budget completes in one quantum");
+    assert!(st.at(SlotId(0)).first_child.is_none(), "subtree empty");
+    assert!(!st.at(SlotId(0)).revoking, "marker cleared on Done");
+    assert!(!st.at(SlotId(0)).cap.is_empty(), "un-homed root survives");
+}
+
+#[test]
+fn revoke_step_marker_blocks_derive() {
+    // While slot 0's revoke is in progress (marker set), `derive` whose source lies in
+    // the subtree is refused and the store is untouched; clearing the marker lets the
+    // same derivation through. Mirrors the `ancestor_or_self_revoking` guard.
+    let mut st = gen_chain(2); // root 0 → child 1
+    // Reserve an empty target slot for the attempted derivation.
+    st.slots.push(CapSlot::empty());
+    let target = SlotId(2);
+
+    // Mark the root as a revoke-in-progress root (what `revoke_step` does on `More`).
+    st.slots[0].revoking = true;
+    assert!(
+        ancestor_or_self_revoking(&st, SlotId(1)),
+        "slot 1 is under the revoking root"
+    );
+
+    let live_before = count_nonempty_exec(&st);
+    let res = derive(&mut st, SlotId(1), target, 0xff, 0xFF);
+    assert!(res.is_err(), "derive into a revoking subtree is refused");
+    // The refused derive is a no-op: no new cap installed, no CDT edge added.
+    assert!(st.at(target).cap.is_empty(), "the refused derive installed no cap");
+    assert!(
+        st.at(SlotId(1)).first_child.is_none(),
+        "the refused derive added no child edge"
+    );
+    assert_eq!(count_nonempty_exec(&st), live_before, "live count unchanged");
+
+    // The root itself is revoking, so deriving *from* it is refused too.
+    assert!(derive(&mut st, SlotId(0), target, 0xff, 0xFF).is_err());
+
+    // Clear the marker: the same derivation now succeeds (the guard is the only gate).
+    st.slots[0].revoking = false;
+    assert!(
+        !ancestor_or_self_revoking(&st, SlotId(1)),
+        "no revoking ancestor once cleared"
+    );
+    derive(&mut st, SlotId(1), target, 0xff, 0xFF).expect("derive succeeds once unmarked");
+    assert!(!st.at(target).cap.is_empty(), "the derived child is installed");
 }
 
 // ── Channel send/recv: the FIFO core, host-differential ─────────────────────

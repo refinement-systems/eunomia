@@ -675,6 +675,7 @@ pub open spec fn reset_slot(s: crate::cspace::CapSlot) -> crate::cspace::CapSlot
         first_child: s.first_child,
         next_sib: s.next_sib,
         prev_sib: s.prev_sib,
+        revoking: s.revoking,
     }
 }
 
