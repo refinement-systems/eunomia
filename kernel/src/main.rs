@@ -7,6 +7,7 @@ mod channel;
 mod cspace;
 mod exceptions;
 mod gic;
+mod irq;
 mod mmu;
 mod notification;
 mod store;
@@ -55,6 +56,7 @@ pub extern "C" fn kernel_main() -> ! {
 
     mmu::init();
     gic::init();
+    irq::init(); // route + enable the boot-static device SPIs (B-IRQ-B)
     timer::start_tick();
     writeln!(out, "MMU + GICv3 + tick @ {} Hz up", timer::TICK_HZ).unwrap();
 

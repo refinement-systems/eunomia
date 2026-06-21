@@ -218,9 +218,13 @@ extern "C" fn handle_el0_irq(frame: *mut TrapFrame) {
             crate::thread::maybe_switch(frame, true);
         }
     } else {
+        // Device SPI (B-IRQ-B): a bound INTID signals its notification and the
+        // line is masked (inside `deliver`) before we EOI; an unbound INTID is
+        // EOI'd and dropped (no receiver). `woke` hints the reschedule.
+        let woke = unsafe { crate::irq::deliver(intid) };
         crate::gic::eoi(intid);
         unsafe {
-            crate::thread::maybe_switch(frame, false);
+            crate::thread::maybe_switch(frame, woke);
         }
     }
 }

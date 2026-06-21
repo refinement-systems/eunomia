@@ -66,6 +66,8 @@ pub enum Sys {
     ReadReport { tcb: u64 },
     UntypedReset { slot: u64 },
     AspaceTopUp { aspace: u64, ut: u64, pages: u64 },
+    IrqBind { irq: u64, notif: u64, bits: u64 },
+    IrqAck { irq: u64 },
 }
 
 /// A decode-time validation failure. The kernel maps every variant to
@@ -110,8 +112,8 @@ fn decode_prio(raw: u64) -> (result: Result<u8, SysError>)
 /// in the verified fragment.
 pub fn decode(nr: u64, a: [u64; 6]) -> (result: Result<Sys, SysError>)
     ensures
-        // rev1§3.7: every `nr` outside the defined 0..=24 range is `UnknownCall`.
-        nr >= 25 ==> result matches Err(SysError::UnknownCall),
+        // rev1§3.7: every `nr` outside the defined 0..=26 range is `UnknownCall`.
+        nr >= 27 ==> result matches Err(SysError::UnknownCall),
         // Retype with an out-of-range `ObjType` discriminant is `BadObjType`
         // (via `ObjType::from_u64`'s `None`-iff-`v >= 8` characterization).
         (nr == 3 && a@[1] >= 8) ==> result matches Err(SysError::BadObjType),
@@ -191,6 +193,11 @@ pub fn decode(nr: u64, a: [u64; 6]) -> (result: Result<Sys, SysError>)
         // "accepts top-ups"). Three raw `u64`s, all validated downstream by the
         // abutment carve + `grow_pool`, so no decode-time range `ensures`.
         24 => Sys::AspaceTopUp { aspace: a[0], ut: a[1], pages: a[2] },
+        // B-IRQ-B: bind/ack an IRQ-handler cap (rev1§1, rev1§3.6). Raw `u64`s,
+        // all validated downstream by the cap lookup + the verified `irq_bind`,
+        // so no decode-time range `ensures` (the `TimerArm`/`AspaceTopUp` precedent).
+        25 => Sys::IrqBind { irq: a[0], notif: a[1], bits: a[2] },
+        26 => Sys::IrqAck { irq: a[0] },
         _ => return Err(SysError::UnknownCall),
     })
 }
@@ -226,13 +233,23 @@ mod tests {
                 pages: 8
             })
         );
+        // B-IRQ-B: the two IRQ opcodes pack raw u64s.
+        assert_eq!(
+            decode(25, [2, 4, 0xF, 0, 0, 0]),
+            Ok(Sys::IrqBind {
+                irq: 2,
+                notif: 4,
+                bits: 0xF
+            })
+        );
+        assert_eq!(decode(26, [2, 0, 0, 0, 0, 0]), Ok(Sys::IrqAck { irq: 2 }));
     }
 
     #[test]
     fn validation_rejects() {
         assert_eq!(decode(99, [0; 6]), Err(SysError::UnknownCall));
-        // B10B moved the defined range to 0..=24, so 25 is the new first unknown.
-        assert_eq!(decode(25, [0; 6]), Err(SysError::UnknownCall));
+        // B-IRQ-B moved the defined range to 0..=26, so 27 is the new first unknown.
+        assert_eq!(decode(27, [0; 6]), Err(SysError::UnknownCall));
         assert_eq!(decode(3, [0, 99, 0, 0, 0, 0]), Err(SysError::BadObjType)); // bad ObjType
         assert_eq!(
             decode(8, [0, 0, MSG_PAYLOAD as u64 + 1, 0, 0, 0]),

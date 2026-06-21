@@ -10,6 +10,7 @@
 
 use crate::channel::{self, ChanError, MSG_CAPS, MSG_PAYLOAD};
 use crate::cspace::{self, CSpaceObj, CapKind, CapSlot, Rights};
+use crate::irq;
 use crate::mmu::{USER_BASE, USER_SIZE};
 use crate::notification;
 use crate::store::KernelStore;
@@ -20,6 +21,7 @@ use core::ptr;
 use kcore::aspace::AspaceObj;
 use kcore::channel::Channel;
 use kcore::id::{ObjId, SlotId};
+use kcore::irq::IrqObj;
 use kcore::notification::NotifObj;
 use kcore::sysabi::{self, Sys, SysError};
 use kcore::thread::Tcb;
@@ -54,6 +56,10 @@ unsafe fn notif_ptr(o: ObjId) -> *mut NotifObj {
 #[inline]
 unsafe fn timer_ptr(o: ObjId) -> *mut TimerObj {
     o.0 as *mut TimerObj
+}
+#[inline]
+unsafe fn irq_ptr(o: ObjId) -> *mut IrqObj {
+    o.0 as *mut IrqObj
 }
 
 pub const ERR_BADSLOT: i64 = -1;
@@ -524,6 +530,45 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
                 bits,
                 timer::counter().saturating_add(delta),
             );
+            Some(0)
+        }
+        // irq_bind (B-IRQ-B) — the TimerArm twin: bind an IRQ-handler cap to a
+        // (notification, bits) pair, so a hardware interrupt on the line signals
+        // that notification (rev1§1, rev1§3.6). WRITE on the notif is required —
+        // the kernel signals through it (as TimerArm/ChanBind do).
+        Sys::IrqBind {
+            irq: irq_cap,
+            notif,
+            bits,
+        } => {
+            let is = cur_slot(irq_cap);
+            let ns = cur_slot(notif);
+            if is.is_null() || ns.is_null() {
+                return Some(ERR_BADSLOT);
+            }
+            let CapKind::Irq(i) = (*is).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            let CapKind::Notification(n) = (*ns).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            if !(*ns).cap.rights.has(Rights::WRITE) {
+                return Some(ERR_PERM);
+            }
+            irq::bind(irq_ptr(i), notif_ptr(n), bits);
+            Some(0)
+        }
+        // irq_ack (B-IRQ-B) — the "acknowledge" half of rev1§1: clear the mask
+        // and re-enable the line after the driver has serviced the device.
+        Sys::IrqAck { irq: irq_cap } => {
+            let is = cur_slot(irq_cap);
+            if is.is_null() {
+                return Some(ERR_BADSLOT);
+            }
+            let CapKind::Irq(i) = (*is).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            irq::ack(irq_ptr(i));
             Some(0)
         }
         // thread_exit — the only voluntary stop (rev1§5.1). The kernel records

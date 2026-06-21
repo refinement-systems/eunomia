@@ -48,6 +48,22 @@ impl IrqObj {
             masked: false,
         });
     }
+
+    /// Boot-static constructor (B-IRQ-B, Design decision 3): a `const` IRQ object
+    /// for the kernel's fixed `IRQ_TABLE`. The `init` value as a `const fn`, so the
+    /// trusted shell can place the IRQ objects in the kernel image (the device-MMIO
+    /// -frame precedent) rather than retype them from untyped — no `ExIrqObj` seam.
+    /// Unbound, unmasked, `refs = 1` (the init grant), carrying `intid`.
+    pub const fn boot_static(intid: u32) -> IrqObj {
+        IrqObj {
+            hdr: ObjHeader { refs: 1 },
+            intid,
+            notif: None,
+            bits: 0,
+            bound: false,
+            masked: false,
+        }
+    }
 }
 
 verus! {
