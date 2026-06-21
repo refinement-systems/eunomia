@@ -13,8 +13,13 @@
 #   6  channel whole-object teardown (rev1§3.3): revoking a channel's backing
 #      sub-untyped fired every endpoint's peer-closed binding before
 #      reclamation, into a separately-funded notification that survived
+#   7  device IRQ → notification (rev1§1, rev1§3.6): a bound PL011 IRQ-handler
+#      cap signalled its notification through the real GIC + exception path,
+#      was acked, and a second interrupt was delivered (the mask-on-deliver /
+#      unmask-on-ack cycle). The line is software-pended from EL1 on the
+#      m1-test path (no real device, no stdin); see doc/results/9_b-irq-c.
 #
-# Success is exactly the line "123456M1 PASS" with no error marker
+# Success is exactly the line "1234567M1 PASS" with no error marker
 # ("E<tag>!"), no "M1 FAIL", and no PANIC.
 set -euo pipefail
 
@@ -58,14 +63,14 @@ kill "$QPID" 2>/dev/null || true
 wait "$QPID" 2>/dev/null || true
 trap - EXIT
 
-if ! grep -q '123456M1 PASS' "$LOG"; then
-    echo "M1 TEST FAIL: did not reach the full marker sequence '123456M1 PASS'" >&2
+if ! grep -q '1234567M1 PASS' "$LOG"; then
+    echo "M1 TEST FAIL: did not reach the full marker sequence '1234567M1 PASS'" >&2
     grep -nE 'M1 FAIL|PANIC|E.!|1234' "$LOG" >&2 || true
     tail -40 "$LOG" >&2
     exit 1
 fi
 
 echo "M1 TEST PASS:"
-echo "  123456M1 PASS — caps/CDT, revoke-through-queue + cspace, timer,"
-echo "  thread reports (exit(42), rights gating), and rev1§3.3 channel"
-echo "  whole-object teardown firing every peer-closed binding"
+echo "  1234567M1 PASS — caps/CDT, revoke-through-queue + cspace, timer,"
+echo "  thread reports (exit(42), rights gating), rev1§3.3 channel"
+echo "  whole-object teardown, and the rev1§3.6 device-IRQ → notification path"
