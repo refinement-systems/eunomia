@@ -247,6 +247,11 @@ impl Store for KernelStore {
     }
 
     // ── hardware / scheduler seam ─────────────────────────────────────────
+    // B8C-3: both realizations now route through the verified `kcore::ready` ops via the
+    // thin `crate::thread` wrappers (`enqueue` → `ready_enqueue`, `unqueue_ready` →
+    // `ready_unqueue`), so `destroy_tcb`'s `store.unqueue_ready(t)` and `signal`/`fire`'s
+    // `store.make_runnable(t)` execute verified list logic — the seam contracts in
+    // `kcore::cspace` (the `StoreSpec` lift of those ops) are discharged by verified code.
     fn make_runnable(&mut self, t: ObjId) {
         unsafe { crate::thread::enqueue(obj_ptr::<Tcb>(t)) }
     }
@@ -288,5 +293,26 @@ impl Store for KernelStore {
     }
     fn set_timer_armed_head(&mut self, h: Option<ObjId>) {
         unsafe { crate::timer::set_armed_head(obj_or_null::<TimerObj>(h)) }
+    }
+    // ── ready queue (B8C): the per-level head/tail + bitmap, realized over the
+    //    `READY`/`READY_BITMAP` kernel statics. The verified `kcore::ready` ops run
+    //    against these by-handle accessors (the trusted ObjId↔`*mut Tcb` link seam).
+    fn ready_head(&self, level: usize) -> Option<ObjId> {
+        unsafe { crate::thread::ready_head_at(level) }
+    }
+    fn set_ready_head(&mut self, level: usize, h: Option<ObjId>) {
+        unsafe { crate::thread::set_ready_head_at(level, h) }
+    }
+    fn ready_tail(&self, level: usize) -> Option<ObjId> {
+        unsafe { crate::thread::ready_tail_at(level) }
+    }
+    fn set_ready_tail(&mut self, level: usize, t: Option<ObjId>) {
+        unsafe { crate::thread::set_ready_tail_at(level, t) }
+    }
+    fn ready_bitmap(&self) -> u32 {
+        unsafe { crate::thread::ready_bitmap_get() }
+    }
+    fn set_ready_bitmap(&mut self, b: u32) {
+        unsafe { crate::thread::ready_bitmap_set(b) }
     }
 }

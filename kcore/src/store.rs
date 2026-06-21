@@ -141,4 +141,16 @@ pub trait Store {
     /// proofs — the list *logic* lives in [`crate::timer`]).
     fn timer_armed_head(&self) -> Option<ObjId>;
     fn set_timer_armed_head(&mut self, h: Option<ObjId>);
+
+    /// The 32-level ready queue: per-level list head/tail + a `u32` presence bitmap
+    /// (the `READY`/`READY_BITMAP` kernel statics in production, the array backing in
+    /// host tests). The list *logic* — enqueue/dequeue/unqueue/top — is the verified
+    /// [`crate::ready`] ops; these are the by-handle accessors they run against.
+    /// `level` is a priority `< NUM_PRIOS`.
+    fn ready_head(&self, level: usize) -> Option<ObjId>;
+    fn set_ready_head(&mut self, level: usize, h: Option<ObjId>);
+    fn ready_tail(&self, level: usize) -> Option<ObjId>;
+    fn set_ready_tail(&mut self, level: usize, t: Option<ObjId>);
+    fn ready_bitmap(&self) -> u32;
+    fn set_ready_bitmap(&mut self, b: u32);
 }
