@@ -4,6 +4,7 @@ members = [
     "kernel",
     "kcore",
     "ipc",
+    "freelist",
     "dma-pool",
     "cas",
     "storage-server",

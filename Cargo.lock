@@ -163,6 +163,7 @@ dependencies = [
 name = "dma-pool"
 version = "0.1.0"
 dependencies = [
+ "freelist",
  "proptest",
  "vstd",
 ]
@@ -218,6 +219,14 @@ name = "foldhash"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
+
+[[package]]
+name = "freelist"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "vstd",
+]
 
 [[package]]
 name = "funty"
@@ -950,6 +959,7 @@ checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 name = "urt"
 version = "0.1.0"
 dependencies = [
+ "freelist",
  "ipc",
  "loom",
  "proptest",

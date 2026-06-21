@@ -42,8 +42,9 @@ decode (`wal_struct_ok`/`e_payload_ok`, the verified half of `wal_content_ok`),
 **gap-freedom composition** (`lemma_gap_freedom` + `lemma_run_len_covers` /
 `lemma_laid_out_mono`), now *live* — fired by `recover_records` on the rebuilt run, its
 `laid_out` premise discharged rather than assumed; the IPC fixed header + window-quota
-`Admission`; the DMA-pool `FreeList`; and `urt`'s slot bitmap and seqlock `utc_ns_at`. The
-seams below are the irreducible remainder.
+`Admission`; the shared `FreeList` (extracted to the `freelist` crate in B11A — used by
+`dma-pool` and, from B11B, the `urt` heap); and `urt`'s slot bitmap and seqlock `utc_ns_at`.
+The seams below are the irreducible remainder.
 
 GC mark-set **sufficiency** (every object reachable from a live root is in the mark set)
 and the mark **walk bound** are, by design, *neither* in the verified surface *nor* a
@@ -143,8 +144,9 @@ Any phase touching these must re-establish them at ≥ the prior numbers.
 | kcore object core | `cargo verus verify -p kcore` | 389 verified, 0 errors |
 | CAS decode + recovery cores | `cargo verus verify -p cas --no-default-features` | 65 verified, 0 errors |
 | IPC header + session codecs | `cargo verus verify -p ipc` | 58 verified, 0 errors |
-| DMA-pool `FreeList` (core + `is_full`/`is_allocated` wrapper-guard accessors) | `cargo verus verify -p dma-pool` | 29 verified, 0 errors |
-| urt slots + time | `cargo verus verify -p urt` | verified (slot bitmap + `utc_ns_at`) |
+| shared `FreeList` (free-list allocator core + `is_full`/`is_allocated` guard accessors; extracted from dma-pool in B11A) | `cargo verus verify -p freelist` | 29 verified, 0 errors |
+| DMA-pool wrapper (plain-Rust PA seam; discharges `FreeList`'s preconditions via the `freelist` guards) | `cargo verus verify -p dma-pool` | 0 verified, 0 errors (the 29 obligations moved to `freelist`, not weakened) |
+| urt slots + time | `cargo verus verify -p urt` | verified (slot bitmap + `utc_ns_at`); also re-checks the `freelist` dep (29/0) |
 | TLA+ | `CommitProtocol` (6886 states; the `RecoverReconstructs` replay-equality action property + the committed negative control `CommitProtocol_NegControl.cfg`, which reports the expected violation), `CapRevocation` (B9C: stepwise revoke — `RevokeBegin`/`RevokeStep`/`RevokeEnd` over a `revoking` marker, `Copy` derive-guard; 503,070 distinct states with the safety invariants checked at every mid-revoke interleaved state + `EventuallyRevoked` liveness under weak fairness; two committed negative controls — `CapRevocation_NegControl.cfg` reports the `LiveParent` violation under a non-leaf delete, `CapRevocation_NegLiveness.cfg` the `EventuallyRevoked` livelock when the guard is dropped; constants trimmed to Threads 1 / QueueDepth 1 because the full-scale liveness tableau exhausts heap — see `doc/results/4_b9c-findings.md`), `CapRevocation_Teardown` (TSpec, 252 states, unchanged), `IpcReactor` (with a negative control) | pass |
 | Fuzzing | wire/on-disk/ELF decoders + mount/recovery cargo-fuzz targets + the GC mark-walk target (`gc_mark`), committed corpora + Miri replay | green |
 
