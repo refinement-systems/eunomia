@@ -3,7 +3,8 @@
 //! supplies the `KernelStore`-bound wrappers for the few ops that fire events or
 //! tear objects down — wrapping the raw `*mut CapSlot` call sites into
 //! [`SlotId`](kcore::id::SlotId) handles. Call sites elsewhere in the kernel see
-//! the same `cspace::delete(slot)` / `cspace::revoke(slot)` signatures as before.
+//! the same `cspace::delete(slot)` / `cspace::revoke_step(slot, budget)`
+//! signatures as before.
 
 pub use kcore::cspace::*;
 
@@ -27,9 +28,14 @@ pub unsafe fn map_frame(
     kcore::cspace::map_frame(&mut KernelStore, SlotId(slot as u64), asp, va, perms)
 }
 
-/// See [`kcore::cspace::revoke`].
-pub unsafe fn revoke(slot: *mut CapSlot) {
-    kcore::cspace::revoke(&mut KernelStore, SlotId(slot as u64));
+/// See [`kcore::cspace::revoke_step`] (B9). Does at most `budget` leaf-deletions of
+/// the revoke walk and returns [`RevokeStatus::Done`] when the subtree is empty or
+/// [`RevokeStatus::More`] when the budget is exhausted with descendants remaining —
+/// the bounded quantum the `CapRevoke` handler maps to `0` / `ERR_AGAIN`. The
+/// unbounded [`kcore::cspace::revoke`] is left in kcore but no longer driven from the
+/// kernel: the revoke surface is preemptible (rev1§2.2, rev1§5.4).
+pub unsafe fn revoke_step(slot: *mut CapSlot, budget: usize) -> RevokeStatus {
+    kcore::cspace::revoke_step(&mut KernelStore, SlotId(slot as u64), budget)
 }
 
 // `unref_aspace` / `unref_cspace` take a store and are reached only from

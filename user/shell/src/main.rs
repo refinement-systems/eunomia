@@ -572,7 +572,9 @@ impl Spawner {
     /// Safe with nothing carved: revoke of a childless untyped is a no-op.
     fn scrub(&self, time_copy: u32) {
         let _ = sys::cap_delete(time_copy);
-        sys::cap_revoke(DONATION);
+        // B9: revoke is now a bounded per-call quantum returning ERR_AGAIN until
+        // the subtree is empty; loop to completion (childless donation → one call).
+        sys::cap_revoke_all(DONATION);
         let _ = sys::untyped_reset(DONATION);
     }
 

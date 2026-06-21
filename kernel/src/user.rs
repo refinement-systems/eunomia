@@ -152,7 +152,16 @@ unsafe fn cap_copy_prio(src: u64, dst: u64, rights: u64, prio_ceiling: u64) -> i
 
 #[inline(always)]
 unsafe fn cap_revoke(slot: u64) -> i64 {
-    sys(6, slot, 0, 0, 0, 0, 0)
+    // B9: CapRevoke runs one bounded quantum and returns ERR_AGAIN (-12) while
+    // descendants remain (rev1§2.2 preemptible/restartable). Loop until the
+    // subtree is empty so the `check`-ing call sites see only a terminal status.
+    // (No yield needed: T2 is parked; the loop terminates as the subtree shrinks.)
+    loop {
+        let r = sys(6, slot, 0, 0, 0, 0, 0);
+        if r != -12 {
+            return r;
+        }
+    }
 }
 
 #[inline(always)]
