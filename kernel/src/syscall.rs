@@ -765,5 +765,35 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
                 Err(_) => ERR_STATE,
             })
         }
+        // aspace_topup(aspace, ut, pages) — grow the aspace's page-table pool by
+        // `pages` tables carved to abut its current end from the donated untyped
+        // (rev1§2.5 "accepts top-ups", B10B). Makes an exhausted-pool `ERR_NOMEM`
+        // recoverable: the caller donates untyped, grows the pool, retries `map`.
+        // Validation mirrors `Sys::Map` (aspace cap + WRITE right); the untyped
+        // needs no rights check, as `Sys::Retype`. The carve/accounting is the
+        // trusted shell (`untyped::aspace_topup`); growth soundness is the
+        // verified `lemma_grow_pool`.
+        Sys::AspaceTopUp { aspace, ut, pages } => {
+            let asp_slot = cur_slot(aspace);
+            let ut_slot = cur_slot(ut);
+            if asp_slot.is_null() || ut_slot.is_null() {
+                return Some(ERR_BADSLOT);
+            }
+            let CapKind::Aspace(asp) = (*asp_slot).cap.kind else {
+                return Some(ERR_TYPE);
+            };
+            if !(*asp_slot).cap.rights.has(Rights::WRITE) {
+                return Some(ERR_PERM);
+            }
+            Some(match untyped::aspace_topup(ut_slot, aspace_ptr(asp), pages) {
+                Ok(()) => 0,
+                // not an untyped cap
+                Err(RetypeError::NotUntyped) => ERR_TYPE,
+                // the untyped has no room for `pages` more tables
+                Err(RetypeError::NoMemory) => ERR_NOMEM,
+                // non-abutting untyped, or pages == 0 / overflow
+                Err(_) => ERR_ARG,
+            })
+        }
     }
 }

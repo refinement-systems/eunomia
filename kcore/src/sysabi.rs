@@ -65,6 +65,7 @@ pub enum Sys {
     ThreadBind { tcb: u64, which: usize, notif: u64, bits: u64 },
     ReadReport { tcb: u64 },
     UntypedReset { slot: u64 },
+    AspaceTopUp { aspace: u64, ut: u64, pages: u64 },
 }
 
 /// A decode-time validation failure. The kernel maps every variant to
@@ -109,8 +110,8 @@ fn decode_prio(raw: u64) -> (result: Result<u8, SysError>)
 /// in the verified fragment.
 pub fn decode(nr: u64, a: [u64; 6]) -> (result: Result<Sys, SysError>)
     ensures
-        // rev1§3.7: every `nr` outside the defined 0..=23 range is `UnknownCall`.
-        nr >= 24 ==> result matches Err(SysError::UnknownCall),
+        // rev1§3.7: every `nr` outside the defined 0..=24 range is `UnknownCall`.
+        nr >= 25 ==> result matches Err(SysError::UnknownCall),
         // Retype with an out-of-range `ObjType` discriminant is `BadObjType`
         // (via `ObjType::from_u64`'s `None`-iff-`v >= 8` characterization).
         (nr == 3 && a@[1] >= 8) ==> result matches Err(SysError::BadObjType),
@@ -186,6 +187,10 @@ pub fn decode(nr: u64, a: [u64; 6]) -> (result: Result<Sys, SysError>)
         }
         22 => Sys::ReadReport { tcb: a[0] },
         23 => Sys::UntypedReset { slot: a[0] },
+        // B10B: grow an aspace's page-table pool from a donated untyped (rev1§2.5
+        // "accepts top-ups"). Three raw `u64`s, all validated downstream by the
+        // abutment carve + `grow_pool`, so no decode-time range `ensures`.
+        24 => Sys::AspaceTopUp { aspace: a[0], ut: a[1], pages: a[2] },
         _ => return Err(SysError::UnknownCall),
     })
 }
@@ -212,11 +217,22 @@ mod tests {
                 caps: 0
             })
         );
+        // B10B: the new top-up opcode packs three raw u64s.
+        assert_eq!(
+            decode(24, [3, 5, 8, 0, 0, 0]),
+            Ok(Sys::AspaceTopUp {
+                aspace: 3,
+                ut: 5,
+                pages: 8
+            })
+        );
     }
 
     #[test]
     fn validation_rejects() {
         assert_eq!(decode(99, [0; 6]), Err(SysError::UnknownCall));
+        // B10B moved the defined range to 0..=24, so 25 is the new first unknown.
+        assert_eq!(decode(25, [0; 6]), Err(SysError::UnknownCall));
         assert_eq!(decode(3, [0, 99, 0, 0, 0, 0]), Err(SysError::BadObjType)); // bad ObjType
         assert_eq!(
             decode(8, [0, 0, MSG_PAYLOAD as u64 + 1, 0, 0, 0]),

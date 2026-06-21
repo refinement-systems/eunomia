@@ -103,3 +103,66 @@ pub unsafe fn retype(
     retype_install(&mut KernelStore, ut_id, ty, kind, c.end, dst_id, dst2_id);
     Ok(())
 }
+
+/// Top-up an aspace's intermediate-page-table pool from a donated untyped
+/// (rev1§2.5 "accepts top-ups", B10B). Carve `pages` zeroed 4 KiB tables that
+/// physically abut the pool's current end out of `ut_slot`, advance the
+/// untyped's watermark — so the bytes are debited from the caller's untyped and
+/// reclaimed by the same `revoke + UntypedReset` that frees the aspace (no new
+/// cap, Design decision 2) — then grow the pool. The abutment check is the
+/// trusted-shell discharge of [`crate::aspace::grow_pool`]'s "fresh tables
+/// contiguous at `pool_base + old_len*PAGE`" premise; soundness of the growth
+/// itself is the verified [`kcore::aspace::lemma_grow_pool`].
+///
+/// pre:  `ut_slot` is a live cap slot; `asp` points at a live AspaceObj.
+/// post: on `Ok`, the untyped's watermark advanced by `pages * PAGE`, the new
+///       tables are zeroed, and `pool_pages += pages`.
+pub unsafe fn aspace_topup(
+    ut_slot: *mut CapSlot,
+    asp: *mut AspaceObj,
+    pages: u64,
+) -> Result<(), RetypeError> {
+    use kcore::aspace::PAGE;
+
+    let CapKind::Untyped {
+        base,
+        size,
+        watermark,
+    } = (*ut_slot).cap.kind
+    else {
+        return Err(RetypeError::NotUntyped);
+    };
+    if pages == 0 {
+        return Err(RetypeError::BadArg);
+    }
+    let bytes = match pages.checked_mul(PAGE) {
+        Some(b) => b,
+        None => return Err(RetypeError::BadArg),
+    };
+    // The pool's current physical end. The abutment contract (Design decision 1):
+    // the untyped's free pointer must equal it, so the carved tables extend the
+    // pool with no gap and `pool_index_spec`'s single affine base stays valid.
+    // Equality also forces the free pointer page-aligned, so `carve_place` rounds
+    // nothing and `c.start == pool_end`.
+    let pool_end = (*asp).pool_base + (*asp).pool_pages * PAGE;
+    if base + watermark != pool_end {
+        return Err(RetypeError::BadArg);
+    }
+    // Placement + room check via the verified carve (NoMemory if it overruns the
+    // untyped). `c.end == pool_end + bytes`.
+    let c = carve_place(base, size, watermark, PAGE, bytes)?;
+    // Advance the watermark exactly as `retype_install` would, but install no
+    // cap: the pool is internal to the aspace (rev1§2.5 gives up per-table caps).
+    // Only the watermark value changes — no verified cspace invariant constrains
+    // it — so this direct write is the trusted int→ptr posture (`KernelStore::
+    // set_slot` is literally `*slot_ptr = v`).
+    (*ut_slot).cap.kind = CapKind::Untyped {
+        base,
+        size,
+        watermark: c.end - base,
+    };
+    // Zero the carved tables and bump `pool_pages`; `pool_view`/`map` then rebuild
+    // the larger slice automatically (no map-path change).
+    crate::aspace::grow_pool(asp, pages);
+    Ok(())
+}
