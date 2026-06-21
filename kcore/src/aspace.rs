@@ -848,6 +848,159 @@ proof fn lemma_link_l1_lookup(
     }
 }
 
+/// `pool_index_spec` only **widens** its accept set as `pool_len` grows: a
+/// descriptor that resolves to an in-range index under `old_len` resolves to the
+/// **same** index under any `new_len >= old_len`. The computed offset
+/// `(pa - pool_base)/PAGE` is `pool_len`-independent — only the `>= pool_len`
+/// bound check uses it — so a `Some` from `old_len` (whose index is `< old_len`)
+/// re-passes the wider bound unchanged. The arithmetic linchpin of the pool
+/// top-up's monotone widening ([`lemma_grow_pool`]).
+proof fn lemma_pool_index_widen(pool_base: u64, old_len: nat, new_len: nat, desc: u64)
+    requires
+        old_len <= new_len,
+        pool_index_spec(pool_base, old_len, desc) is Some,
+    ensures
+        pool_index_spec(pool_base, new_len, desc) == pool_index_spec(pool_base, old_len, desc),
+        pool_index_spec(pool_base, old_len, desc).unwrap() < old_len,
+{
+}
+
+/// Extending the table pool with `new_len - old_len` zeroed tables appended after
+/// the current `old_len` (the first `old_len` tables, `pool_used`, the L1 table,
+/// and the leaf partition all unchanged) preserves `pt_wf` and **changes no
+/// `pt_lookup`** — the verified monotone-widening core of the aspace pool top-up
+/// (rev1§2.5 "accepts top-ups", B10). Every live descriptor targets an index
+/// `< pool_used <= old_len <= new_len`, untouched by the tail extension, and
+/// `pool_index_spec`'s accept set only widens ([`lemma_pool_index_widen`]). The
+/// existing `pool_len`-parameterized `pt_wf`/walker (`map_in`/`unmap_in`/
+/// `range_mapped_in`/`alloc_table`) are reused **unchanged**; this is the whole
+/// reason the top-up is a widening lemma, not a page-table-model rewrite. It is
+/// the machine-checked justification that the trusted shell's `grow_pool`
+/// (`kernel/src/aspace.rs`) keeps `map_in`'s `pt_wf` precondition true.
+pub proof fn lemma_grow_pool(
+    l1: Seq<u64>,
+    pool: Seq<[u64; 512]>,
+    grown: Seq<[u64; 512]>,
+    pool_base: u64,
+    pool_used: nat,
+    old_len: nat,
+    new_len: nat,
+)
+    requires
+        pt_wf(l1, pool, pool_base, pool_used, old_len),
+        old_len <= new_len,
+        grown.len() == new_len,
+        forall|t: int| #![trigger grown[t]] 0 <= t < old_len ==> grown[t] == pool[t],
+    ensures
+        pt_wf(l1, grown, pool_base, pool_used, new_len),
+        forall|w: u64| #![trigger pt_lookup(l1, grown, pool_base, w)]
+            pt_lookup(l1, grown, pool_base, w) == pt_lookup(l1, pool, pool_base, w),
+{
+    let leaves = choose|lv: Set<nat>| pt_wf_leveled(l1, pool, pool_base, pool_used, old_len, lv);
+    // The old (a) clause gives `pool_used <= old_len`, so every table the live tree
+    // touches lies in the unchanged prefix `grown[t] == pool[t]` (t < pool_used).
+    assert(pt_wf_leveled(l1, grown, pool_base, pool_used, new_len, leaves)) by {
+        // (b1) L1 → inner: same descriptor (l1 unchanged), index widened.
+        assert forall|i: int| #![trigger l1[i]]
+            0 <= i < 512 && l1[i] & DESC_TABLE == DESC_TABLE implies {
+                &&& pool_index_spec(pool_base, new_len, l1[i]) is Some
+                &&& pool_index_spec(pool_base, new_len, l1[i]).unwrap() < pool_used
+                &&& !leaves.contains(pool_index_spec(pool_base, new_len, l1[i]).unwrap())
+            } by {
+            lemma_pool_index_widen(pool_base, old_len, new_len, l1[i]);  // old (b1) supplies `is Some`
+        }
+        // (b2) inner → leaf: t < pool_used <= old_len, so grown[t] == pool[t].
+        assert forall|t: int, e: int| #![trigger grown[t][e]]
+            0 <= t < pool_used && !leaves.contains(t as nat) && 0 <= e < 512
+                && grown[t][e] & DESC_TABLE == DESC_TABLE implies {
+                &&& pool_index_spec(pool_base, new_len, grown[t][e]) is Some
+                &&& pool_index_spec(pool_base, new_len, grown[t][e]).unwrap() < pool_used
+                &&& leaves.contains(pool_index_spec(pool_base, new_len, grown[t][e]).unwrap())
+            } by {
+            assert(grown[t] == pool[t]);            // t < pool_used <= old_len
+            assert(grown[t][e] == pool[t][e]);
+            lemma_pool_index_widen(pool_base, old_len, new_len, pool[t][e]);  // old (b2) supplies `is Some`
+        }
+        // (c1) L1 injective: both targets in-range, so widened indices equal old.
+        assert forall|i: int, j: int| #![trigger l1[i], l1[j]]
+            0 <= i < 512 && 0 <= j < 512 && i != j
+                && l1[i] & DESC_TABLE == DESC_TABLE && l1[j] & DESC_TABLE == DESC_TABLE
+            implies pool_index_spec(pool_base, new_len, l1[i])
+                        != pool_index_spec(pool_base, new_len, l1[j]) by {
+            lemma_pool_index_widen(pool_base, old_len, new_len, l1[i]);
+            lemma_pool_index_widen(pool_base, old_len, new_len, l1[j]);
+        }
+        // (c2) inner-table descriptors injective across inner tables.
+        assert forall|t1: int, e1: int, t2: int, e2: int| #![trigger grown[t1][e1], grown[t2][e2]]
+            0 <= t1 < pool_used && !leaves.contains(t1 as nat) && 0 <= e1 < 512
+                && 0 <= t2 < pool_used && !leaves.contains(t2 as nat) && 0 <= e2 < 512
+                && !(t1 == t2 && e1 == e2)
+                && grown[t1][e1] & DESC_TABLE == DESC_TABLE
+                && grown[t2][e2] & DESC_TABLE == DESC_TABLE
+            implies pool_index_spec(pool_base, new_len, grown[t1][e1])
+                        != pool_index_spec(pool_base, new_len, grown[t2][e2]) by {
+            assert(grown[t1] == pool[t1] && grown[t2] == pool[t2]);
+            assert(grown[t1][e1] == pool[t1][e1] && grown[t2][e2] == pool[t2][e2]);
+            lemma_pool_index_widen(pool_base, old_len, new_len, pool[t1][e1]);
+            lemma_pool_index_widen(pool_base, old_len, new_len, pool[t2][e2]);
+        }
+    }
+    // pt_lookup is unchanged for every `w` (the walk never reaches the new tables).
+    assert forall|w: u64| #![trigger pt_lookup(l1, grown, pool_base, w)]
+        pt_lookup(l1, grown, pool_base, w) == pt_lookup(l1, pool, pool_base, w) by {
+        lemma_grow_pool_lookup(l1, pool, grown, pool_base, pool_used, old_len, new_len, leaves, w);
+    }
+}
+
+/// Per-`w` core of [`lemma_grow_pool`]'s `pt_lookup` frame: `w`'s walk reads only
+/// tables `< pool_used` (closure), all in the unchanged prefix and — crucially —
+/// at the **same** index, because the two walks use **different** `pool.len()`
+/// (old vs new) but [`lemma_pool_index_widen`] bridges each level. If `w`'s L1
+/// entry is absent both walks dead-end at `None`.
+proof fn lemma_grow_pool_lookup(
+    l1: Seq<u64>,
+    pool: Seq<[u64; 512]>,
+    grown: Seq<[u64; 512]>,
+    pool_base: u64,
+    pool_used: nat,
+    old_len: nat,
+    new_len: nat,
+    leaves: Set<nat>,
+    w: u64,
+)
+    requires
+        pt_wf_leveled(l1, pool, pool_base, pool_used, old_len, leaves),
+        old_len <= new_len,
+        pool.len() == old_len,
+        grown.len() == new_len,
+        forall|t: int| #![trigger grown[t]] 0 <= t < old_len ==> grown[t] == pool[t],
+    ensures
+        pt_lookup(l1, grown, pool_base, w) == pt_lookup(l1, pool, pool_base, w),
+{
+    lemma_va_indices(w);
+    assert(pool.len() == old_len && grown.len() == new_len);  // align both walks' pool_index_spec
+    let i1 = spec_l1_index(w) as int;
+    if l1[i1] & DESC_TABLE == DESC_TABLE {
+        // After: walk uses grown.len()==new_len; before: pool.len()==old_len. The
+        // L1 target resolves to the same inner table `l2i < pool_used` either way.
+        let l2i = pool_index_spec(pool_base, old_len, l1[i1]).unwrap();  // (b1) closure: Some, < pool_used
+        lemma_pool_index_widen(pool_base, old_len, new_len, l1[i1]);
+        assert(l2i < pool_used);
+        assert(grown[l2i as int] == pool[l2i as int]);
+        let l2e = pool[l2i as int][spec_l2_index(w) as int];
+        if l2e & DESC_TABLE == DESC_TABLE {
+            assert(!leaves.contains(l2i));  // l1 target is inner (b1)
+            let l3i = pool_index_spec(pool_base, old_len, l2e).unwrap();  // (b2) closure: Some, < pool_used
+            lemma_pool_index_widen(pool_base, old_len, new_len, l2e);
+            assert(l3i < pool_used);
+            assert(grown[l3i as int] == pool[l3i as int]);
+        }
+    }
+    // every read on `w`'s walk matched (same indices, same tables), so the two
+    // walks coincide.
+    assert(pt_lookup(l1, grown, pool_base, w) == pt_lookup(l1, pool, pool_base, w));
+}
+
 /// Linking a **fresh, zeroed** leaf table (index `pu`) into a previously-empty
 /// slot `(t1, e1)` of an **inner** table `t1` preserves `pt_wf` (with `pu` joining
 /// `leaves`) and **frames every nonzero leaf**: a page that was mapped stays

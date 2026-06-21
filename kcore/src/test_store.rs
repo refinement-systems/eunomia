@@ -5804,6 +5804,94 @@ fn randomized_map_sweep() {
     );
 }
 
+// ── aspace pool top-up: `grow_pool` (B10) continues mapping past exhaustion ──
+//
+// The verified core is `kcore::aspace::lemma_grow_pool` (a monotone-widening +
+// lookup-stability proof); these host checks are its runtime witness. They model
+// the trusted shell's contiguous extension (`kernel/src/aspace::grow_pool`) by a
+// `Vec::extend` of zeroed tables — exactly what `pool_view` rebuilds after the
+// shell bumps `pool_pages`.
+
+#[test]
+fn map_in_grow_pool_continues() {
+    // A 2-table pool: exactly enough for one 1-page map (L2 + L3). A second map
+    // into a different 1 GiB region needs a fresh L2 + L3, so it hits NeedMemory on
+    // the full pool. Growing the pool (the shell's contiguous extension, here a Vec
+    // extend) lets the same map succeed — the M-2 acceptance, exercised functionally.
+    let (mut l1, mut pool, mut used, base) = map_fixture(2);
+    let mut store = ArrayStore::new(0);
+    let va1 = USER_VA_BASE;
+    let va2 = USER_VA_BASE + (1u64 << 30); // a different L1 (1 GiB) region
+    let (pa1, pa2) = (0x4800_0000u64, 0x4A00_0000u64);
+    map_in(
+        &mut l1, &mut pool, &mut used, base, pa1, va1, 1, PERM_W, &mut store,
+    )
+    .unwrap();
+    assert_eq!(used, 2, "pool exhausted: one L2 + one L3");
+    // Full pool → the second region cannot allocate its tables (allocated nothing).
+    let r = map_in(
+        &mut l1, &mut pool, &mut used, base, pa2, va2, 1, PERM_W, &mut store,
+    );
+    assert_eq!(r, Err(MapError::NeedMemory));
+    assert_eq!(used, 2, "atomic: the full pool allocated nothing");
+    // Grow: append zeroed tables contiguously (the shell's `grow_pool`).
+    pool.extend(core::iter::repeat([0u64; 512]).take(4));
+    // The previously-failing map now succeeds.
+    map_in(
+        &mut l1, &mut pool, &mut used, base, pa2, va2, 1, PERM_W, &mut store,
+    )
+    .unwrap();
+    assert!(
+        range_mapped_in(&l1, &pool, base, va2, PAGE, true),
+        "second region mapped after grow"
+    );
+    // …and the original mapping is untouched.
+    assert!(
+        range_mapped_in(&l1, &pool, base, va1, PAGE, true),
+        "first region still mapped"
+    );
+}
+
+#[test]
+fn map_in_grow_pool_lookup_stable() {
+    // Growing the pool changes no existing lookup (the `lemma_grow_pool` stability
+    // fact, witnessed at runtime): a mapping installed before the grow resolves to
+    // the identical leaf slot and PTE after the grow — and stays stable even after a
+    // new mapping is installed into the freshly-added tables.
+    let (mut l1, mut pool, mut used, base) = map_fixture(2);
+    let mut store = ArrayStore::new(0);
+    let va1 = USER_VA_BASE;
+    let pa1 = 0x4800_0000u64;
+    map_in(
+        &mut l1, &mut pool, &mut used, base, pa1, va1, 1, PERM_W, &mut store,
+    )
+    .unwrap();
+    let (l3, e) = lookup(&l1, &pool, base, va1).expect("present before grow");
+    let pte = pool[l3][e];
+    assert_eq!(pte, pte_encode(pa1, PERM_W));
+    // Grow the pool.
+    pool.extend(core::iter::repeat([0u64; 512]).take(4));
+    // Same leaf slot, same PTE — the extension is invisible to existing mappings.
+    assert_eq!(
+        lookup(&l1, &pool, base, va1),
+        Some((l3, e)),
+        "leaf slot unchanged by grow"
+    );
+    assert_eq!(pool[l3][e], pte, "PTE unchanged by grow");
+    // Install a new mapping into the grown region; the old one still resolves.
+    let va2 = USER_VA_BASE + (1u64 << 30);
+    map_in(
+        &mut l1, &mut pool, &mut used, base, 0x4A00_0000, va2, 1, PERM_W, &mut store,
+    )
+    .unwrap();
+    assert_eq!(
+        lookup(&l1, &pool, base, va1),
+        Some((l3, e)),
+        "first mapping stable after a new map into the grown tail"
+    );
+    assert_eq!(pool[l3][e], pte_encode(pa1, PERM_W));
+}
+
 // ── aspace `unmap_in`: the verified leaf-clear + TLBI effect-log ─────────────
 //
 // `unmap_in` runs the **real** body against the same hand-built arrays, driving

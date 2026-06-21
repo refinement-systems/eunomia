@@ -25,7 +25,11 @@ waiter queue, timer armed list, the **32-level ready queue** (its per-level
 `top_ready`/`ready_enqueue`/`ready_dequeue`/`ready_unqueue`, integrated through the
 `make_runnable`/`unqueue_ready` seams and threaded across `signal`/`fire`/the IPC fast path
 /the cspace teardown SCC/`destroy_tcb` — B8C; the scheduler *policy* and asm context switch
-stay trusted, §6.1(d)), thread report record, the aspace page-table walker, and
+stay trusted, §6.1(d)), thread report record, the aspace page-table walker (with the
+verified pool-growth lemma `grow_pool` — `lemma_grow_pool` + its monotone-widening
+helper `lemma_pool_index_widen` and per-VA stability core `lemma_grow_pool_lookup` —
+proving a contiguous pool extension preserves `pt_wf` and every existing mapping,
+rev1§2.5 "accepts top-ups", B10A), and
 `sysabi::decode`; the CAS decode + recovery-decision cores (`pick_survivor`,
 `commit_target`, `advance_head`, `decode_frame`, `recover_records` — the recovery walk
 that bounds *and* rebuilds the run, proving its `laid_out` linking invariant (B7C, T-2;
@@ -133,7 +137,7 @@ Any phase touching these must re-establish them at ≥ the prior numbers.
 
 | Surface | Command | Result |
 |---|---|---|
-| kcore object core | `cargo verus verify -p kcore` | 381 verified, 0 errors |
+| kcore object core | `cargo verus verify -p kcore` | 384 verified, 0 errors |
 | CAS decode + recovery cores | `cargo verus verify -p cas --no-default-features` | 65 verified, 0 errors |
 | IPC header + session codecs | `cargo verus verify -p ipc` | 58 verified, 0 errors |
 | DMA-pool `FreeList` (core + `is_full`/`is_allocated` wrapper-guard accessors) | `cargo verus verify -p dma-pool` | 29 verified, 0 errors |
