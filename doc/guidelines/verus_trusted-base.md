@@ -42,8 +42,14 @@ decode (`wal_struct_ok`/`e_payload_ok`, the verified half of `wal_content_ok`),
 **gap-freedom composition** (`lemma_gap_freedom` + `lemma_run_len_covers` /
 `lemma_laid_out_mono`), now *live* — fired by `recover_records` on the rebuilt run, its
 `laid_out` premise discharged rather than assumed; the IPC fixed header + window-quota
-`Admission`; the shared `FreeList` (extracted to the `freelist` crate in B11A — used by
-`dma-pool` and, from B11B, the `urt` heap); and `urt`'s slot bitmap and seqlock `utc_ns_at`.
+`Admission`; the shared `FreeList` (extracted to the `freelist` crate in B11A) — **the
+verified allocation algorithm behind both `dma-pool` and, since B11B, the `urt` heap
+allocator** (first-fit search, alignment round-up, split, two-sided address-ordered coalesce,
+proven over the side-stored `(offset, len)`-extent model); and `urt`'s slot bitmap, seqlock
+`utc_ns_at`, and that heap free-list. The `urt` heap's arena byte-region (`UnsafeCell<[u8; N]>`
++ the `base.add(off)` / `(p as usize) - base` seam) is the lone trusted plain-Rust step left in
+the allocator — the DMA-pool wrapper's posture exactly, kept honest by the B11C Miri+proptest
+tier rather than a `verus!{}` construct (so it adds nothing to the seam tally; Baselines below).
 The seams below are the irreducible remainder.
 
 GC mark-set **sufficiency** (every object reachable from a live root is in the mark set)
@@ -116,6 +122,13 @@ grep-able rather than an implicit consequence of the crash semantics, as rev1§4
 2 CAS: `checksum_ok`/`wal_checksum_ok`; 1 urt: `debug_check_free`) + 6 `assume_specification`
 (3 `bytes_for` + `saturating_mul` + `checked_next_multiple_of` + `CapSlot::empty`) = **13**.
 
+> **The `urt` heap arena seam (B11C) is *not* one of these 13.** Like the DMA-pool wrapper, the
+> heap allocator's trusted step — `UnsafeCell<[u8; N]>` interior mutability + `base.add(off)` /
+> `(p as usize) - base` — is plain-Rust wrapper code, **not** a `verus!{}` `external_body` /
+> `assume_specification` construct. It is kept honest by the B11C Miri+proptest tier (Baselines),
+> so it leaves this tally unchanged at **13**. The heap's *algorithm* is verified (the `freelist`
+> proof), not trusted; only the byte-region boundary is trusted, exactly as for `dma-pool`.
+
 > **Reconciliation with audit §4.1.** The audit (`doc/results/0_audit_rev0.md` §4.1)
 > says "three `assume_specification`s." That count collapses the three `bytes_for` into
 > one "positivity" category and omits `CapSlot::empty` (`cspace.rs:1226`). Ground truth is
@@ -146,7 +159,7 @@ Any phase touching these must re-establish them at ≥ the prior numbers.
 | IPC header + session codecs | `cargo verus verify -p ipc` | 58 verified, 0 errors |
 | shared `FreeList` (free-list allocator core + `is_full`/`is_allocated` guard accessors; extracted from dma-pool in B11A) | `cargo verus verify -p freelist` | 29 verified, 0 errors |
 | DMA-pool wrapper (plain-Rust PA seam; discharges `FreeList`'s preconditions via the `freelist` guards) | `cargo verus verify -p dma-pool` | 0 verified, 0 errors (the 29 obligations moved to `freelist`, not weakened) |
-| urt slots + time | `cargo verus verify -p urt` | verified (slot bitmap + `utc_ns_at`); also re-checks the `freelist` dep (29/0) |
+| urt slots + time + heap | `cargo verus verify -p urt` | **29 verified, 0 errors** — urt's *own* surface (slot bitmap + `utc_ns_at`). The heap allocator's *algorithm* is the `freelist` dep it re-checks transitively (**29/0**, the proof rewired in B11B); the heap *wrapper* is a plain-Rust arena seam (`UnsafeCell<[u8; N]>` + `base.add(off)`), **0 obligations**, kept honest by the B11C Miri+proptest tier (`cargo +nightly miri test -p urt`). Disclosed MVP bounds in that wrapper (test-routed, not Verus-mechanized): `HEAP_RANGES = 1024` fragmentation cap, `MAX_ALIGN = 64`, `dealloc`-at-cap → safe leak (never aborts a free) — see `urt/src/lib.rs` module doc. *(Corrects B11A's findings-table "58": that was 29 urt + 29 freelist summed; urt's own count is and was 29/0.)* |
 | TLA+ | `CommitProtocol` (6886 states; the `RecoverReconstructs` replay-equality action property + the committed negative control `CommitProtocol_NegControl.cfg`, which reports the expected violation), `CapRevocation` (B9C: stepwise revoke — `RevokeBegin`/`RevokeStep`/`RevokeEnd` over a `revoking` marker, `Copy` derive-guard; 503,070 distinct states with the safety invariants checked at every mid-revoke interleaved state + `EventuallyRevoked` liveness under weak fairness; two committed negative controls — `CapRevocation_NegControl.cfg` reports the `LiveParent` violation under a non-leaf delete, `CapRevocation_NegLiveness.cfg` the `EventuallyRevoked` livelock when the guard is dropped; constants trimmed to Threads 1 / QueueDepth 1 because the full-scale liveness tableau exhausts heap — see `doc/results/4_b9c-findings.md`), `CapRevocation_Teardown` (TSpec, 252 states, unchanged), `IpcReactor` (with a negative control) | pass |
 | Fuzzing | wire/on-disk/ELF decoders + mount/recovery cargo-fuzz targets + the GC mark-walk target (`gc_mark`), committed corpora + Miri replay | green |
 

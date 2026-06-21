@@ -42,7 +42,11 @@
 //!   #[global_allocator]
 //!   static HEAP: urt::Heap<{ 2 * 1024 * 1024 }> = urt::Heap::new();
 
-#![no_std]
+// `no_std` for every real build; under `cargo test` the crate links `std` so the
+// B11C wrapper proptests can use `std::panic::catch_unwind` + the panic hook (the
+// fragmentation-cap leak path's `debug_assert!` witness). Verus verification is
+// not a test build, so it still sees `no_std`. Same idiom as `dma-pool`.
+#![cfg_attr(not(test), no_std)]
 // Clippy is not a CI gate: both fire in `verus!{}` verified exec code where the
 // explicit forms are deliberate — `x = x + y` and the explicit saturating-subtract
 // branch (a hand-spelled `.saturating_sub`, which Verus has no model for). Fixing
@@ -255,6 +259,258 @@ mod tests {
             h.dealloc(victim, l);
             // The allocator keeps serving other requests after the leak.
             assert!(!h.alloc(l).is_null());
+        }
+    }
+
+    // ---- B11C: wrapper Miri + proptest tier (mirrors dma-pool's B4C). --------
+    //
+    // The verified `freelist::FreeList` proves the allocation *arithmetic*; these
+    // properties prove the wrapper *drivers* — alloc → write the bytes →
+    // dealloc/realloc over a real arena through the `UnsafeCell` + `base.add(off)`
+    // seam — are sound under randomized sequences, with Miri as the UB oracle (the
+    // rev1§6 "everything gets Miri + proptest" baseline the heap had never met).
+
+    use proptest::prelude::*;
+    use std::panic;
+
+    /// A per-allocation-unique fill: `31` is invertible mod 256, so distinct
+    /// `tag`s never share a byte sequence — an aliasing write from one live block
+    /// into another is therefore always caught as a content mismatch.
+    fn pattern(tag: u32, len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|i| tag.wrapping_mul(31).wrapping_add(i as u32) as u8)
+            .collect()
+    }
+
+    /// Run `f`, swallowing any panic message. The fragmentation-cap leak path
+    /// (Property 3) fires its `debug_assert!(false, …)` witness in debug builds,
+    /// and the default hook would flood the output across hundreds of frees. The
+    /// cap witness panics at `dealloc` entry *before* mutating the free list, and
+    /// the closures only call `&self` methods of `Heap`, so nothing observes a torn
+    /// invariant across the unwind (hence `AssertUnwindSafe` over the `UnsafeCell`).
+    fn catch_silent<R>(f: impl FnOnce() -> R) -> std::thread::Result<R> {
+        let prev = panic::take_hook();
+        panic::set_hook(Box::new(|_| {}));
+        let r = panic::catch_unwind(panic::AssertUnwindSafe(f));
+        panic::set_hook(prev);
+        r
+    }
+
+    /// The wrapper rounds every request up to `MIN_ALIGN`, so the carved extent is
+    /// `need` bytes (≥ the requested `size`). Filling the *whole* extent — not just
+    /// `size` — makes the disjointness oracle tight: any overlap of two carved
+    /// extents corrupts a neighbour's pattern even when the `size`-prefixes miss.
+    fn need_of(layout: Layout) -> usize {
+        layout.size().max(1).next_multiple_of(MIN_ALIGN)
+    }
+
+    /// Write `pat` through the raw allocation pointer (a scoped raw copy: no `&mut
+    /// [u8]` is held, so two live blocks never alias under Miri's borrow model).
+    unsafe fn fill(p: *mut u8, pat: &[u8]) {
+        ptr::copy_nonoverlapping(pat.as_ptr(), p, pat.len());
+    }
+
+    /// Read a block's `len` bytes back into a fresh `Vec` (a scoped shared view).
+    unsafe fn snapshot(p: *const u8, len: usize) -> Vec<u8> {
+        core::slice::from_raw_parts(p, len).to_vec()
+    }
+
+    /// One live allocation in the proptest model: its pointer, the `Layout` it was
+    /// requested with (needed to `dealloc`/`realloc` it), and the unique pattern
+    /// filling its whole carved extent (the no-perturbation oracle).
+    #[derive(Clone)]
+    struct Live {
+        p: *mut u8,
+        layout: Layout,
+        pat: Vec<u8>,
+    }
+
+    #[derive(Debug, Clone)]
+    enum Op {
+        Alloc { size: usize, align_log2: u32 },
+        Dealloc { idx: usize },
+        Realloc { idx: usize, new_size: usize },
+    }
+
+    fn op_strategy() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            // align = 1<<log2 ≤ 64 = MAX_ALIGN, so the request is never over-aligned.
+            (1usize..=256, 0u32..=6).prop_map(|(size, align_log2)| Op::Alloc { size, align_log2 }),
+            any::<usize>().prop_map(|idx| Op::Dealloc { idx }),
+            (any::<usize>(), 1usize..=256)
+                .prop_map(|(idx, new_size)| Op::Realloc { idx, new_size }),
+        ]
+    }
+
+    proptest! {
+        // Miri: a few cases cover the same paths; native keeps the full sweep
+        // (mirrors cas/src/file.rs). urt has no blake3, so Miri is fast.
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 256 },
+            ..ProptestConfig::default()
+        })]
+
+        /// Property 1 — alloc/dealloc/realloc round-trip + disjointness. Every live
+        /// block stays in-arena, is `align`-aligned, and its whole carved extent is
+        /// disjoint from every other live block (the wrapper corollary of
+        /// `lemma_two_allocs_disjoint`); a write to one never perturbs another. A
+        /// pointer-arithmetic bug (overlap, off-by-one split, mis-coalesce) breaks
+        /// this, and Miri validates the raw `base.add(off)` accesses underneath.
+        #[test]
+        fn alloc_dealloc_realloc_roundtrip(ops in prop::collection::vec(op_strategy(), 0..64)) {
+            const LEN: usize = 4096;
+            let h = Heap::<LEN>::new();
+            let base = h.mem.get() as *mut u8 as usize;
+            let mut live: Vec<Live> = Vec::new();
+            let mut tag: u32 = 1;
+
+            for op in ops {
+                match op {
+                    Op::Alloc { size, align_log2 } => {
+                        let align = 1usize << align_log2;
+                        let layout = Layout::from_size_align(size, align).unwrap();
+                        let need = need_of(layout);
+                        let p = unsafe { h.alloc(layout) };
+                        if !p.is_null() {
+                            let addr = p as usize;
+                            prop_assert_eq!(addr % align, 0, "misaligned alloc");
+                            prop_assert!(
+                                addr >= base && addr + need <= base + LEN,
+                                "carved extent out of arena"
+                            );
+                            // Disjoint from every other live block's carved extent.
+                            for other in &live {
+                                let oa = other.p as usize;
+                                let ob = oa + other.pat.len();
+                                prop_assert!(
+                                    addr + need <= oa || ob <= addr,
+                                    "overlapping live blocks"
+                                );
+                            }
+                            let pat = pattern(tag, need);
+                            tag = tag.wrapping_add(1);
+                            unsafe { fill(p, &pat) };
+                            prop_assert_eq!(unsafe { snapshot(p, need) }, pat.clone());
+                            live.push(Live { p, layout, pat });
+                        }
+                    }
+                    Op::Dealloc { idx } => {
+                        if !live.is_empty() {
+                            let blk = live.remove(idx % live.len());
+                            // Still intact at free time (no other op perturbed it).
+                            prop_assert_eq!(
+                                unsafe { snapshot(blk.p, blk.pat.len()) },
+                                blk.pat.clone()
+                            );
+                            unsafe { h.dealloc(blk.p, blk.layout) };
+                        }
+                    }
+                    Op::Realloc { idx, new_size } => {
+                        if !live.is_empty() {
+                            let i = idx % live.len();
+                            let blk = live[i].clone();
+                            prop_assert_eq!(
+                                unsafe { snapshot(blk.p, blk.pat.len()) },
+                                blk.pat.clone()
+                            );
+                            let np = unsafe { h.realloc(blk.p, blk.layout, new_size) };
+                            if np.is_null() {
+                                // The default realloc leaves the old block untouched.
+                                prop_assert_eq!(
+                                    unsafe { snapshot(blk.p, blk.pat.len()) },
+                                    blk.pat.clone()
+                                );
+                            } else {
+                                let nlayout =
+                                    Layout::from_size_align(new_size, blk.layout.align()).unwrap();
+                                let need = need_of(nlayout);
+                                let pat = pattern(tag, need);
+                                tag = tag.wrapping_add(1);
+                                unsafe { fill(np, &pat) };
+                                live[i] = Live { p: np, layout: nlayout, pat };
+                            }
+                        }
+                    }
+                }
+                // After every op: no live block was perturbed by another's write.
+                for blk in &live {
+                    prop_assert_eq!(unsafe { snapshot(blk.p, blk.pat.len()) }, blk.pat.clone());
+                }
+            }
+        }
+
+        /// Property 2 — exhaustion + coalescing, end-to-end through the wrapper.
+        /// Fill the heap with fixed-size blocks until `alloc` returns null (never a
+        /// bad pointer at capacity), free everything, then re-allocate (near) the
+        /// full span — two-sided coalescing restored the single extent.
+        #[test]
+        fn exhaustion_then_coalesce(block in 16usize..=256) {
+            const LEN: usize = 4096;
+            let h = Heap::<LEN>::new();
+            let l = Layout::from_size_align(block, 16).unwrap();
+            let mut ps: Vec<*mut u8> = Vec::new();
+            loop {
+                let p = unsafe { h.alloc(l) };
+                if p.is_null() {
+                    break;
+                }
+                ps.push(p);
+            }
+            prop_assert!(!ps.is_empty());
+            // Capacity reached: a further alloc is still null, not a bad pointer.
+            let over = unsafe { h.alloc(l) };
+            prop_assert!(over.is_null());
+            for p in &ps {
+                unsafe { h.dealloc(*p, l) };
+            }
+            // Everything coalesced back: a single near-full allocation fits again.
+            let span = Layout::from_size_align(LEN - 64, 16).unwrap();
+            let full = unsafe { h.alloc(span) };
+            prop_assert!(!full.is_null());
+        }
+    }
+
+    proptest! {
+        // The fragmentation-cap leg drives `nfree` toward HEAP_RANGES (1024), so a
+        // single case is a full ~2050-block carve; keep Miri to one case (the
+        // deterministic `capped_heap` tests above also exercise the exact at-cap
+        // path under Miri), native to a modest sweep for fragmentation-pattern
+        // breadth.
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 1 } else { 64 },
+            ..ProptestConfig::default()
+        })]
+
+        /// Property 3 — fragmentation cap never UB. Fully carve a heap into 16-byte
+        /// blocks, then free a random subset; each non-adjacent free adds a free
+        /// extent, marching `nfree` toward (and possibly to) HEAP_RANGES. Each
+        /// `dealloc` either records a new extent or, at the cap, leaks safely —
+        /// never UB, never an abort. Miri is the oracle: an unguarded
+        /// `FreeList::free` indexing `free[N]` would be an immediate Miri error
+        /// here, not a silent pass (the randomized companion to the deterministic
+        /// `dealloc_at_cap_*` tests).
+        #[test]
+        fn fragmentation_cap_never_ub(free_mask in prop::collection::vec(any::<bool>(), 0..2050)) {
+            const BLOCKS: usize = 2050;
+            let h = Heap::<{ BLOCKS * 16 }>::new();
+            let l = Layout::from_size_align(16, 16).unwrap();
+            let mut ps: Vec<*mut u8> = Vec::with_capacity(BLOCKS);
+            for _ in 0..BLOCKS {
+                let p = unsafe { h.alloc(l) };
+                prop_assert!(!p.is_null());
+                ps.push(p);
+            }
+            // Free the masked subset (each index at most once → no double-free).
+            // Each free is Ok (new extent) or a clean cap-leak (debug witness
+            // panics, caught here; release leaks silently) — never UB, never abort.
+            for (i, &do_free) in free_mask.iter().enumerate() {
+                if i < ps.len() && do_free {
+                    let p = ps[i];
+                    let _ = catch_silent(|| unsafe { h.dealloc(p, l) });
+                }
+            }
+            // The allocator keeps serving after the churn.
+            let _ = unsafe { h.alloc(l) };
         }
     }
 }

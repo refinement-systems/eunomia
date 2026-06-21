@@ -83,4 +83,10 @@ cargo +nightly miri test -p cas
 # The DMA-pool wrapper (the one place PAs are visible) joins the sweep as of
 # B4C: it has no fuzz corpus, so its proptests run as the crate's lib tests —
 #   MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri test -p dma-pool
+# The urt heap allocator wrapper joins as of B11C (same posture as dma-pool: no
+# fuzz corpus, so its proptests run as the crate's lib tests — randomized
+# alloc/dealloc/realloc, exhaustion, and the fragmentation-cap leak path). The
+# fragmentation-cap proptest fully carves a ~2050-block heap, so it caps Miri at
+# one case (the rest stay at 4); no blake3, so the sweep is still quick —
+#   MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri test -p urt
 ```
