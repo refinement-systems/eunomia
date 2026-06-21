@@ -719,6 +719,110 @@ fn timer_wf_exec(st: &ArrayStore) -> bool {
     true
 }
 
+// ── The ready-queue mirrors (B8C) ───────────────────────────────────────────
+//
+// Executable counterparts of `cspace::ready_seq`/`ready_wf`/`ready_complete` (ghost, so
+// erased and uncallable from test code). The verified `ready_enqueue`/`ready_dequeue`/
+// `ready_unqueue`/`top_ready` ops run against the `ArrayStore` ready backing; these mirrors
+// let the host tests assert the invariant those ops preserve, with teeth
+// (`ready_wf_exec_has_teeth`/`ready_complete_exec_has_teeth`).
+
+// Walk `level`'s ready chain from the head through `qnext`, bounded so a malformed cyclic
+// chain can't loop forever (the surplus node makes the duplicate visible to the dup check).
+fn ready_seq_exec(st: &ArrayStore, level: usize) -> Vec<ObjId> {
+    let mut out = Vec::new();
+    let mut cur = st.ready_heads[level];
+    while let Some(t) = cur {
+        out.push(t);
+        if out.len() > st.tcbs.len() + 1 {
+            break; // a cycle (walk longer than the TCB count) — caught by ready_wf_exec
+        }
+        cur = st.tcbs.get(&t.0).and_then(|tc| tc.qnext);
+    }
+    out
+}
+
+// `ready_seq_exec` as raw `u64` ids — `ObjId` has no `Debug`, so sequence assertions compare
+// the tags (the `wait_signal_fifo` idiom of reading handles through `.0`).
+fn ready_ids(st: &ArrayStore, level: usize) -> Vec<u64> {
+    ready_seq_exec(st, level).iter().map(|x| x.0).collect()
+}
+
+// The exec mirror of `cspace::ready_wf` ∧ `ready_bitmap_coherent`: across all 32 levels,
+// head-None iff tail-None; the presence bit is set iff the level is non-empty; the chain is
+// duplicate-free (acyclic) with `head`/`tail` its first/last node; and every charted node is
+// a resident, Runnable TCB at that level threaded by `qnext` (`None` at the tail). The
+// structural ready-queue invariant the ops preserve — note it does NOT fold in
+// `ready_complete` (that is a separate predicate, since `ready_unqueue` preserves only
+// `ready_complete_except`).
+fn ready_wf_exec(st: &ArrayStore) -> bool {
+    for level in 0..crate::sysabi::NUM_PRIOS {
+        let head = st.ready_heads[level];
+        let tail = st.ready_tails[level];
+        let bit = st.ready_bitmap & (1u32 << level) != 0;
+        if head.is_none() != tail.is_none() {
+            return false; // head/tail None agreement
+        }
+        let seq = ready_seq_exec(st, level);
+        if bit != !seq.is_empty() {
+            return false; // bitmap coherence: bit set iff level non-empty
+        }
+        if seq.is_empty() {
+            continue;
+        }
+        // duplicate-free (acyclic).
+        for i in 0..seq.len() {
+            for j in (i + 1)..seq.len() {
+                if seq[i].0 == seq[j].0 {
+                    return false;
+                }
+            }
+        }
+        // head/tail are the chain's first/last node.
+        if head != Some(seq[0]) || tail != Some(seq[seq.len() - 1]) {
+            return false;
+        }
+        // per-node covenant: resident, Runnable, at `level`, qnext threads to the next.
+        for (i, node) in seq.iter().enumerate() {
+            let tc = match st.tcbs.get(&node.0) {
+                Some(tc) => tc,
+                None => return false, // a charted node is not a live TCB
+            };
+            if tc.state != ThreadState::Runnable || tc.priority as usize != level {
+                return false;
+            }
+            let expect_next = if i + 1 < seq.len() {
+                Some(seq[i + 1])
+            } else {
+                None
+            };
+            if tc.qnext != expect_next {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+// The exec mirror of `cspace::ready_complete`: every Runnable thread is charted on its
+// priority level's ready chain (and that priority is in range). The completeness discipline
+// `ready_unqueue`'s splice walk and `top_ready`'s pick rely on — the ready-queue analogue of
+// `timer_complete`.
+fn ready_complete_exec(st: &ArrayStore) -> bool {
+    for (id, tc) in st.tcbs.iter() {
+        if tc.state == ThreadState::Runnable {
+            let level = tc.priority as usize;
+            if level >= crate::sysabi::NUM_PRIOS {
+                return false;
+            }
+            if !ready_seq_exec(st, level).iter().any(|x| x.0 == *id) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 // ── The cap→object consistency mirror ────────────────────────────────────────
 //
 // `caps_consistent_exec` is the executable counterpart of the ghost
@@ -1398,6 +1502,9 @@ fn check_signal_frame(st: &mut ArrayStore, n: ObjId, bits: u64) {
     assert!(fingerprint(st) == fp, "signal post: slot_view unchanged");
     assert!(st.chans == chans, "signal post: chan_view unchanged");
     assert!(notif_wf_exec(st, n), "signal post: notif_wf preserved");
+    // B8C-4: signal's wake path enqueues the woken waiter via `make_runnable`
+    // (→ `ready_enqueue`), so the ready queue stays well-formed (incl. bitmap coherence).
+    assert!(ready_wf_exec(st), "signal post: ready_wf preserved");
 }
 
 // Run the real `notification::remove_waiter` and assert its proven frame: the
@@ -1890,6 +1997,16 @@ fn check_destroy_tcb(st: &mut ArrayStore, t: ObjId) {
         st.tcbs[&t.0].qnext.is_none(),
         "destroy_tcb: queue link cleared"
     );
+    // B8C-4: the faithful detach. A Runnable `t` was spliced out of its ready chain
+    // (`unqueue_ready` → `ready_unqueue`) and then halted, so the ready queue is well-formed
+    // and `t` sits on no chain at any level — `ready_complete` is restored for the survivors.
+    assert!(ready_wf_exec(st), "destroy_tcb post: ready_wf preserved");
+    for level in 0..crate::sysabi::NUM_PRIOS {
+        assert!(
+            !ready_seq_exec(st, level).iter().any(|x| x.0 == t.0),
+            "destroy_tcb post: t spliced off every ready chain"
+        );
+    }
     assert_eq!(
         st.tcbs[&t.0].report, report0,
         "destroy_tcb: report unchanged"
@@ -2715,6 +2832,12 @@ fn signal_frame() {
         ThreadState::Runnable,
         "woken waiter made Runnable"
     );
+    // B8C-4: and enqueued at the tail of its priority level (0) — the sole node there, with
+    // the presence bit set and its qnext cleared (the precise `ready_enqueue` placement).
+    assert_eq!(ready_ids(&st, 0), vec![200], "woken waiter is the sole level-0 ready node");
+    assert!(st.ready_heads[0] == Some(ObjId(200)) && st.ready_tails[0] == Some(ObjId(200)));
+    assert_eq!(st.ready_bitmap & 1, 1, "level-0 presence bit set");
+    assert!(st.tcbs[&200].qnext.is_none(), "the enqueued thread's qnext is cleared");
 }
 
 #[test]
@@ -4914,6 +5037,402 @@ fn destroy_tcb_structural() {
 
     assert_eq!(st.refs[&50], 1, "EXIT bind cap deleted (ref decremented)");
     assert_eq!(st.refs[&51], 1, "FAULT bind cap deleted (ref decremented)");
+}
+
+// `destroy_tcb` on a thread genuinely *on* its ready chain: like `destroy_tcb_structural`,
+// but `t` (200) sits between two siblings at a shared level, so the teardown exercises the
+// faithful `unqueue_ready` splice (predecessor re-thread; the level stays non-empty so its
+// presence bit survives) before the halt promotes `ready_complete_except(t)` back to
+// `ready_complete`. The B8C-4 ready-queue half of `check_destroy_tcb`.
+#[test]
+fn destroy_tcb_splices_out_of_ready_queue() {
+    let mut st = ArrayStore::new(2);
+    st.slots[0] = detached(notif_cap(50));
+    st.slots[1] = detached(notif_cap(51));
+    st.refs.insert(50, 2);
+    st.refs.insert(51, 2);
+    st.refs.insert(200, 0); // dead (last designating cap gone) — the destroy_tcb precondition
+    let t = ObjId(200);
+    let prio = 5u8;
+    st.tcbs.insert(
+        200,
+        TcbState {
+            state: ThreadState::Inactive, // ready_enqueue flips it Runnable
+            report: Report::Running,
+            priority: prio,
+            bind_slots: [SlotId(0), SlotId(1)],
+            ..tcb_state_default()
+        },
+    );
+    let a = ObjId(201);
+    let b = ObjId(202);
+    for id in [201u64, 202] {
+        st.tcbs.insert(
+            id,
+            TcbState {
+                state: ThreadState::Inactive,
+                priority: prio,
+                ..tcb_state_default()
+            },
+        );
+    }
+    // chain at `prio`: [a, t, b] — t in the middle.
+    crate::ready::ready_enqueue(&mut st, a);
+    crate::ready::ready_enqueue(&mut st, t);
+    crate::ready::ready_enqueue(&mut st, b);
+    assert_eq!(
+        ready_ids(&st, prio as usize),
+        vec![201, 200, 202],
+        "fixture: t between two siblings"
+    );
+    assert!(
+        ready_wf_exec(&st) && ready_complete_exec(&st),
+        "fixture is a well-formed, complete ready queue"
+    );
+
+    check_destroy_tcb(&mut st, t); // asserts ready_wf + t off every chain (B8C-4 extension)
+
+    // the splice re-threaded a→b; the level stays non-empty with the bit set.
+    assert_eq!(
+        ready_ids(&st, prio as usize),
+        vec![201, 202],
+        "siblings re-threaded around t"
+    );
+    assert!(
+        st.tcbs[&a.0].qnext == Some(b),
+        "predecessor re-threaded to successor"
+    );
+    assert!(st.ready_heads[prio as usize] == Some(a));
+    assert!(st.ready_tails[prio as usize] == Some(b));
+    assert!(
+        st.ready_bitmap & (1 << prio) != 0,
+        "level still non-empty, presence bit stays"
+    );
+    assert!(
+        ready_complete_exec(&st),
+        "survivors stay charted (ready_complete restored after the halt)"
+    );
+    assert_eq!(st.refs[&50], 1, "EXIT bind cap deleted");
+    assert_eq!(st.refs[&51], 1, "FAULT bind cap deleted");
+}
+
+// ── Ready queue (B8C): the verified ops over the ArrayStore backing ──────────────
+
+// enqueue spreads threads across two levels; `top_ready` picks the highest non-empty level;
+// `ready_dequeue` is FIFO within a level (round-robin) and clears the presence bit as each
+// level empties; `ready_wf` (incl. bitmap coherence) holds throughout.
+#[test]
+fn ready_enqueue_top_dequeue_round_robin() {
+    let mut st = ArrayStore::new(0);
+    for (id, prio) in [(200u64, 5u8), (201, 5), (202, 5), (203, 9)] {
+        st.tcbs.insert(
+            id,
+            TcbState {
+                state: ThreadState::Inactive,
+                priority: prio,
+                ..tcb_state_default()
+            },
+        );
+    }
+    for id in [200u64, 201, 202, 203] {
+        crate::ready::ready_enqueue(&mut st, ObjId(id));
+        assert!(ready_wf_exec(&st), "ready_wf after enqueue {id}");
+    }
+    assert_eq!(
+        ready_ids(&st, 5),
+        vec![200, 201, 202],
+        "level-5 chain is tail-append (FIFO) insertion order"
+    );
+
+    // top_ready picks the highest non-empty level (9 over 5).
+    assert_eq!(crate::ready::top_ready(&st), Some(9), "level 9 outranks level 5");
+    assert_eq!(
+        crate::ready::ready_dequeue(&mut st, 9).map(|x| x.0),
+        Some(203),
+        "dequeue level 9 pops its sole thread"
+    );
+    assert!(ready_wf_exec(&st));
+    assert_eq!(st.ready_bitmap & (1 << 9), 0, "emptied level 9 clears its bit");
+    assert_eq!(crate::ready::top_ready(&st), Some(5), "now level 5 is highest");
+
+    // round-robin within level 5: FIFO 200, 201, 202.
+    assert_eq!(crate::ready::ready_dequeue(&mut st, 5).map(|x| x.0), Some(200));
+    assert_eq!(crate::ready::ready_dequeue(&mut st, 5).map(|x| x.0), Some(201));
+    assert!(ready_wf_exec(&st));
+    assert!(
+        st.ready_bitmap & (1 << 5) != 0,
+        "level 5 still non-empty (one thread left)"
+    );
+    assert_eq!(crate::ready::ready_dequeue(&mut st, 5).map(|x| x.0), Some(202));
+
+    // fully drained.
+    assert!(
+        crate::ready::ready_dequeue(&mut st, 5).is_none(),
+        "an empty level yields None"
+    );
+    assert_eq!(crate::ready::top_ready(&st), None, "empty queue: no ready thread");
+    assert_eq!(st.ready_bitmap, 0, "all presence bits clear");
+    assert!(ready_wf_exec(&st));
+    // dequeued threads are left Runnable-and-off-chain (maybe_switch sets them Running next).
+    for id in [200u64, 201, 202, 203] {
+        assert!(st.tcbs[&id].qnext.is_none(), "{id} qnext cleared on dequeue");
+        assert_eq!(
+            st.tcbs[&id].state,
+            ThreadState::Runnable,
+            "{id} stays Runnable post-dequeue"
+        );
+    }
+}
+
+// `ready_unqueue` splices a thread out from any position — head, middle, tail, or sole —
+// re-threading the predecessor and clearing the presence bit only when the level empties.
+#[test]
+fn ready_unqueue_splices_arbitrary_position() {
+    let level = 7usize;
+    let build = |ids: &[u64]| -> ArrayStore {
+        let mut st = ArrayStore::new(0);
+        for &id in ids {
+            st.tcbs.insert(
+                id,
+                TcbState {
+                    state: ThreadState::Inactive,
+                    priority: level as u8,
+                    ..tcb_state_default()
+                },
+            );
+        }
+        for &id in ids {
+            crate::ready::ready_enqueue(&mut st, ObjId(id));
+        }
+        st
+    };
+
+    // middle.
+    let mut st = build(&[10, 11, 12]);
+    crate::ready::ready_unqueue(&mut st, ObjId(11));
+    assert!(ready_wf_exec(&st));
+    assert_eq!(ready_ids(&st, level), vec![10, 12], "middle node removed");
+    assert!(st.tcbs[&11].qnext.is_none(), "spliced node's qnext cleared");
+    assert!(
+        st.tcbs[&10].qnext == Some(ObjId(12)),
+        "predecessor re-threaded past the removed node"
+    );
+    assert!(st.ready_bitmap & (1 << level) != 0, "non-empty level keeps its bit");
+
+    // head.
+    let mut st = build(&[10, 11, 12]);
+    crate::ready::ready_unqueue(&mut st, ObjId(10));
+    assert!(ready_wf_exec(&st));
+    assert_eq!(ready_ids(&st, level), vec![11, 12], "head removed");
+    assert!(st.ready_heads[level] == Some(ObjId(11)), "head advanced");
+
+    // tail.
+    let mut st = build(&[10, 11, 12]);
+    crate::ready::ready_unqueue(&mut st, ObjId(12));
+    assert!(ready_wf_exec(&st));
+    assert_eq!(ready_ids(&st, level), vec![10, 11], "tail removed");
+    assert!(
+        st.ready_tails[level] == Some(ObjId(11)),
+        "tail fixed up to the predecessor"
+    );
+
+    // sole node — the level empties and the bit clears.
+    let mut st = build(&[10]);
+    crate::ready::ready_unqueue(&mut st, ObjId(10));
+    assert!(ready_wf_exec(&st));
+    assert!(ready_ids(&st, level).is_empty(), "sole node removed");
+    assert_eq!(
+        st.ready_bitmap & (1 << level),
+        0,
+        "emptied level clears its bit"
+    );
+    assert!(st.ready_heads[level].is_none() && st.ready_tails[level].is_none());
+}
+
+// A randomized op sequence — enqueue / unqueue / dequeue over a thread pool spread across
+// priority levels — asserting `ready_wf` (incl. bitmap coherence) and `ready_complete` after
+// every op. The executable counterpart of the per-op ready-queue proofs across a sequence
+// (the ready-queue analogue of `randomized_fifo_sweep`). The model keeps "Runnable iff on a
+// chain" by recycling a removed thread's state to Inactive, so `ready_complete` is meaningful.
+#[test]
+fn randomized_ready_sweep() {
+    let pool: [(u64, u8); 10] = [
+        (100, 0),
+        (101, 0),
+        (102, 5),
+        (103, 5),
+        (104, 5),
+        (105, 9),
+        (106, 9),
+        (107, 31),
+        (108, 3),
+        (109, 9),
+    ];
+    let mut trials = 0usize;
+    let (mut saw_enq, mut saw_unq, mut saw_deq) = (0usize, 0usize, 0usize);
+    for seed in 0..400u64 {
+        let mut st = ArrayStore::new(0);
+        for &(id, prio) in pool.iter() {
+            st.tcbs.insert(
+                id,
+                TcbState {
+                    state: ThreadState::Inactive,
+                    priority: prio,
+                    ..tcb_state_default()
+                },
+            );
+        }
+        let mut rng = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
+        for _ in 0..30 {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let r = rng >> 33;
+            // off-queue (not Runnable) vs on-chain (Runnable) — the model keeps these in sync
+            // with chain membership by recycling removed threads' state below.
+            let off: Vec<u64> = pool
+                .iter()
+                .map(|&(id, _)| id)
+                .filter(|id| st.tcbs[id].state != ThreadState::Runnable)
+                .collect();
+            let on: Vec<u64> = pool
+                .iter()
+                .map(|&(id, _)| id)
+                .filter(|id| st.tcbs[id].state == ThreadState::Runnable)
+                .collect();
+            match r % 3 {
+                0 => {
+                    if !off.is_empty() {
+                        let id = off[(r as usize / 3) % off.len()];
+                        crate::ready::ready_enqueue(&mut st, ObjId(id));
+                        saw_enq += 1;
+                    }
+                }
+                1 => {
+                    if !on.is_empty() {
+                        let id = on[(r as usize / 3) % on.len()];
+                        crate::ready::ready_unqueue(&mut st, ObjId(id));
+                        st.tcbs.get_mut(&id).unwrap().state = ThreadState::Inactive;
+                        saw_unq += 1;
+                    }
+                }
+                _ => {
+                    let nonempty: Vec<usize> = (0..crate::sysabi::NUM_PRIOS)
+                        .filter(|&l| !ready_seq_exec(&st, l).is_empty())
+                        .collect();
+                    if !nonempty.is_empty() {
+                        let lvl = nonempty[(r as usize / 3) % nonempty.len()];
+                        if let Some(popped) = crate::ready::ready_dequeue(&mut st, lvl) {
+                            st.tcbs.get_mut(&popped.0).unwrap().state = ThreadState::Inactive;
+                            saw_deq += 1;
+                        }
+                    }
+                }
+            }
+            assert!(ready_wf_exec(&st), "ready_wf after op (seed {seed})");
+            assert!(ready_complete_exec(&st), "ready_complete after op (seed {seed})");
+            trials += 1;
+        }
+    }
+    assert!(trials > 5000, "sweep ran {trials} trials");
+    assert!(
+        saw_enq > 0 && saw_unq > 0 && saw_deq > 0,
+        "every op exercised: enq={saw_enq} unq={saw_unq} deq={saw_deq}"
+    );
+}
+
+// `ready_wf_exec` must reject each way the structural ready-queue invariant can break, else
+// the ready-queue checks above are vacuous (the `*_exec_has_teeth` discipline).
+#[test]
+fn ready_wf_exec_has_teeth() {
+    let level = 5usize;
+    let build = |ids: &[u64]| -> ArrayStore {
+        let mut st = ArrayStore::new(0);
+        for &id in ids {
+            st.tcbs.insert(
+                id,
+                TcbState {
+                    state: ThreadState::Inactive,
+                    priority: level as u8,
+                    ..tcb_state_default()
+                },
+            );
+        }
+        for &id in ids {
+            crate::ready::ready_enqueue(&mut st, ObjId(id));
+        }
+        st
+    };
+    assert!(ready_wf_exec(&build(&[10, 11])), "a well-formed ready queue is accepted");
+
+    // bit set on an empty level.
+    let mut st = build(&[]);
+    st.ready_bitmap |= 1 << level;
+    assert!(!ready_wf_exec(&st), "presence bit set on an empty level rejected");
+
+    // bit clear on a non-empty level.
+    let mut st = build(&[10]);
+    st.ready_bitmap &= !(1 << level);
+    assert!(!ready_wf_exec(&st), "presence bit clear on a non-empty level rejected");
+
+    // a charted node not Runnable.
+    let mut st = build(&[10, 11]);
+    st.tcbs.get_mut(&10).unwrap().state = ThreadState::Inactive;
+    assert!(!ready_wf_exec(&st), "non-Runnable charted node rejected");
+
+    // a charted node at the wrong level.
+    let mut st = build(&[10, 11]);
+    st.tcbs.get_mut(&10).unwrap().priority = level as u8 + 1;
+    assert!(!ready_wf_exec(&st), "charted node with mismatched priority rejected");
+
+    // tail disagreeing with the chain end.
+    let mut st = build(&[10, 11]);
+    st.ready_tails[level] = Some(ObjId(10));
+    assert!(!ready_wf_exec(&st), "tail not the last node rejected");
+
+    // a cycle (qnext loops back to the head).
+    let mut st = build(&[10, 11]);
+    st.tcbs.get_mut(&11).unwrap().qnext = Some(ObjId(10));
+    assert!(!ready_wf_exec(&st), "cyclic chain rejected");
+
+    // head/tail None disagreement.
+    let mut st = build(&[10]);
+    st.ready_heads[level] = None;
+    assert!(!ready_wf_exec(&st), "head None with tail Some rejected");
+}
+
+// `ready_complete_exec` must reject a Runnable thread that is off every chain, else the
+// completeness assertions in the sweep / `check_destroy_tcb` are vacuous.
+#[test]
+fn ready_complete_exec_has_teeth() {
+    let level = 4usize;
+    let mut st = ArrayStore::new(0);
+    st.tcbs.insert(
+        10,
+        TcbState {
+            state: ThreadState::Inactive,
+            priority: level as u8,
+            ..tcb_state_default()
+        },
+    );
+    crate::ready::ready_enqueue(&mut st, ObjId(10));
+    assert!(
+        ready_complete_exec(&st),
+        "a charted Runnable thread satisfies completeness"
+    );
+    // a Runnable thread sitting on no chain breaks completeness.
+    st.tcbs.insert(
+        11,
+        TcbState {
+            state: ThreadState::Runnable,
+            priority: level as u8,
+            ..tcb_state_default()
+        },
+    );
+    assert!(
+        !ready_complete_exec(&st),
+        "an off-chain Runnable thread is rejected"
+    );
 }
 
 // ── aspace `map_in`: the verified two-pass walk-allocate over arrays ─────────────
