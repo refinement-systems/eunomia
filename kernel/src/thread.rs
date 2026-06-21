@@ -1,8 +1,15 @@
 //! Kernel-side scheduler (spec rev1§1, rev1§5.4). The thread *object* — TCB layout,
 //! trap frame, report state machine, binding slots — lives in
 //! [`kcore::thread`] (re-exported below); this module keeps the
-//! architectural half: ready queues, the context switch, `CURRENT`, the
-//! idle WFI loop, and ASID-tagged TTBR0 activation.
+//! architectural half: the ready-queue *backing* (the `READY`/`READY_BITMAP`
+//! statics + the by-handle accessors the verified ops run against), the context
+//! switch, `CURRENT`, the idle WFI loop, and ASID-tagged TTBR0 activation.
+//!
+//! The ready-queue list *logic* (enqueue/dequeue/unqueue/`top_ready`) is the
+//! Verus-verified [`kcore::ready`] ops (B8C); the `enqueue`/`dequeue`/`top_ready`/
+//! `unqueue_ready` wrappers below are thin pointer-convert + `kcore::ready::*`
+//! calls via [`KernelStore`]. The scheduler *policy* (`maybe_switch`) and the asm
+//! context switch stay trusted shell (rev1§6.1(d)).
 //!
 //! Strict fixed-priority preemptive scheduling: 32 levels, round-robin
 //! within a level on the periodic tick, idle is a WFI loop at priority 0.
@@ -110,69 +117,33 @@ pub unsafe fn set_current(t: *mut Tcb) {
     CURRENT = t;
 }
 
-/// pre:  t not on any queue; t.priority < NUM_PRIOS.
+/// Append a thread to the tail of its priority level (the verified
+/// [`kcore::ready::ready_enqueue`]). pre: t not on any queue; t.priority < NUM_PRIOS.
 /// post: t Runnable at the tail of its priority level.
 pub unsafe fn enqueue(t: *mut Tcb) {
-    let prio = (*t).priority as usize;
-    (*t).state = ThreadState::Runnable;
-    (*t).qnext = None;
-    let q = &mut READY[prio];
-    if q.tail.is_null() {
-        q.head = t;
-    } else {
-        (*q.tail).qnext = tcb_id(t);
-    }
-    q.tail = t;
-    READY_BITMAP |= 1 << prio;
+    kcore::ready::ready_enqueue(&mut KernelStore, ObjId(t as u64));
 }
 
+/// Pop the head of `prio`'s ready list (the verified [`kcore::ready::ready_dequeue`]).
+/// Only `maybe_switch` calls it, always on a known-non-empty `top`, so the result
+/// is `Some`; an empty level maps to a null pointer.
 unsafe fn dequeue(prio: usize) -> *mut Tcb {
-    let q = &mut READY[prio];
-    let t = q.head;
-    q.head = as_tcb((*t).qnext);
-    if q.head.is_null() {
-        q.tail = ptr::null_mut();
-        READY_BITMAP &= !(1 << prio);
-    }
-    (*t).qnext = None;
-    t
+    as_tcb(kcore::ready::ready_dequeue(&mut KernelStore, prio))
 }
 
-/// Highest ready priority, or None if no thread is ready.
+/// Highest ready priority, or None if no thread is ready (the verified
+/// [`kcore::ready::top_ready`] bit-scan).
 unsafe fn top_ready() -> Option<usize> {
-    if READY_BITMAP == 0 {
-        None
-    } else {
-        Some(31 - READY_BITMAP.leading_zeros() as usize)
-    }
+    kcore::ready::top_ready(&KernelStore)
 }
 
 /// Remove a Runnable thread from its ready queue (the scheduler half of the
 /// old `unqueue`; the notification-wait half lives in
-/// [`kcore::thread::destroy_tcb`], which calls this through
-/// `Env::unqueue_ready`). pre: t.state == Runnable.
+/// [`kcore::thread::destroy_tcb`], which calls this through the
+/// `Store::unqueue_ready` seam). The verified arbitrary-position splice
+/// [`kcore::ready::ready_unqueue`]. pre: t.state == Runnable.
 pub(crate) unsafe fn unqueue_ready(t: *mut Tcb) {
-    let q = &mut READY[(*t).priority as usize];
-    let mut cur = q.head;
-    let mut prev: *mut Tcb = ptr::null_mut();
-    while !cur.is_null() {
-        if cur == t {
-            if prev.is_null() {
-                q.head = as_tcb((*cur).qnext);
-            } else {
-                (*prev).qnext = (*cur).qnext;
-            }
-            if q.tail == t {
-                q.tail = prev;
-            }
-            break;
-        }
-        prev = cur;
-        cur = as_tcb((*cur).qnext);
-    }
-    if q.head.is_null() {
-        READY_BITMAP &= !(1 << (*t).priority as usize);
-    }
+    kcore::ready::ready_unqueue(&mut KernelStore, ObjId(t as u64));
 }
 
 /// Scheduling decision at exception exit. `frame` is the trap frame on the

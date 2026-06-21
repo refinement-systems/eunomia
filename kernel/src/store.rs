@@ -247,6 +247,11 @@ impl Store for KernelStore {
     }
 
     // ── hardware / scheduler seam ─────────────────────────────────────────
+    // B8C-3: both realizations now route through the verified `kcore::ready` ops via the
+    // thin `crate::thread` wrappers (`enqueue` → `ready_enqueue`, `unqueue_ready` →
+    // `ready_unqueue`), so `destroy_tcb`'s `store.unqueue_ready(t)` and `signal`/`fire`'s
+    // `store.make_runnable(t)` execute verified list logic — the seam contracts in
+    // `kcore::cspace` (the `StoreSpec` lift of those ops) are discharged by verified code.
     fn make_runnable(&mut self, t: ObjId) {
         unsafe { crate::thread::enqueue(obj_ptr::<Tcb>(t)) }
     }
