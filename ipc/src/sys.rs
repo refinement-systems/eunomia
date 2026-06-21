@@ -218,6 +218,20 @@ pub fn timer_arm(timer: u32, notif: u32, bits: u64, delta: u64) -> i64 {
     unsafe { syscall(14, timer as u64, notif as u64, bits, delta, 0, 0) }
 }
 
+/// Bind an IRQ-handler cap to a notification (B-IRQ-B, rev1§1/rev1§3.6): a
+/// hardware interrupt on the line signals `notif` with `bits` (the `timer_arm`
+/// twin for device interrupts). `notif` must carry WRITE. The kernel masks the
+/// line on delivery; call [`irq_ack`] once the device has been serviced.
+pub fn irq_bind(irq: u32, notif: u32, bits: u64) -> i64 {
+    unsafe { syscall(25, irq as u64, notif as u64, bits, 0, 0, 0) }
+}
+
+/// Acknowledge an IRQ (B-IRQ-B): re-enable the line so the next interrupt is
+/// delivered — the "acknowledge" half of rev1§1's IRQ-handler cap.
+pub fn irq_ack(irq: u32) -> i64 {
+    unsafe { syscall(26, irq as u64, 0, 0, 0, 0, 0) }
+}
+
 /// The only voluntary stop (rev1§5.1): the kernel records the status — a
 /// child can neither lie about nor forget its own death.
 pub fn thread_exit(status: u64) -> ! {
