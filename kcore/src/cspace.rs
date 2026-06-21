@@ -2995,6 +2995,13 @@ pub open spec fn ready_complete(rv: ReadyView, tv: Map<ObjId, TcbView>) -> bool 
     forall|t: ObjId| #[trigger] tv.dom().contains(t) && tv[t].state == ThreadState::Runnable
         ==> (tv[t].priority as int) < NUM_PRIOS
             && ready_seq(rv, tv, tv[t].priority as int).contains(t)
+            // B8C: a Runnable thread is not waiting on any notification. Folded in (rather
+            // than threaded as a global `runnable_not_waiting` invariant) so `signal`'s census
+            // frame can discharge `wait_notif != Some(o)` for the *old level-tail* `p` that a
+            // faithful `make_runnable` re-threads — `p` is Runnable, hence charted here. The
+            // sole appender (`make_runnable`/`ready_enqueue`) carries the matching leaf
+            // precondition; `signal` supplies it by clearing `wait_notif` before the enqueue.
+            && tv[t].wait_notif is None
 }
 
 // `ready_complete` with one Runnable thread `t` excepted — the liveness `ready_unqueue`
@@ -3006,6 +3013,7 @@ pub open spec fn ready_complete_except(rv: ReadyView, tv: Map<ObjId, TcbView>, t
         && x != t
         ==> (tv[x].priority as int) < NUM_PRIOS
             && ready_seq(rv, tv, tv[x].priority as int).contains(x)
+            && tv[x].wait_notif is None
 }
 
 // The presence bitmap is coherent: bit `level` set ⇔ level `level`'s chain is non-empty.
@@ -4837,6 +4845,25 @@ pub proof fn lemma_sysinv_frame_equal_views<S: Store>(s0: &S, s1: &S)
         assert(cap_consistent(s0, s0.slot_view()[s].cap));
     }
     assert(end_caps_sound(s1));
+}
+
+// B8C: the ready-queue invariants (`ready_wf` + `ready_complete`) ride an edit that frames both
+// `ready_view` and `tcb_view` — the `lemma_sysinv_frame_equal_views` analogue for the ready pair.
+// The cascade carriers (`delete`/`obj_unref`/`destroy_cspace`/`unref_cspace`/`destroy_channel`/
+// `revoke`/`bind`, and the `endpoint_cap_dropped`/`signal` non-wake segments) discharge their
+// ready obligation with one call to this across each object-only step; the `signal` wake and the
+// `destroy_tcb` detach use the seam ops' own ensures instead. The predicates are pure functions of
+// (`ready_view`, `tcb_view`), both held equal, so the body is empty.
+pub proof fn lemma_ready_inv_frame<S: Store>(s0: &S, s1: &S)
+    requires
+        ready_wf(s0.ready_view(), s0.tcb_view()),
+        ready_complete(s0.ready_view(), s0.tcb_view()),
+        s1.ready_view() == s0.ready_view(),
+        s1.tcb_view() == s0.tcb_view(),
+    ensures
+        ready_wf(s1.ready_view(), s1.tcb_view()),
+        ready_complete(s1.ready_view(), s1.tcb_view()),
+{
 }
 
 // `refcount_sound` rides an edit that holds `refs` fixed and every object's census fixed — the

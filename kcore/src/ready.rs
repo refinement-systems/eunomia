@@ -255,6 +255,10 @@ pub proof fn lemma_ready_push_wf(
         rvf.bitmap == rv0.bitmap | (1u32 << (level as u32)),
         forall|x: ObjId| x != t && rv0.tails[level] != Some(x) ==> #[trigger] tvf[x] == tv0[x],
         rv0.tails[level] matches Some(y) ==> tv0[y].priority as int == level,
+        // B8C: the enqueued `t` and the re-threaded old tail keep `wait_notif is None` (the op
+        // preserves `wait_notif` on both), so the strengthened `ready_complete` re-establishes.
+        tvf[t].wait_notif is None,
+        rv0.tails[level] matches Some(y) ==> tvf[y].wait_notif is None,
     ensures
         cspace::ready_wf(rvf, tvf),
         cspace::ready_complete(rvf, tvf),
@@ -337,6 +341,18 @@ pub proof fn lemma_ready_push_wf(
                 }
             }
             assert(cspace::ready_seq(rvf, tvf, lx) == cspace::ready_seq(rv0, tv0, lx));
+        }
+    }
+    // The strengthened `ready_complete` conjunct: every Runnable thread has `wait_notif is
+    // None`. `t` and the old tail carry it from the new hypotheses; every other Runnable `x`
+    // is framed (`tvf[x] == tv0[x]`) and was Runnable in `tv0`, so `ready_complete(rv0)` gives it.
+    assert forall|x: ObjId| #[trigger] tvf.dom().contains(x) && tvf[x].state == ThreadState::Runnable
+        implies tvf[x].wait_notif is None by {
+        if x == t {
+        } else if rv0.tails[level] == Some(x) {
+        } else {
+            assert(tvf[x] == tv0[x]);
+            assert(tv0[x].state == ThreadState::Runnable);
         }
     }
 }
@@ -479,6 +495,10 @@ pub fn ready_enqueue<S: Store>(store: &mut S, t: ObjId)
         old(store).tcb_view().dom().contains(t),
         (old(store).tcb_view()[t].priority as int) < NUM_PRIOS,
         old(store).tcb_view()[t].state != ThreadState::Runnable,
+        // B8C: a thread joining the ready chain is not waiting (the strengthened
+        // `ready_complete` requires it of every Runnable thread). `signal` clears `wait_notif`
+        // before the enqueue; `maybe_switch`'s callers likewise hand off a non-waiting thread.
+        old(store).tcb_view()[t].wait_notif is None,
         cspace::ready_wf(old(store).ready_view(), old(store).tcb_view()),
         cspace::ready_complete(old(store).ready_view(), old(store).tcb_view()),
     ensures
@@ -604,6 +624,16 @@ pub fn ready_enqueue<S: Store>(store: &mut S, t: ObjId)
             #[trigger] rvf.heads[l] == rv0.heads[l] && rvf.tails[l] == rv0.tails[l] by {}
         assert(bm == rv0.bitmap);
         assert(rvf.bitmap == rv0.bitmap | (1u32 << (level as u32)));
+        // `wait_notif` is untouched by the state/qnext writes: `t` keeps its `None`
+        // precondition, and the old tail (Runnable at `level` in `tv0`) has `wait_notif None`
+        // by `ready_complete(rv0)`.
+        assert(tvf[t].wait_notif is None);
+        assert(old_tail matches Some(y) ==> tvf[y].wait_notif is None) by {
+            if let Some(y) = old_tail {
+                assert(rs0.len() > 0 && y == rs0[rs0.len() - 1]);
+                assert(tv0[y].state == ThreadState::Runnable && tv0[y].priority as int == level);
+            }
+        }
         lemma_ready_push_wf(rv0, tv0, rvf, tvf, level, t, pws);
     }
 }
@@ -873,6 +903,7 @@ pub fn ready_unqueue<S: Store>(store: &mut S, t: ObjId)
                     assert(tvf[rs0[k - 1]].qnext == tv0[t].qnext);
                     assert(tvf[rs0[k - 1]].state == tv0[rs0[k - 1]].state);
                     assert(tvf[rs0[k - 1]].priority == tv0[rs0[k - 1]].priority);
+                    assert(tvf[rs0[k - 1]].wait_notif == tv0[rs0[k - 1]].wait_notif);
                 }
                 if k == len - 1 {
                     assert(rvf.tails[level]
@@ -914,7 +945,8 @@ pub fn ready_unqueue<S: Store>(store: &mut S, t: ObjId)
                 assert forall|x: ObjId| #[trigger] tvf.dom().contains(x)
                     && tvf[x].state == ThreadState::Runnable && x != t
                     implies (tvf[x].priority as int) < NUM_PRIOS
-                        && cspace::ready_seq(rvf, tvf, tvf[x].priority as int).contains(x) by {
+                        && cspace::ready_seq(rvf, tvf, tvf[x].priority as int).contains(x)
+                        && tvf[x].wait_notif is None by {
                     // `tv0[x]` is Runnable in both cases: unchanged ⇒ from `tvf[x] == tv0[x]`;
                     // the changed `x != t` is `t`'s predecessor `rs0[k-1]`, on the chain.
                     if tvf[x] != tv0[x] {
@@ -924,8 +956,11 @@ pub fn ready_unqueue<S: Store>(store: &mut S, t: ObjId)
                     assert(tv0.dom().contains(x));
                     assert(tv0[x].state == ThreadState::Runnable);
                     let px = tv0[x].priority as int;
-                    // only `qnext` ever moved, so `x`'s priority/state survive the splice.
+                    // only `qnext` ever moved, so `x`'s priority/state/wait_notif survive the
+                    // splice; rv0-`ready_complete` gives the surviving Runnable `x` `wait_notif None`.
                     assert(tvf[x].priority as int == px);
+                    assert(tvf[x].wait_notif == tv0[x].wait_notif);
+                    assert(tv0[x].wait_notif is None);
                     // rv0-`ready_complete` charts `x` at `px`.
                     assert(px < NUM_PRIOS && cspace::ready_seq(rv0, tv0, px).contains(x));
                     if px != level {
