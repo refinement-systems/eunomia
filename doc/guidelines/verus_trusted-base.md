@@ -15,7 +15,11 @@ finding, not a boundary.
 ## Scope of the verified surface (what is *not* trusted)
 
 For calibration, the mechanized surface these seams bound (the regression baselines, §
-"Baselines" below): `kcore`'s cspace/CDT, untyped retype, channel FIFO, notification
+"Baselines" below): `kcore`'s cspace/CDT (including the **preemptible revoke walk** — the
+bounded `revoke_step`, the revoke-in-progress `revoking` marker on the root, and the `derive`
+ancestor-guard that refuses growth into a revoking subtree, all per-step-verified in Verus, B9A;
+its cross-restart interleaving safety and completion-under-the-guard liveness modeled in the TLA
+`CapRevocation` model, B9C), untyped retype, channel FIFO, notification
 waiter queue, timer armed list, the **32-level ready queue** (its per-level
 `ready_chain`/`ready_seq` witnesses, `u32` bitmap-coherence invariant, and the four ops
 `top_ready`/`ready_enqueue`/`ready_dequeue`/`ready_unqueue`, integrated through the
@@ -134,7 +138,7 @@ Any phase touching these must re-establish them at ≥ the prior numbers.
 | IPC header + session codecs | `cargo verus verify -p ipc` | 58 verified, 0 errors |
 | DMA-pool `FreeList` (core + `is_full`/`is_allocated` wrapper-guard accessors) | `cargo verus verify -p dma-pool` | 29 verified, 0 errors |
 | urt slots + time | `cargo verus verify -p urt` | verified (slot bitmap + `utc_ns_at`) |
-| TLA+ | `CommitProtocol` (6886 states; the `RecoverReconstructs` replay-equality action property + the committed negative control `CommitProtocol_NegControl.cfg`, which reports the expected violation), `CapRevocation`/`_Teardown` (~799k, recorded run), `IpcReactor` (with a negative control) | pass |
+| TLA+ | `CommitProtocol` (6886 states; the `RecoverReconstructs` replay-equality action property + the committed negative control `CommitProtocol_NegControl.cfg`, which reports the expected violation), `CapRevocation` (B9C: stepwise revoke — `RevokeBegin`/`RevokeStep`/`RevokeEnd` over a `revoking` marker, `Copy` derive-guard; 503,070 distinct states with the safety invariants checked at every mid-revoke interleaved state + `EventuallyRevoked` liveness under weak fairness; two committed negative controls — `CapRevocation_NegControl.cfg` reports the `LiveParent` violation under a non-leaf delete, `CapRevocation_NegLiveness.cfg` the `EventuallyRevoked` livelock when the guard is dropped; constants trimmed to Threads 1 / QueueDepth 1 because the full-scale liveness tableau exhausts heap — see `doc/results/4_b9c-findings.md`), `CapRevocation_Teardown` (TSpec, 252 states, unchanged), `IpcReactor` (with a negative control) | pass |
 | Fuzzing | wire/on-disk/ELF decoders + mount/recovery cargo-fuzz targets + the GC mark-walk target (`gc_mark`), committed corpora + Miri replay | green |
 
 ---

@@ -37,6 +37,11 @@
 \*     by a fresh Copy.
 \*   - ReportMonotone (action property): the terminal report transitions
 \*     at most once, running -> exited | faulted (rev1§5.1).
+\*   - EventuallyRevoked (liveness): a started revoke completes — once a
+\*     root is marked `revoking`, its subtree eventually empties. Holds
+\*     under weak fairness on RevokeStep BECAUSE the Copy guard forbids
+\*     derivation into a revoking subtree, so the subtree only shrinks
+\*     (the B9 marker/guard, mechanized — rev1§2.2 "restartable").
 \*
 \* TSpec properties (rev1§3.3 channel teardown):
 \*   - ChannelFireSafe: every peer-closed binding on a live channel names a
@@ -48,11 +53,21 @@
 \*   - ReclaimedReleased: a reclaimed channel holds no notification.
 \*
 \* Modeling notes:
-\*   - Revoke is atomic here. The kernel walk is preemptible/restartable;
-\*     its postcondition (no live descendants on completion) is what this
-\*     model checks. The deletion order constraint the implementation must
-\*     respect (delete leaf-first / DFS post-order, so LiveParent holds at
-\*     every preemption point) is recorded here as the obligation.
+\*   - Revoke is modeled STEPWISE (B9C), no longer atomic: RevokeBegin marks
+\*     the root (`revoking`), RevokeStep deletes ONE leaf descendant, and
+\*     RevokeEnd clears the marker once the subtree is empty — the three
+\*     interleave with every other action. The leaf-first / DFS-post-order
+\*     deletion order the kernel walk must respect (so LiveParent holds at
+\*     every preemption point) is therefore now a CHECKED invariant under
+\*     arbitrary interleaving, not just a recorded obligation: deleting a
+\*     childless cap orphans nobody. Completion across the gaps between
+\*     quanta is the EventuallyRevoked liveness property, which holds
+\*     because the Copy guard (`~AncestorOrSelfRevoking`) — the model of
+\*     B9A's derive guard — forbids re-growth below a revoking root. Two
+\*     committed negative controls pin both load-bearing choices: a
+\*     non-leaf RevokeStepBad violates LiveParent (CapRevocation_NegControl.cfg);
+\*     dropping the Copy guard livelocks EventuallyRevoked
+\*     (CapRevocation_NegLiveness.cfg).
 \*   - Receivers tolerate sparse messages: revoke deletes caps out of
 \*     queued messages in place, so a message can arrive with fewer caps
 \*     than were sent — the "null cap slots" of rev1§3.4.
@@ -96,6 +111,7 @@ VARIABLES
     bindings,   \* Threads -> [BindKinds -> CapIds \cup {NULL}]
     treport,    \* Threads -> {"running", "exited", "faulted"}  (rev1§5.1)
     revoked,    \* SUBSET CapIds — ghost: revoked ids not yet reused
+    revoking,   \* SUBSET CapIds — roots with an in-progress revoke (B9 marker)
     \* --- TSpec only (channel teardown, rev1§3.3); constant under Spec -------
     nlive,      \* SUBSET Notifs — alive notification objects
     ncaps,      \* Notifs -> 0..MaxNCaps  (outstanding caps per notif)
@@ -105,10 +121,11 @@ VARIABLES
 \* The revocation half (Spec) and the channel-teardown half (TSpec) carry
 \* disjoint variables; each half holds the other's constant, so neither
 \* multiplies the other's state space.
-crVars == <<live, parent, cspaces, queues, bindings, treport, revoked>>
+crVars == <<live, parent, cspaces, queues, bindings, treport, revoked,
+            revoking>>
 tdVars == <<nlive, ncaps, pcbind, eopen>>
 vars   == <<live, parent, cspaces, queues, bindings, treport, revoked,
-            nlive, ncaps, pcbind, eopen>>
+            revoking, nlive, ncaps, pcbind, eopen>>
 
 \* All descendants of cap in the CDT (recursive). Dead caps have parent
 \* NULL, so the walk only ever finds live caps.
@@ -116,6 +133,21 @@ RECURSIVE Descendants(_)
 Descendants(cap) ==
     LET children == {c \in CapIds : parent[c] = cap}
     IN  children \cup UNION {Descendants(c) : c \in children}
+
+\* A live cap with no live child — a leaf of the live CDT forest. RevokeStep
+\* may only delete a leaf, so deleting it orphans nobody (the leaf-first
+\* obligation the kernel walk must respect — rev1§2.2).
+IsLeaf(l) == l \in live /\ ~\E x \in live : parent[x] = l
+
+\* Walk the CDT parent chain up from x; TRUE iff any node on the path,
+\* including x itself, is a revoke root. The TLA mirror of B9A's verified
+\* exec ancestor-walk `ancestor_or_self_revoking`; terminates on the
+\* acyclic `parent` forest (the same assumption Descendants relies on).
+RECURSIVE AncestorOrSelfRevoking(_)
+AncestorOrSelfRevoking(x) ==
+    IF x = NULL THEN FALSE
+    ELSE IF x \in revoking THEN TRUE
+    ELSE AncestorOrSelfRevoking(parent[x])
 
 InitCap  == CHOOSE c \in CapIds : TRUE
 InitProc == CHOOSE p \in Procs : TRUE
@@ -128,6 +160,7 @@ Init ==
     /\ bindings = [t \in Threads |-> [k \in BindKinds |-> NULL]]
     /\ treport  = [t \in Threads |-> "running"]
     /\ revoked  = {}
+    /\ revoking = {}
     \* TSpec variables — constant under Spec, evolving under TSpec.
     /\ nlive    = {}
     /\ ncaps    = [n \in Notifs |-> 0]
@@ -142,11 +175,13 @@ Init ==
 Copy(p, src, dst) ==
     /\ src \in cspaces[p]
     /\ dst \notin live
+    /\ ~AncestorOrSelfRevoking(src)  \* B9 derive guard: no growth into a
+                                     \* revoking subtree (keeps revoke terminating)
     /\ live'    = live \cup {dst}
     /\ parent'  = [parent EXCEPT ![dst] = src]
     /\ cspaces' = [cspaces EXCEPT ![p] = @ \cup {dst}]
     /\ revoked' = revoked \ {dst}
-    /\ UNCHANGED <<queues, bindings, treport>>
+    /\ UNCHANGED <<queues, bindings, treport, revoking>>
 
 \* Send: caps move from the sender's cspace into a queue slot (rev1§3.4).
 \* Non-blocking; disabled (FULL) when the queue is at capacity (rev1§3.3).
@@ -157,7 +192,7 @@ Send(p, ch, cs) ==
     /\ Len(queues[ch]) < QueueDepth
     /\ cspaces' = [cspaces EXCEPT ![p] = @ \ cs]
     /\ queues'  = [queues EXCEPT ![ch] = Append(@, cs)]
-    /\ UNCHANGED <<live, parent, bindings, treport, revoked>>
+    /\ UNCHANGED <<live, parent, bindings, treport, revoked, revoking>>
 
 \* Receive: head message's surviving caps land in the receiver's cspace.
 \* (Cspace-slot exhaustion makes receive fail with the message left
@@ -166,7 +201,7 @@ Receive(p, ch) ==
     /\ queues[ch] /= << >>
     /\ cspaces' = [cspaces EXCEPT ![p] = @ \cup Head(queues[ch])]
     /\ queues'  = [queues EXCEPT ![ch] = Tail(@)]
-    /\ UNCHANGED <<live, parent, bindings, treport, revoked>>
+    /\ UNCHANGED <<live, parent, bindings, treport, revoked, revoking>>
 
 \* Bind: configure a TCB binding slot (rev1§5.1) — the cap moves from the
 \* binder's cspace into the slot, exactly as Send moves caps into queue
@@ -177,7 +212,7 @@ Bind(p, t, k, c) ==
     /\ bindings[t][k] = NULL
     /\ bindings' = [bindings EXCEPT ![t][k] = c]
     /\ cspaces'  = [cspaces EXCEPT ![p] = @ \ {c}]
-    /\ UNCHANGED <<live, parent, queues, treport, revoked>>
+    /\ UNCHANGED <<live, parent, queues, treport, revoked, revoking>>
 
 \* Thread death (rev1§5.1): the terminal record transitions exactly once,
 \* and the kernel fires the matching binding slot at this instant — it
@@ -187,31 +222,58 @@ Bind(p, t, k, c) ==
 ThreadExit(t) ==
     /\ treport[t] = "running"
     /\ treport' = [treport EXCEPT ![t] = "exited"]
-    /\ UNCHANGED <<live, parent, cspaces, queues, bindings, revoked>>
+    /\ UNCHANGED <<live, parent, cspaces, queues, bindings, revoked, revoking>>
 
 ThreadFault(t) ==
     /\ treport[t] = "running"
     /\ treport' = [treport EXCEPT ![t] = "faulted"]
-    /\ UNCHANGED <<live, parent, cspaces, queues, bindings, revoked>>
+    /\ UNCHANGED <<live, parent, cspaces, queues, bindings, revoked, revoking>>
 
-\* Revoke: delete every CDT descendant of c — from cspaces AND from
-\* queued messages AND from TCB binding slots. c itself stays live (seL4
-\* semantics: revoke empties the subtree below the cap, establishing
-\* exclusivity for retype).
-Revoke(c) ==
+\* Revoke is modeled STEPWISE (B9): RevokeBegin marks the root, RevokeStep
+\* deletes ONE leaf descendant per preemption point, RevokeEnd clears the
+\* marker once the subtree is empty. c itself stays live (seL4 semantics:
+\* revoke empties the subtree below the cap, establishing exclusivity for
+\* retype).
+
+\* Delete exactly one cap d everywhere it can reside — cspace, queue slot,
+\* binding slot — clear its parent and ghost-revoke it. Shared by the
+\* leaf-first RevokeStep and the negative-control RevokeStepBad; the ONLY
+\* difference between those two is whether d is required to be a leaf.
+DeleteOne(d) ==
+    /\ live'    = live \ {d}
+    /\ parent'  = [parent EXCEPT ![d] = NULL]
+    /\ cspaces' = [p \in Procs |-> cspaces[p] \ {d}]
+    /\ queues'  = [ch \in Channels |->
+                      [i \in 1..Len(queues[ch]) |-> queues[ch][i] \ {d}]]
+    /\ bindings' = [t \in Threads |-> [k \in BindKinds |->
+                      IF bindings[t][k] = d THEN NULL ELSE bindings[t][k]]]
+    /\ revoked' = revoked \cup {d}
+    /\ UNCHANGED <<treport, revoking>>
+
+\* Mark the root c (only when it has descendants and is not already marked):
+\* one preemption-point-free step that sets the marker, deletes nothing.
+RevokeBegin(c) ==
     /\ c \in live
-    /\ LET dead == Descendants(c) IN
-        /\ dead /= {}   \* no-op revokes add nothing to the state space
-        /\ live'    = live \ dead
-        /\ parent'  = [x \in CapIds |-> IF x \in dead THEN NULL ELSE parent[x]]
-        /\ cspaces' = [p \in Procs |-> cspaces[p] \ dead]
-        /\ queues'  = [ch \in Channels |->
-                          [i \in 1..Len(queues[ch]) |-> queues[ch][i] \ dead]]
-        /\ bindings' = [t \in Threads |-> [k \in BindKinds |->
-                          IF bindings[t][k] \in dead THEN NULL
-                          ELSE bindings[t][k]]]
-        /\ revoked' = revoked \cup dead
-        /\ UNCHANGED treport
+    /\ Descendants(c) /= {}
+    /\ c \notin revoking
+    /\ revoking' = revoking \cup {c}
+    /\ UNCHANGED <<live, parent, cspaces, queues, bindings, treport, revoked>>
+
+\* One bounded quantum: delete a single LEAF descendant. Leaf-only deletion
+\* is what keeps LiveParent true at every interleaved state — deleting a
+\* childless cap orphans nobody (the leaf-first / DFS-post-order obligation).
+RevokeStep(c) ==
+    /\ c \in revoking
+    /\ \E l \in Descendants(c) :
+        /\ IsLeaf(l)
+        /\ DeleteOne(l)
+
+\* Clear the marker once the subtree is empty; c survives.
+RevokeEnd(c) ==
+    /\ c \in revoking
+    /\ Descendants(c) = {}
+    /\ revoking' = revoking \ {c}
+    /\ UNCHANGED <<live, parent, cspaces, queues, bindings, treport, revoked>>
 
 \* Retype: consume an exclusive cap (e.g. untyped -> kernel object).
 \* Sound only when no derived caps exist anywhere — the guard the kernel
@@ -225,7 +287,7 @@ Retype(p, c) ==
     /\ parent'  = [parent EXCEPT ![c] = NULL]
     /\ cspaces' = [cspaces EXCEPT ![p] = @ \ {c}]
     /\ revoked' = revoked \cup {c}
-    /\ UNCHANGED <<queues, bindings, treport>>
+    /\ UNCHANGED <<queues, bindings, treport, revoking>>
 
 Next ==
     /\ \/ \E p \in Procs, s, d \in CapIds : Copy(p, s, d)
@@ -234,11 +296,23 @@ Next ==
        \/ \E p \in Procs, t \in Threads, k \in BindKinds, c \in CapIds : Bind(p, t, k, c)
        \/ \E t \in Threads : ThreadExit(t)
        \/ \E t \in Threads : ThreadFault(t)
-       \/ \E c \in CapIds : Revoke(c)
+       \/ \E c \in CapIds : RevokeBegin(c)
+       \/ \E c \in CapIds : RevokeStep(c)
+       \/ \E c \in CapIds : RevokeEnd(c)
        \/ \E p \in Procs, c \in CapIds : Retype(p, c)
     /\ UNCHANGED tdVars
 
-Spec == Init /\ [][Next]_vars
+\* Weak fairness on RevokeStep: a marked root's subtree is eventually
+\* drained. Combined with the Copy guard (the subtree never re-grows) this
+\* gives EventuallyRevoked. Fairness does not change which states are
+\* reachable, so the safety invariants are still checked over the full graph.
+\* The subscript is crVars, not vars: RevokeStep is a revocation-half action
+\* that specifies exactly the crVars primes (the tdVars are held constant by
+\* this Spec, so WF_crVars and WF_vars coincide here, but WF_vars is rejected
+\* by TLC because RevokeStep names no tdVars prime).
+Fairness == \A c \in CapIds : WF_crVars(RevokeStep(c))
+
+Spec == Init /\ [][Next]_vars /\ Fairness
 
 \* --- Invariants --------------------------------------------------------
 
@@ -252,6 +326,7 @@ TypeOK ==
     /\ bindings \in [Threads -> [BindKinds -> CapIds \cup {NULL}]]
     /\ treport \in [Threads -> {"running", "exited", "faulted"}]
     /\ revoked \subseteq CapIds
+    /\ revoking \subseteq CapIds
 
 \* Where a cap currently resides.
 ProcPlaces(c)  == {p \in Procs : c \in cspaces[p]}
@@ -294,6 +369,74 @@ RevokedDead == revoked \cap live = {}
 ReportMonotone ==
     [][\A t \in Threads :
         treport[t] /= "running" => treport'[t] = treport[t]]_vars
+
+\* --- Liveness ----------------------------------------------------------
+
+\* rev1§2.2 "restartable": a started revoke completes. Once a root is marked
+\* `revoking`, its subtree eventually empties. Holds under WF on RevokeStep
+\* BECAUSE the Copy guard forbids re-derivation into a revoking subtree, so
+\* the subtree shrinks monotonically and WF forces the leaves drained. The
+\* committed liveness negative control (CapRevocation_NegLiveness.cfg) drops
+\* the guard and livelocks this property — the runnable proof it has teeth.
+EventuallyRevoked ==
+    \A c \in CapIds : (c \in revoking) ~> (Descendants(c) = {})
+
+\* --- Negative controls (committed; the B7 pattern) ---------------------
+\* Each control action is the real action MINUS exactly one load-bearing
+\* conjunct; a passing main model plus a failing control proves that
+\* conjunct is load-bearing. Driven by the alternate specs below, checked by
+\* CapRevocation_NegControl.cfg (safety) and CapRevocation_NegLiveness.cfg
+\* (liveness).
+
+\* SAFETY control: RevokeStep WITHOUT the IsLeaf filter — deletes any
+\* descendant, leaf or interior. An interior delete leaves the deleted
+\* node's live children pointing at a dead parent -> LiveParent CEX.
+RevokeStepBad(c) ==
+    /\ c \in revoking
+    /\ \E l \in Descendants(c) : DeleteOne(l)
+
+NextBad ==
+    /\ \/ \E p \in Procs, s, d \in CapIds : Copy(p, s, d)
+       \/ \E p \in Procs, ch \in Channels, cs \in (SUBSET CapIds) : Send(p, ch, cs)
+       \/ \E p \in Procs, ch \in Channels : Receive(p, ch)
+       \/ \E p \in Procs, t \in Threads, k \in BindKinds, c \in CapIds : Bind(p, t, k, c)
+       \/ \E t \in Threads : ThreadExit(t)
+       \/ \E t \in Threads : ThreadFault(t)
+       \/ \E c \in CapIds : RevokeBegin(c)
+       \/ \E c \in CapIds : RevokeStepBad(c)
+       \/ \E c \in CapIds : RevokeEnd(c)
+       \/ \E p \in Procs, c \in CapIds : Retype(p, c)
+    /\ UNCHANGED tdVars
+
+SpecBad == Init /\ [][NextBad]_vars
+
+\* LIVENESS control: Copy WITHOUT the ~AncestorOrSelfRevoking guard —
+\* re-derivation into a revoking subtree is allowed, so a
+\* RevokeStep<->CopyNoGuard cycle re-grows the subtree forever ->
+\* EventuallyRevoked livelock (still fair: RevokeStep fires infinitely).
+CopyNoGuard(p, src, dst) ==
+    /\ src \in cspaces[p]
+    /\ dst \notin live
+    /\ live'    = live \cup {dst}
+    /\ parent'  = [parent EXCEPT ![dst] = src]
+    /\ cspaces' = [cspaces EXCEPT ![p] = @ \cup {dst}]
+    /\ revoked' = revoked \ {dst}
+    /\ UNCHANGED <<queues, bindings, treport, revoking>>
+
+NextNoGuard ==
+    /\ \/ \E p \in Procs, s, d \in CapIds : CopyNoGuard(p, s, d)
+       \/ \E p \in Procs, ch \in Channels, cs \in (SUBSET CapIds) : Send(p, ch, cs)
+       \/ \E p \in Procs, ch \in Channels : Receive(p, ch)
+       \/ \E p \in Procs, t \in Threads, k \in BindKinds, c \in CapIds : Bind(p, t, k, c)
+       \/ \E t \in Threads : ThreadExit(t)
+       \/ \E t \in Threads : ThreadFault(t)
+       \/ \E c \in CapIds : RevokeBegin(c)
+       \/ \E c \in CapIds : RevokeStep(c)
+       \/ \E c \in CapIds : RevokeEnd(c)
+       \/ \E p \in Procs, c \in CapIds : Retype(p, c)
+    /\ UNCHANGED tdVars
+
+SpecNoGuard == Init /\ [][NextNoGuard]_vars /\ Fairness
 
 \* =======================================================================
 \* Channel whole-object teardown and peer-closed firing (rev1§3.3) — TSpec
