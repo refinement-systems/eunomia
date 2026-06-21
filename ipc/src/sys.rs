@@ -14,6 +14,10 @@ pub const ERR_NOMEM: i64 = -8;
 pub const ERR_ARG: i64 = -9;
 pub const ERR_CLOSED: i64 = -10;
 pub const ERR_STATE: i64 = -11;
+/// Retry-later (B9): `cap_revoke` returns this when a bounded quantum ends with
+/// descendants remaining, and `cap_copy` when the source is under an in-flight
+/// revoke. Kept in lockstep with the kernel block (`kernel/src/syscall.rs`).
+pub const ERR_AGAIN: i64 = -12;
 
 pub const SLOT_NONE: u32 = u32::MAX;
 
@@ -156,6 +160,21 @@ pub fn cap_delete(slot: u32) -> i64 {
 
 pub fn cap_revoke(slot: u32) -> i64 {
     unsafe { syscall(6, slot as u64, 0, 0, 0, 0, 0) }
+}
+
+/// Fully revoke `slot`'s subtree (rev1§2.2). `cap_revoke` runs one bounded quantum
+/// per call and returns [`ERR_AGAIN`] while descendants remain (the walk is
+/// preemptible/restartable); loop, yielding the CPU between tries, until it returns
+/// a terminal status. Returns the final `cap_revoke` result (`0` on success, or a
+/// non-`ERR_AGAIN` error). A childless cap completes in the first call.
+pub fn cap_revoke_all(slot: u32) -> i64 {
+    loop {
+        let r = cap_revoke(slot);
+        if r != ERR_AGAIN {
+            return r;
+        }
+        yield_now();
+    }
 }
 
 pub fn cap_install(cspace: u32, src: u32, dst_index: u32) -> i64 {

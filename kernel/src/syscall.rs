@@ -67,8 +67,19 @@ pub const ERR_NOMEM: i64 = -8;
 pub const ERR_ARG: i64 = -9;
 pub const ERR_CLOSED: i64 = -10;
 pub const ERR_STATE: i64 = -11;
+/// Retry-later (B9): `CapRevoke` returns this when a bounded quantum ends with
+/// descendants still remaining, and `CapCopy` returns it when the source is under
+/// an in-flight revoke (rev1§2.2 preemptible/restartable walk). The caller loops.
+pub const ERR_AGAIN: i64 = -12;
 
 pub const SLOT_NONE: u32 = u32::MAX;
+
+/// Leaf-deletions performed per `CapRevoke` call before the kernel returns
+/// `ERR_AGAIN` (B9). A shell-policy constant (rev1§6.1(d)), chosen ≪ a 10 ms
+/// scheduler tick's worth of deletions so interrupt latency stays bounded by one
+/// quantum; the caller (`ipc::sys::cap_revoke_all`) re-issues from EL0 where IRQs
+/// are unmasked. Tuning is left to measurement — not a verified parameter.
+pub const REVOKE_QUANTUM: usize = 16;
 
 /// Validate a user buffer for the current thread before the kernel
 /// dereferences it. Identity-map threads (M1 scaffold, idle) get the
@@ -245,6 +256,15 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if src.is_null() || dst.is_null() {
                 return Some(ERR_BADSLOT);
             }
+            // B9: refuse derivation into an in-flight revoke subtree with a
+            // distinguishable `ERR_AGAIN` (retry once the revoke finishes).
+            // `derive` already rejects this internally, but only as a bare
+            // `Err(())` indistinguishable from a structural failure, so we
+            // pre-check the (read-only) ancestor-walk here. Single-core, masked
+            // at EL1: the check and the derive run atomically (no TOCTOU).
+            if cspace::ancestor_or_self_revoking(&KernelStore, SlotId(src as u64)) {
+                return Some(ERR_AGAIN);
+            }
             Some(
                 match cspace::derive(
                     &mut KernelStore,
@@ -271,8 +291,15 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if s.is_null() || (*s).cap.is_empty() {
                 return Some(ERR_BADSLOT);
             }
-            cspace::revoke(s);
-            Some(0)
+            // B9: do one bounded quantum of leaf-deletions and return. `More`
+            // means the subtree still has descendants — userspace re-issues
+            // (`ERR_AGAIN`); `Done` means the walk completed. The masked-EL1
+            // entry is unchanged: preemption is delivered at the syscall
+            // boundary, not by unmasking mid-walk (honesty note 2).
+            match cspace::revoke_step(s, REVOKE_QUANTUM) {
+                cspace::RevokeStatus::Done => Some(0),
+                cspace::RevokeStatus::More => Some(ERR_AGAIN),
+            }
         }
         // cap_install — move a cap into another cspace (explicit child-cspace
         // construction, rev1§5.1).
