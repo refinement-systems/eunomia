@@ -21,6 +21,8 @@ const GICR_ISENABLER0: usize = GICR_SGI_BASE + 0x0100;
 const GICD_IGROUPR: usize = GICD_BASE + 0x0080;
 const GICD_ISENABLER: usize = GICD_BASE + 0x0100;
 const GICD_ICENABLER: usize = GICD_BASE + 0x0180;
+#[cfg(feature = "m1-test")]
+const GICD_ISPENDR: usize = GICD_BASE + 0x0200;
 const GICD_IPRIORITYR: usize = GICD_BASE + 0x0400;
 const GICD_ICFGR: usize = GICD_BASE + 0x0C00;
 const GICD_IROUTER: usize = GICD_BASE + 0x6000;
@@ -110,4 +112,18 @@ pub fn enable(intid: u32) {
 pub fn disable(intid: u32) {
     let word = (intid / 32) as usize;
     unsafe { mmio_w(GICD_ICENABLER + 4 * word, 1 << (intid % 32)) };
+}
+
+/// Software-pend a device SPI (set its pending state) — the m1-test self-kick
+/// (B-IRQ-C). The embedded EL0 exit-criterion test has no device to assert the
+/// PL011 line and no privilege to reach the distributor itself, and the smoke
+/// harness boots with no stdin, so the kernel pends INTID 33 from EL1 to drive
+/// the real exception → `irq::deliver` → `signal` path. For a level-sensitive
+/// SPI whose input line is deasserted, one `ISPENDR` write yields exactly one
+/// delivery (the pending state clears on activation), so each kick is one clean
+/// interrupt. Test-only; absent from real boot.
+#[cfg(feature = "m1-test")]
+pub fn set_pending(intid: u32) {
+    let word = (intid / 32) as usize;
+    unsafe { mmio_w(GICD_ISPENDR + 4 * word, 1 << (intid % 32)) };
 }

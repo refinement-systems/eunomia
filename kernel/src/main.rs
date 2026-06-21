@@ -126,6 +126,36 @@ pub extern "C" fn kernel_main() -> ! {
             rights: Rights(Rights::READ | Rights::PHYS),
         };
 
+        // Slots 23/24: the PL011 console's device resources (rev1§1: init
+        // "holds all device resources … MMIO frames, IRQ caps"). The
+        // device-MMIO-frame precedent (slots 3/4), boot-static not retyped
+        // (B-IRQ Design decision 3). init delegates both to the userspace
+        // console driver (C-M9); until then they sit here. High slots (above
+        // the m1-test exerciser's slots 6..=22) so the embedded test's retypes
+        // never collide with them.
+        //
+        // Slot 23: the PL011 MMIO frame (UART at 0x0900_0000 on QEMU virt) —
+        // the driver's register window.
+        let slot23 = CSpaceObj::slot(root, 23);
+        (*slot23).cap = Cap {
+            kind: CapKind::Frame {
+                base: 0x0900_0000,
+                pages: 1,
+                mapping: None,
+            },
+            rights: Rights(Rights::READ | Rights::WRITE | Rights::PHYS),
+        };
+        // Slot 24: the PL011 IRQ-handler cap (rev1§1) — INTID 33 (SPI 1, RX).
+        // A plain designating handle to the boot-static `IrqObj`; the driver
+        // binds it to a notification (`IrqBind`) and acks (`IrqAck`). The
+        // handlers gate on the cap kind, not its rights, so READ|WRITE simply
+        // keeps it delegable/attenuable.
+        let slot24 = CSpaceObj::slot(root, 24);
+        (*slot24).cap = Cap {
+            kind: CapKind::Irq(irq::pl011_objid()),
+            rights: Rights(Rights::READ | Rights::WRITE),
+        };
+
         // Slot 5: init's own address space. Init is the one process that
         // maps things into itself (the PL031 window for the boot-time RTC
         // read, rev1§2.6); children never hold their own aspace caps.

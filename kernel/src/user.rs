@@ -68,6 +68,12 @@ const UA: u64 = 19; // sub-untyped funding the channel ("untyped A")
 const PC_NOTIF: u64 = 20; // peer-closed notification, funded from UNTYPED2
 const PC_CHAN_A: u64 = 21;
 const PC_CHAN_B: u64 = 22;
+// B-IRQ-C: the PL011 IRQ-handler cap, a kernel-bestowed boot cap (main.rs
+// slot 24, beside its MMIO frame at 23 — above the scaffold's own slots so
+// the retypes never collide). N_IRQ is the notification the device IRQ
+// signals; carved fresh so its bits don't alias N1's.
+const PL011_IRQ: u64 = 24;
+const N_IRQ: u64 = 25;
 
 // T2 (cspace2) slot map.
 const T2_CHAN: u64 = 0;
@@ -90,6 +96,8 @@ const BIT_GO: u64 = 1 << 2;
 // are free again. One bit per endpoint's peer-closed binding.
 const BIT_PC_A: u64 = 1 << 0;
 const BIT_PC_B: u64 = 1 << 1;
+// N_IRQ bit (B-IRQ-C) — a dedicated notification, so the low bit is free.
+const BIT_IRQ: u64 = 1 << 0;
 
 #[inline(always)]
 unsafe fn sys(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 {
@@ -210,6 +218,16 @@ unsafe fn thread_start(tcb: u64, cspace: u64, entry: u64, sp: u64, prio: u64, ar
 #[inline(always)]
 unsafe fn timer_arm(timer: u64, notif: u64, bits: u64, delta: u64) -> i64 {
     sys(14, timer, notif, bits, delta, 0, 0)
+}
+
+#[inline(always)]
+unsafe fn irq_bind(irq: u64, notif: u64, bits: u64) -> i64 {
+    sys(25, irq, notif, bits, 0, 0, 0)
+}
+
+#[inline(always)]
+unsafe fn irq_ack(irq: u64) -> i64 {
+    sys(26, irq, 0, 0, 0, 0, 0)
 }
 
 #[inline(always)]
@@ -450,6 +468,28 @@ pub extern "C" fn user_main(_arg: u64) -> ! {
             exit();
         }
         putc(b'6'); // marker: whole-object teardown fired every peer-closed
+
+        // ── Device IRQ → notification (rev1§1, rev1§3.6) ──────────────
+        // init holds the PL011 IRQ-handler cap (boot grant, slot 24).
+        // Bind it to a fresh notification and let the line fire: the
+        // kernel signals that notification from `handle_el0_irq` — the
+        // timer's delivery twin, but for a device SPI — masks the line,
+        // and `irq_ack` re-enables it. There is no real device to assert
+        // the PL011 line here (and the smoke harness has no stdin), so on
+        // the m1-test path the kernel software-pends INTID 33 on bind and
+        // on ack: two clean deliveries arrive through the real GIC +
+        // exception path. The first proves bind → deliver → signal; the
+        // second proves `irq_ack` re-enabled the masked line (the rev1§3.6
+        // mask-on-deliver / unmask-on-ack cycle). Lost-wakeup-safe either
+        // way: if the kick lands before the wait it is a poll-once, if
+        // after, a genuine block-then-wake (the timer segment already
+        // proved the latter for notifications).
+        check(retype(UNTYPED, OBJ_NOTIF, 0, N_IRQ, 0), b'O');
+        check(irq_bind(PL011_IRQ, N_IRQ, BIT_IRQ), b'P');
+        wait_for(N_IRQ, BIT_IRQ, b'Q'); // delivery 1: bound IRQ signalled it
+        check(irq_ack(PL011_IRQ), b'R'); // ack unmasks; the kick re-fires
+        wait_for(N_IRQ, BIT_IRQ, b'S'); // delivery 2: ack re-enabled the line
+        putc(b'7'); // marker: device IRQ delivered, acked, and re-fired
 
         debug_write(&MSG_PASS);
         exit();

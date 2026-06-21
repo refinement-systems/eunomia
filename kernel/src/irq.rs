@@ -22,6 +22,9 @@ pub const PL011_INTID: u32 = 33;
 /// addition, not new verified code).
 const N_SPI: usize = 1;
 
+/// Index of the PL011 console line in [`IRQ_TABLE`].
+const PL011: usize = 0;
+
 /// The fixed table of IRQ objects, baked into the kernel image. kcore addresses
 /// these through `Store::irq_*`; the trusted shell here derefs them directly.
 static mut IRQ_TABLE: [IrqObj; N_SPI] = [IrqObj::boot_static(PL011_INTID)];
@@ -29,6 +32,16 @@ static mut IRQ_TABLE: [IrqObj; N_SPI] = [IrqObj::boot_static(PL011_INTID)];
 #[inline]
 unsafe fn slot(i: usize) -> *mut IrqObj {
     core::ptr::addr_of_mut!(IRQ_TABLE[i])
+}
+
+/// The boot-static PL011 IRQ object's handle, for init's boot grant (`main.rs`,
+/// B-IRQ-C). init holds this IRQ-handler cap (rev1§1: "init … holds all device
+/// resources … IRQ caps") and delegates an attenuated copy to the console driver
+/// (C-M9). The `ObjId` is the table entry's address — exactly what `Store::irq_*`
+/// resolves back through (the boot-static device-frame precedent, Design
+/// decision 3), uniform with how `irq::bind` forms the handle below.
+pub fn pl011_objid() -> ObjId {
+    unsafe { ObjId(slot(PL011) as u64) }
 }
 
 /// Trusted INTID→object lookup (the `ARMED_HEAD`-resolution analog, rev1§6.1(d)).
@@ -76,6 +89,12 @@ pub unsafe fn deliver(intid: u32) -> bool {
 /// (notification, bits) pair via the verified [`kcore::irq::irq_bind`].
 pub unsafe fn bind(i: *mut IrqObj, notif: *mut NotifObj, bits: u64) {
     kcore::irq::irq_bind(&mut KernelStore, ObjId(i as u64), ObjId(notif as u64), bits);
+    // m1-test self-kick (B-IRQ-C): the embedded EL0 test has no real device to
+    // assert the line, so software-pend it now that it is bound. On `eret` to
+    // EL0 the pending+enabled INTID fires through the real exception path →
+    // `deliver` → the verified `signal`. Compiled out of real boot.
+    #[cfg(feature = "m1-test")]
+    crate::gic::set_pending((*i).intid);
 }
 
 /// `IrqAck` core: clear the mask and re-enable the line so the next interrupt is
@@ -83,4 +102,9 @@ pub unsafe fn bind(i: *mut IrqObj, notif: *mut NotifObj, bits: u64) {
 pub unsafe fn ack(i: *mut IrqObj) {
     (*i).masked = false;
     crate::gic::enable((*i).intid);
+    // m1-test self-kick (B-IRQ-C): re-pend after the unmask so the test observes
+    // a second delivery — the witness that ack re-enabled the line (the
+    // mask-on-deliver / unmask-on-ack cycle works). Compiled out of real boot.
+    #[cfg(feature = "m1-test")]
+    crate::gic::set_pending((*i).intid);
 }

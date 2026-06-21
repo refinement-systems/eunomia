@@ -1021,6 +1021,12 @@ fn thread_cap(o: u64, max_prio: u8) -> Cap {
         rights: Rights(0xff),
     }
 }
+fn irq_cap(o: u64) -> Cap {
+    Cap {
+        kind: CapKind::Irq(ObjId(o)),
+        rights: Rights(0xff),
+    }
+}
 
 // The exec mirror of the spec `CapKind::Untyped { base, size, watermark }`
 // projection — `Some(geometry)` iff the cap is an untyped, used both to compute
@@ -5257,6 +5263,57 @@ fn refcount_sound_exec_irq_teeth() {
     // Drop the IRQ's ref without unbinding: now census(100) == 1 but refs[100] == 0.
     st.refs.insert(100, 0);
     assert!(!refcount_sound_exec(&st), "teeth: irq_binding_refs term");
+}
+
+// B-IRQ-C: the cspace-level teardown — deleting the last IRQ cap runs the real
+// `delete` → `obj_unref`'s Irq arm → `destroy_irq`, releasing the bound notification's
+// ref. `destroy_irq_unbinds` proves the object op in isolation; this drives it through
+// the actual cap-deletion dispatch off an `Irq` cap — the rev1§2.2 "revoke deletes
+// descendants" path the boot-granted PL011 cap (main.rs slot 24) takes when init's grant
+// is revoked. The notification's own cap survives the IRQ object's destruction.
+#[test]
+fn delete_irq_cap_releases_notif_ref() {
+    let mut st = ArrayStore::new(2);
+    st.slots[0] = detached(notif_cap(100)); // the notification's own cap (must survive)
+    st.slots[1] = detached(irq_cap(400)); // the IRQ object's lone cap — its delete destroys it
+    // notif 100: one cap (slot 0) + one IRQ binding ⇒ census == refs == 2 (sound at entry).
+    st.refs.insert(100, 2);
+    st.refs.insert(400, 1); // the IRQ object's lone cap (slot 1)
+    st.notifs.insert(
+        100,
+        NotifState { word: 0, wait_head: None, wait_tail: None },
+    );
+    st.irqs.insert(
+        400,
+        IrqState { intid: 33, notif: Some(ObjId(100)), bits: 0b1, bound: true, masked: false },
+    );
+    assert_eq!(
+        obj_census_exec(&st, ObjId(100)),
+        2,
+        "pre: census(100) = its cap + the IRQ binding"
+    );
+    assert!(refcount_sound_exec(&st), "pre: sound (refs[100] == 2 == census)");
+
+    // The generic delete contract (cspace_wf preserved, count drops, refcount_sound held),
+    // then the IRQ-specific accounting.
+    check_delete(&mut st, SlotId(1));
+
+    assert!(st.at(SlotId(1)).cap.is_empty(), "the IRQ cap is gone");
+    assert!(
+        !st.irqs[&400].bound,
+        "obj_unref → destroy_irq unbound the IRQ object"
+    );
+    assert_eq!(
+        obj_census_exec(&st, ObjId(100)),
+        1,
+        "the IRQ binding term dropped — only the notif's own cap remains"
+    );
+    assert_eq!(st.refs[&100], 1, "notif 100 ref released down to its own cap");
+    assert!(
+        !st.at(SlotId(0)).cap.is_empty(),
+        "the notification's own cap survives the IRQ teardown"
+    );
+    assert!(refcount_sound_exec(&st), "post: accounting closes (sound)");
 }
 
 // `check_expired`: a sweep over `300 → 301` where 300 (deadline 50) is expired and binds a
