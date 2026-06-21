@@ -119,6 +119,20 @@ pub trait Store {
     fn timer_next(&self, t: ObjId) -> Option<ObjId>;
     fn set_timer_next(&mut self, t: ObjId, n: Option<ObjId>);
 
+    // ── IRQ-handler object (B-IRQ) ────────────────────────────────────────
+    // The timer accessors' twin, minus the armed-list (`next`/head) seam. `intid` is
+    // boot-static (a getter only). The verified [`crate::irq`] ops run against these; the
+    // INTID→`ObjId` delivery lookup (`irq_for_intid`) is the trusted shell's concern (B-IRQ-B).
+    fn irq_intid(&self, i: ObjId) -> u32;
+    fn irq_notif(&self, i: ObjId) -> Option<ObjId>;
+    fn set_irq_notif(&mut self, i: ObjId, n: Option<ObjId>);
+    fn irq_bits(&self, i: ObjId) -> u64;
+    fn set_irq_bits(&mut self, i: ObjId, v: u64);
+    fn irq_bound(&self, i: ObjId) -> bool;
+    fn set_irq_bound(&mut self, i: ObjId, v: bool);
+    fn irq_masked(&self, i: ObjId) -> bool;
+    fn set_irq_masked(&mut self, i: ObjId, v: bool);
+
     // ── hardware / scheduler seam (folded from Env) ───────────────────────
     /// Make a thread Runnable (notification delivery, rev1§3.6). pre: `t` detached
     /// from any wait queue, register state consistent. post: `t` schedulable.

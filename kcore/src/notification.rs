@@ -85,6 +85,7 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
         // `signal` touches no cspace residency (every setter frames it) — the frame
         // `lemma_caps_consistent_frame` (via `fire`) needs.
         final(store).cspace_view() == old(store).cspace_view(),
+        final(store).irq_view() == old(store).irq_view(),
         // The refcount census moves in lockstep: a wake drops `refs[n]`
         // and `waiter_seq(n)` together, so `refs[x] - census(x)` is frozen at every `x`.
         // Unconditional and `requires`-free, so the kernel-shell callers
@@ -683,6 +684,7 @@ pub fn destroy_notif<S: Store>(store: &mut S, n: ObjId)
         final(store).timer_view() == old(store).timer_view(),
         final(store).timer_head_view() == old(store).timer_head_view(),
         final(store).cspace_view() == old(store).cspace_view(),
+        final(store).irq_view() == old(store).irq_view(),
         // B8C: the model no-op frames the ready queue too — `obj_unref`'s Notification arm
         // frames the ready pair across the destructor.
         final(store).ready_view() == old(store).ready_view(),
@@ -750,6 +752,7 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
         // Residency is untouched (the splice writes notif head/tail + tcb queue links + `refs`,
         // never `cspace_view`); `destroy_tcb` carries it to its own `cspace_view` ensures.
         final(store).cspace_view() == old(store).cspace_view(),
+        final(store).irq_view() == old(store).irq_view(),
         // The teardown system invariants survive the splice (the `signal`→`fire` precedent):
         // it is a signal-shaped edit (only `n`'s notif view + `n`'s waiter TCBs move, every
         // TCB's `bind_slots`/`cspace` fixed), so `lemma_caps_consistent_frame` applies; the
@@ -824,6 +827,7 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
             // residency too: the walk never touches `cspace_view`, so
             // the absent-path post-state can frame it, and `destroy_tcb` carries it forward.
             store.cspace_view() == old(store).cspace_view(),
+            store.irq_view() == old(store).irq_view(),
             // B8C: the walk is read-only on the ready view too — pinned so both return paths can
             // re-establish the ready invariants (off-chain on the found path, equal on absent).
             store.ready_view() == old(store).ready_view(),
@@ -972,6 +976,7 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
                 assert(store.slot_view() == old(store).slot_view());
                 assert(store.chan_view() == old(store).chan_view());
                 assert(store.cspace_view() == old(store).cspace_view());
+                assert(store.irq_view() == old(store).irq_view());
                 assert(nvf =~= nv0.insert(n, nvf[n]));
                 assert forall|kk: ObjId| old(store).tcb_view()[kk].wait_notif != Some(n)
                     implies #[trigger] tvf[kk] == tv0[kk] by {
@@ -1079,6 +1084,7 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
         assert(store.tcb_view() == old(store).tcb_view());
         assert(store.refs_view() == old(store).refs_view());
         assert(store.cspace_view() == old(store).cspace_view());
+        assert(store.irq_view() == old(store).irq_view());
         assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o)
             == cspace::obj_census(old(store), o) by {}
         // refcount_sound (conditional): the store is unchanged, so it carries.

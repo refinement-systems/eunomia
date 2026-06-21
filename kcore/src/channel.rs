@@ -259,6 +259,7 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
         // Residency is framed: `set_chan_end_caps` and `fire` both frame `cspace_view`, so
         // `delete`'s Channel branch carries it to `obj_unref`.
         final(store).cspace_view() == old(store).cspace_view(),
+        final(store).irq_view() == old(store).irq_view(),
         cspace::ready_wf(final(store).ready_view(), final(store).tcb_view()),
         cspace::ready_complete(final(store).ready_view(), final(store).tcb_view()),
         cspace::caps_consistent(final(store)),
@@ -455,6 +456,7 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
         // Residency is framed across the fire — `signal` frames `cspace_view`, the unbound
         // branch is a no-op; the teardown chain reads it off to `obj_unref`.
         final(store).cspace_view() == old(store).cspace_view(),
+        final(store).irq_view() == old(store).irq_view(),
         cspace::binding_notif_wf(final(store).chan_view(), final(store).notif_view(),
             final(store).tcb_view(), ch),
         // The cap→object invariant survives the fire: `signal` keeps every
@@ -1633,6 +1635,7 @@ fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
         cspace::census_dom_complete(final(store)),
         final(store).slot_view() == old(store).slot_view(),
         final(store).cspace_view() == old(store).cspace_view(),
+        final(store).irq_view() == old(store).irq_view(),
         // B8C: `release_binding` touches only chan bindings + `refs[n]`; the setters frame
         // `tcb_view` + `ready_view`, so `destroy_channel`'s binding-release loop carries the
         // ready pair across it (via `lemma_ready_inv_frame`).
@@ -1837,6 +1840,8 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
         // Residency is immutable: the ring-cap `delete`s and `set_obj_refs` all frame
         // `cspace_view`, so `obj_unref`'s Channel arm carries it.
         final(store).cspace_view() == old(store).cspace_view(),
+        // (No `irq_view` frame: a ring cap may be an `Irq` cap, whose `delete` runs
+        // `destroy_irq` and mutates `irq_view` — the `timer_view` precedent.)
         // The channel skeleton (`ring_cap`/`depth`/dom) is immutable: the body deletes ring
         // caps (slots, not the layout) and clears bindings, never re-homing a channel.
         // `obj_unref`'s Channel arm reads it off.
@@ -1887,6 +1892,8 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
             cspace::census_dom_complete(store),
             cspace::only_empties(old(store).slot_view(), store.slot_view()),
             store.cspace_view() == old(store).cspace_view(),
+            // (No `irq_view` invariant: a ring cap may be an `Irq` cap, whose `delete` runs
+            // `destroy_irq` and mutates `irq_view` — the `timer_view` precedent.)
             cspace::chan_struct_frame(old(store).chan_view(), store.chan_view()),
             cspace::dead_tcb_frozen(old(store), store),
             cspace::home_views_frozen(old(store), store),
@@ -1925,6 +1932,8 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                 cspace::census_dom_complete(store),
                 cspace::only_empties(old(store).slot_view(), store.slot_view()),
                 store.cspace_view() == old(store).cspace_view(),
+                // (No `irq_view` invariant: a ring cap may be an `Irq` cap, whose `delete`
+                // runs `destroy_irq` and mutates `irq_view` — the `timer_view` precedent.)
                 cspace::chan_struct_frame(old(store).chan_view(), store.chan_view()),
                 cspace::dead_tcb_frozen(old(store), store),
                 cspace::home_views_frozen(old(store), store),
@@ -1965,6 +1974,8 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                     cspace::census_dom_complete(store),
                     cspace::only_empties(old(store).slot_view(), store.slot_view()),
                     store.cspace_view() == old(store).cspace_view(),
+                    // (No `irq_view` invariant: a ring cap may be an `Irq` cap, whose `delete`
+                    // runs `destroy_irq` and mutates `irq_view` — the `timer_view` precedent.)
                     cspace::chan_struct_frame(old(store).chan_view(), store.chan_view()),
                     cspace::dead_tcb_frozen(old(store), store),
                     cspace::home_views_frozen(old(store), store),
@@ -2077,6 +2088,8 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
             cspace::census_dom_complete(store),
             cspace::only_empties(old(store).slot_view(), store.slot_view()),
             store.cspace_view() == old(store).cspace_view(),
+            // (No `irq_view` invariant: a ring cap may be an `Irq` cap, whose `delete` runs
+            // `destroy_irq` and mutates `irq_view` — the `timer_view` precedent.)
             cspace::chan_struct_frame(old(store).chan_view(), store.chan_view()),
             cspace::dead_tcb_frozen(old(store), store),
             cspace::home_views_frozen(old(store), store),
@@ -2107,6 +2120,8 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                 cspace::census_dom_complete(store),
                 cspace::only_empties(old(store).slot_view(), store.slot_view()),
                 store.cspace_view() == old(store).cspace_view(),
+                // (No `irq_view` invariant: a ring cap may be an `Irq` cap, whose `delete`
+                // runs `destroy_irq` and mutates `irq_view` — the `timer_view` precedent.)
                 cspace::chan_struct_frame(old(store).chan_view(), store.chan_view()),
                 cspace::dead_tcb_frozen(old(store), store),
                 cspace::home_views_frozen(old(store), store),

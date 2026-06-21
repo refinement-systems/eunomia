@@ -90,6 +90,7 @@ pub fn disarm<S: Store>(store: &mut S, t: ObjId)
         // pair across the disarm (via `lemma_ready_inv_frame`) to feed the in-loop `signal`.
         final(store).ready_view() == old(store).ready_view(),
         final(store).cspace_view() == old(store).cspace_view(),
+        final(store).irq_view() == old(store).irq_view(),
         final(store).timer_view().dom() == old(store).timer_view().dom(),
         cspace::timer_wf(final(store).timer_view(), final(store).timer_head_view()),
         // The refcount census moves in lockstep (the `signal`/`remove_waiter` precedent):
@@ -162,6 +163,7 @@ pub fn disarm<S: Store>(store: &mut S, t: ObjId)
             store.notif_view() == old(store).notif_view(),
             store.tcb_view() == old(store).tcb_view(),
             store.cspace_view() == old(store).cspace_view(),
+            store.irq_view() == old(store).irq_view(),
             store.refs_view() == old(store).refs_view(),
             // B8C: `disarm` never touches the ready queue; the setters frame `ready_view`, so it
             // is pinned across the splice loop — gives the new `ready_view` frame ensure.
@@ -478,6 +480,7 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
         // `obj_unref`'s Timer arm can frame the ready pair across the destructor.
         final(store).ready_view() == old(store).ready_view(),
         final(store).cspace_view() == old(store).cspace_view(),
+        final(store).irq_view() == old(store).irq_view(),
         final(store).timer_view().dom() == old(store).timer_view().dom(),
         cspace::timer_wf(final(store).timer_view(), final(store).timer_head_view()),
         cspace::refcount_sound(final(store)),
@@ -553,6 +556,7 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
         // arm reads an unchanged domain + the ensured `timer_wf`; every other arm reads a
         // framed object view. Each live cap's consistency carries over.
         assert(store.cspace_view() == old(store).cspace_view());
+        assert(store.irq_view() == old(store).irq_view());
         assert(store.timer_view().dom() == old(store).timer_view().dom());
         assert forall|s: crate::id::SlotId| #![trigger store.slot_view()[s]]
             store.slot_view().dom().contains(s)
