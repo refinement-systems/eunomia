@@ -1756,6 +1756,13 @@ pub open spec fn waiter_chain(
             tv[ws[i]].qnext == (if i + 1 < ws.len() { Some(ws[i + 1]) } else { None })
     &&& forall|i: int| #![trigger ws[i]] 0 <= i < ws.len() ==>
             tv[ws[i]].wait_notif == Some(n) && tv[ws[i]].state == ThreadState::BlockedNotif
+    // B8C: a queued waiter's priority is a valid ready-queue level. This rides `notif_wf`
+    // (already threaded everywhere), so `signal` can discharge the woken head's
+    // `priority < NUM_PRIOS` precondition for the faithful `make_runnable`/`ready_enqueue`
+    // without a separate global `prio_bounded` invariant. Only `wait` (the sole appender)
+    // must establish it for the blocking thread — a leaf precondition the kernel supplies.
+    &&& forall|i: int| #![trigger ws[i]] 0 <= i < ws.len() ==>
+            (tv[ws[i]].priority as int) < NUM_PRIOS
 }
 
 // Notification `n` is well-formed: empty-queue head/tail agreement, and a waiter
@@ -2242,6 +2249,9 @@ pub proof fn lemma_waiter_refs_frame_fields(
         forall|k: ObjId| #[trigger] tvf[k].qnext == tv0[k].qnext,
         forall|k: ObjId| #[trigger] tvf[k].wait_notif == tv0[k].wait_notif,
         forall|k: ObjId| #[trigger] tvf[k].state == tv0[k].state,
+        // B8C: `waiter_chain` now carries a priority bound, so its frame transfer needs
+        // priority preserved too (the callers — `bind_bits`, etc. — never write priority).
+        forall|k: ObjId| #[trigger] tvf[k].priority == tv0[k].priority,
     ensures
         waiter_refs(nv, tvf, o) == waiter_refs(nv, tv0, o),
 {
@@ -2598,6 +2608,9 @@ pub proof fn lemma_remove_chain(
         k > 0 ==> tvf[ws0[k - 1]].qnext == tv0[t].qnext,
         k > 0 ==> tvf[ws0[k - 1]].wait_notif == tv0[ws0[k - 1]].wait_notif,
         k > 0 ==> tvf[ws0[k - 1]].state == tv0[ws0[k - 1]].state,
+        // B8C: `waiter_chain`'s priority covenant — the re-threaded predecessor keeps its
+        // priority (the splice writes only its `qnext`), so the result chain stays bounded.
+        k > 0 ==> tvf[ws0[k - 1]].priority == tv0[ws0[k - 1]].priority,
         // every other TCB unchanged.
         forall|j: ObjId| #![trigger tvf[j]]
             j != t && (k == 0 || j != ws0[k - 1]) ==> tvf[j] == tv0[j],

@@ -352,6 +352,11 @@ pub fn wait<S: Store>(store: &mut S, n: ObjId, cur: ObjId) -> (res: Option<u64>)
         old(store).tcb_view().dom().contains(cur),
         cspace::notif_wf(old(store).notif_view(), old(store).tcb_view(), n),
         old(store).tcb_view()[cur].wait_notif is None,
+        // B8C: the blocking thread's priority is a valid ready-queue level. `wait` is the sole
+        // appender to a waiter chain, so this leaf precondition (the kernel supplies it for the
+        // running thread) re-establishes the strengthened `waiter_chain` priority covenant; it
+        // then rides `notif_wf` to `signal`, which needs it for the faithful `make_runnable`.
+        (old(store).tcb_view()[cur].priority as int) < crate::sysabi::NUM_PRIOS,
         old(store).notif_view()[n].word == 0
             ==> old(store).refs_view().dom().contains(n) && old(store).refs_view()[n] < u32::MAX,
     ensures
@@ -471,6 +476,20 @@ pub fn wait<S: Store>(store: &mut S, n: ObjId, cur: ObjId) -> (res: Option<u64>)
                     assert(pws[i] == ws0[i] && ws0[i] != cur);
                 } else {
                     assert(pws[i] == cur);
+                }
+            }
+            // B8C: the strengthened priority covenant. `wait` never writes any `priority`
+            // (only state/wait_notif/qnext), so the bound rides framed for the `ws0` prefix
+            // (from the input chain) and from the new leaf precondition for `cur`.
+            assert forall|i: int| 0 <= i < pws.len() implies
+                (tvf[pws[i]].priority as int) < crate::sysabi::NUM_PRIOS by {
+                if i < ws0.len() {
+                    assert(pws[i] == ws0[i]);
+                    assert((tv0[ws0[i]].priority as int) < crate::sysabi::NUM_PRIOS);
+                    assert(tvf[ws0[i]].priority == tv0[ws0[i]].priority);
+                } else {
+                    assert(pws[i] == cur);
+                    assert(tvf[cur].priority == tv0[cur].priority);
                 }
             }
         }
