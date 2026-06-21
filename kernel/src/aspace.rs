@@ -100,6 +100,22 @@ pub unsafe fn map(
     r
 }
 
+/// Grow the aspace's intermediate-page-table pool by `add` zeroed tables, carved
+/// contiguously at the pool's current end (rev1§2.5 "accepts top-ups", B10). The
+/// caller (the `Sys::AspaceTopUp` handler, wired in B10B) places `add` fresh
+/// tables physically abutting `pool_base + pool_pages*PAGE`; here we zero them and
+/// bump the recorded `pool_pages`, after which `pool_view`/`map` rebuild the larger
+/// slice automatically (no map-path change). Soundness — the extension preserves
+/// `pt_wf` and every existing mapping — is the verified
+/// [`kcore::aspace::lemma_grow_pool`].
+#[allow(dead_code)] // wired to the `Sys::AspaceTopUp` handler in B10B
+pub unsafe fn grow_pool(this: *mut AspaceObj, add: u64) {
+    let old_len = (*this).pool_pages;
+    let region = (*this).pool_base + old_len * PAGE;
+    ptr::write_bytes(region as *mut u8, 0, (add * PAGE) as usize);
+    (*this).pool_pages = old_len + add;
+}
+
 /// Unmap (frame-cap deletion path). The verified walker clears the leaves and
 /// drives the per-page TLBI + trailing barrier through `KernelStore`.
 pub unsafe fn unmap(this: *mut AspaceObj, va: u64, pages: u64) {
