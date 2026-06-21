@@ -522,6 +522,16 @@ pub fn ready_enqueue<S: Store>(store: &mut S, t: ObjId)
         forall|x: ObjId| #![trigger final(store).tcb_view()[x]]
             x != t && old(store).ready_view().tails[old(store).tcb_view()[t].priority as int] != Some(x)
             ==> final(store).tcb_view()[x] == old(store).tcb_view()[x],
+        // B8C-2: the enqueue writes only `state` (on the woken `t`, specified above) and `qnext`
+        // (on `t` + the old tail). Every thread *but* `t` changes **only its `qnext`** — its
+        // `state`/`wait_notif`/`cspace`/`aspace`/`bind_*`/`priority`/`retval` are preserved, so the
+        // old ready-tail stays Runnable with `wait_notif None`. `signal`'s census/caps proofs read
+        // that off this global frame.
+        forall|x: ObjId| #![trigger final(store).tcb_view()[x]]
+            x != t ==> final(store).tcb_view()[x] == (cspace::TcbView {
+                qnext: final(store).tcb_view()[x].qnext,
+                ..old(store).tcb_view()[x]
+            }),
         cspace::ready_seq(final(store).ready_view(), final(store).tcb_view(),
             old(store).tcb_view()[t].priority as int)
             == cspace::ready_seq(old(store).ready_view(), old(store).tcb_view(),
@@ -635,6 +645,11 @@ pub fn ready_enqueue<S: Store>(store: &mut S, t: ObjId)
             }
         }
         lemma_ready_push_wf(rv0, tv0, rvf, tvf, level, t, pws);
+        // global frame: only `state` (on `t`) and `qnext` (on `t` + the old tail) ever change;
+        // for `x != t` only `qnext` moves (the old-tail re-thread), so `set_tcb_qnext` frames
+        // every other field — the old tail keeps its Runnable state and `wait_notif`.
+        assert forall|x: ObjId| #![trigger tvf[x]]
+            x != t ==> tvf[x] == (cspace::TcbView { qnext: tvf[x].qnext, ..tv0[x] }) by {}
     }
 }
 
@@ -784,13 +799,29 @@ pub fn ready_unqueue<S: Store>(store: &mut S, t: ObjId)
             &&& final(store).tcb_view()[t].qnext is None
             &&& final(store).tcb_view()[t].state == old(store).tcb_view()[t].state
             &&& final(store).tcb_view()[t].priority == old(store).tcb_view()[t].priority
+            &&& final(store).tcb_view()[t].wait_notif == old(store).tcb_view()[t].wait_notif
             &&& final(store).tcb_view()[t].cspace == old(store).tcb_view()[t].cspace
             &&& final(store).tcb_view()[t].aspace == old(store).tcb_view()[t].aspace
-            // the "signal-shaped" frame: only level's chain nodes (t + its predecessor) moved.
+            &&& final(store).tcb_view()[t].bind_slots == old(store).tcb_view()[t].bind_slots
+            // B8C (Step F): `t`'s report survives the splice (only `qnext` is written) —
+            // `destroy_tcb` reads it off to preserve the halted subject's report (rev1§5.1).
+            &&& final(store).tcb_view()[t].report == old(store).tcb_view()[t].report
+            // the "signal-shaped" frame: only level's chain nodes (t + its predecessor) moved,
+            // each Runnable (so off every waiter chain), and each preserves the home fields
+            // `destroy_tcb`'s census/caps reasoning needs — `wait_notif` (waiter census),
+            // `cspace`/`aspace` (`thread_hold_refs`), `bind_slots` (`caps_consistent`'s Thread arm).
+            // B8C (Step F): extends the part-2 frame with `cspace`/`aspace`.
             &&& forall|x: ObjId| #![trigger final(store).tcb_view()[x]]
                     final(store).tcb_view()[x] != old(store).tcb_view()[x]
                     ==> old(store).tcb_view()[x].state == ThreadState::Runnable
+                        && final(store).tcb_view()[x].state == old(store).tcb_view()[x].state
                         && old(store).tcb_view()[x].priority as int == level
+                        && final(store).tcb_view()[x].wait_notif
+                            == old(store).tcb_view()[x].wait_notif
+                        && final(store).tcb_view()[x].cspace == old(store).tcb_view()[x].cspace
+                        && final(store).tcb_view()[x].aspace == old(store).tcb_view()[x].aspace
+                        && final(store).tcb_view()[x].bind_slots
+                            == old(store).tcb_view()[x].bind_slots
         }),
 {
     let ghost rv0 = old(store).ready_view();
@@ -985,9 +1016,12 @@ pub fn ready_unqueue<S: Store>(store: &mut S, t: ObjId)
                 }
 
                 // ── signal-shaped frame: only `t` and its predecessor (both Runnable at
-                //    `level` in `tv0`) moved ──
+                //    `level` in `tv0`) moved; the splice writes only `qnext`, so every thread's
+                //    `wait_notif`/`bind_slots` survive (`destroy_tcb`'s home/census frames) ──
                 assert forall|x: ObjId| #[trigger] tvf[x] != tv0[x] implies
-                    tv0[x].state == ThreadState::Runnable && tv0[x].priority as int == level by {
+                    tv0[x].state == ThreadState::Runnable && tv0[x].priority as int == level
+                    && tvf[x].wait_notif == tv0[x].wait_notif
+                    && tvf[x].bind_slots == tv0[x].bind_slots by {
                     if x != t {
                         assert(k > 0 && x == rs0[k - 1]);
                         assert(0 <= k - 1 < rs0.len());
@@ -996,6 +1030,8 @@ pub fn ready_unqueue<S: Store>(store: &mut S, t: ObjId)
                     }
                 }
                 assert(tvf[t].qnext is None);
+                assert(tvf[t].wait_notif == tv0[t].wait_notif);
+                assert(tvf[t].bind_slots == tv0[t].bind_slots);
             }
             return;
         }

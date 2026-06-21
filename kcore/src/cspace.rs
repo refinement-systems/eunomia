@@ -1100,48 +1100,117 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
-    // ── scheduler seam ─────────────────────────────────────
+    // ── scheduler seam (B8C: faithful ready-queue ops) ─────────────────────
     //
-    // The single assumed scheduler contract phase 4 adds: `signal`'s body proof
-    // (4b) needs to know the wake touches only the woken thread's `state`. The
-    // ready queue is scheduler state *below* the abstract `tcb_view` (a thread is
-    // off every kcore queue once Runnable — `signal` sets `qnext = None` before
-    // calling this), so modeling it as "state → Runnable, all else fixed" is
-    // faithful; host-test-checked against `ArrayStore`. `unqueue_ready`'s contract
-    // lands with the final-thread teardown `destroy_tcb` body (below).
+    // `make_runnable` is the seam lift of the verified `ready::ready_enqueue` (ready.rs): it
+    // appends `t` to the tail of `t`'s priority level (writing the old level-tail's `qnext`)
+    // and sets the presence bit. The contract mirrors `ready_enqueue`'s ensures term-for-term so
+    // the verified op discharges it (the KernelStore realization routes through it in B8C-3;
+    // ArrayStore is host-checked via `signal_frame`). `signal` supplies the `priority < NUM_PRIOS`
+    // precondition from the strengthened `waiter_chain` (via `notif_wf`) and `wait_notif is None`
+    // by clearing it before the call.
     fn make_runnable(&mut self, t: ObjId)
-        requires old(self).tcb_view().dom().contains(t),
+        requires
+            old(self).tcb_view().dom().contains(t),
+            (old(self).tcb_view()[t].priority as int) < NUM_PRIOS,
+            old(self).tcb_view()[t].state != ThreadState::Runnable,
+            old(self).tcb_view()[t].wait_notif is None,
+            ready_wf(old(self).ready_view(), old(self).tcb_view()),
+            ready_complete(old(self).ready_view(), old(self).tcb_view()),
         ensures
-            final(self).tcb_view() == old(self).tcb_view().insert(
-                t, TcbView { state: ThreadState::Runnable, ..old(self).tcb_view()[t] }),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).chan_view() == old(self).chan_view(),
             final(self).notif_view() == old(self).notif_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
-            final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).tcb_view().dom() == old(self).tcb_view().dom(),
+            ready_wf(final(self).ready_view(), final(self).tcb_view()),
+            ready_complete(final(self).ready_view(), final(self).tcb_view()),
+            // tcb_view changes only at `t` (now Runnable, tail, qnext None) and the old
+            // level-tail (qnext now points at `t`); `t`'s other fields are framed.
+            final(self).tcb_view()[t] == (TcbView {
+                state: ThreadState::Runnable,
+                qnext: None,
+                ..old(self).tcb_view()[t]
+            }),
+            forall|x: ObjId| #![trigger final(self).tcb_view()[x]]
+                x != t
+                && old(self).ready_view().tails[old(self).tcb_view()[t].priority as int] != Some(x)
+                ==> final(self).tcb_view()[x] == old(self).tcb_view()[x],
+            // global frame: only `state` (on the woken `t`, specified above) and `qnext` (on `t`
+            // + the old tail) change. Every thread *but* `t` changes **only its `qnext`** — its
+            // `state`/`wait_notif`/`cspace`/`aspace`/`bind_*`/`priority`/`retval` are preserved.
+            // So the old ready-tail stays Runnable with `wait_notif None`; `signal`'s caps/
+            // waiter-coherence proofs read that off this (a Runnable tail is never `BlockedNotif`).
+            forall|x: ObjId| #![trigger final(self).tcb_view()[x]]
+                x != t ==> final(self).tcb_view()[x] == (TcbView {
+                    qnext: final(self).tcb_view()[x].qnext,
+                    ..old(self).tcb_view()[x]
+                }),
+            ready_seq(final(self).ready_view(), final(self).tcb_view(),
+                old(self).tcb_view()[t].priority as int)
+                == ready_seq(old(self).ready_view(), old(self).tcb_view(),
+                    old(self).tcb_view()[t].priority as int).push(t);
 
-    // `unqueue_ready` — the `destroy_tcb` teardown counterpart of `make_runnable`
-    // The ready queue is scheduler state *below* the abstract `tcb_view`:
-    // a thread is Runnable both before and after the unqueue (the kcore model tracks only
-    // `state`, which `destroy_tcb` itself sets to `Halted` *afterwards*), so the faithful
-    // model is a **total no-op on every object view**. Host-test-checked against `ArrayStore`'s
-    // empty body via `check_destroy_tcb` (the `make_runnable` precedent). This retires the
-    // `thread.rs` note that `unqueue_ready` "needs no Verus contract" — the proven body needs
-    // the frame.
+    // `unqueue_ready` — the seam lift of the verified `ready::ready_unqueue`: the
+    // arbitrary-position splice walk. Removes a Runnable `t` from its level's chain
+    // (re-threading its predecessor's `qnext`, clearing `t`'s), leaving `t` transiently
+    // Runnable-and-off-chain — `destroy_tcb` (its sole caller) halts `t` immediately after,
+    // promoting `ready_complete_except(t)` back to `ready_complete`. Mirrors `ready_unqueue`'s
+    // ensures. `destroy_tcb` supplies `priority < NUM_PRIOS` from `ready_complete` (`t` Runnable).
+    // Host-checked via `check_destroy_tcb`.
     fn unqueue_ready(&mut self, t: ObjId)
+        requires
+            old(self).tcb_view().dom().contains(t),
+            old(self).tcb_view()[t].state == ThreadState::Runnable,
+            (old(self).tcb_view()[t].priority as int) < NUM_PRIOS,
+            ready_wf(old(self).ready_view(), old(self).tcb_view()),
+            ready_complete(old(self).ready_view(), old(self).tcb_view()),
         ensures
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).chan_view() == old(self).chan_view(),
             final(self).notif_view() == old(self).notif_view(),
-            final(self).tcb_view() == old(self).tcb_view(),
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
-            final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+            final(self).tcb_view().dom() == old(self).tcb_view().dom(),
+            ready_wf(final(self).ready_view(), final(self).tcb_view()),
+            ready_complete_except(final(self).ready_view(), final(self).tcb_view(), t),
+            ({
+                let level = old(self).tcb_view()[t].priority as int;
+                let rs0 = ready_seq(old(self).ready_view(), old(self).tcb_view(), level);
+                &&& ready_seq(final(self).ready_view(), final(self).tcb_view(), level)
+                        == rs0.remove(rs0.index_of(t))
+                &&& final(self).tcb_view()[t].qnext is None
+                &&& final(self).tcb_view()[t].state == old(self).tcb_view()[t].state
+                &&& final(self).tcb_view()[t].priority == old(self).tcb_view()[t].priority
+                &&& final(self).tcb_view()[t].wait_notif == old(self).tcb_view()[t].wait_notif
+                &&& final(self).tcb_view()[t].cspace == old(self).tcb_view()[t].cspace
+                &&& final(self).tcb_view()[t].aspace == old(self).tcb_view()[t].aspace
+                &&& final(self).tcb_view()[t].bind_slots == old(self).tcb_view()[t].bind_slots
+                // B8C (Step F): `t`'s report survives the splice (only `qnext` is written) —
+                // `destroy_tcb` reads it off to preserve the halted subject's report (rev1§5.1).
+                &&& final(self).tcb_view()[t].report == old(self).tcb_view()[t].report
+                // signal-shaped frame: only level's chain nodes (t + predecessor) moved, each
+                // Runnable (off every waiter chain), and each preserves the home fields
+                // `destroy_tcb`'s census/caps reasoning needs — `wait_notif` (waiter census),
+                // `cspace`/`aspace` (`thread_hold_refs`), `bind_slots` (`caps_consistent`).
+                // B8C (Step F): extends the part-2 frame with `cspace`/`aspace`.
+                &&& forall|x: ObjId| #![trigger final(self).tcb_view()[x]]
+                        final(self).tcb_view()[x] != old(self).tcb_view()[x]
+                        ==> old(self).tcb_view()[x].state == ThreadState::Runnable
+                            && final(self).tcb_view()[x].state == old(self).tcb_view()[x].state
+                            && old(self).tcb_view()[x].priority as int == level
+                            && final(self).tcb_view()[x].wait_notif
+                                == old(self).tcb_view()[x].wait_notif
+                            && final(self).tcb_view()[x].cspace == old(self).tcb_view()[x].cspace
+                            && final(self).tcb_view()[x].aspace == old(self).tcb_view()[x].aspace
+                            && final(self).tcb_view()[x].bind_slots
+                                == old(self).tcb_view()[x].bind_slots
+            });
 
     // ── aspace hardware seam (the `aspace::map_in` post-map barrier) ──────────
     //
@@ -1932,7 +2001,12 @@ pub proof fn lemma_notif_wf_frame(
         nv2.dom().contains(m),
         nv2[m] == nv[m],
         tv2.dom() == tv.dom(),
-        forall|k: ObjId| #[trigger] tv[k].wait_notif == Some(m) ==> tv2[k] == tv[k],
+        // B8C: dom-guarded — the lemma only consumes the in-domain waiters of `m` (the chain
+        // `m`'s head/tail thread, all in `tv.dom()`), so a caller need not reason about phantom
+        // out-of-domain keys. A weakening of the precondition; every existing caller, which
+        // supplied the un-guarded `forall`, satisfies it unchanged.
+        forall|k: ObjId| #[trigger] tv[k].wait_notif == Some(m) && tv.dom().contains(k)
+            ==> tv2[k] == tv[k],
     ensures
         notif_wf(nv2, tv2, m),
 {
@@ -1968,7 +2042,12 @@ pub proof fn lemma_drop_first_chain(
         tv0[t].qnext is None ==> nvf[n].wait_tail is None,
         tv0[t].qnext is Some ==> nvf[n].wait_tail == nv0[n].wait_tail,
         tvf.dom() == tv0.dom(),
-        forall|k: ObjId| #![trigger tvf[k]] k != t ==> tvf[k] == tv0[k],
+        // B8C: only `n`'s waiters need to be unchanged (the chain `ws0.drop_first` is all
+        // waiters of `n`). Weakened from `k != t ==> unchanged` so `signal`'s faithful enqueue —
+        // which also re-threads the Runnable old ready-tail `p` (`wait_notif None`, not a
+        // waiter of `n`) — can still discharge it.
+        forall|k: ObjId| #![trigger tvf[k]]
+            k != t && tv0[k].wait_notif == Some(n) ==> tvf[k] == tv0[k],
     ensures
         waiter_chain(nvf, tvf, n, ws0.drop_first()),
 {
@@ -1991,6 +2070,9 @@ pub proof fn lemma_drop_first_chain(
         && tvf[dws[i]].wait_notif == Some(n)
         && tvf[dws[i]].state == ThreadState::BlockedNotif by {
         assert(dws[i] == ws0[i + 1]);
+        // `dws[i]` is a waiter of `n` (covenant) and `!= t`, so the weakened frame freezes it.
+        assert(tv0[ws0[i + 1]].wait_notif == Some(n));
+        assert(tvf[dws[i]] == tv0[dws[i]]);
         assert(tv0[ws0[i + 1]].qnext == (if i + 2 < ws0.len() { Some(ws0[i + 2]) } else { None }));
     }
 }
@@ -2958,6 +3040,33 @@ pub proof fn lemma_ready_chain_frame(
 {
 }
 
+// B8C: the *field-based* chain frame — `ready_chain` reads only each member's `qnext`/`state`/
+// `priority` (plus `rv`'s heads/tails and `tv`'s domain), so an edit preserving exactly those
+// three fields at the chain members carries the chain even if it rewrites other fields (e.g.
+// `report_terminal`'s `report`, `bind`'s `cspace`/`aspace`/`bind_*`).
+pub proof fn lemma_ready_chain_frame_fields(
+    rv0: ReadyView,
+    tv0: Map<ObjId, TcbView>,
+    rvf: ReadyView,
+    tvf: Map<ObjId, TcbView>,
+    level: int,
+    rs: Seq<ObjId>,
+)
+    requires
+        ready_chain(rv0, tv0, level, rs),
+        rvf.heads[level] == rv0.heads[level],
+        rvf.tails[level] == rv0.tails[level],
+        tvf.dom() == tv0.dom(),
+        forall|i: int| #![trigger tvf[rs[i]]] 0 <= i < rs.len()
+            ==> tvf.dom().contains(rs[i])
+                && tvf[rs[i]].qnext == tv0[rs[i]].qnext
+                && tvf[rs[i]].state == tv0[rs[i]].state
+                && tvf[rs[i]].priority == tv0[rs[i]].priority,
+    ensures
+        ready_chain(rvf, tvf, level, rs),
+{
+}
+
 // When the chain at `level` is preserved (`lemma_ready_chain_frame`'s conclusion), so is
 // `ready_seq` at `level` (uniqueness). Carries the per-level `ready_seq` equality the ops'
 // `ready_complete` re-establishment needs for the 31 untouched levels.
@@ -3200,6 +3309,25 @@ pub proof fn lemma_seq_remove_no_dup<A>(s: Seq<A>, k: int)
         let jj = if j < k { j } else { j + 1 };
         assert(r[i] == s[ii] && r[j] == s[jj]);
         assert(ii != jj);
+    }
+}
+
+// B8C (Step F): removing the unique occurrence of an element from a `no_duplicates` sequence
+// leaves a sequence that no longer contains it — `destroy_tcb` uses this to prove the unqueued
+// `t` is off its (post-splice) level chain, hence (with `ready_wf`) off every ready chain.
+pub proof fn lemma_seq_remove_drops<A>(s: Seq<A>, k: int)
+    requires
+        s.no_duplicates(),
+        0 <= k < s.len(),
+    ensures
+        !s.remove(k).contains(s[k]),
+{
+    let r = s.remove(k);
+    s.remove_ensures(k);
+    assert forall|j: int| 0 <= j < r.len() implies r[j] != s[k] by {
+        let jj = if j < k { j } else { j + 1 };
+        assert(r[j] == s[jj]);
+        assert(jj != k);   // `no_duplicates` ⇒ `s[jj] != s[k]`
     }
 }
 
@@ -4137,8 +4265,15 @@ pub open spec fn census_off_by_one<S: Store>(store: &S, z: ObjId) -> bool {
 // The per-object kernel of `dead_tcb_frozen` (a clean predicate so the system quantifier triggers
 // on `dead_tcb_frozen_at(s0, s1, x)`, not the fragile `s1.tcb_view[x]` map index).
 pub open spec fn dead_tcb_frozen_at<S: Store>(s0: &S, s1: &S, x: ObjId) -> bool {
+    // B8C: a *Runnable* thread is not "dead" for freezing purposes — the faithful
+    // `make_runnable`/`ready_unqueue` re-thread a Runnable node's `qnext` (the old ready-tail /
+    // the spliced predecessor), which may be refs-0 yet legitimately on the ready queue (ready
+    // membership carries no refcount). The teardown consumers only ever freeze Halted/Blocked
+    // dead threads (`destroy_tcb` halts its subject before recursing), so excluding Runnable
+    // threads here is sound and weakens the obligation precisely where the scheduler edits land.
     (s0.tcb_view().dom().contains(x) && s0.refs_view().dom().contains(x)
-        && s0.refs_view()[x] == 0 && s0.tcb_view()[x].wait_notif is None)
+        && s0.refs_view()[x] == 0 && s0.tcb_view()[x].wait_notif is None
+        && s0.tcb_view()[x].state != ThreadState::Runnable)
         ==> (s1.tcb_view().dom().contains(x) && s1.refs_view().dom().contains(x)
             && s1.refs_view()[x] == 0 && s1.tcb_view()[x] == s0.tcb_view()[x])
 }
@@ -4164,9 +4299,14 @@ pub proof fn lemma_dead_tcb_frozen_trans<S: Store>(s0: &S, s1: &S, s2: &S)
         // Chain: if `x` is dead+detached in s0, frame 1 makes it dead+detached in s1 (with
         // `tcb[x] == s0.tcb[x]`, so still `wait_notif is None`), then frame 2 reaches s2.
         if s0.tcb_view().dom().contains(x) && s0.refs_view().dom().contains(x)
-            && s0.refs_view()[x] == 0 && s0.tcb_view()[x].wait_notif is None {
+            && s0.refs_view()[x] == 0 && s0.tcb_view()[x].wait_notif is None
+            && s0.tcb_view()[x].state != ThreadState::Runnable {
+            // B8C: the antecedent now matches the weakened `dead_tcb_frozen_at` (Runnable
+            // excluded), so frame 1 fires and pins `s1.tcb[x] == s0.tcb[x]`; that carries
+            // `wait_notif is None` *and* `state != Runnable` into s1, firing frame 2 to s2.
             assert(s1.tcb_view()[x] == s0.tcb_view()[x]);
             assert(s1.tcb_view()[x].wait_notif is None);
+            assert(s1.tcb_view()[x].state != ThreadState::Runnable);
         }
     }
 }
@@ -4183,17 +4323,24 @@ pub proof fn lemma_dead_tcb_frozen_signal_shaped<S: Store>(s0: &S, s1: &S, n: Ob
         s1.tcb_view().dom() == s0.tcb_view().dom(),
         forall|x: ObjId| s0.refs_view().dom().contains(x) && s0.refs_view()[x] == 0
             ==> #[trigger] s1.refs_view()[x] == 0,
+        // B8C: a changed TCB is either an `n`-waiter (the woken/spliced head) OR a Runnable
+        // node (the enqueue's re-threaded old ready-tail). A *dead* `x` (refs 0, detached,
+        // non-Runnable per the weakened `dead_tcb_frozen_at`) is neither, so it is frozen.
         forall|k: ObjId| #[trigger] s1.tcb_view()[k] == s0.tcb_view()[k]
-            || s0.tcb_view()[k].wait_notif == Some(n),
+            || s0.tcb_view()[k].wait_notif == Some(n)
+            || s0.tcb_view()[k].state == ThreadState::Runnable,
     ensures
         dead_tcb_frozen(s0, s1),
 {
     assert forall|x: ObjId| #[trigger] dead_tcb_frozen_at(s0, s1, x) by {
         if s0.tcb_view().dom().contains(x) && s0.refs_view().dom().contains(x)
-            && s0.refs_view()[x] == 0 && s0.tcb_view()[x].wait_notif is None {
-            // Detached `x`: `wait_notif is None != Some(n)`, so the disjunction's right fails and
-            // the left (`tcb` frozen) holds; the refs hypothesis keeps it dead-in-domain.
-            assert(s1.tcb_view()[x] == s0.tcb_view()[x] || s0.tcb_view()[x].wait_notif == Some(n));
+            && s0.refs_view()[x] == 0 && s0.tcb_view()[x].wait_notif is None
+            && s0.tcb_view()[x].state != ThreadState::Runnable {
+            // Dead `x`: `wait_notif None != Some(n)` and not Runnable, so the right two
+            // disjuncts fail and the left (`tcb` frozen) holds; refs keeps it dead-in-domain.
+            assert(s1.tcb_view()[x] == s0.tcb_view()[x]
+                || s0.tcb_view()[x].wait_notif == Some(n)
+                || s0.tcb_view()[x].state == ThreadState::Runnable);
         }
     }
 }
@@ -4866,6 +5013,188 @@ pub proof fn lemma_ready_inv_frame<S: Store>(s0: &S, s1: &S)
 {
 }
 
+// B8C: the generalised ready frame — the invariants ride an edit that frames `ready_view` and
+// changes `tcb_view` only at threads that are non-Runnable in BOTH states. A blocked/halted
+// thread is on no ready chain (every chain member is Runnable by the `ready_chain` covenant), so
+// the per-level chains — hence `ready_wf` — and the Runnable set with its `wait_notif`/charting —
+// hence `ready_complete` — are untouched. Used by `signal`'s pre-enqueue fixups (which retarget
+// only the still-`BlockedNotif` woken head), `remove_waiter` (a waiter-chain splice over
+// `BlockedNotif` nodes), and `destroy_tcb`'s blocked/halt branches.
+#[verifier::spinoff_prover]
+#[verifier::rlimit(60)]
+pub proof fn lemma_ready_inv_frame_offchain<S: Store>(s0: &S, s1: &S)
+    requires
+        ready_wf(s0.ready_view(), s0.tcb_view()),
+        ready_complete(s0.ready_view(), s0.tcb_view()),
+        s1.ready_view() == s0.ready_view(),
+        s1.tcb_view().dom() == s0.tcb_view().dom(),
+        forall|x: ObjId| #[trigger] s1.tcb_view()[x] != s0.tcb_view()[x]
+            ==> s0.tcb_view()[x].state != ThreadState::Runnable
+                && s1.tcb_view()[x].state != ThreadState::Runnable,
+    ensures
+        ready_wf(s1.ready_view(), s1.tcb_view()),
+        ready_complete(s1.ready_view(), s1.tcb_view()),
+{
+    let rv = s0.ready_view();
+    let tv0 = s0.tcb_view();
+    let tv1 = s1.tcb_view();
+    // Each level's chain is unchanged: its members are Runnable, hence not among the changed
+    // (non-Runnable) threads, so framed; `lemma_ready_seq_frame` transfers the chain + seq.
+    assert forall|level: int| #![trigger ready_seq(rv, tv1, level)] 0 <= level < NUM_PRIOS as int
+        implies ready_seq(rv, tv1, level) == ready_seq(rv, tv0, level)
+            && ready_chain(rv, tv1, level, ready_seq(rv, tv1, level)) by {
+        let rs = ready_seq(rv, tv0, level);
+        assert(ready_chain(rv, tv0, level, rs));
+        assert forall|i: int| 0 <= i < rs.len() implies #[trigger] tv1[rs[i]] == tv0[rs[i]] by {
+            assert(tv0[rs[i]].state == ThreadState::Runnable);
+        }
+        lemma_ready_seq_frame(rv, tv0, rv, tv1, level);
+    }
+    // ready_wf: domains + empty-agreement depend only on `rv`; the per-level chains carry
+    // (above); bitmap coherence carries since each `ready_seq` is unchanged.
+    assert(ready_wf(rv, tv1));
+    // ready_complete: a Runnable `x` in `tv1` is unchanged (a changed thread is non-Runnable),
+    // so it kept its level/`wait_notif` and its (unchanged) chain still charts it.
+    assert forall|x: ObjId| #[trigger] tv1.dom().contains(x) && tv1[x].state == ThreadState::Runnable
+        implies (tv1[x].priority as int) < NUM_PRIOS
+            && ready_seq(rv, tv1, tv1[x].priority as int).contains(x)
+            && tv1[x].wait_notif is None by {
+        assert(tv1[x] == tv0[x]);
+        let px = tv0[x].priority as int;
+        assert(ready_seq(rv, tv1, px) == ready_seq(rv, tv0, px));
+    }
+}
+
+// B8C: the *field-based* ready frame — the invariants ride an edit that frames `ready_view` and
+// preserves the four ready-relevant fields (`state`/`priority`/`qnext`/`wait_notif`) of EVERY
+// thread, even if it rewrites other fields. Used by `report_terminal` (sets `report`) and `bind`
+// (sets `cspace`/`aspace`/`bind_*`) — neither touches a field `ready_wf`/`ready_complete` reads.
+#[verifier::spinoff_prover]
+#[verifier::rlimit(60)]
+pub proof fn lemma_ready_inv_frame_fields<S: Store>(s0: &S, s1: &S)
+    requires
+        ready_wf(s0.ready_view(), s0.tcb_view()),
+        ready_complete(s0.ready_view(), s0.tcb_view()),
+        s1.ready_view() == s0.ready_view(),
+        s1.tcb_view().dom() == s0.tcb_view().dom(),
+        forall|x: ObjId| #[trigger] s1.tcb_view()[x].state == s0.tcb_view()[x].state
+            && s1.tcb_view()[x].priority == s0.tcb_view()[x].priority
+            && s1.tcb_view()[x].qnext == s0.tcb_view()[x].qnext
+            && s1.tcb_view()[x].wait_notif == s0.tcb_view()[x].wait_notif,
+    ensures
+        ready_wf(s1.ready_view(), s1.tcb_view()),
+        ready_complete(s1.ready_view(), s1.tcb_view()),
+{
+    let rv = s0.ready_view();
+    let tv0 = s0.tcb_view();
+    let tv1 = s1.tcb_view();
+    // Each level's chain carries: the field-based chain frame needs only qnext/state/priority,
+    // all preserved; uniqueness then transfers `ready_seq`.
+    assert forall|level: int| #![trigger ready_seq(rv, tv1, level)] 0 <= level < NUM_PRIOS as int
+        implies ready_seq(rv, tv1, level) == ready_seq(rv, tv0, level)
+            && ready_chain(rv, tv1, level, ready_seq(rv, tv1, level)) by {
+        let rs = ready_seq(rv, tv0, level);
+        assert(ready_chain(rv, tv0, level, rs));
+        lemma_ready_chain_frame_fields(rv, tv0, rv, tv1, level, rs);
+        lemma_ready_chain_unique(rv, tv1, level, ready_seq(rv, tv1, level), rs);
+    }
+    assert(ready_wf(rv, tv1));
+    // ready_complete: each Runnable `x` (same state/priority/wait_notif as in `tv0`) is still
+    // Runnable in `tv0` and charted by its (unchanged) level chain.
+    assert forall|x: ObjId| #[trigger] tv1.dom().contains(x) && tv1[x].state == ThreadState::Runnable
+        implies (tv1[x].priority as int) < NUM_PRIOS
+            && ready_seq(rv, tv1, tv1[x].priority as int).contains(x)
+            && tv1[x].wait_notif is None by {
+        assert(tv0[x].state == ThreadState::Runnable);
+        let px = tv0[x].priority as int;
+        assert(tv1[x].priority == tv0[x].priority);
+        assert(ready_seq(rv, tv1, px) == ready_seq(rv, tv0, px));
+    }
+}
+
+// B8C (Step F): a thread is off **every** ready chain when it is either non-Runnable or off its
+// own priority level's chain — `ready_wf`'s per-level covenant (`state == Runnable && priority ==
+// level`) forces any chain member to be a Runnable thread sitting at exactly that level, so a
+// non-Runnable `t`, or a `t` absent from its own level's chain, cannot appear on any level's chain.
+// `destroy_tcb` uses this at the post-detach snapshot: the Runnable branch's `unqueue_ready` left
+// `t` off its level (the splice), the other branches have `t` non-Runnable.
+pub proof fn lemma_thread_off_all_ready_chains<S: Store>(s: &S, t: ObjId)
+    requires
+        ready_wf(s.ready_view(), s.tcb_view()),
+        s.tcb_view()[t].state != ThreadState::Runnable
+            || !ready_seq(s.ready_view(), s.tcb_view(),
+                    s.tcb_view()[t].priority as int).contains(t),
+    ensures
+        forall|level: int| 0 <= level < NUM_PRIOS as int
+            ==> !(#[trigger] ready_seq(s.ready_view(), s.tcb_view(), level)).contains(t),
+{
+    let rv = s.ready_view();
+    let tv = s.tcb_view();
+    assert forall|level: int| 0 <= level < NUM_PRIOS as int
+        implies !(#[trigger] ready_seq(rv, tv, level)).contains(t) by {
+        let rs = ready_seq(rv, tv, level);
+        if rs.contains(t) {
+            assert(ready_chain(rv, tv, level, rs));
+            let i = rs.index_of(t);
+            assert(0 <= i < rs.len() && rs[i] == t);
+            // `ready_chain`'s covenant: a chain member is Runnable at exactly `level`.
+            assert(tv[t].state == ThreadState::Runnable);
+            assert(tv[t].priority as int == level);
+            assert(ready_seq(rv, tv, tv[t].priority as int).contains(t));
+            assert(false);
+        }
+    }
+}
+
+// B8C (Step F): the `destroy_tcb` halt promotes `ready_complete_except(t)` back to full
+// `ready_complete`. The detach left `t` off every ready chain (the splice removed it; a
+// non-Runnable `t` was never on one), and the halt is the only tcb edit (`t` → Halted, `ready_view`
+// framed). So every Runnable `x != t` is unchanged (still charted), and `t` is no longer Runnable —
+// closing the `_except` gap; `ready_wf` rides too (the chains, all `t`-free, are unchanged).
+pub proof fn lemma_ready_complete_halt_promote<S: Store>(s0: &S, s1: &S, t: ObjId)
+    requires
+        ready_wf(s0.ready_view(), s0.tcb_view()),
+        ready_complete_except(s0.ready_view(), s0.tcb_view(), t),
+        s1.ready_view() == s0.ready_view(),
+        s1.tcb_view().dom() == s0.tcb_view().dom(),
+        forall|x: ObjId| x != t ==> #[trigger] s1.tcb_view()[x] == s0.tcb_view()[x],
+        s1.tcb_view()[t].state != ThreadState::Runnable,
+        forall|level: int| 0 <= level < NUM_PRIOS as int
+            ==> !(#[trigger] ready_seq(s0.ready_view(), s0.tcb_view(), level)).contains(t),
+    ensures
+        ready_wf(s1.ready_view(), s1.tcb_view()),
+        ready_complete(s1.ready_view(), s1.tcb_view()),
+{
+    let rv = s0.ready_view();
+    let tv0 = s0.tcb_view();
+    let tv1 = s1.tcb_view();
+    // Each level's chain is `t`-free, and `t` is the only changed thread, so every member is
+    // unchanged → the chain + seq transfer (exactly the `_offchain` argument, keyed on `t`-absence).
+    assert forall|level: int| #![trigger ready_seq(rv, tv1, level)] 0 <= level < NUM_PRIOS as int
+        implies ready_seq(rv, tv1, level) == ready_seq(rv, tv0, level)
+            && ready_chain(rv, tv1, level, ready_seq(rv, tv1, level)) by {
+        let rs = ready_seq(rv, tv0, level);
+        assert(ready_chain(rv, tv0, level, rs));
+        assert forall|i: int| 0 <= i < rs.len() implies #[trigger] tv1[rs[i]] == tv0[rs[i]] by {
+            assert(rs.contains(rs[i]));
+            assert(rs[i] != t);
+        }
+        lemma_ready_seq_frame(rv, tv0, rv, tv1, level);
+    }
+    assert(ready_wf(rv, tv1));
+    // ready_complete: a Runnable `x` in `tv1` has `x != t` (t is non-Runnable in tv1), so `x` is
+    // unchanged and Runnable in tv0 → charted by `ready_complete_except`; its chain is unchanged.
+    assert forall|x: ObjId| #[trigger] tv1.dom().contains(x) && tv1[x].state == ThreadState::Runnable
+        implies (tv1[x].priority as int) < NUM_PRIOS
+            && ready_seq(rv, tv1, tv1[x].priority as int).contains(x)
+            && tv1[x].wait_notif is None by {
+        assert(x != t);
+        assert(tv1[x] == tv0[x]);
+        let px = tv0[x].priority as int;
+        assert(ready_seq(rv, tv1, px) == ready_seq(rv, tv0, px));
+    }
+}
+
 // `refcount_sound` rides an edit that holds `refs` fixed and every object's census fixed — the
 // `destroy_tcb` halt step (`lemma_census_frame_thread_halt` supplies the census equality, the
 // `set_tcb_*` setters frame `refs`). Plan the final-thread teardown
@@ -5032,7 +5361,14 @@ pub proof fn lemma_caps_consistent_frame<S: Store>(s0: &S, s1: &S, n: ObjId)
         s1.notif_view() == s0.notif_view().insert(n, s1.notif_view()[n]),
         s1.tcb_view().dom() == s0.tcb_view().dom(),
         notif_wf(s1.notif_view(), s1.tcb_view(), n),
-        forall|k: ObjId| #[trigger] s0.tcb_view()[k].wait_notif != Some(n)
+        // B8C: weakened from "non-`n`-waiter ⇒ unchanged" to "**other waiter** (`wait_notif`
+        // some, ≠ `n`) ⇒ unchanged". The old form was too strong for the faithful enqueue, which
+        // re-threads the Runnable old ready-tail `p` (`wait_notif None`) — now excluded. The body
+        // needs only that *other notifications' waiters* are unchanged (to carry their `notif_wf`
+        // via `lemma_notif_wf_frame`); a caller supplies it from `signal`'s contrapositive frame +
+        // `ready_complete` (an `m`-waiter is `BlockedNotif`, non-Runnable, so not in the changed set).
+        forall|k: ObjId| #[trigger] s0.tcb_view()[k].wait_notif is Some
+            && s0.tcb_view()[k].wait_notif != Some(n) && s0.tcb_view().dom().contains(k)
             ==> s1.tcb_view()[k] == s0.tcb_view()[k],
         forall|k: ObjId| #[trigger] s1.tcb_view()[k].bind_slots == s0.tcb_view()[k].bind_slots,
         // Every TCB's bound cspace is framed too: the strengthened
@@ -9517,6 +9853,9 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
         end_caps_sound(old(store)),
         census_dom_complete(old(store)),
         cspace_resident_wf(old(store), cs),
+        // B8C: the resident `delete`s can fire / tear down threads, touching the ready queue.
+        ready_wf(old(store).ready_view(), old(store).tcb_view()),
+        ready_complete(old(store).ready_view(), old(store).tcb_view()),
     ensures
         cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom() == old(store).slot_view().dom(),
@@ -9526,6 +9865,8 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
         caps_consistent(final(store)),
         end_caps_sound(final(store)),
         census_dom_complete(final(store)),
+        ready_wf(final(store).ready_view(), final(store).tcb_view()),
+        ready_complete(final(store).ready_view(), final(store).tcb_view()),
         only_empties(old(store).slot_view(), final(store).slot_view()),
         // Residency is immutable: the resident `delete`s frame `cspace_view`, and emptying a
         // resident never re-homes it, so the residency map rides through.
@@ -9572,6 +9913,9 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
             end_caps_sound(store),
             // …and refs-domain completeness (each `delete` requires + re-establishes it).
             census_dom_complete(store),
+            // B8C: the ready pair carries across the resident loop — each `delete` ensures it.
+            ready_wf(store.ready_view(), store.tcb_view()),
+            ready_complete(store.ready_view(), store.tcb_view()),
             // Teardown only empties slots — composes across the resident deletes.
             only_empties(old(store).slot_view(), store.slot_view()),
             // Residency is immutable — `delete` frames `cspace_view`, and dom is preserved,
@@ -9709,11 +10053,18 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
         // it for their recursive `delete`s; the at-zero teardown only ever removes an object
         // whose census is already 0, so coverage carries.
         census_dom_complete(old(store)),
+        // B8C: the Thread/Channel arms reach the ready queue (`destroy_tcb`'s `unqueue_ready`,
+        // `destroy_channel`'s peer-closed `fire`), so `obj_unref` carries the ready pair. `delete`
+        // (its sole caller) supplies them.
+        ready_wf(old(store).ready_view(), old(store).tcb_view()),
+        ready_complete(old(store).ready_view(), old(store).tcb_view()),
     ensures
         refcount_sound(final(store)),
         cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom() == old(store).slot_view().dom(),
         count_nonempty(final(store).slot_view()) <= count_nonempty(old(store).slot_view()),
+        ready_wf(final(store).ready_view(), final(store).tcb_view()),
+        ready_complete(final(store).ready_view(), final(store).tcb_view()),
         caps_consistent(final(store)),
         end_caps_sound(final(store)),
         census_dom_complete(final(store)),
@@ -9782,6 +10133,8 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             let ghost st1 = *store;
             proof {
                 lemma_dead_tcb_frozen_dec_ref(&st0, store, o);
+                // B8C: `dec_ref` frames `ready_view` + `tcb_view`, so the ready pair carries to `st1`.
+                lemma_ready_inv_frame(&st0, store);
                 // Home frame: `dec_ref` frames `slot_view` + every object view (so the home maps are
                 // framed and no slot is emptied) — the base the at-zero destructor composes onto.
                 lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
@@ -9809,6 +10162,8 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             let ghost st1 = *store;
             proof {
                 lemma_dead_tcb_frozen_dec_ref(&st0, store, o);
+                // B8C: `dec_ref` frames `ready_view` + `tcb_view`, so the ready pair carries to `st1`.
+                lemma_ready_inv_frame(&st0, store);
                 // Home frame: `dec_ref` frames `slot_view` + every object view (so the home maps are
                 // framed and no slot is emptied) — the base the at-zero destructor composes onto.
                 lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
@@ -9849,6 +10204,8 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             let ghost st1 = *store;
             proof {
                 lemma_dead_tcb_frozen_dec_ref(&st0, store, o);
+                // B8C: `dec_ref` frames `ready_view` + `tcb_view`, so the ready pair carries to `st1`.
+                lemma_ready_inv_frame(&st0, store);
                 // Home frame: `dec_ref` frames `slot_view` + every object view (so the home maps are
                 // framed and no slot is emptied) — the base the at-zero destructor composes onto.
                 lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
@@ -9878,6 +10235,8 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             let ghost st1 = *store;
             proof {
                 lemma_dead_tcb_frozen_dec_ref(&st0, store, o);
+                // B8C: `dec_ref` frames `ready_view` + `tcb_view`, so the ready pair carries to `st1`.
+                lemma_ready_inv_frame(&st0, store);
                 // Home frame: `dec_ref` frames `slot_view` + every object view (so the home maps are
                 // framed and no slot is emptied) — the base the at-zero destructor composes onto.
                 lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
@@ -9899,6 +10258,8 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                 proof {
                     // `destroy_notif` frames every view (a model no-op), so `store == st1`.
                     lemma_dead_tcb_frozen_refl(&st1, store);
+                    // B8C: the model no-op frames `ready_view` + `tcb_view`; carry the pair from `st1`.
+                    lemma_ready_inv_frame(&st1, store);
                     lemma_dead_tcb_frozen_trans(&st0, &st1, store);
                     // Home frame: model no-op — free + home refl, composed onto `dec_ref`.
                     lemma_unhomed_frozen_free_from_slot_eq(&st1, store);
@@ -9919,6 +10280,8 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             let ghost st1 = *store;
             proof {
                 lemma_dead_tcb_frozen_dec_ref(&st0, store, o);
+                // B8C: `dec_ref` frames `ready_view` + `tcb_view`, so the ready pair carries to `st1`.
+                lemma_ready_inv_frame(&st0, store);
                 // Home frame: `dec_ref` frames `slot_view` + every object view (so the home maps are
                 // framed and no slot is emptied) — the base the at-zero destructor composes onto.
                 lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
@@ -9949,6 +10312,8 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                 crate::timer::destroy_timer(store, o);
                 proof {
                     lemma_dead_tcb_frozen_trans(&st0, &st1, store);
+                    // B8C: `destroy_timer` frames `ready_view` + `tcb_view`; carry the pair from `st1`.
+                    lemma_ready_inv_frame(&st1, store);
                     // Home frame: `destroy_timer` frames `slot_view` + every object view — free + home refl.
                     lemma_unhomed_frozen_free_from_slot_eq(&st1, store);
                     lemma_unhomed_frozen_free_trans(&st0, &st1, store);
@@ -9966,6 +10331,9 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             // Decrement-then-maybe-`aspace_destroy` — exactly `unref_aspace`'s body, reused.
             unref_aspace(store, o);
             proof {
+                // B8C: `unref_aspace` frames `ready_view` + `tcb_view` (aspace teardown never
+                // touches the ready queue); carry the pair across it.
+                lemma_ready_inv_frame(&st0, store);
                 // `unref_aspace` frames `tcb` whole and drops `refs` only at `o` (`refs[o] > 0` at
                 // entry, so a dead `x != o`); `o` may leave the domain, but no dead object does.
                 assert forall|x: ObjId| #[trigger] dead_tcb_frozen_at(&st0, store, x) by {
@@ -9985,6 +10353,8 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
         CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => {
             proof {
                 lemma_dead_tcb_frozen_refl(&st0, store);
+                // B8C: a no-op (store untouched) — the ready pair carries.
+                lemma_ready_inv_frame(&st0, store);
                 // Home frame: a no-op (store untouched) — free + home refl.
                 lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
                 lemma_home_views_frozen_refl(&st0, store);
@@ -10013,6 +10383,9 @@ pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId)
         end_caps_sound(old(store)),
         census_dom_complete(old(store)),
         cspace_resident_wf(old(store), cs),
+        // B8C: the at-zero `destroy_cspace` runs resident `delete`s that can touch the ready queue.
+        ready_wf(old(store).ready_view(), old(store).tcb_view()),
+        ready_complete(old(store).ready_view(), old(store).tcb_view()),
     ensures
         refcount_sound(final(store)),
         cspace_wf(final(store).slot_view()),
@@ -10021,6 +10394,8 @@ pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId)
         caps_consistent(final(store)),
         end_caps_sound(final(store)),
         census_dom_complete(final(store)),
+        ready_wf(final(store).ready_view(), final(store).tcb_view()),
+        ready_complete(final(store).ready_view(), final(store).tcb_view()),
         only_empties(old(store).slot_view(), final(store).slot_view()),
         // Residency is immutable: `dec_ref` and `destroy_cspace` both frame `cspace_view`, so
         // `destroy_tcb`'s cspace release carries it.
@@ -10056,6 +10431,9 @@ pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId)
     proof {
         // `dec_ref` froze `tcb` whole and only dropped `refs[cs]` (cs ∉ dead set: `refs[cs] > 0`).
         lemma_dead_tcb_frozen_dec_ref(&st0, store, cs);
+        // B8C: `dec_ref` frames `ready_view` + `tcb_view`, so the ready pair carries to `st1`
+        // (and onward — `destroy_cspace` ensures it when the at-zero teardown runs).
+        lemma_ready_inv_frame(&st0, store);
         // Home-frame base: `dec_ref` frames `slot_view` + every object view (free + home refl).
         lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
         lemma_home_views_frozen_refl(&st0, store);
@@ -10628,6 +11006,12 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         // object into `refs.dom()` from the census via it (`delete_prepare` + `obj_unref`).
         // The verified callers carry it.
         census_dom_complete(old(store)),
+        // B8C: the teardown can fire a peer-closed notification (Channel branch →
+        // `endpoint_cap_dropped` → `fire`) or tear down a thread (→ `destroy_tcb` → `unqueue_ready`),
+        // both of which touch the ready queue, so `delete` carries the ready-queue invariants.
+        // The verified callers (`bind`/`revoke`/`destroy_cspace`/`destroy_channel`) supply them.
+        ready_wf(old(store).ready_view(), old(store).tcb_view()),
+        ready_complete(old(store).ready_view(), old(store).tcb_view()),
     ensures
         cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom() == old(store).slot_view().dom(),
@@ -10638,6 +11022,8 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         caps_consistent(final(store)),
         end_caps_sound(final(store)),
         census_dom_complete(final(store)),
+        ready_wf(final(store).ready_view(), final(store).tcb_view()),
+        ready_complete(final(store).ready_view(), final(store).tcb_view()),
         // Teardown only empties slots, never fills one: the just-cleared `slot`
         // and every already-empty slot stay empty through the recursive `obj_unref`. The
         // frame `destroy_channel`'s ring-cap loop carries; host-checked (`check_delete`).
@@ -10710,7 +11096,11 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
     let ghost asp_opt = cap_frame_aspace(cap);
     // `delete_prepare` framed `refs` + `tcb` whole, so it is dead-tcb-frozen
     // — the base the teardown branches + `obj_unref` compose onto.
-    proof { lemma_dead_tcb_frozen_refl(&st0, store); }
+    proof {
+        lemma_dead_tcb_frozen_refl(&st0, store);
+        // B8C: `delete_prepare` frames `ready_view` + `tcb_view`, so the ready pair carries.
+        lemma_ready_inv_frame(&st0, store);
+    }
     let ghost st_prep = *store;
     // Channel endpoint liveness is tracked per end for peer-closed (rev1§3.3).
     if let CapKind::Channel(ch, end) = cap.kind {
@@ -10734,10 +11124,13 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         }
         crate::channel::endpoint_cap_dropped(store, ch, end);
         // `endpoint_cap_dropped` is dead-tcb-frozen + death-preserving (st_prep → here).
+        // B8C: it also re-establishes the ready pair (its own ensures).
     } else {
         proof {
             lemma_dead_tcb_frozen_refl(&st_prep, store);
             lemma_refs_death_persist_from_refs_eq(&st_prep, store);
+            // B8C: the non-Channel branch is object-only; the ready pair carries.
+            lemma_ready_inv_frame(&st_prep, store);
         }
     }
     let ghost st_chan = *store;
@@ -10774,11 +11167,15 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
             // exports `refs_death_persist`; compose `st_chan → st_unmap → final`.
             lemma_refs_death_persist_from_refs_eq(&st_chan, &st_unmap);
             lemma_refs_death_persist_trans(&st_chan, &st_unmap, store);
+            // B8C: `aspace_unmap` + `unref_aspace` frame `ready_view` + `tcb_view`, so the pair carries.
+            lemma_ready_inv_frame(&st_chan, store);
         }
     } else {
         proof {
             lemma_dead_tcb_frozen_refl(&st_chan, store);
             lemma_refs_death_persist_from_refs_eq(&st_chan, store);
+            // B8C: the non-mapped-Frame branch is object-only; the ready pair carries.
+            lemma_ready_inv_frame(&st_chan, store);
         }
     }
     let ghost st_frame = *store;
@@ -11000,6 +11397,9 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
         caps_consistent(old(store)),
         end_caps_sound(old(store)),
         census_dom_complete(old(store)),
+        // B8C: the subtree `delete`s can fire / tear down threads, touching the ready queue.
+        ready_wf(old(store).ready_view(), old(store).tcb_view()),
+        ready_complete(old(store).ready_view(), old(store).tcb_view()),
     ensures
         // Descendant-deletion and well-formedness are **unconditional**: they
         // hold for *any* target, including the `homed_in_cspace` slot every `Sys::CapRevoke`
@@ -11039,6 +11439,8 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
         // composed from each `delete`'s `only_empties`. A queued cap the walk reaches is destroyed,
         // not relabelled.
         only_empties(old(store).slot_view(), final(store).slot_view()),
+        ready_wf(final(store).ready_view(), final(store).tcb_view()),
+        ready_complete(final(store).ready_view(), final(store).tcb_view()),
 {
     // `refcount_sound`, `caps_consistent`, the endpoint-cap census, and refs-domain
     // completeness ride the loop as `delete`'s preconditions: each `delete` requires them
@@ -11057,6 +11459,9 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
             caps_consistent(store),
             end_caps_sound(store),
             census_dom_complete(store),
+            // B8C: the ready pair carries across the subtree loop — each `delete` ensures it.
+            ready_wf(store.ready_view(), store.tcb_view()),
+            ready_complete(store.ready_view(), store.tcb_view()),
             // `slot`'s home status is immutable across teardown (`home_views_frozen`, via
             // `lemma_is_homed_stable`), so the `old` homing carries through the loop unchanged.
             is_homed(store, slot) == is_homed(old(store), slot),

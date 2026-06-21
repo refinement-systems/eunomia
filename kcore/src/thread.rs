@@ -162,11 +162,16 @@ pub fn report_terminal<S: Store>(store: &mut S, t: ObjId, r: Report)
                     &&& old(store).tcb_view()[t].wait_notif != Some(nn)
                 })
         }),
+        // B8C: carries the ready invariants across the bound `signal` (the kernel supplies them).
+        cspace::ready_wf(old(store).ready_view(), old(store).tcb_view()),
+        cspace::ready_complete(old(store).ready_view(), old(store).tcb_view()),
     ensures
         final(store).slot_view() == old(store).slot_view(),
         final(store).chan_view() == old(store).chan_view(),
         final(store).timer_view() == old(store).timer_view(),
         final(store).timer_head_view() == old(store).timer_head_view(),
+        cspace::ready_wf(final(store).ready_view(), final(store).tcb_view()),
+        cspace::ready_complete(final(store).ready_view(), final(store).tcb_view()),
         // ReportMonotone — absorbing: an already-terminal report ⇒ a no-op.
         !(old(store).tcb_view()[t].report matches Report::Running) ==> {
             &&& final(store).refs_view() == old(store).refs_view()
@@ -183,6 +188,14 @@ pub fn report_terminal<S: Store>(store: &mut S, t: ObjId, r: Report)
         _ => { return; }
     }
     store.set_tcb_report(t, r);
+    proof {
+        // `set_tcb_report` inserts at the resident key `t`, so the TCB domain is unchanged
+        // (extensional) — the dom-equality precondition the field-based ready frame needs.
+        assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
+        // `set_tcb_report` rewrites only `report`, preserving every ready-relevant field, so the
+        // ready invariants carry (field-based frame); `signal` (if reached) re-establishes them.
+        cspace::lemma_ready_inv_frame_fields(old(store), store);
+    }
     let which = match r {
         Report::Exited(_) => BIND_EXIT,
         Report::Faulted { .. } => BIND_FAULT,
@@ -303,10 +316,15 @@ pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<S
             &&& src != old(store).tcb_view()[t].bind_slots[which as int]
             &&& !cspace::is_empty_cap(old(store).slot_view()[src].cap)
         },
+        // B8C: carries the ready invariants across the displaced-cap `delete`.
+        cspace::ready_wf(old(store).ready_view(), old(store).tcb_view()),
+        cspace::ready_complete(old(store).ready_view(), old(store).tcb_view()),
     ensures
         cspace::cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom() == old(store).slot_view().dom(),
         final(store).slot_view().dom().finite(),
+        cspace::ready_wf(final(store).ready_view(), final(store).tcb_view()),
+        cspace::ready_complete(final(store).ready_view(), final(store).tcb_view()),
         // `bind_bits[which]` updated; the rest of `t`'s TCB and every other TCB fixed.
         final(store).tcb_view() == old(store).tcb_view().insert(
             t,
@@ -346,6 +364,10 @@ pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<S
         // `refcount_sound` holds here: `delete` re-establishes it (its `ensures`), and the
         // empty-slot path is a no-op that leaves the entry census untouched.
         assert(cspace::refcount_sound(store));
+        // B8C: likewise the ready pair — `delete` re-establishes it; the empty-slot no-op rides
+        // it from the requires (store unchanged).
+        assert(cspace::ready_wf(store.ready_view(), store.tcb_view()));
+        assert(cspace::ready_complete(store.ready_view(), store.tcb_view()));
     }
     let ghost st1 = *store;
     store.set_tcb_bind_bits(t, which, bits);
@@ -362,6 +384,9 @@ pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<S
             cspace::lemma_thread_hold_frame(st1.tcb_view(), store.tcb_view(), x);
         }
         cspace::lemma_refcount_sound_from_census_eq(&st1, store);
+        // B8C: `set_tcb_bind_bits` preserves `state`/`priority`/`qnext`/`wait_notif` and frames
+        // `ready_view`, so the ready pair carries (`bind_bits` is not a ready field).
+        cspace::lemma_ready_inv_frame_fields(&st1, store);
     }
     if let Some(src) = notif_src {
         let ghost st2 = *store;
@@ -379,6 +404,9 @@ pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<S
                 cspace::lemma_cap_move_census(st2.slot_view(), store.slot_view(), src, slot, x);
             }
             cspace::lemma_refcount_sound_from_census_eq(&st2, store);
+            // B8C: `slot_move` relocates a cap (frames `tcb_view` + `ready_view`), so the ready
+            // pair carries.
+            cspace::lemma_ready_inv_frame(&st2, store);
         }
     }
 }
@@ -468,6 +496,10 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         old(store).tcb_view()[t].state == ThreadState::BlockedNotif ==>
             (old(store).tcb_view()[t].wait_notif matches Some(wn) ==>
                 cspace::notif_wf(old(store).notif_view(), old(store).tcb_view(), wn)),
+        // B8C (Step F): the faithful `unqueue_ready` detach now requires the ready-queue
+        // invariants (a Runnable `t` is found + spliced); `obj_unref`'s Thread arm supplies them.
+        cspace::ready_wf(old(store).ready_view(), old(store).tcb_view()),
+        cspace::ready_complete(old(store).ready_view(), old(store).tcb_view()),
     ensures
         cspace::cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom() == old(store).slot_view().dom(),
@@ -477,6 +509,10 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         cspace::caps_consistent(final(store)),
         cspace::end_caps_sound(final(store)),
         cspace::census_dom_complete(final(store)),
+        // B8C (Step F): the detach splices `t` off the ready queue and the halt promotes
+        // `ready_complete_except(t)` back to full `ready_complete` — so the pair is restored.
+        cspace::ready_wf(final(store).ready_view(), final(store).tcb_view()),
+        cspace::ready_complete(final(store).ready_view(), final(store).tcb_view()),
         cspace::only_empties(old(store).slot_view(), final(store).slot_view()),
         // Residency is immutable: the bind-cap `delete`s, `unref_cspace`/`unref_aspace`, and
         // `set_tcb_*` all frame `cspace_view` (a destroyed cspace keeps its residency map —
@@ -528,13 +564,56 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
     //    waiter chain (a kcore object). Both leave the seven object views — and `refs[t]` —
     //    otherwise intact; the BlockedNotif path additionally splices `t` out of `wn`'s FIFO. ──
     if matches!(store.tcb_state(t), ThreadState::Runnable) {
+        proof {
+            // `unqueue_ready`'s `priority < NUM_PRIOS` precond: a Runnable in-domain thread is
+            // charted by `ready_complete`, which folds in the priority bound.
+            assert((store.tcb_view()[t].priority as int) < crate::sysabi::NUM_PRIOS);
+        }
         store.unqueue_ready(t);
         proof {
-            cspace::lemma_dead_tcb_frozen_refl(&st0, store);
+            // B8C (Step F): the faithful `unqueue_ready` writes only `qnext` of `t` + its
+            // predecessor (both Runnable, hence `wait_notif None` by `ready_complete`, hence off
+            // every waiter chain), and frames every object view + `refs`. So the four system
+            // invariants ride it via the *off-chain* frame lemmas, not the old equal-views no-op.
             cspace::lemma_thread_off_all_chains(store, t);   // Runnable ⇒ not BlockedNotif
-            cspace::lemma_sysinv_frame_equal_views(&st0, store);  // `unqueue_ready` frames every view
-            // `unqueue_ready` frames `refs`, so death persists.
+            // census frozen: waiter census (changed threads `wait_notif None`), thread-hold census
+            // (`cspace`/`aspace` preserved), the rest read framed views.
+            assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o)
+                == cspace::obj_census(&st0, o) by {
+                cspace::lemma_waiter_refs_frame_offchain(
+                    store.notif_view(), st0.tcb_view(), store.tcb_view(), o);
+                cspace::lemma_thread_hold_frame(st0.tcb_view(), store.tcb_view(), o);
+            }
+            cspace::lemma_refcount_sound_from_census_eq(&st0, store);
+            cspace::lemma_caps_consistent_frame_thread_offchain(&st0, store);
+            // `census_dom_complete`: census frozen + refs domain unchanged.
+            assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o) >= 1
+                implies store.refs_view().dom().contains(o) by {
+                cspace::lemma_in_refs_from_census(&st0, o);
+            }
+            assert(cspace::end_caps_sound(store));
+            // `dead_tcb_frozen`: a dead (non-Runnable) thread is not among the changed (Runnable)
+            // nodes, so it is unchanged.
+            assert forall|x: ObjId| #[trigger] cspace::dead_tcb_frozen_at(&st0, store, x) by {}
             cspace::lemma_refs_death_persist_from_refs_eq(&st0, store);
+            // `t` is off every ready chain: the splice removed it from its level (`ready_seq`
+            // delta + `no_duplicates`), and `ready_wf` rules out any other level.
+            let level = st0.tcb_view()[t].priority as int;
+            let rs0 = cspace::ready_seq(st0.ready_view(), st0.tcb_view(), level);
+            assert(rs0.contains(t));
+            // `rs0` is a `ready_chain`, hence `no_duplicates`; the splice removed `t`'s unique
+            // occurrence, so the post-splice level chain no longer contains `t`.
+            assert(cspace::ready_chain(st0.ready_view(), st0.tcb_view(), level, rs0));
+            assert(rs0.no_duplicates());
+            let i = rs0.index_of(t);
+            assert(0 <= i < rs0.len() && rs0[i] == t);
+            cspace::lemma_seq_remove_drops(rs0, i);
+            assert(store.tcb_view()[t].priority as int == level);
+            assert(cspace::ready_seq(store.ready_view(), store.tcb_view(), level)
+                == rs0.remove(i));
+            assert(!cspace::ready_seq(store.ready_view(), store.tcb_view(),
+                store.tcb_view()[t].priority as int).contains(t));
+            cspace::lemma_thread_off_all_ready_chains(store, t);
         }
     } else if matches!(store.tcb_state(t), ThreadState::BlockedNotif) {
         if let Some(wn) = store.tcb_wait_notif(t) {
@@ -574,6 +653,11 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
                     assert(store.tcb_view() == st0.tcb_view());
                 }
                 cspace::lemma_thread_off_all_chains(store, t);
+                // B8C (Step F): `remove_waiter` re-establishes the ready pair (its ensures); `t`
+                // (state preserved BlockedNotif, non-Runnable) is off every ready chain. Full
+                // `ready_complete` weakens to `ready_complete_except(t)` for the merge.
+                cspace::lemma_thread_off_all_ready_chains(store, t);
+                assert(cspace::ready_complete_except(store.ready_view(), store.tcb_view(), t));
             }
         } else {
             proof {
@@ -581,6 +665,11 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
                 cspace::lemma_thread_off_all_chains(store, t);   // wait_notif None
                 cspace::lemma_sysinv_frame_equal_views(&st0, store);
                 cspace::lemma_refs_death_persist_from_refs_eq(&st0, store);
+                // B8C (Step F): a no-op detach — the ready pair rides the equal views, and `t`
+                // (BlockedNotif, non-Runnable) is off every ready chain.
+                cspace::lemma_ready_inv_frame(&st0, store);
+                cspace::lemma_thread_off_all_ready_chains(store, t);
+                assert(cspace::ready_complete_except(store.ready_view(), store.tcb_view(), t));
             }
         }
     } else {
@@ -589,6 +678,11 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
             cspace::lemma_thread_off_all_chains(store, t);   // not BlockedNotif
             cspace::lemma_sysinv_frame_equal_views(&st0, store);
             cspace::lemma_refs_death_persist_from_refs_eq(&st0, store);
+            // B8C (Step F): a no-op detach — the ready pair rides the equal views, and `t`
+            // (non-Runnable) is off every ready chain.
+            cspace::lemma_ready_inv_frame(&st0, store);
+            cspace::lemma_thread_off_all_ready_chains(store, t);
+            assert(cspace::ready_complete_except(store.ready_view(), store.tcb_view(), t));
         }
     }
     let ghost st_detach = *store;
@@ -600,6 +694,15 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         assert(store.tcb_view()[t].aspace == a_opt);
         assert(store.tcb_view()[t].report == report0);
         assert(store.refs_view()[t] == 0);
+        // B8C (Step F): the ready pair carried through the detach — `ready_wf` holds, `t` is off
+        // every ready chain, and `ready_complete_except(t)` holds (the Runnable branch unqueued
+        // `t`, leaving it off-chain; the other branches preserve *full* completeness, which
+        // weakens to except-`t`). The halt below promotes this back to full `ready_complete`.
+        assert(cspace::ready_wf(store.ready_view(), store.tcb_view()));
+        assert(forall|level: int| 0 <= level < crate::sysabi::NUM_PRIOS as int
+            ==> !(#[trigger] cspace::ready_seq(store.ready_view(), store.tcb_view(), level))
+                    .contains(t));
+        assert(cspace::ready_complete_except(store.ready_view(), store.tcb_view(), t));
         assert forall|o: ObjId, ws: Seq<ObjId>|
             cspace::waiter_chain(st_detach.notif_view(), st_detach.tcb_view(), o, ws)
             implies !ws.contains(t) by {}
@@ -630,6 +733,13 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         // unchanged (the dom precondition the halt-frame lemmas need).
         assert(st_detach.tcb_view().dom().contains(t));
         assert(store.tcb_view().dom() =~= st_detach.tcb_view().dom());
+        // B8C (Step F): the halt promotes `ready_complete_except(t)` → full `ready_complete` —
+        // `t` is now Halted (non-Runnable) and off every ready chain, and the `set_tcb_*` edits
+        // touch only `t` and frame `ready_view`, so `ready_wf` rides too.
+        assert(store.ready_view() == st_detach.ready_view());
+        assert(forall|x: ObjId| x != t
+            ==> #[trigger] store.tcb_view()[x] == st_detach.tcb_view()[x]);
+        cspace::lemma_ready_complete_halt_promote(&st_detach, store, t);
         // `t` off all chains: at `st_detach` (carried from the detach branches), and at `st_halt`
         // (now Halted ⇒ not BlockedNotif).
         cspace::lemma_thread_off_all_chains(store, t);
@@ -797,6 +907,9 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
             assert(store.tcb_view().dom() =~= st_pre_cs.tcb_view().dom());
             cspace::lemma_thread_off_all_chains(&st_pre_cs, t);
             cspace::lemma_thread_off_all_chains(store, t);
+            // B8C (Step F): the cspace-field clear preserves state/priority/qnext/wait_notif and
+            // frames `ready_view`, so the ready pair carries to feed `unref_cspace`'s requires.
+            cspace::lemma_ready_inv_frame_fields(&st_pre_cs, store);
             cspace::lemma_census_after_hold_clear(&st_pre_cs, store, t, cs);
             cspace::lemma_no_live_thread_cap_from_dead(&st_pre_cs, t);
             cspace::lemma_caps_consistent_frame_thread_halt_clear(&st_pre_cs, store, t);
@@ -853,6 +966,8 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
             assert(store.tcb_view().dom() =~= st_pre_as.tcb_view().dom());
             cspace::lemma_thread_off_all_chains(&st_pre_as, t);
             cspace::lemma_thread_off_all_chains(store, t);
+            // B8C (Step F): the aspace-field clear preserves the ready fields + frames `ready_view`.
+            cspace::lemma_ready_inv_frame_fields(&st_pre_as, store);
             cspace::lemma_census_after_hold_clear_aspace(&st_pre_as, store, t, a);
             cspace::lemma_no_live_thread_cap_from_dead(&st_pre_as, t);
             cspace::lemma_caps_consistent_frame_thread_halt_clear(&st_pre_as, store, t);
@@ -882,6 +997,9 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
             assert(cspace::dead_tcb_frozen_at(&st_asclear, store, t));
             cspace::lemma_dead_tcb_frozen_to_except(&st_asclear, store, t);
             cspace::lemma_dead_tcb_frozen_except_trans(&st0, &st_asclear, store, t);
+            // B8C (Step F): `unref_aspace` frames `ready_view` + `tcb_view` (aspace teardown never
+            // touches the ready queue), so the ready pair carries to the exit.
+            cspace::lemma_ready_inv_frame(&st_asclear, store);
             // `unref_aspace` frames `slot_view` + every object view — free + home refl; compose.
             cspace::lemma_unhomed_frozen_free_from_slot_eq(&st_asclear, store);
             cspace::lemma_home_views_frozen_refl(&st_asclear, store);

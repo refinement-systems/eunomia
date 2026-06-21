@@ -340,15 +340,18 @@ impl Store for ArrayStore {
     fn set_timer_next(&mut self, t: ObjId, n: Option<ObjId>) {
         self.timers.get_mut(&t.0).unwrap().next = n;
     }
-    // `make_runnable` flips the woken thread to Runnable and touches nothing else —
-    // the faithful counterpart of its contract (the ready-queue linkage is
-    // scheduler state below the abstract `tcb_view`; a thread is off every kcore
-    // queue once Runnable, so a no-op on the rest models the frame). `unqueue_ready`
-    // stays a no-op — its effects live in scheduler state outside `tcb_view`.
+    // B8C: `make_runnable`/`unqueue_ready` are now **faithful** — they route through the verified
+    // `ready_enqueue`/`ready_unqueue` ops so the host model realizes the seam contracts Verus
+    // assumes (the ready-queue linkage now lives in `ready_view`, not below the abstract view).
+    // `make_runnable` flips the thread Runnable then enqueues it to its priority level's tail;
+    // `unqueue_ready` splices it back out. (The kernel's real realizations are B8C-3.)
     fn make_runnable(&mut self, t: ObjId) {
         self.tcbs.get_mut(&t.0).unwrap().state = ThreadState::Runnable;
+        crate::ready::ready_enqueue(self, t);
     }
-    fn unqueue_ready(&mut self, _: ObjId) {}
+    fn unqueue_ready(&mut self, t: ObjId) {
+        crate::ready::ready_unqueue(self, t);
+    }
     // The real `dsb`/`isb` + TLBI is the kernel shell's job; here the barriers are
     // no-ops and `tlb_invalidate_page` records the `(asid, va)` log so `check_unmap`
     // can assert the TLBI ordering theorem against the real `unmap_in` body.

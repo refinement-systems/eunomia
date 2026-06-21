@@ -250,11 +250,17 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
         // sibling makes the count ≥ 1, so the over-count is ≥ 2). `delete`-supplied.
         cspace::caps_consistent(old(store)),
         cspace::end_caps_off_by_one(old(store), ch, end_idx_spec(end)),
+        // B8C: the peer-closed `fire` faithfully enqueues the woken thread, so carry the
+        // ready-queue invariants (`delete` supplies them; `fire` re-establishes them on the wake).
+        cspace::ready_wf(old(store).ready_view(), old(store).tcb_view()),
+        cspace::ready_complete(old(store).ready_view(), old(store).tcb_view()),
     ensures
         final(store).slot_view() == old(store).slot_view(),
         // Residency is framed: `set_chan_end_caps` and `fire` both frame `cspace_view`, so
         // `delete`'s Channel branch carries it to `obj_unref`.
         final(store).cspace_view() == old(store).cspace_view(),
+        cspace::ready_wf(final(store).ready_view(), final(store).tcb_view()),
+        cspace::ready_complete(final(store).ready_view(), final(store).tcb_view()),
         cspace::caps_consistent(final(store)),
         cspace::end_caps_sound(final(store)),
         final(store).chan_view() == old(store).chan_view().insert(
@@ -354,6 +360,11 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
             }
         }
     }
+    proof {
+        // B8C: `set_chan_end_caps` frames `ready_view` + `tcb_view`, so the ready pair carries
+        // to feed `fire`'s requires (bound branch) and the no-fire ensures (else branch).
+        cspace::lemma_ready_inv_frame(old(store), store);
+    }
     if store.chan_end_caps(ch, e) == 0 {
         fire(store, ch, 1 - e, EV_PEER_CLOSED);
     } else {
@@ -432,8 +443,14 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
             old(store).tcb_view(), ch),
         cspace::binding_refs_ok(old(store).chan_view(), old(store).notif_view(),
             old(store).refs_view(), ch, end as int, event as int),
+        // B8C: the fire carries the ready-queue invariants across the bound `signal`
+        // (the teardown/IPC callers supply them; `signal` re-establishes them on the wake).
+        cspace::ready_wf(old(store).ready_view(), old(store).tcb_view()),
+        cspace::ready_complete(old(store).ready_view(), old(store).tcb_view()),
     ensures
         final(store).slot_view() == old(store).slot_view(),
+        cspace::ready_wf(final(store).ready_view(), final(store).tcb_view()),
+        cspace::ready_complete(final(store).ready_view(), final(store).tcb_view()),
         final(store).chan_view() == old(store).chan_view(),
         // Residency is framed across the fire — `signal` frames `cspace_view`, the unbound
         // branch is a no-op; the teardown chain reads it off to `obj_unref`.
@@ -498,6 +515,19 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
                 // other by the frame lemma (signal touched no waiter of `m != n`).
                 assert(old(store).chan_view()[ch].bindings[(e, v)].notif is Some);
                 if m != n {
+                    // B8C: signal's contrapositive frame freezes every in-domain waiter of
+                    // `m != n`. If such a `k` (`wait_notif == Some(m)`) had changed, signal's
+                    // frame says it was an `n`-waiter (`Some(n) != Some(m)`) or Runnable (⇒
+                    // `wait_notif None` by `ready_complete`, contradicting `Some(m)`) — neither
+                    // holds, so `k` is fixed. (Phantom out-of-domain keys are dom-guarded out.)
+                    assert forall|k: ObjId| #[trigger] old(store).tcb_view()[k].wait_notif == Some(m)
+                        && old(store).tcb_view().dom().contains(k)
+                        implies tvf[k] == old(store).tcb_view()[k] by {
+                        if tvf[k] != old(store).tcb_view()[k] {
+                            assert(old(store).tcb_view()[k].state
+                                != crate::thread::ThreadState::Runnable);
+                        }
+                    }
                     cspace::lemma_notif_wf_frame(old(store).notif_view(),
                         old(store).tcb_view(), nvf, tvf, m);
                 }
@@ -518,6 +548,18 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
                 assert forall|k: ObjId| #[trigger] tvf[k] != old(store).tcb_view()[k]
                     && tvf[k].state == crate::thread::ThreadState::BlockedNotif
                     implies (tvf[k].wait_notif matches Some(wn) ==> wn == n) by {}
+                // Other notifications' waiters (`wait_notif` Some, `!= n`) are frozen — each is
+                // `BlockedNotif` (non-Runnable by `ready_complete`), so signal's contrapositive
+                // frame (changed ⇒ `n`-waiter or Runnable) leaves it unchanged.
+                assert forall|k: ObjId| #[trigger] old(store).tcb_view()[k].wait_notif is Some
+                    && old(store).tcb_view()[k].wait_notif != Some(n)
+                    && old(store).tcb_view().dom().contains(k)
+                    implies tvf[k] == old(store).tcb_view()[k] by {
+                    if tvf[k] != old(store).tcb_view()[k] {
+                        assert(old(store).tcb_view()[k].state
+                            != crate::thread::ThreadState::Runnable);
+                    }
+                }
                 cspace::lemma_caps_consistent_frame(old(store), store, n);
             }
         }
@@ -543,6 +585,9 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
         // `old` is this `old`, nothing preceded it); the unbound branch frames `refs` whole.
         if b.notif is None {
             cspace::lemma_refs_death_persist_from_refs_eq(old(store), store);
+            // B8C: the unbound branch is a no-op, so the ready invariants ride the equal-views
+            // frame. (The bound branch rides `signal`'s own `ready_wf`/`ready_complete` ensures.)
+            cspace::lemma_ready_inv_frame(old(store), store);
         }
     }
 }
@@ -733,6 +778,11 @@ pub fn send<S: Store>(
             old(store).tcb_view(), ch),
         cspace::binding_refs_ok(old(store).chan_view(), old(store).notif_view(),
             old(store).refs_view(), ch, 1 - end_idx_spec(end), EV_READABLE as int),
+        // B8C: the readable `fire` faithfully enqueues a woken receiver, so `send` carries the
+        // ready-queue invariants in. (The trusted syscall shell supplies them; `send` consumes
+        // them only to discharge `fire`'s requires — no kcore caller needs them in `ensures`.)
+        cspace::ready_wf(old(store).ready_view(), old(store).tcb_view()),
+        cspace::ready_complete(old(store).ready_view(), old(store).tcb_view()),
     ensures
         cspace::binding_notif_wf(final(store).chan_view(), final(store).notif_view(),
             final(store).tcb_view(), ch),
@@ -765,6 +815,7 @@ pub fn send<S: Store>(
     let ghost r0 = old(store).refs_view();
     let ghost nv0 = old(store).notif_view();
     let ghost tv0 = old(store).tcb_view();
+    let ghost rrv0 = old(store).ready_view();
 
     let e = end_idx(end);
     if store.chan_end_caps(ch, 1 - e) == 0 {
@@ -824,6 +875,9 @@ pub fn send<S: Store>(
             store.refs_view() == r0,
             store.notif_view() == nv0,
             store.tcb_view() == tv0,
+            // B8C: the ring/cap loop touches no thread state; the setters frame `ready_view`,
+            // so it stays pinned to entry — lets `lemma_ready_inv_frame` carry the pair to `fire`.
+            store.ready_view() == rrv0,
             cspace::cspace_wf(store.slot_view()),
             store.slot_view().dom() == sv0.dom(),
             store.slot_view().dom().finite(),
@@ -971,6 +1025,11 @@ pub fn send<S: Store>(
     assert(store.tcb_view() == old(store).tcb_view());
     assert(store.refs_view() == old(store).refs_view());
     assert(store.chan_view()[ch].bindings == cv0[ch].bindings);
+    proof {
+        // B8C: the ring enqueue framed `ready_view` + `tcb_view`, so the ready pair carries
+        // unchanged to feed `fire`'s requires.
+        cspace::lemma_ready_inv_frame(old(store), store);
+    }
     fire(store, ch, 1 - e, EV_READABLE);
 
     proof {
@@ -1092,6 +1151,10 @@ pub fn recv<S: Store>(
             old(store).tcb_view(), ch),
         cspace::binding_refs_ok(old(store).chan_view(), old(store).notif_view(),
             old(store).refs_view(), ch, 1 - end_idx_spec(end), EV_WRITABLE as int),
+        // B8C: the writable `fire` faithfully enqueues a woken sender, so `recv` carries the
+        // ready-queue invariants in (trusted shell supplies them; consumed only for `fire`).
+        cspace::ready_wf(old(store).ready_view(), old(store).tcb_view()),
+        cspace::ready_complete(old(store).ready_view(), old(store).tcb_view()),
     ensures
         cspace::binding_notif_wf(final(store).chan_view(), final(store).notif_view(),
             final(store).tcb_view(), ch),
@@ -1155,6 +1218,7 @@ pub fn recv<S: Store>(
     let ghost r0 = old(store).refs_view();
     let ghost nv0 = old(store).notif_view();
     let ghost tv0 = old(store).tcb_view();
+    let ghost rrv0 = old(store).ready_view();
 
     let e = end_idx(end);
     let ring = 1 - e;
@@ -1183,6 +1247,9 @@ pub fn recv<S: Store>(
             store.refs_view() == r0,
             store.notif_view() == nv0,
             store.tcb_view() == tv0,
+            // B8C: the ring/cap loop touches no thread state; the setters frame `ready_view`,
+            // so it stays pinned to entry — lets `lemma_ready_inv_frame` carry the pair to `fire`.
+            store.ready_view() == rrv0,
             // Pass 1 is read-only, so the binding invariant rides through unchanged — it
             // is what each `NoCapSlot` early-return needs to re-establish its postcondition.
             cspace::binding_notif_wf(store.chan_view(), store.notif_view(), store.tcb_view(), ch),
@@ -1233,6 +1300,9 @@ pub fn recv<S: Store>(
             store.refs_view() == r0,
             store.notif_view() == nv0,
             store.tcb_view() == tv0,
+            // B8C: the ring/cap loop touches no thread state; the setters frame `ready_view`,
+            // so it stays pinned to entry — lets `lemma_ready_inv_frame` carry the pair to `fire`.
+            store.ready_view() == rrv0,
             cspace::cspace_wf(store.slot_view()),
             store.slot_view().dom() == sv0.dom(),
             store.slot_view().dom().finite(),
@@ -1423,6 +1493,11 @@ pub fn recv<S: Store>(
     assert(store.tcb_view() == old(store).tcb_view());
     assert(store.refs_view() == old(store).refs_view());
     assert(store.chan_view()[ch].bindings == cv0[ch].bindings);
+    proof {
+        // B8C: the ring dequeue framed `ready_view` + `tcb_view`, so the ready pair carries
+        // unchanged to feed `fire`'s requires.
+        cspace::lemma_ready_inv_frame(old(store), store);
+    }
     fire(store, ch, 1 - e, EV_WRITABLE);
 
     proof {
@@ -1558,6 +1633,11 @@ fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
         cspace::census_dom_complete(final(store)),
         final(store).slot_view() == old(store).slot_view(),
         final(store).cspace_view() == old(store).cspace_view(),
+        // B8C: `release_binding` touches only chan bindings + `refs[n]`; the setters frame
+        // `tcb_view` + `ready_view`, so `destroy_channel`'s binding-release loop carries the
+        // ready pair across it (via `lemma_ready_inv_frame`).
+        final(store).tcb_view() == old(store).tcb_view(),
+        final(store).ready_view() == old(store).ready_view(),
         final(store).chan_view().dom() == old(store).chan_view().dom(),
         cspace::chan_struct_frame(old(store).chan_view(), final(store).chan_view()),
         // Dead, queue-detached TCBs are frozen: `release_binding`
@@ -1739,6 +1819,9 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
         // sits there at `refs == 0` (`obj_unref` calls this at `refs[ch] == 0`). `ch` homes its ring
         // caps, so it is the death witness for each ring slot the teardown empties.
         cspace::dead_obj(old(store), ch),
+        // B8C: ring-cap `delete`s can fire / tear down threads, touching the ready queue.
+        cspace::ready_wf(old(store).ready_view(), old(store).tcb_view()),
+        cspace::ready_complete(old(store).ready_view(), old(store).tcb_view()),
     ensures
         cspace::cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom() == old(store).slot_view().dom(),
@@ -1748,6 +1831,8 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
         cspace::caps_consistent(final(store)),
         cspace::end_caps_sound(final(store)),
         cspace::census_dom_complete(final(store)),
+        cspace::ready_wf(final(store).ready_view(), final(store).tcb_view()),
+        cspace::ready_complete(final(store).ready_view(), final(store).tcb_view()),
         cspace::only_empties(old(store).slot_view(), final(store).slot_view()),
         // Residency is immutable: the ring-cap `delete`s and `set_obj_refs` all frame
         // `cspace_view`, so `obj_unref`'s Channel arm carries it.
@@ -1809,6 +1894,9 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
             // Dual provenance composes across the ring-cap deletes.
             cspace::emptied_via_dead_home_free(old(store), store),
             cspace::refs_death_persist(old(store), store),
+            // B8C: the ready pair carries across the ring loop — each `delete` ensures it.
+            cspace::ready_wf(store.ready_view(), store.tcb_view()),
+            cspace::ready_complete(store.ready_view(), store.tcb_view()),
             // `ch` is dead throughout (it entered dead, death is monotone-preserved) — the witness
             // for each ring cap being emptied.
             cspace::dead_obj(store, ch),
@@ -1844,6 +1932,8 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                 // Dual provenance composes across the ring-cap deletes.
                 cspace::emptied_via_dead_home_free(old(store), store),
                 cspace::refs_death_persist(old(store), store),
+                cspace::ready_wf(store.ready_view(), store.tcb_view()),
+                cspace::ready_complete(store.ready_view(), store.tcb_view()),
                 cspace::dead_obj(store, ch),
                 store.chan_view().dom().contains(ch),
                 store.chan_view()[ch].ring_cap == rc,
@@ -1882,6 +1972,8 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                     // Dual provenance composes across the ring-cap deletes.
                     cspace::emptied_via_dead_home_free(old(store), store),
                     cspace::refs_death_persist(old(store), store),
+                    cspace::ready_wf(store.ready_view(), store.tcb_view()),
+                    cspace::ready_complete(store.ready_view(), store.tcb_view()),
                     cspace::dead_obj(store, ch),
                     store.chan_view().dom().contains(ch),
                     store.chan_view()[ch].ring_cap == rc,
@@ -1991,6 +2083,10 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
             cspace::unhomed_frozen_free(old(store), store),
             cspace::emptied_via_dead_home_free(old(store), store),
             cspace::refs_death_persist(old(store), store),
+            // B8C: the ready pair carries across the binding-release loop — `release_binding`
+            // frames `ready_view` + `tcb_view`, threaded by `lemma_ready_inv_frame`.
+            cspace::ready_wf(store.ready_view(), store.tcb_view()),
+            cspace::ready_complete(store.ready_view(), store.tcb_view()),
             store.chan_view().dom().contains(ch),
             forall|r: int, i: int, c: int|
                 (0 <= r < 2 && 0 <= i < depth0 && 0 <= c < 4)
@@ -2017,6 +2113,8 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                 cspace::unhomed_frozen_free(old(store), store),
                 cspace::emptied_via_dead_home_free(old(store), store),
                 cspace::refs_death_persist(old(store), store),
+                cspace::ready_wf(store.ready_view(), store.tcb_view()),
+                cspace::ready_complete(store.ready_view(), store.tcb_view()),
                 store.chan_view().dom().contains(ch),
                 forall|r: int, i: int, c: int|
                     (0 <= r < 2 && 0 <= i < depth0 && 0 <= c < 4)
@@ -2026,6 +2124,8 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
             let ghost st_before = *store;
             release_binding(store, ch, end, ev);
             proof {
+                // B8C: `release_binding` frames `ready_view` + `tcb_view`; carry the pair.
+                cspace::lemma_ready_inv_frame(&st_before, store);
                 cspace::lemma_chan_struct_frame_trans(
                     old(store).chan_view(), cv_before, store.chan_view());
                 cspace::lemma_dead_tcb_frozen_trans(old(store), &st_before, store);
