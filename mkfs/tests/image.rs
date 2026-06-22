@@ -51,3 +51,31 @@ fn built_image_mounts_and_matches_source() {
 
     std::fs::remove_dir_all(&base).ok();
 }
+
+#[test]
+fn refuses_undersized_image_cleanly() {
+    // rev1§4.5 (S-10): an undersized device is refused on the clean
+    // `run() -> Err -> main() -> ExitCode::FAILURE` path (exit code 1), never a
+    // panic/abort (which would surface as 101 or a terminating signal).
+    let base = std::env::temp_dir().join(format!("eunomia-mkfs-small-{}", std::process::id()));
+    let src = base.join("src");
+    let img = base.join("tiny.img");
+    std::fs::create_dir_all(&src).unwrap();
+
+    // 0 MiB: a zero-length device cannot hold the WAL + chunk floor, so
+    // `Store::format` refuses before `populate` ever reads the source dir.
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_mkfs"))
+        .arg(&img)
+        .arg(&src)
+        .arg("0")
+        .status()
+        .unwrap();
+    assert!(!status.success(), "mkfs must fail on an undersized image");
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "clean ExitCode::FAILURE, not a panic/abort"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}

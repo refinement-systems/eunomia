@@ -48,6 +48,12 @@ use alloc::vec;
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
+/// Minimal chunk region a freshly-`format`ted device must hold beyond the WAL,
+/// for the initial ref-table object and durable index frame (rev1§4.5 geometry
+/// floor). A device that does not clear this is refused, not panicked; a write
+/// that nonetheless overruns the device surfaces as a `DevError`, also no panic.
+const MIN_CHUNK_REGION: u64 = 4096;
+
 #[derive(Debug)]
 pub enum StoreError {
     Io(DevError),
@@ -73,6 +79,11 @@ pub enum StoreError {
     },
     /// Write extent overflows u64 or exceeds the chunk region capacity.
     WriteOutOfRange,
+    /// `format` was handed a device too small to hold the requested geometry —
+    /// the two superblock slots, the WAL region, and a minimal chunk region
+    /// (rev1§4.5: `format` is total over device *geometry*, refusing an
+    /// undersized or un-layoutable device with an error, never a panic).
+    DeviceTooSmall,
 }
 
 impl From<DevError> for StoreError {
@@ -109,6 +120,9 @@ impl core::fmt::Display for StoreError {
                 write!(f, "ref edit version mismatch (current {current})")
             }
             StoreError::WriteOutOfRange => write!(f, "write extent out of range"),
+            StoreError::DeviceTooSmall => {
+                write!(f, "device too small for the requested geometry")
+            }
         }
     }
 }
@@ -181,22 +195,29 @@ pub struct StoreOptions {
 
 impl Default for StoreOptions {
     fn default() -> Self {
-        // B12A keeps the pre-B12 magnitudes (the rev1§4.4 recommended defaults —
-        // S-9 — are shipped by B12F). The new bounds are stubbed to
-        // non-triggering values so the reshape changes no behavior: a single ref
-        // may still fill the whole budget, no op-count/watermark/staleness flush
-        // fires by default. Tests that exercise the bounds pass tight opts.
-        let global_budget = 8 * 1024 * 1024;
-        let wal_len = 16 * 1024 * 1024;
+        // The rev1§4.4 recommended defaults (S-9, spec line 266): the *triggers
+        // and bounds* are mandatory mechanisms (shipped by B12A–B12D); these
+        // *numbers* are the recommended figures a store may tune. The storage
+        // server (`storaged`) mounts with this `default()`, so it *is* "the
+        // storage server's shipped configuration" the spec says matches the
+        // table. (`mount` overrides only `wal_len` from the on-disk superblock;
+        // the memory budgets come from these opts.)
+        let global_budget = 128 * 1024 * 1024; // global high watermark
+        let wal_len = 64 * 1024 * 1024;
         StoreOptions {
             wal_len,
             chunker: ChunkerParams::DEFAULT,
             global_budget,
-            per_ref_budget: global_budget,
-            op_count_bound: u64::MAX,
-            size_low_watermark: global_budget,
-            wal_watermark: wal_len,
-            staleness_ns: u64::MAX,
+            per_ref_budget: 8 * 1024 * 1024, // per-ref soft bound (containment)
+            // No spec number for the op-count secondary bound: a few-thousand-op
+            // ceiling that catches a metadata storm whose dirty *bytes* stay well
+            // under `per_ref_budget`. Tunable like the rest.
+            op_count_bound: 8192,
+            // Flush-the-biggest-offenders starts here, below the high watermark
+            // (`global_budget`), so writers rarely hit it — B12B's 3/4 fraction.
+            size_low_watermark: global_budget / 4 * 3,
+            wal_watermark: wal_len / 2, // flush-the-pinner at 50% (M-5)
+            staleness_ns: 30 * 1_000_000_000, // 30 s staleness bound (M-6 timer)
         }
     }
 }
@@ -1454,8 +1475,24 @@ impl<D: BlockDev> Store<D> {
     // ── Lifecycle ───────────────────────────────────────────────────
 
     pub fn format(mut dev: D, opts: StoreOptions) -> Result<Store<D>, StoreError> {
-        let chunk_off = WAL_OFF + opts.wal_len;
-        assert!(dev.len() > chunk_off + 4096, "device too small");
+        // rev1§4.5: `format` is total over device *geometry* — validate the
+        // requested layout against the device *before writing anything*, and
+        // refuse an undersized or un-layoutable device with an error, never a
+        // panic. (Mount is total over device *contents*; this is its geometry
+        // twin.) `checked_add` keeps the check total even for a hostile
+        // `wal_len` near `u64::MAX`, which a bare add would wrap into a false
+        // pass. The threshold is the old `assert!`'s: room for the two
+        // superblock slots (folded into `WAL_OFF`), the WAL region, and a
+        // minimal chunk region for the initial ref-table + index frame.
+        let chunk_off = WAL_OFF
+            .checked_add(opts.wal_len)
+            .ok_or(StoreError::DeviceTooSmall)?;
+        let min_dev = chunk_off
+            .checked_add(MIN_CHUNK_REGION)
+            .ok_or(StoreError::DeviceTooSmall)?;
+        if dev.len() <= min_dev {
+            return Err(StoreError::DeviceTooSmall);
+        }
         // Invalidate both slots first so a re-format can't leave a stale
         // valid superblock pointing into the new chunk region.
         dev.write(SB_A_OFF, &[0u8; SB_SIZE])?;
@@ -2895,13 +2932,18 @@ mod tests {
             global_budget: 32 * 1024,
             // Keep the low watermark consistent with this fixture's tightened
             // global_budget (rev1§4.4 invariant: size_low_watermark <= the high
-            // watermark). Default would leave it at 8 MiB, above this 32 KiB high
-            // watermark; pinning it equal preserves the pre-B12 size trigger
-            // threshold, now realized as flush-the-biggest-offenders.
+            // watermark). Default would leave it at 96 MiB, above this 32 KiB
+            // high watermark; pinning it equal preserves the pre-B12 size
+            // trigger threshold, now realized as flush-the-biggest-offenders.
             size_low_watermark: 32 * 1024,
-            // The per-ref/op-count/wal/staleness bounds inherit their
-            // non-triggering defaults, so this shared fixture preserves the
-            // pre-B12 flush behavior; tests that exercise a bound pass tight opts.
+            // B12F ships triggering op-count and staleness *defaults* (8192 ops,
+            // 30 s); pin them off here so this shared fixture keeps preserving
+            // the pre-B12 flush behavior. The wal watermark inherits the default
+            // (>> this fixture's 8 KiB wal_len), so flush-the-pinner stays inert
+            // too. Tests that exercise a specific bound pass their own tight opts
+            // (`crash_opts`, `wal_opts`, `stale_opts`, and the inline builders).
+            op_count_bound: u64::MAX,
+            staleness_ns: u64::MAX,
             ..StoreOptions::default()
         }
     }
@@ -2933,6 +2975,39 @@ mod tests {
         rec.extend_from_slice(&[0u8; 32]); // checksum placeholder
         rec.extend_from_slice(payload);
         rec
+    }
+
+    // ── B12F: refuse-not-panic format contract (rev1§4.5, S-10) ──
+
+    /// rev1§4.5: `format` is total over device *geometry* — an undersized or
+    /// un-layoutable device is refused with `StoreError::DeviceTooSmall`, never
+    /// a panic (`mkfs`'s clean `ExitCode::FAILURE` path depends on this). With
+    /// the 8 KiB-WAL fixture the geometry floor is `WAL_OFF (8 KiB) + wal_len
+    /// (8 KiB) + MIN_CHUNK_REGION (4 KiB) = 20 KiB`.
+    #[test]
+    fn format_refuses_undersized_device_without_panic() {
+        let floor = WAL_OFF + test_opts().wal_len + MIN_CHUNK_REGION;
+        // At or below the floor: refused cleanly, no panic. `.map(|_| ())` drops
+        // the (non-Debug) `Store` from the Ok arm so the mismatch is printable.
+        for too_small in [0u64, 8192, floor - 1, floor] {
+            match Store::format(MemDev::new(too_small as usize), test_opts()).map(|_| ()) {
+                Err(StoreError::DeviceTooSmall) => {}
+                other => panic!("len {too_small}: expected DeviceTooSmall, got {other:?}"),
+            }
+        }
+        // One byte over the floor formats cleanly.
+        assert!(Store::format(MemDev::new((floor + 1) as usize), test_opts()).is_ok());
+        // A hostile `wal_len` near u64::MAX overflows the geometry add — the
+        // `checked_add` refuses rather than wrapping into a false pass; still no
+        // panic.
+        let huge = StoreOptions {
+            wal_len: u64::MAX,
+            ..test_opts()
+        };
+        match Store::format(MemDev::new(1 << 20), huge).map(|_| ()) {
+            Err(StoreError::DeviceTooSmall) => {}
+            other => panic!("u64::MAX wal_len: expected DeviceTooSmall, got {other:?}"),
+        }
     }
 
     // ── B12A: per-ref accounting + per-ref soft bound (rev1§4.4, M-3/M-6) ──
