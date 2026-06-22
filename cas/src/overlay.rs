@@ -8,16 +8,18 @@
 //!
 //! The overlay keys its per-file interval maps on an ephemeral, server-runtime
 //! [`FileId`] (rev1§4.3/§4.9), not on the path: a name-ordered `by_name` index
-//! resolves a path to its id, and an `id → name` map (`names`) is what a future
-//! rename swaps in O(1) regardless of how much dirty state the file holds. IDs
-//! are runtime-only and never touch disk — they are re-derived by replaying the
-//! path-keyed WAL on mount.
+//! resolves a path to its id, and an `id → name` map (`names`) is what a
+//! [`rename`](Overlay::rename) swaps in O(1) regardless of how much dirty state
+//! the file holds. IDs are runtime-only and never touch disk — they are
+//! re-derived by replaying the path-keyed WAL on mount. A file rename moves the
+//! name only (the interval map never moves); a directory rename is recorded in
+//! `dir_renames` and applied at flush as a tree detach/reattach (rev1§4.9).
 //!
-//! C2C adds the rev1§4.9 *open handle*: an id can be held open across an unlink.
+//! An id can also be held *open* across an unlink (the rev1§4.9 open handle):
 //! `open` refcounts the live handles per id; unlinking an *open* id orphans it
 //! (`names[id] = None`) instead of reaping it, so the handle keeps working
 //! against the overlay, and at flush an orphaned id (resolving to no name) is
-//! discarded — "which is what unlink means here." Rename itself lands in C2B.
+//! discarded — "which is what unlink means here."
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
@@ -40,15 +42,20 @@ pub struct FileOverlay {
     pub mtime: u64,
     /// Committed-tree path to read pre-edit bytes from at flush (rev1§4.9 base
     /// origin), fixed at first write and distinct from the current name once a
-    /// rename moves the name; `None` for a `fresh` file (no base to read). Set
-    /// here but only consulted by flush once rename exists (C2B) — in C2A
-    /// `origin` always equals the current name, so flush still reads the base at
-    /// the current name and the field is write-only for now.
-    #[allow(dead_code)]
+    /// rename moves the name; `None` for a `fresh` file (no base to read). Read
+    /// by `Store::read`/`flush_ref` (C2B): a renamed dirty file applies its
+    /// interval map over the committed bytes at the *original* name.
     origin: Option<Path>,
 }
 
 impl FileOverlay {
+    /// The committed-tree path to read pre-edit bytes from (rev1§4.9 base
+    /// origin). `None` for a `fresh` file. Differs from the current name after a
+    /// rename; the store reads the base here and writes at the current name.
+    pub fn origin(&self) -> Option<&Path> {
+        self.origin.as_ref()
+    }
+
     /// Largest offset written (for synthesizing sizes in listings).
     pub fn extent(&self) -> u64 {
         self.writes
@@ -136,10 +143,11 @@ pub struct Overlay {
     by_name: BTreeMap<Path, FileId>,
     /// id → current name (rev1§4.9 "ID → current-path map"): the inverse of
     /// `by_name` for every live file. `None` marks an id whose name was unlinked
-    /// while still open — reserved for C2C, never produced in C2A.
+    /// while still open (rev1§4.9 unlink-while-open — the orphaned open handle).
     names: BTreeMap<FileId, Option<Path>>,
     /// Tombstones: names that read as absent until flush removes them from the
-    /// tree (the old `unlinks` set, unchanged in role).
+    /// tree (the old `unlinks` set, unchanged in role). A file rename adds its
+    /// source name here.
     tombs: BTreeSet<Path>,
     /// Open-handle refcount per id (rev1§4.9). `open[id] > 0` means a live handle
     /// holds the id, which changes two things: unlinking the id *orphans* it
@@ -148,12 +156,18 @@ pub struct Overlay {
     /// an id is `open`ed; ephemeral, like the ids themselves (never persisted, no
     /// open/close WAL record — a crash leaves no open handles, see [`Self::carry_open`]).
     open: BTreeMap<FileId, u32>,
+    /// Pending directory moves `from → to` (rev1§4.9 detach/reattach). A
+    /// directory has no dirty bytes to re-key, so its move is recorded here and
+    /// executed at flush as a `tree::remove`+`tree::put` of its `DirRoot` entry.
+    /// `Store::rename` drains dirty descendants (flush-first, DD4) before
+    /// recording the move, so no file overlay hides under `from`.
+    dir_renames: BTreeMap<Path, Path>,
     bytes: usize,
 }
 
 impl Overlay {
     pub fn is_empty(&self) -> bool {
-        self.by_id.is_empty() && self.tombs.is_empty()
+        self.by_id.is_empty() && self.tombs.is_empty() && self.dir_renames.is_empty()
     }
 
     pub fn bytes(&self) -> usize {
@@ -356,6 +370,13 @@ impl Overlay {
         }
     }
 
+    /// Whether `path` is a live (dirty) file in the overlay — the fast check
+    /// that lets a rename take the O(1) name-swap path (vs. opening a clean
+    /// committed file or recording a directory move).
+    pub fn contains_file(&self, path: &Path) -> bool {
+        self.by_name.contains_key(path)
+    }
+
     pub fn unlinks(&self) -> impl Iterator<Item = &Path> {
         self.tombs.iter()
     }
@@ -388,6 +409,63 @@ impl Overlay {
         self.tombs
             .iter()
             .filter(move |p| p.len() == dir.len() + 1 && p[..dir.len()] == *dir)
+    }
+
+    /// Pending directory moves (`from`, `to`), applied at flush.
+    pub fn dir_renames(&self) -> impl Iterator<Item = (&Path, &Path)> {
+        self.dir_renames.iter()
+    }
+
+    /// Bring a clean, committed *file* into the overlay so a rename can move it
+    /// (rev1§4.9). It carries no dirty writes; its `origin` is its current name,
+    /// so flush reads the unchanged committed bytes there and writes them at the
+    /// renamed name. The caller (`Store::rename`) has verified `name` is a file
+    /// absent from the overlay.
+    pub fn open_for_rename(&mut self, name: &Path, next_id: &mut FileId) {
+        let id = *next_id;
+        *next_id += 1;
+        self.by_id.insert(
+            id,
+            FileOverlay {
+                fresh: false,
+                origin: Some(name.clone()),
+                ..FileOverlay::default()
+            },
+        );
+        self.by_name.insert(name.clone(), id);
+        self.names.insert(id, Some(name.clone()));
+    }
+
+    /// Move a live overlay *file* `from → to` in O(1): the id keeps its interval
+    /// map (it never moves), only the name pointers swap (rev1§4.9). The source
+    /// name is tombstoned (reads absent, flush removes its committed entry); the
+    /// `origin` is untouched, so flush still reads the pre-edit base at the
+    /// original name. A pre-existing destination is overwritten last-write-wins
+    /// (rev1§4.4). The caller guarantees `from` is live in `by_name`.
+    pub fn rename(&mut self, from: &Path, to: &Path, mtime: u64) {
+        let id = *self.by_name.get(from).expect("rename source must be live");
+        // Destination last-write-wins: the target name becomes live again; reap
+        // any id currently parked there.
+        self.tombs.remove(to);
+        if let Some(victim) = self.by_name.remove(to) {
+            if let Some(fo) = self.by_id.remove(&victim) {
+                let drop_bytes: usize = fo.writes.values().map(|v| v.len()).sum();
+                self.bytes = self.bytes.saturating_sub(drop_bytes);
+            }
+            self.names.remove(&victim);
+        }
+        // The O(1) swap: move the name, never the interval map.
+        self.by_name.remove(from);
+        self.by_name.insert(to.clone(), id);
+        self.names.insert(id, Some(to.clone()));
+        self.tombs.insert(from.clone());
+        self.by_id.get_mut(&id).unwrap().mtime = mtime;
+    }
+
+    /// Record a directory move `from → to` for flush to apply as a tree
+    /// detach/reattach (rev1§4.9). The caller has drained dirty descendants.
+    pub fn rename_dir(&mut self, from: &Path, to: &Path) {
+        self.dir_renames.insert(from.clone(), to.clone());
     }
 
     /// Cross-check the id indirection (test-only): the indices stay mutually
@@ -550,6 +628,100 @@ mod tests {
         assert_ne!(fo.apply(b"OLD"), wrong);
     }
 
+    /// A file rename moves the name only: the id, its interval map, and its
+    /// `origin` are untouched, the source reads absent, the destination reads
+    /// the moved dirty content (rev1§4.9).
+    #[test]
+    fn rename_moves_name_keeps_id_and_origin() {
+        let mut o = Overlay::default();
+        let mut next = 0u64;
+        let (a, b) = (path("a"), path("b"));
+        o.write(&a, 0, b"hello", 1, &mut next);
+        assert_eq!(next, 1); // one id minted
+        o.rename(&a, &b, 5);
+        assert_eq!(next, 1); // rename mints no id
+                             // Source reads absent (tombstoned); destination carries the same bytes.
+        assert!(matches!(o.state(&a), FileState::Unlinked));
+        let FileState::Dirty(fo) = o.state(&b) else {
+            panic!("renamed file must be dirty at the new name")
+        };
+        assert_eq!(fo.apply(&[]), b"hello".to_vec());
+        // `origin` stays the *original* name — flush reads the base there.
+        assert_eq!(fo.origin(), Some(&a));
+        assert_eq!(fo.mtime, 5);
+        o.check_invariants();
+    }
+
+    /// O(1) witness (DD1): renaming a file with a large dirty interval map does
+    /// not move or rebuild the interval map — only the name pointers swap. We
+    /// witness this structurally: the per-id `writes` map is byte-identical
+    /// before and after the rename.
+    #[test]
+    fn rename_does_not_move_the_interval_map() {
+        let mut o = Overlay::default();
+        let mut next = 0u64;
+        let (a, b) = (path("a"), path("b"));
+        // A fat, fragmented interval map: 500 disjoint 4-byte intervals.
+        for i in 0..500u64 {
+            o.write(&a, i * 8, b"abcd", i + 1, &mut next);
+        }
+        let FileState::Dirty(before) = o.state(&a) else {
+            panic!()
+        };
+        let writes_before = before.writes.clone();
+        let bytes_before = o.bytes();
+        assert_eq!(writes_before.len(), 500);
+
+        o.rename(&a, &b, 9999);
+
+        let FileState::Dirty(after) = o.state(&b) else {
+            panic!()
+        };
+        // Same interval map object content — the rename touched no dirty state.
+        assert_eq!(after.writes, writes_before);
+        assert_eq!(o.bytes(), bytes_before);
+        o.check_invariants();
+    }
+
+    /// Renaming onto an existing destination is last-write-wins: the old target
+    /// id is reaped (its dirty bytes released) and the source takes its place.
+    #[test]
+    fn rename_onto_existing_is_last_write_wins() {
+        let mut o = Overlay::default();
+        let mut next = 0u64;
+        let (a, b) = (path("a"), path("b"));
+        o.write(&a, 0, b"AAAA", 1, &mut next);
+        o.write(&b, 0, b"BBBBBBBB", 2, &mut next);
+        assert_eq!(o.bytes(), 12);
+        o.rename(&a, &b, 3);
+        let FileState::Dirty(fo) = o.state(&b) else {
+            panic!()
+        };
+        // `b` now holds `a`'s content; `b`'s old 8 bytes were released.
+        assert_eq!(fo.apply(&[]), b"AAAA".to_vec());
+        assert_eq!(o.bytes(), 4);
+        assert!(matches!(o.state(&a), FileState::Unlinked));
+        o.check_invariants();
+    }
+
+    /// Renaming back to the original name (`a→b→a`) restores `a` as a live file
+    /// and leaves only `b` tombstoned (the indices stay consistent).
+    #[test]
+    fn rename_round_trip_restores_source() {
+        let mut o = Overlay::default();
+        let mut next = 0u64;
+        let (a, b) = (path("a"), path("b"));
+        o.write(&a, 0, b"x", 1, &mut next);
+        o.rename(&a, &b, 2);
+        o.rename(&b, &a, 3);
+        let FileState::Dirty(fo) = o.state(&a) else {
+            panic!()
+        };
+        assert_eq!(fo.apply(&[]), b"x".to_vec());
+        assert!(matches!(o.state(&b), FileState::Unlinked));
+        o.check_invariants();
+    }
+
     proptest! {
         // Miri: a few cases cover the same paths; native keeps the full sweep.
         #![proptest_config(ProptestConfig {
@@ -634,6 +806,25 @@ mod tests {
             self.unlinks.insert(path.clone());
         }
 
+        /// Path-keyed rename oracle: move the per-file interval map by path
+        /// (the naive O(dirty) cost the id indirection avoids), last-write-wins
+        /// over the destination, tombstone the source. Caller guarantees `from`
+        /// is a live file.
+        fn rename(&mut self, from: &Path, to: &Path, mtime: u64) {
+            let mut fo = self
+                .files
+                .remove(from)
+                .expect("ref rename source must be live");
+            if let Some(victim) = self.files.remove(to) {
+                let drop_bytes: usize = victim.writes.values().map(|v| v.len()).sum();
+                self.bytes = self.bytes.saturating_sub(drop_bytes);
+            }
+            self.unlinks.remove(to);
+            fo.mtime = mtime;
+            self.files.insert(to.clone(), fo);
+            self.unlinks.insert(from.clone());
+        }
+
         fn state(&self, path: &Path) -> FileState<'_> {
             if self.unlinks.contains(path) {
                 FileState::Unlinked
@@ -663,6 +854,7 @@ mod tests {
     enum Op {
         Write(usize, u64, Vec<u8>),
         Unlink(usize),
+        Rename(usize, usize),
     }
 
     fn overlay_op() -> impl Strategy<Value = Op> {
@@ -674,6 +866,7 @@ mod tests {
             )
                 .prop_map(|(i, off, data)| Op::Write(i, off, data)),
             (0usize..NAMES).prop_map(Op::Unlink),
+            (0usize..NAMES, 0usize..NAMES).prop_map(|(i, j)| Op::Rename(i, j)),
         ]
     }
 
@@ -700,6 +893,16 @@ mod tests {
                     Op::Unlink(i) => {
                         real.unlink(&names[*i], mtime);
                         refm.unlink(&names[*i]);
+                    }
+                    Op::Rename(i, j) => {
+                        // The overlay-level swap requires a live source; a clean
+                        // committed file is opened by the store, not here. Skip
+                        // self-renames and dead sources so both models step in
+                        // lockstep (the store-level proptest covers the rest).
+                        if i != j && real.contains_file(&names[*i]) {
+                            real.rename(&names[*i], &names[*j], mtime);
+                            refm.rename(&names[*i], &names[*j], mtime);
+                        }
                     }
                 }
                 mtime += 1;

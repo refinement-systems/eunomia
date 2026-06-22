@@ -69,6 +69,10 @@ pub enum StoreError {
     /// gone after a crash (handles do not survive a remount).
     NoSuchHandle,
     NotAFile,
+    /// A rename named a source path that resolves to nothing (rev1§4.9): no live
+    /// overlay file, no committed tree entry. Rejected before the WAL so an
+    /// acked record always has something to move.
+    NotFound,
     Corrupt(&'static str),
     NoSpace,
     /// The snapshot is a tag target; tags are keep-strength pins (rev1§4.7).
@@ -118,6 +122,7 @@ impl core::fmt::Display for StoreError {
             StoreError::NoSuchSnapshot => write!(f, "no such snapshot"),
             StoreError::NoSuchHandle => write!(f, "no such open handle"),
             StoreError::NotAFile => write!(f, "not a file"),
+            StoreError::NotFound => write!(f, "no such path"),
             StoreError::Corrupt(w) => write!(f, "corrupt store: {w}"),
             StoreError::NoSpace => write!(f, "chunk region full"),
             StoreError::Pinned => write!(f, "snapshot pinned by a tag"),
@@ -733,10 +738,11 @@ spec fn s_path(pay: Seq<u8>, pos: int, count: int) -> Option<int>
 
 /// The payload region structurally decodes and is *exactly* consumed — the
 /// interpreted mirror of `WalOp::decode_payload`: a tag byte (1 = Write,
-/// 2 = Unlink), then for Write `ref_name`/`path`/`offset`/`mtime`/`data`
-/// (the data length a `u32`), for Unlink `ref_name`/`path`/`mtime`, with the
-/// final cursor at the end (`Reader::done`). Verified-equal to the exec walk by
-/// [`wal_struct_ok`]; no longer trusted.
+/// 2 = Unlink, 3 = Rename), then for Write `ref_name`/`path`/`offset`/`mtime`/
+/// `data` (the data length a `u32`), for Unlink `ref_name`/`path`/`mtime`, for
+/// Rename `ref_name`/`from`/`to`/`mtime` (two paths), with the final cursor at
+/// the end (`Reader::done`). Verified-equal to the exec walk by [`wal_struct_ok`];
+/// no longer trusted.
 spec fn s_payload_ok(pay: Seq<u8>) -> bool {
     match s_take(pay, 0, 1) {
         None => false,
@@ -786,6 +792,30 @@ spec fn s_payload_ok(pay: Seq<u8>) -> bool {
                                 Some(p_path) => match s_take(pay, p_path, 8) {
                                     None => false,
                                     Some(p_mt) => p_mt == pay.len(),
+                                },
+                            },
+                        },
+                    },
+                }
+            } else if tag == 3u8 {
+                // Rename: rl·ref_name, from path, to path, mtime u64.
+                match s_take(pay, p_tag, 1) {
+                    None => false,
+                    Some(p_rl) => match s_take(pay, p_rl, pay[p_tag] as int) {
+                        None => false,
+                        Some(p_ref) => match s_take(pay, p_ref, 1) {
+                            None => false,
+                            Some(p_fc) => match s_path(pay, p_fc, pay[p_ref] as int) {
+                                None => false,
+                                Some(p_from) => match s_take(pay, p_from, 1) {
+                                    None => false,
+                                    Some(p_tc) => match s_path(pay, p_tc, pay[p_from] as int) {
+                                        None => false,
+                                        Some(p_to) => match s_take(pay, p_to, 8) {
+                                            None => false,
+                                            Some(p_mt) => p_mt == pay.len(),
+                                        },
+                                    },
                                 },
                             },
                         },
@@ -942,6 +972,39 @@ fn e_payload_ok(pay: &[u8]) -> (r: bool)
             Some(p) => p,
         };
         let p_mt = match e_take(pay, p_path, 8) {
+            None => return false,
+            Some(p) => p,
+        };
+        p_mt == pay.len()
+    } else if tag == 3u8 {
+        let p_rl = match e_take(pay, p_tag, 1) {
+            None => return false,
+            Some(p) => p,
+        };
+        let rl = pay[p_tag] as usize;
+        let p_ref = match e_take(pay, p_rl, rl) {
+            None => return false,
+            Some(p) => p,
+        };
+        let p_fc = match e_take(pay, p_ref, 1) {
+            None => return false,
+            Some(p) => p,
+        };
+        let fc = pay[p_ref] as usize;
+        let p_from = match e_path(pay, p_fc, fc) {
+            None => return false,
+            Some(p) => p,
+        };
+        let p_tc = match e_take(pay, p_from, 1) {
+            None => return false,
+            Some(p) => p,
+        };
+        let tc = pay[p_from] as usize;
+        let p_to = match e_path(pay, p_tc, tc) {
+            None => return false,
+            Some(p) => p,
+        };
+        let p_mt = match e_take(pay, p_to, 8) {
             None => return false,
             Some(p) => p,
         };
@@ -1760,7 +1823,7 @@ impl<D: BlockDev> Store<D> {
                     return Err(StoreError::Corrupt("wal record extent out of range"));
                 }
             }
-            store.apply_to_overlay(&op);
+            store.apply_to_overlay(&op)?;
             // Reconstruct per-ref flush accounting from the replayed records
             // (rev1§4.4): nothing of it is persisted, so the live state is
             // recomputed here exactly as the write path built it (B12 is
@@ -2141,6 +2204,93 @@ impl<D: BlockDev> Store<D> {
         Ok(())
     }
 
+    /// Move `from` to `to` within one ref (rev1§4.9). Within-subtree only — the
+    /// wire layer resolves both endpoints under a handle's subtree, so a
+    /// cross-subtree target is unnameable (DD4); cross-ref rename is a copy with
+    /// new lineage, a different op (out of scope). A dirty file's rename is the
+    /// O(1) name swap in the overlay; a clean file or a directory is logged the
+    /// same and resolved at apply/flush. A directory rename drains the ref first
+    /// (DD4) so the move is a pure tree detach/reattach, then flushes the move.
+    pub fn rename(
+        &mut self,
+        ref_name: &[u8],
+        from: &Path,
+        to: &Path,
+        mtime: u64,
+    ) -> Result<(), StoreError> {
+        if from.is_empty() || to.is_empty() {
+            return Err(StoreError::Format(FormatError::BadName));
+        }
+        for comp in from.iter().chain(to.iter()) {
+            crate::prolly::validate_name(comp)?;
+        }
+        if from == to {
+            return Ok(());
+        }
+        // A directory cannot be moved inside its own subtree (would orphan it).
+        if to.len() > from.len() && to[..from.len()] == from[..] {
+            return Err(StoreError::NotAFile);
+        }
+        let root = self
+            .table
+            .refs
+            .get(ref_name)
+            .ok_or(StoreError::NoSuchRef)?
+            .root;
+
+        // Classify the source: a live dirty overlay file, else the committed
+        // tree. A tombstoned (unlinked) name reads as absent — reject it too.
+        let live_file = self
+            .overlays
+            .get(ref_name)
+            .map_or(false, |o| o.contains_file(from));
+        let is_dir = if live_file {
+            false
+        } else {
+            let from_comps: Vec<&[u8]> = from.iter().map(|c| c.as_slice()).collect();
+            match tree::lookup(&self.chunks, &root, &from_comps)? {
+                Some(e) => matches!(e.kind, EntryKind::Dir),
+                None => return Err(StoreError::NotFound),
+            }
+        };
+
+        // Destination: parents must be directories and (for a file) the final
+        // slot must not be an existing directory — an existing *file* is
+        // overwritten last-write-wins.
+        self.validate_mutation_path(ref_name, to)?;
+        if is_dir {
+            // MVP: a directory move must not overwrite an existing entry.
+            let to_comps: Vec<&[u8]> = to.iter().map(|c| c.as_slice()).collect();
+            let in_tree = tree::lookup(&self.chunks, &root, &to_comps)?.is_some();
+            let in_overlay = self
+                .overlays
+                .get(ref_name)
+                .map_or(false, |o| !matches!(o.state(to), FileState::Clean));
+            if in_tree || in_overlay {
+                return Err(StoreError::NotAFile);
+            }
+        }
+
+        let op = WalOp::Rename {
+            ref_name: ref_name.to_vec(),
+            from: from.clone(),
+            to: to.clone(),
+            mtime,
+        };
+        if is_dir {
+            // Drain the ref so the directory move is a pure tree detach/reattach
+            // with no dirty-prefix re-pathing (DD4), then log, apply (records the
+            // move), flush (executes it), and commit so it is durable at once.
+            self.flush_ref(ref_name)?;
+            self.commit()?;
+            self.log_then_apply(op)?;
+            self.flush_ref(ref_name)?;
+            self.commit()
+        } else {
+            self.log_then_apply(op)
+        }
+    }
+
     /// Hand the device back (for crash-injection tests).
     pub fn into_dev(self) -> D {
         self.chunks.dev
@@ -2201,7 +2351,7 @@ impl<D: BlockDev> Store<D> {
         if reclen > self.opts.wal_len {
             // Oversized: bypass the WAL, commit synchronously before ack.
             let r = op.ref_name().to_vec();
-            self.apply_to_overlay(&op);
+            self.apply_to_overlay(&op)?;
             self.flush_ref(&r)?;
             return self.commit();
         }
@@ -2227,7 +2377,7 @@ impl<D: BlockDev> Store<D> {
         self.wal_tail = (rec_off + reclen) % self.opts.wal_len;
         self.wal_seq += 1;
         let r = op.ref_name().to_vec();
-        self.apply_to_overlay(&op);
+        self.apply_to_overlay(&op)?;
         self.account_op(&op, rec_off);
 
         // Per-ref soft bound (rev1§4.4 containment, M-3/M-6): a ref that
@@ -2432,11 +2582,7 @@ impl<D: BlockDev> Store<D> {
         a.oldest_dirty_ns.get_or_insert(op.mtime());
     }
 
-    fn apply_to_overlay(&mut self, op: &WalOp) {
-        // Disjoint field borrows: the id allocator and the overlay map are
-        // separate fields, so write can mint a fresh id while holding the overlay.
-        let next_id = &mut self.next_file_id;
-        let overlay = self.overlays.entry(op.ref_name().to_vec()).or_default();
+    fn apply_to_overlay(&mut self, op: &WalOp) -> Result<(), StoreError> {
         match op {
             WalOp::Write {
                 path,
@@ -2445,12 +2591,62 @@ impl<D: BlockDev> Store<D> {
                 data,
                 ..
             } => {
+                // Disjoint field borrows: the id allocator and the overlay map
+                // are separate fields, so write can mint a fresh id while
+                // holding the overlay.
+                let next_id = &mut self.next_file_id;
+                let overlay = self.overlays.entry(op.ref_name().to_vec()).or_default();
                 overlay.write(path, *offset, data, *mtime, next_id);
             }
             WalOp::Unlink { path, mtime, .. } => {
+                let overlay = self.overlays.entry(op.ref_name().to_vec()).or_default();
                 overlay.unlink(path, *mtime);
             }
+            WalOp::Rename {
+                ref_name,
+                from,
+                to,
+                mtime,
+            } => {
+                // A live dirty file renames via the O(1) name swap. Otherwise
+                // classify the committed entity: a clean file is opened into the
+                // overlay so flush moves it via its `origin`; a directory is
+                // recorded for a flush-time tree detach/reattach (DD4/DD5). Ids
+                // are re-derived on replay, so this single branch reconstructs
+                // the live op's overlay state from the path-keyed record.
+                let live = self
+                    .overlays
+                    .get(ref_name.as_slice())
+                    .map_or(false, |o| o.contains_file(from));
+                if live {
+                    self.overlays
+                        .get_mut(ref_name.as_slice())
+                        .unwrap()
+                        .rename(from, to, *mtime);
+                    return Ok(());
+                }
+                let kind = match self.table.refs.get(ref_name.as_slice()).map(|e| e.root) {
+                    Some(root) => {
+                        let comps: Vec<&[u8]> = from.iter().map(|c| c.as_slice()).collect();
+                        tree::lookup(&self.chunks, &root, &comps)?.map(|e| e.kind)
+                    }
+                    None => None,
+                };
+                let next_id = &mut self.next_file_id;
+                let overlay = self.overlays.entry(ref_name.to_vec()).or_default();
+                match kind {
+                    Some(EntryKind::Dir) => overlay.rename_dir(from, to),
+                    Some(EntryKind::File) => {
+                        overlay.open_for_rename(from, next_id);
+                        overlay.rename(from, to, *mtime);
+                    }
+                    // Source absent: rejected before the WAL on the live path
+                    // (`Store::rename`), so unreachable on replay — no-op.
+                    None => {}
+                }
+            }
         }
+        Ok(())
     }
 
     // ── Read path (overlay first, tree below — rev1§4.3) ────────────────
@@ -2469,7 +2665,12 @@ impl<D: BlockDev> Store<D> {
                 let base = if fo.fresh {
                     Vec::new()
                 } else {
-                    self.read_from_tree(&entry.root, path)?.unwrap_or_default()
+                    // A renamed dirty file reads its pre-edit base from the
+                    // committed `origin` (the original name), not the current
+                    // path — the tree still holds it there until flush (DD3).
+                    let origin = fo.origin().unwrap_or(path);
+                    self.read_from_tree(&entry.root, origin)?
+                        .unwrap_or_default()
                 };
                 Ok(Some(fo.apply(&base)))
             }
@@ -2607,23 +2808,66 @@ impl<D: BlockDev> Store<D> {
             }
             return Ok(());
         }
-        let mut root = self
+        // The pre-flush committed root. File bases are read against this
+        // immutable snapshot (DD3): a renamed dirty file's base lives at its
+        // `origin` (the original name), which a later removal in this same flush
+        // would otherwise have already deleted from the mutating `root`.
+        let base_root = self
             .table
             .refs
             .get(ref_name)
             .ok_or(StoreError::NoSuchRef)?
             .root;
+        let mut root = base_root;
 
-        for path in overlay.unlinks() {
+        // Phase 1: directory moves (rev1§4.9 detach/reattach). Move the committed
+        // `DirRoot` entry wholesale — O(depth), no content materialization. The
+        // source's dirty descendants were drained before the move was recorded
+        // (DD4), so the file phase below depends on nothing under `from`.
+        for (from, to) in overlay.dir_renames() {
+            let from_comps: Vec<&[u8]> = from.iter().map(|c| c.as_slice()).collect();
+            let (new_root, removed) = tree::remove(&mut self.chunks, &root, &from_comps)?;
+            self.check_io()?;
+            root = new_root;
+            if let Some(mut entry) = removed {
+                let to_comps: Vec<&[u8]> = to.iter().map(|c| c.as_slice()).collect();
+                let (to_dir, to_name) = to_comps.split_at(to_comps.len() - 1);
+                entry.name = to_name[0].to_vec();
+                let mtime = entry.mtime;
+                root = tree::put(&mut self.chunks, &root, to_dir, entry, mtime)?;
+                self.check_io()?;
+            }
+        }
+
+        // Names this flush removes from the committed tree: explicit tombstones
+        // (which now include file-rename sources) plus any base `origin` that
+        // differs from its file's current name — minus any name a live file is
+        // about to (re)create, so `a→b` then a fresh write to `a` keeps the new
+        // `a` instead of deleting it as the rename's stale source (DD3).
+        let live: BTreeSet<Path> = overlay.files().map(|(name, _)| name.clone()).collect();
+        let mut removals: BTreeSet<Path> = overlay.unlinks().cloned().collect();
+        for (name, fo) in overlay.files() {
+            if let Some(origin) = fo.origin() {
+                if origin != name {
+                    removals.insert(origin.clone());
+                }
+            }
+        }
+        removals.retain(|p| !live.contains(p));
+        for path in &removals {
             let comps: Vec<&[u8]> = path.iter().map(|c| c.as_slice()).collect();
             let (new_root, _) = tree::remove(&mut self.chunks, &root, &comps)?;
             self.check_io()?;
             root = new_root;
         }
-        for (path, fo) in overlay.files() {
-            let comps: Vec<&[u8]> = path.iter().map(|c| c.as_slice()).collect();
-            let (dir, name) = comps.split_at(comps.len() - 1);
-            let old = tree::lookup(&self.chunks, &root, &comps)?;
+        for (name, fo) in overlay.files() {
+            let name_comps: Vec<&[u8]> = name.iter().map(|c| c.as_slice()).collect();
+            let (dir, fname) = name_comps.split_at(name_comps.len() - 1);
+            // Read the pre-edit base from `origin` against the snapshot — for an
+            // un-renamed file `origin == name`, so this is the prior behavior.
+            let origin = fo.origin().unwrap_or(name);
+            let origin_comps: Vec<&[u8]> = origin.iter().map(|c| c.as_slice()).collect();
+            let old = tree::lookup(&self.chunks, &base_root, &origin_comps)?;
             // Reuse the old chunk list only when there is a real base to diff
             // against — not a fresh create / unlink-then-write, and not a
             // directory. `reuse` carries the old content (its chunk list) and
@@ -2660,7 +2904,7 @@ impl<D: BlockDev> Store<D> {
             };
             self.check_io()?;
             let entry = Entry {
-                name: name[0].to_vec(),
+                name: fname[0].to_vec(),
                 kind: EntryKind::File,
                 flags,
                 size: content.len() as u64,
@@ -4151,6 +4395,18 @@ mod tests {
         let urec = unlink.encode_record(2);
         assert!(wal_struct_ok(&urec, 0, urec.len()));
 
+        // A complete Rename record (tag 3, two paths) is accepted by both the
+        // structural decoder and the content predicate.
+        let rename = WalOp::Rename {
+            ref_name: b"root".to_vec(),
+            from: vec![b"dir".to_vec(), b"a".to_vec()],
+            to: vec![b"dir".to_vec(), b"b".to_vec()],
+            mtime: 11,
+        };
+        let rnrec = rename.encode_record(3);
+        assert!(wal_struct_ok(&rnrec, 0, rnrec.len()));
+        assert!(wal_content_ok(&rnrec, 0, rnrec.len()));
+
         // The blake3 half still bites: corrupt one checksum byte and the
         // structure still decodes, but content acceptance fails.
         let mut bad_cksum = rec.clone();
@@ -4177,6 +4433,14 @@ mod tests {
         //     tag(2) · rl(0) · path-count(1) · comp-len(5) · <no comp bytes>.
         let truncated = framed(&[2, 0, 1, 5]);
         assert!(!wal_struct_ok(&truncated, 0, truncated.len()));
+        // (c') a Rename whose *second* path is truncated — the tag-3 walk must
+        //      reject. tag(3) · rl(0) · from-count(0) · to-count(1) · comp-len(9)
+        //      · <no comp bytes>. The first path is well-formed; the second runs off.
+        let rn_trunc = framed(&[3, 0, 0, 1, 9]);
+        assert!(!wal_struct_ok(&rn_trunc, 0, rn_trunc.len()));
+        // (c'') a Rename missing its mtime: two empty paths then no 8-byte mtime.
+        let rn_no_mtime = framed(&[3, 0, 0, 0]);
+        assert!(!wal_struct_ok(&rn_no_mtime, 0, rn_no_mtime.len()));
         // (d) empty payload (no tag byte at all).
         let empty = framed(&[]);
         assert!(!wal_struct_ok(&empty, 0, empty.len()));
@@ -5498,6 +5762,302 @@ mod tests {
         }
     }
 
+    // ── C2B: rename (rev1§4.9) ──────────────────────────────────────────────
+
+    /// A dirty file's rename moves the name in the overlay and flushes at the
+    /// new name with the source gone from the tree (DD3). The base is read from
+    /// the `origin`, so a renamed-but-unflushed read already sees the content.
+    #[test]
+    fn rename_dirty_file_flushes_at_new_name() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        store.write(b"main", &p(&["a"]), 0, b"hello", 1).unwrap();
+        store.rename(b"main", &p(&["a"]), &p(&["b"]), 2).unwrap();
+        // Pre-flush: the overlay already reflects the move.
+        assert_eq!(store.read(b"main", &p(&["b"])).unwrap().unwrap(), b"hello");
+        assert_eq!(store.read(b"main", &p(&["a"])).unwrap(), None);
+        store.flush_ref(b"main").unwrap();
+        store.commit().unwrap();
+        // Post-flush + remount: the tree holds `b`, not `a`.
+        let dev = store.into_dev();
+        let s = Store::mount(dev, test_opts()).unwrap();
+        assert_eq!(s.read(b"main", &p(&["b"])).unwrap().unwrap(), b"hello");
+        assert_eq!(s.read(b"main", &p(&["a"])).unwrap(), None);
+    }
+
+    /// A clean (committed) file's rename: the store opens it into the overlay so
+    /// flush reads the committed bytes at the `origin` and writes them at the
+    /// new name (rev1§4.9).
+    #[test]
+    fn rename_clean_file_moves_committed_bytes() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        store
+            .write(b"main", &p(&["a"]), 0, b"committed", 1)
+            .unwrap();
+        store.sync_all().unwrap(); // `a` is now clean/committed
+        store.rename(b"main", &p(&["a"]), &p(&["b"]), 2).unwrap();
+        assert_eq!(
+            store.read(b"main", &p(&["b"])).unwrap().unwrap(),
+            b"committed"
+        );
+        assert_eq!(store.read(b"main", &p(&["a"])).unwrap(), None);
+        store.flush_ref(b"main").unwrap();
+        store.commit().unwrap();
+        let dev = store.into_dev();
+        let s = Store::mount(dev, test_opts()).unwrap();
+        assert_eq!(s.read(b"main", &p(&["b"])).unwrap().unwrap(), b"committed");
+        assert_eq!(s.read(b"main", &p(&["a"])).unwrap(), None);
+    }
+
+    /// Renaming over an existing committed file is last-write-wins: the
+    /// destination's old content is replaced by the source's (rev1§4.4).
+    #[test]
+    fn rename_over_existing_is_last_write_wins() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        store.write(b"main", &p(&["a"]), 0, b"AAAA", 1).unwrap();
+        store.write(b"main", &p(&["b"]), 0, b"BBBBBBBB", 1).unwrap();
+        store.sync_all().unwrap();
+        store.rename(b"main", &p(&["a"]), &p(&["b"]), 2).unwrap();
+        store.flush_ref(b"main").unwrap();
+        store.commit().unwrap();
+        let dev = store.into_dev();
+        let s = Store::mount(dev, test_opts()).unwrap();
+        assert_eq!(s.read(b"main", &p(&["b"])).unwrap().unwrap(), b"AAAA");
+        assert_eq!(s.read(b"main", &p(&["a"])).unwrap(), None);
+    }
+
+    /// `a→b` then a fresh write to `a`: flush keeps the new `a` (the rename's
+    /// stale source must not delete the freshly recreated file — DD3).
+    #[test]
+    fn rename_then_recreate_source_keeps_both() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        store.write(b"main", &p(&["a"]), 0, b"first", 1).unwrap();
+        store.sync_all().unwrap();
+        store.rename(b"main", &p(&["a"]), &p(&["b"]), 2).unwrap();
+        store.write(b"main", &p(&["a"]), 0, b"second", 3).unwrap();
+        store.flush_ref(b"main").unwrap();
+        store.commit().unwrap();
+        let dev = store.into_dev();
+        let s = Store::mount(dev, test_opts()).unwrap();
+        assert_eq!(s.read(b"main", &p(&["b"])).unwrap().unwrap(), b"first");
+        assert_eq!(s.read(b"main", &p(&["a"])).unwrap().unwrap(), b"second");
+    }
+
+    /// A directory rename is an O(depth) detach/reattach: the subtree moves
+    /// wholesale and the children follow (rev1§4.9 `:337`).
+    #[test]
+    fn rename_directory_detach_reattach() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        store.write(b"main", &p(&["d", "x"]), 0, b"X", 1).unwrap();
+        store.write(b"main", &p(&["d", "y"]), 0, b"Y", 1).unwrap();
+        store.sync_all().unwrap();
+        // `Store::rename` of a directory drains + applies + commits internally.
+        store.rename(b"main", &p(&["d"]), &p(&["e"]), 5).unwrap();
+        let dev = store.into_dev();
+        let s = Store::mount(dev, test_opts()).unwrap();
+        assert_eq!(s.read(b"main", &p(&["e", "x"])).unwrap().unwrap(), b"X");
+        assert_eq!(s.read(b"main", &p(&["e", "y"])).unwrap().unwrap(), b"Y");
+        assert_eq!(s.read(b"main", &p(&["d", "x"])).unwrap(), None);
+    }
+
+    /// A rename whose source resolves to nothing is rejected before the WAL.
+    #[test]
+    fn rename_missing_source_is_rejected() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        assert!(matches!(
+            store.rename(b"main", &p(&["nope"]), &p(&["b"]), 1),
+            Err(StoreError::NotFound)
+        ));
+    }
+
+    /// An acknowledged-but-unflushed rename replays after a crash (rev1§4.5):
+    /// the WAL `Rename` record reconstructs the move on mount. Negative control:
+    /// an otherwise-identical store that never issued the rename recovers the
+    /// pre-rename state — so the record is load-bearing, not incidental.
+    #[test]
+    fn acked_unflushed_rename_replays_after_crash() {
+        let build = |do_rename: bool| {
+            let mut store = Store::format(CrashDev::new(1 << 20), test_opts()).unwrap();
+            store.create_ref(b"main").unwrap();
+            store.write(b"main", &p(&["a"]), 0, b"hello", 1).unwrap();
+            store.sync_all().unwrap(); // `a` durable in the tree
+            if do_rename {
+                // Acked (WAL-fsynced) but not committed — relies on replay.
+                store.rename(b"main", &p(&["a"]), &p(&["b"]), 2).unwrap();
+            }
+            let mut dev = store.into_dev();
+            dev.crash(0x1234_5678);
+            Store::mount(dev, test_opts()).unwrap()
+        };
+        let renamed = build(true);
+        assert_eq!(
+            renamed.read(b"main", &p(&["b"])).unwrap().unwrap(),
+            b"hello"
+        );
+        assert_eq!(renamed.read(b"main", &p(&["a"])).unwrap(), None);
+        // Negative control: drop the rename and the recovered state differs.
+        let baseline = build(false);
+        assert_eq!(baseline.read(b"main", &p(&["b"])).unwrap(), None);
+        assert_eq!(
+            baseline.read(b"main", &p(&["a"])).unwrap().unwrap(),
+            b"hello"
+        );
+    }
+
+    /// A directory rename survives a crash at any point: a `Store::rename` of a
+    /// directory drains + commits, logs the `Rename`, then flushes + commits, so
+    /// the power cut can land in any of those. After recovery (draining any
+    /// replayed-but-unflushed move), the subtree is intact at *exactly one*
+    /// location — old or new, never both, neither, nor torn (rev1§4.2 atomicity
+    /// + rev1§4.5 replay). `clear_fail` is mandatory: the recovery mount itself
+    /// must not hit the injected failure.
+    #[test]
+    fn directory_rename_survives_crash() {
+        // Miri: interpreted BLAKE3 makes each format+flush costly, so probe a
+        // few fail points; native sweeps the whole window.
+        let fail_max: u64 = if cfg!(miri) { 5 } else { 40 };
+        for fail_at in 1u64..fail_max {
+            let mut store = Store::format(CrashDev::new(1 << 20), test_opts()).unwrap();
+            store.create_ref(b"main").unwrap();
+            store.write(b"main", &p(&["d", "x"]), 0, b"X", 1).unwrap();
+            store.write(b"main", &p(&["d", "y"]), 0, b"Y", 1).unwrap();
+            store.sync_all().unwrap();
+            store.dev_mut().set_fail_after(fail_at);
+            // May fail mid-way; the WAL record (if it landed) replays the move.
+            let _ = store.rename(b"main", &p(&["d"]), &p(&["e"]), 5);
+            let mut dev = store.into_dev();
+            dev.clear_fail();
+            dev.crash(fail_at.wrapping_mul(0x9E3779B97F4A7C15));
+            let mut rec = Store::mount(dev, test_opts()).unwrap();
+            rec.sync_all().unwrap(); // execute any replayed-but-unflushed move
+            let old_x = rec.read(b"main", &p(&["d", "x"])).unwrap();
+            let new_x = rec.read(b"main", &p(&["e", "x"])).unwrap();
+            let at_old = old_x == Some(b"X".to_vec())
+                && new_x.is_none()
+                && rec.read(b"main", &p(&["d", "y"])).unwrap() == Some(b"Y".to_vec());
+            let at_new = new_x == Some(b"X".to_vec())
+                && old_x.is_none()
+                && rec.read(b"main", &p(&["e", "y"])).unwrap() == Some(b"Y".to_vec());
+            assert!(
+                at_old ^ at_new,
+                "fail_at={fail_at}: d/x={old_x:?} e/x={new_x:?} (subtree not intact at one place)"
+            );
+        }
+    }
+
+    proptest! {
+        // Miri: a few cases cover the same paths; native keeps the full sweep.
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 64 },
+            ..ProptestConfig::default()
+        })]
+        /// Crash-recovery with renames in the op stream: after a crash at an
+        /// arbitrary point, every acknowledged file state is recoverable, and at
+        /// most the single in-flight op is ambiguous. The oracle is a path-keyed
+        /// model; a rename that the model forgot to follow would mispredict the
+        /// destination — the assertion's teeth.
+        #[test]
+        fn crash_recovery_preserves_renamed_state(
+            ops in proptest::collection::vec(
+                (0u8..6, 0usize..4, 0usize..4, proptest::collection::vec(any::<u8>(), 1..48)),
+                1..40,
+            ),
+            fail_at in 4u64..400,
+            crash_seed in any::<u64>(),
+        ) {
+            let names = [p(&["f0"]), p(&["f1"]), p(&["d", "g0"]), p(&["d", "g1"])];
+            let mut store = Store::format(CrashDev::new(1 << 20), crash_opts()).unwrap();
+            store.create_ref(b"main").unwrap();
+            store.dev_mut().set_fail_after(fail_at);
+
+            // Acked logical state, and per-path candidate values for the single
+            // ambiguous (device-failed) op.
+            let mut model: std::collections::HashMap<Path, Option<Vec<u8>>> =
+                std::collections::HashMap::new();
+            let mut inflight: std::collections::HashMap<Path, Vec<Option<Vec<u8>>>> =
+                std::collections::HashMap::new();
+
+            for (sel, a, b, data) in &ops {
+                let pa = names[*a].clone();
+                match sel {
+                    0 | 1 => {
+                        // Write the whole `data` at offset 0 (splice over base).
+                        let mut content = model.get(&pa).cloned().flatten().unwrap_or_default();
+                        if content.len() < data.len() {
+                            content.resize(data.len(), 0);
+                        }
+                        content[..data.len()].copy_from_slice(data);
+                        let next = Some(content);
+                        if store.write(b"main", &pa, 0, data, 1).is_ok() {
+                            model.insert(pa, next);
+                        } else {
+                            let pre = model.get(&pa).cloned().flatten();
+                            inflight.insert(pa, vec![pre, next]);
+                            break;
+                        }
+                    }
+                    2 | 3 => {
+                        let pre = model.get(&pa).cloned().flatten();
+                        if store.unlink(b"main", &pa, 1).is_ok() {
+                            model.insert(pa, None);
+                        } else {
+                            inflight.insert(pa, vec![pre, None]);
+                            break;
+                        }
+                    }
+                    4 => {
+                        // Rename P[a]→P[b], only when the source currently exists
+                        // and is a distinct file (the store rejects otherwise).
+                        if a == b || !matches!(model.get(&pa), Some(Some(_))) {
+                            continue;
+                        }
+                        let pb = names[*b].clone();
+                        let from_val = model.get(&pa).cloned().flatten();
+                        let to_pre = model.get(&pb).cloned().flatten();
+                        if store.rename(b"main", &pa, &pb, 1).is_ok() {
+                            model.insert(pb, from_val);
+                            model.insert(pa, None);
+                        } else {
+                            inflight.insert(pa.clone(), vec![from_val.clone(), None]);
+                            inflight.insert(pb, vec![to_pre, from_val]);
+                            break;
+                        }
+                    }
+                    // 5: sync (content-neutral; a torn commit keeps logical state).
+                    _ => {
+                        if store.sync_all().is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            let mut dev = store.into_dev();
+            dev.clear_fail();
+            dev.crash(crash_seed);
+            let recovered = Store::mount(dev, crash_opts()).unwrap();
+
+            let keys: std::collections::BTreeSet<Path> =
+                model.keys().chain(inflight.keys()).cloned().collect();
+            for path in &keys {
+                let got = recovered.read(b"main", path).unwrap();
+                let acked = model.get(path).cloned().flatten();
+                let ok = got == acked
+                    || inflight.get(path).is_some_and(|cands| cands.contains(&got));
+                prop_assert!(
+                    ok,
+                    "path {:?}: got {:?}, acked {:?}, inflight {:?}",
+                    path, got, acked, inflight.get(path)
+                );
+            }
+        }
+    }
+
     /// Regression for the WAL stale-record graft (rev1§4.5): the record
     /// checksum once covered only the payload, not the sequence number. The WAL
     /// is a reused linear region whose stale bytes are rejected on replay by the
@@ -5692,6 +6252,40 @@ mod tests {
             .expect("a v3 image must not mount");
         assert!(
             matches!(err, StoreError::UnsupportedVersion(3)),
+            "got {err:?}"
+        );
+    }
+
+    /// C2B bumped the format v4 → v5 (the WAL gained a tag-3 `Rename` op). A
+    /// pre-C2B (v4) binary could decode a tag-3 record as a torn tail and
+    /// silently drop a renamed-but-unflushed write, so the version gate refuses
+    /// a v4 image cleanly. `mkfs`/`format` write v5 — checked by the round-trip
+    /// mount above (a freshly formatted store mounts), here we pin the refusal.
+    #[test]
+    fn format_v4_image_is_refused_with_a_version_error() {
+        use crate::disk::{SB_A_OFF, SB_B_OFF};
+
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        store.write(b"main", &p(&["f"]), 0, b"data", 1).unwrap();
+        store
+            .snapshot(b"main", b"t", b"image", disk::CLASS_KEEP, 100)
+            .unwrap();
+        let dev = store.into_dev();
+        let mut img = vec![0u8; dev.len() as usize];
+        dev.read(0, &mut img).unwrap();
+        // Re-stamp both slots as the immediately-preceding format v4, intact and
+        // plausibly checksummed — the dangerous artifact, not a torn slot.
+        for off in [SB_A_OFF as usize, SB_B_OFF as usize] {
+            img[off + 8..off + 12].copy_from_slice(&4u32.to_le_bytes());
+            let sum = Hash::of(&img[off..off + disk::SB_BODY]);
+            img[off + disk::SB_BODY..off + disk::SB_BODY + 32].copy_from_slice(sum.as_bytes());
+        }
+        let err = Store::mount(MemDev::from_bytes(img), test_opts())
+            .err()
+            .expect("a v4 image must not mount");
+        assert!(
+            matches!(err, StoreError::UnsupportedVersion(4)),
             "got {err:?}"
         );
     }
