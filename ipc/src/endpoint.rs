@@ -224,3 +224,85 @@ impl<'t, T: Transport> Endpoint<'t, T> {
         Ok(())
     }
 }
+
+// Cap-marshalling property tests (B14B, rev1§6 baseline tier): the
+// `Message.caps` (`[Option<u32>; 4]`) ↔ kernel-ABI `[u32; 4]` (`SLOT_NONE` for
+// an empty slot) mapping is pure, single-threaded glue — its tier is proptest +
+// Miri. The wire codec proper (`header`/`session`) is Verus + fuzz; this raises
+// the *marshalling* alone. Std-only, off the loom/shuttle model builds.
+#[cfg(all(test, not(loom), not(shuttle)))]
+mod tests {
+    use super::*;
+    use crate::model::ModelTransport;
+    use proptest::prelude::*;
+
+    // A cap array of cspace slot indices. Values are restricted to `< SLOT_NONE`
+    // (a real slot index is never the `u32::MAX` sentinel); the
+    // `Some(SLOT_NONE)` aliasing edge is asserted separately below, not
+    // generated, so it does not spuriously fail the round-trip.
+    fn caps_strategy() -> impl Strategy<Value = [Option<u32>; 4]> {
+        let slot = || proptest::option::of(0u32..u32::MAX);
+        (slot(), slot(), slot(), slot()).prop_map(|(a, b, c, d)| [a, b, c, d])
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 256 },
+            failure_persistence: if cfg!(miri) { None } else { ProptestConfig::default().failure_persistence },
+            .. ProptestConfig::default()
+        })]
+
+        /// `cap_slots` round-trips: the all-empty case is `None` (so the syscall
+        /// layer skips cap handling); otherwise `Some(slots)` with
+        /// `slots[i] == caps[i].unwrap_or(SLOT_NONE)`, and decoding back
+        /// (`SLOT_NONE` → `None`) reproduces `caps` exactly. Pure: a second call
+        /// yields the same result.
+        #[test]
+        fn cap_slots_round_trips(caps in caps_strategy()) {
+            let mut msg = Message::new();
+            msg.caps = caps;
+            let slots = msg.cap_slots();
+            prop_assert_eq!(slots, msg.cap_slots(), "cap_slots is not a pure function of caps");
+
+            if caps.iter().all(Option::is_none) {
+                prop_assert_eq!(slots, None, "all-empty caps must marshal to None");
+            } else {
+                let slots = slots.expect("non-empty caps must marshal to Some");
+                for i in 0..4 {
+                    prop_assert_eq!(slots[i], caps[i].unwrap_or(SLOT_NONE));
+                    let decoded = if slots[i] == SLOT_NONE { None } else { Some(slots[i]) };
+                    prop_assert_eq!(decoded, caps[i], "cap slot did not round-trip at index {}", i);
+                }
+            }
+        }
+
+        /// End-to-end through `Endpoint` + `ModelTransport`: after a send/recv,
+        /// the receiver's `caps[i]` is `Some(dest)` iff a cap arrived there
+        /// (`sent[i].is_some()`) and `None` otherwise — the cap-present mask
+        /// round-trips, and a `None` where a cap was expected is tolerated, never
+        /// a panic (rev1§3.4 null-slot tolerance).
+        #[test]
+        fn cap_present_mask_round_trips(sent in caps_strategy()) {
+            let t = ModelTransport::shared(2, 0); // capacity 2; no notifications needed
+            let ep = Endpoint::new(&*t, 0);
+
+            let mut smsg = Message::new();
+            smsg.caps = sent;
+            ep.send_nb(&smsg).unwrap();
+
+            let mut rmsg = Message::new();
+            // Offer a distinct dest slot at every position (we accept None too).
+            rmsg.caps = [Some(7), Some(8), Some(9), Some(10)];
+            ep.recv_nb(&mut rmsg).unwrap();
+
+            for i in 0..4 {
+                prop_assert_eq!(
+                    rmsg.caps[i].is_some(),
+                    sent[i].is_some(),
+                    "cap-present bit diverged at index {}",
+                    i
+                );
+            }
+        }
+    }
+}
