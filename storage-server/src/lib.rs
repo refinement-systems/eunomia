@@ -235,6 +235,16 @@ pub enum Request {
     ListTags {
         handle: HandleId,
     },
+    /// Rename `from` to `to` within the handle's ref (rev1§4.9). `R_WRITE`-gated
+    /// and ref-only, like `Write`/`Unlink`; both paths are subtree-scoped under
+    /// the handle, so a cross-subtree target is unnameable and therefore denied
+    /// for free. Appended last to keep every prior variant's postcard
+    /// discriminant — and the committed `request_dispatch` corpus — stable.
+    Rename {
+        handle: HandleId,
+        from: TreePath,
+        to: TreePath,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -510,6 +520,10 @@ impl<D: BlockDev> Server<D> {
             | Request::OpenChild { path, .. }
             | Request::Stat { path, .. }
             | Request::OpenSnapshot { path, .. } => Self::validate_path(path)?,
+            Request::Rename { from, to, .. } => {
+                Self::validate_path(from)?;
+                Self::validate_path(to)?;
+            }
             _ => {}
         }
         match req {
@@ -560,6 +574,23 @@ impl<D: BlockDev> Server<D> {
                 };
                 self.store
                     .unlink(name, &Self::full_path(subtree, &path), now)
+                    .map_err(store_err)?;
+                Ok(Response::Ok)
+            }
+            Request::Rename { handle, from, to } => {
+                let e = self.lookup(session, handle, R_WRITE)?;
+                let HandleTarget::Ref { name, subtree, .. } = &e.target else {
+                    return Err(ErrorCode::ReadOnly); // snapshots are immutable
+                };
+                // Both paths are resolved under the handle's subtree, so a
+                // target outside it is unnameable (rev1§4.9) — no extra check.
+                self.store
+                    .rename(
+                        name,
+                        &Self::full_path(subtree, &from),
+                        &Self::full_path(subtree, &to),
+                        now,
+                    )
                     .map_err(store_err)?;
                 Ok(Response::Ok)
             }
@@ -1001,6 +1032,9 @@ fn store_err(e: StoreError) -> ErrorCode {
         StoreError::Format(_) => ErrorCode::BadPath,
         StoreError::Pinned => ErrorCode::Pinned,
         StoreError::WriteOutOfRange => ErrorCode::BadOffset,
+        // Only `Store::rename` produces `NotFound` (a missing source); surface
+        // it as a path error rather than the catch-all `Internal`.
+        StoreError::NotFound => ErrorCode::BadPath,
         _ => ErrorCode::Internal,
     }
 }

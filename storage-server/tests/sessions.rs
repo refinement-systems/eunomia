@@ -158,6 +158,157 @@ fn subtree_confinement_by_unreachability() {
 }
 
 #[test]
+fn rename_moves_a_file_and_denies_what_it_should() {
+    let mut srv = new_server();
+    let root = srv.root_grant(b"main").unwrap();
+    let s = srv.open_session(vec![root]);
+
+    // Happy path (rev1§4.9): write a, rename a -> b, b reads back, a is gone.
+    assert_eq!(
+        srv.handle(
+            s,
+            Request::Write {
+                handle: 0,
+                path: p(&["a"]),
+                offset: 0,
+                data: b"x".to_vec()
+            },
+            10
+        ),
+        Response::Ok
+    );
+    assert_eq!(
+        srv.handle(
+            s,
+            Request::Rename {
+                handle: 0,
+                from: p(&["a"]),
+                to: p(&["b"])
+            },
+            11
+        ),
+        Response::Ok
+    );
+    assert_eq!(
+        srv.handle(
+            s,
+            Request::Read {
+                handle: 0,
+                path: p(&["b"]),
+                offset: 0,
+                len: u32::MAX
+            },
+            12
+        ),
+        Response::Data(b"x".to_vec())
+    );
+    assert_eq!(
+        srv.handle(
+            s,
+            Request::Read {
+                handle: 0,
+                path: p(&["a"]),
+                offset: 0,
+                len: u32::MAX
+            },
+            13
+        ),
+        Response::NotFound
+    );
+
+    // A missing source fails cleanly as a path error (not a panic/Internal).
+    assert_eq!(
+        srv.handle(
+            s,
+            Request::Rename {
+                handle: 0,
+                from: p(&["a"]),
+                to: p(&["c"])
+            },
+            14
+        ),
+        Response::Err(ErrorCode::BadPath)
+    );
+
+    // A subtree handle can never name a target outside its subtree: both ends
+    // are resolved under the subtree, and ".." is rejected up front (rev1§4.9).
+    let Response::Handle(sub) = srv.handle(
+        s,
+        Request::OpenChild {
+            handle: 0,
+            path: p(&["pub"]),
+            rights_mask: R_READ | R_WRITE,
+        },
+        15,
+    ) else {
+        panic!()
+    };
+    assert_eq!(
+        srv.handle(
+            s,
+            Request::Rename {
+                handle: sub,
+                from: p(&["readme"]),
+                to: p(&["..", "escaped"]),
+            },
+            16
+        ),
+        Response::Err(ErrorCode::BadPath)
+    );
+    // A legal move through the subtree handle stays confined under pub/.
+    assert_eq!(
+        srv.handle(
+            s,
+            Request::Rename {
+                handle: sub,
+                from: p(&["readme"]),
+                to: p(&["moved"])
+            },
+            17
+        ),
+        Response::Ok
+    );
+    assert_eq!(
+        srv.handle(
+            s,
+            Request::Read {
+                handle: 0,
+                path: p(&["pub", "moved"]),
+                offset: 0,
+                len: u32::MAX
+            },
+            18
+        ),
+        Response::Data(b"public info".to_vec())
+    );
+
+    // A read-only handle cannot rename — the R_WRITE gate fires as Denied.
+    let Response::Handle(ro) = srv.handle(
+        s,
+        Request::OpenChild {
+            handle: 0,
+            path: p(&["pub"]),
+            rights_mask: R_READ,
+        },
+        19,
+    ) else {
+        panic!()
+    };
+    assert_eq!(
+        srv.handle(
+            s,
+            Request::Rename {
+                handle: ro,
+                from: p(&["moved"]),
+                to: p(&["again"])
+            },
+            20
+        ),
+        Response::Err(ErrorCode::Denied)
+    );
+}
+
+#[test]
 fn attenuation_is_monotone() {
     let mut srv = new_server();
     let root = srv.root_grant(b"main").unwrap();

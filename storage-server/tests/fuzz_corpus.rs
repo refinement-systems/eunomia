@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use cas::chunk::ChunkerParams;
 use cas::dev::MemDev;
 use cas::store::{Store, StoreOptions};
-use storage_server::{wire, HandleEntry, HandleTarget, Server, R_ENUMERATE, R_READ};
+use storage_server::{wire, HandleEntry, HandleTarget, Request, Server, R_ENUMERATE, R_READ};
 
 fn corpus_files(target: &str) -> Vec<Vec<u8>> {
     let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -91,4 +91,24 @@ fn request_dispatch() {
         let (mut server, session) = fresh();
         let _ = server.handle(session, req, 1_000);
     }
+}
+
+/// Generator for the C2D `Request::Rename` corpus seed
+/// (`corpus/request_dispatch/rename`): a single encoded `Rename` request so the
+/// `request_dispatch` fuzzer — and the Miri replay above — exercise the new
+/// rename decode+dispatch path. `#[ignore]`d because it rewrites a committed
+/// file; run explicitly to regenerate:
+/// `cargo test -p storage-server --test fuzz_corpus gen_rename_corpus_seed -- --ignored`.
+#[test]
+#[ignore = "regenerates a committed corpus seed"]
+fn gen_rename_corpus_seed() {
+    let bytes = wire::encode_request(&Request::Rename {
+        handle: 0,
+        from: vec![b"a".to_vec()],
+        to: vec![b"b".to_vec()],
+    })
+    .unwrap();
+    let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    dir.push("fuzz/corpus/request_dispatch");
+    fs::write(dir.join("rename"), &bytes).unwrap();
 }
