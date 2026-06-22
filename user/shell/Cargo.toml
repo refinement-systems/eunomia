@@ -15,6 +15,12 @@ urt = { path = "../../urt" }
 loader = { path = "../../loader", default-features = false }
 storage-server = { path = "../../storage-server", default-features = false, features = ["serde"] }
 
+# Host-only: B15B unit/property tests for the shell's pure non-I/O logic
+# (rev1§6 Baseline tier). Never enters the aarch64 build (dev-deps are not
+# compiled for a normal `cargo build`).
+[dev-dependencies]
+proptest = "1"
+
 [profile.release]
 panic = "abort"
 opt-level = "s"
