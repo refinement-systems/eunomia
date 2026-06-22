@@ -625,7 +625,7 @@ fn dispatch(sp: &mut Spawner, line: &[u8]) {
     match cmd {
         b"" => {}
         b"help" => out(
-            b"ls cat write rm sync run runloop date\nsnap snaps rollback snapdel keep prune gc df help\n",
+            b"ls cat write mv rm sync run runloop date\nsnap snaps rollback snapdel keep prune gc df help\n",
         ),
         b"date" => cmd_date(),
         b"ls" => cmd_ls(arg),
@@ -669,6 +669,20 @@ fn dispatch(sp: &mut Spawner, line: &[u8]) {
                 offset: 0,
                 data: text.to_vec(),
             }));
+        }
+        b"mv" => {
+            let mut ma = arg.splitn(2, |&b| b == b' ');
+            let from = ma.next().unwrap_or(b"");
+            let to = ma.next().unwrap_or(b"").trim_ascii();
+            if from.is_empty() || to.is_empty() {
+                out(b"usage: mv <from> <to>\n");
+            } else {
+                report(request(&Request::Rename {
+                    handle: root_handle(),
+                    from: parse_path(from),
+                    to: parse_path(to),
+                }));
+            }
         }
         b"run" => cmd_run(sp, arg),
         b"runloop" => cmd_runloop(sp, arg),
