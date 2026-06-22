@@ -4,12 +4,18 @@ version = "0.1.0"
 edition = "2021"
 
 # Built by kernel/build.rs for aarch64-unknown-none-softfloat; not a
-# workspace member (host builds make no sense for a no_std EL0 binary).
+# workspace member. The bare-metal items are gated behind cfg(not(test)) so a
+# host `cargo test` can drive the pure ST01 decoder (B15C, rev1§6 Baseline).
 [workspace]
 
 [dependencies]
 ipc = { path = "../../ipc" }
 urt = { path = "../../urt" }
+
+# B15C — host tests for the ST01 startup-block decoder (rev1§6 Baseline tier).
+# Dev-only, so the aarch64 cross-build never pulls it.
+[dev-dependencies]
+proptest = "1"
 
 [profile.release]
 panic = "abort"

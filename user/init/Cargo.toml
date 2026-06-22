@@ -12,6 +12,11 @@ ipc = { path = "../../ipc" }
 loader = { path = "../../loader", default-features = false }
 urt = { path = "../../urt" }
 
+# B15C — host tests for the SD02/SH01 startup-block builders + the RTC sanity
+# rule (rev1§6 Baseline tier). Dev-only, so the aarch64 cross-build never pulls it.
+[dev-dependencies]
+proptest = "1"
+
 [profile.release]
 panic = "abort"
 opt-level = "s"

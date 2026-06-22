@@ -21,8 +21,13 @@
 //! child N+1 read child N's writes here — so a nonzero probe is a
 //! cross-spawn leak, and `bss-clean` every iteration is the zeroing proof.
 
-#![no_std]
-#![no_main]
+#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(test), no_main)]
+// Under `cfg(test)` the crate builds as a host harness (Design decision 2,
+// B15C): std and the default test `main` take over, the bare-metal items are
+// gated out, and only the pure `parse_st01` decoder remains. Allow the
+// dead-code / unused-import noise the boot-only items leave behind.
+#![cfg_attr(test, allow(dead_code, unused_imports))]
 
 use ipc::sys;
 
@@ -50,6 +55,30 @@ fn probe_bss() -> u8 {
     acc
 }
 
+/// The parent→selftest startup block (rev1§5.1): magic `"ST01"`, a one-byte
+/// mode, then (optionally) the time-page VA as a little-endian `u64`. A decode
+/// of an untrusted-shaped message (rev1§2.7): a short or mis-magicked block is
+/// *refused* into the safe default (mode `0`, no clock), never a panic. Total
+/// over any byte slice — `len >= 5` guards the magic + mode, `len >= 13` guards
+/// the VA.
+#[derive(Debug, PartialEq)]
+struct St01 {
+    mode: u8,
+    time_va: Option<u64>,
+}
+
+fn parse_st01(buf: &[u8]) -> St01 {
+    let is_block = buf.len() >= 5 && &buf[..4] == b"ST01";
+    let mode = if is_block { buf[4] } else { 0 };
+    let time_va = if is_block && buf.len() >= 13 {
+        Some(u64::from_le_bytes(buf[5..13].try_into().unwrap()))
+    } else {
+        None
+    };
+    St01 { mode, time_va }
+}
+
+#[cfg(not(test))]
 #[no_mangle]
 #[link_section = ".text._start"]
 pub extern "C" fn _start() -> ! {
@@ -75,13 +104,11 @@ pub extern "C" fn _start() -> ! {
         }
         sys::yield_now();
     };
-    let is_block = len >= 5 && &buf[..4] == b"ST01";
-    let mode = if is_block { buf[4] } else { 0 };
+    let St01 { mode, time_va } = parse_st01(&buf[..len]);
     // The "time" grant (rev1§2.6): the parent mapped the read-only time page
     // into us and put its VA in the block. Attach so `urt::time` can read
     // the clock. Absent (short block) → no clock, mode 0xFD reports it.
-    if is_block && len >= 13 {
-        let time_va = u64::from_le_bytes(buf[5..13].try_into().unwrap());
+    if let Some(time_va) = time_va {
         // Safety: the shell established this VA as a live read-only mapping
         // of the time page before queueing the block; it outlives us.
         unsafe { urt::time::attach(time_va as usize) };
@@ -119,8 +146,108 @@ pub extern "C" fn _start() -> ! {
     sys::thread_exit(mode as u64)
 }
 
+#[cfg(not(test))]
 #[panic_handler]
 fn on_panic(_: &core::panic::PanicInfo) -> ! {
     sys::debug_write(b"[selftest] PANIC\n");
     sys::thread_exit(sys::STATUS_PANIC)
+}
+
+#[cfg(test)]
+mod tests {
+    //! B15C — host tests for the ST01 startup-block decoder (rev1§6 Baseline
+    //! tier). The decode must be total: a short / mis-magicked block falls
+    //! back to the safe default (mode `0`, no clock), never a panic (rev1§2.7).
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Build an ST01 block: magic + mode, plus the time VA when `time_va` is set.
+    fn st01(mode: u8, time_va: Option<u64>) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"ST01");
+        b.push(mode);
+        if let Some(va) = time_va {
+            b.extend_from_slice(&va.to_le_bytes());
+        }
+        b
+    }
+
+    #[test]
+    fn parse_st01_full_block_yields_mode_and_time() {
+        let b = st01(0xFD, Some(0xA300_0000));
+        assert_eq!(b.len(), 13);
+        assert_eq!(
+            parse_st01(&b),
+            St01 {
+                mode: 0xFD,
+                time_va: Some(0xA300_0000)
+            }
+        );
+    }
+
+    #[test]
+    fn parse_st01_five_byte_block_is_mode_only() {
+        // A 5-byte block: mode present, no time VA (len < 13) — current
+        // behaviour pinned (mode runs, the clock simply never attaches).
+        let b = st01(0x07, None);
+        assert_eq!(b.len(), 5);
+        assert_eq!(
+            parse_st01(&b),
+            St01 {
+                mode: 0x07,
+                time_va: None
+            }
+        );
+    }
+
+    #[test]
+    fn parse_st01_short_or_wrong_magic_is_default() {
+        // len < 5 → mode 0 / no time (refuse-not-crash).
+        assert_eq!(
+            parse_st01(&[]),
+            St01 {
+                mode: 0,
+                time_va: None
+            }
+        );
+        assert_eq!(
+            parse_st01(b"ST0"),
+            St01 {
+                mode: 0,
+                time_va: None
+            }
+        );
+        // Wrong magic but long enough → still the safe default, no attach.
+        let mut wrong = st01(0xFF, Some(1));
+        wrong[3] = b'2'; // "ST02"
+        assert_eq!(
+            parse_st01(&wrong),
+            St01 {
+                mode: 0,
+                time_va: None
+            }
+        );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 256 },
+            ..ProptestConfig::default()
+        })]
+
+        /// Total over arbitrary bytes: `parse_st01` never panics (rev1§2.7 floor).
+        #[test]
+        fn parse_st01_is_total(bytes in proptest::collection::vec(any::<u8>(), 0..32)) {
+            let _ = parse_st01(&bytes);
+        }
+
+        /// A 13-byte ST01 block round-trips mode + time VA.
+        #[test]
+        fn parse_st01_round_trips_full_block(mode in any::<u8>(), va in any::<u64>()) {
+            prop_assert_eq!(
+                parse_st01(&st01(mode, Some(va))),
+                St01 { mode, time_va: Some(va) }
+            );
+        }
+    }
 }

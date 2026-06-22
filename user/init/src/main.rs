@@ -7,13 +7,25 @@
 //! for spawning, the time page, and the console-by-syscall), each with an
 //! explicitly constructed cspace and a rev1§5.1 startup block.
 
-#![no_std]
-#![no_main]
+#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(test), no_main)]
+// Under `cfg(test)` the crate builds as a host harness (Design decision 2,
+// B15C): std and the default test `main` take over, the bare-metal items and
+// the ELF `include_bytes!`d at boot are gated out, and only the pure startup-
+// block builders + the RTC sanity rule remain. Allow the dead-code / unused-
+// import noise the boot-only items leave behind.
+#![cfg_attr(test, allow(dead_code, unused_imports))]
 
 use ipc::sys::{self, OBJ_CHANNEL, OBJ_FRAME, PERM_DEVICE, PERM_W, RIGHT_READ};
+// `loader::spawn` exists only on the bare-metal target (it is gated
+// `target_os = "none"`), so the import is boot-only — gated out of the host
+// test build alongside the `_start` that is its sole user.
+#[cfg(not(test))]
 use loader::spawn;
 
+#[cfg(not(test))]
 static STORAGED_ELF: &[u8] = include_bytes!(env!("STORAGED_ELF_PATH"));
+#[cfg(not(test))]
 static SHELL_ELF: &[u8] = include_bytes!(env!("SHELL_ELF_PATH"));
 
 // Kernel-bestowed slots.
@@ -57,6 +69,40 @@ const RTC_MIN_SANE_SECS: u64 = 1_577_836_800;
 
 const RIGHTS_WITH_PHYS: u64 = 0b111;
 
+/// Is the one-shot RTC reading sane? A reading before this code's own era
+/// (2020-01-01, `RTC_MIN_SANE_SECS`) or a zero counter frequency means the
+/// device is absent/unbacked, not that it is 1970 — a boot failure, since
+/// every store timestamp inherits this value (rev1§2.6).
+fn rtc_sane(secs: u64, cntfrq: u64) -> bool {
+    secs >= RTC_MIN_SANE_SECS && cntfrq != 0
+}
+
+/// Build the init→storaged startup block (rev1§5.1): magic `"SD02"` followed
+/// by five little-endian `u64` fields (MMIO VA, DMA VA, DMA device PA, DMA
+/// length, time-page VA). storaged decodes the inverse (its `parse_config`);
+/// the format is pinned on both ends (B15C).
+fn build_sd02(mmio_va: u64, dma_va: u64, dma_pa: u64, dma_len: u64, time_va: u64) -> [u8; 44] {
+    let mut c = [0u8; 44];
+    c[..4].copy_from_slice(b"SD02");
+    c[4..12].copy_from_slice(&mmio_va.to_le_bytes());
+    c[12..20].copy_from_slice(&dma_va.to_le_bytes());
+    c[20..28].copy_from_slice(&dma_pa.to_le_bytes());
+    c[28..36].copy_from_slice(&dma_len.to_le_bytes());
+    c[36..44].copy_from_slice(&time_va.to_le_bytes());
+    c
+}
+
+/// Build the init→shell startup block (rev1§5.1): magic `"SH01"` followed by
+/// the time-page VA as a little-endian `u64`. The shell decodes the inverse
+/// (`&boot[..4] == b"SH01"` + the 8-byte VA, `shell:_start`); B15C pins the
+/// producer side.
+fn build_sh01(time_va: u64) -> [u8; 12] {
+    let mut c = [0u8; 12];
+    c[..4].copy_from_slice(b"SH01");
+    c[4..12].copy_from_slice(&time_va.to_le_bytes());
+    c
+}
+
 fn check(r: i64, what: &[u8]) -> i64 {
     if r < 0 {
         sys::debug_write(b"[init] FAILED: ");
@@ -69,7 +115,11 @@ fn check(r: i64, what: &[u8]) -> i64 {
 
 /// One-shot PL031 read (rev1§2.6): map the RTC read-only into our own aspace,
 /// pair seconds-since-epoch from RTCDR with CNTVCT, and never touch the
-/// device again — there is deliberately no RTC driver.
+/// device again — there is deliberately no RTC driver. Boot-only: it reads
+/// the aarch64-only `urt::time::cntvct`/`cntfrq` intrinsics, so it is gated
+/// out of the host test build (the sanity rule it applies, `rtc_sane`, is
+/// host-tested separately).
+#[cfg(not(test))]
 fn read_boot_utc() -> (i64, u64, u64) {
     check(
         sys::map(SELF_ASPACE, PL031_FRAME, RTC_VA, PERM_DEVICE),
@@ -84,7 +134,7 @@ fn read_boot_utc() -> (i64, u64, u64) {
     // the one-shot read is the design and QEMU virt always provides the
     // device (rev1§2.6). Every timestamp in the store inherits this value —
     // fail loudly rather than seed them garbage.
-    if secs < RTC_MIN_SANE_SECS || cntfrq == 0 {
+    if !rtc_sane(secs, cntfrq) {
         sys::debug_write(b"[init] FAILED: insane PL031/CNTFRQ read\n");
         sys::exit();
     }
@@ -95,6 +145,7 @@ fn read_boot_utc() -> (i64, u64, u64) {
     ((secs as i64) * 1_000_000_000, cntvct_base, cntfrq)
 }
 
+#[cfg(not(test))]
 #[no_mangle]
 #[link_section = ".text._start"]
 pub extern "C" fn _start() -> ! {
@@ -165,13 +216,7 @@ pub extern "C" fn _start() -> ! {
         b"time sd map",
     );
 
-    let mut config = [0u8; 44];
-    config[..4].copy_from_slice(b"SD02");
-    config[4..12].copy_from_slice(&MMIO_VA.to_le_bytes());
-    config[12..20].copy_from_slice(&DMA_VA.to_le_bytes());
-    config[20..28].copy_from_slice(&dma_pa.to_le_bytes());
-    config[28..36].copy_from_slice(&(DMA_PAGES * 4096).to_le_bytes());
-    config[36..44].copy_from_slice(&TIME_VA.to_le_bytes());
+    let config = build_sd02(MMIO_VA, DMA_VA, dma_pa, DMA_PAGES * 4096, TIME_VA);
     check(
         sys::chan_send(SD_BOOT_A, &config, None),
         b"sd startup block",
@@ -232,9 +277,7 @@ pub extern "C" fn _start() -> ! {
         b"time child install",
     );
 
-    let mut sh_config = [0u8; 12];
-    sh_config[..4].copy_from_slice(b"SH01");
-    sh_config[4..12].copy_from_slice(&TIME_VA.to_le_bytes());
+    let sh_config = build_sh01(TIME_VA);
     check(
         sys::chan_send(SH_BOOT_A, &sh_config, None),
         b"sh startup block",
@@ -257,8 +300,103 @@ pub extern "C" fn _start() -> ! {
     sys::exit()
 }
 
+#[cfg(not(test))]
 #[panic_handler]
 fn on_panic(_: &core::panic::PanicInfo) -> ! {
     sys::debug_write(b"[init] PANIC\n");
     sys::thread_exit(sys::STATUS_PANIC)
+}
+
+#[cfg(test)]
+mod tests {
+    //! B15C — host tests for init's startup-block *builders* and the RTC
+    //! sanity rule (rev1§6 Baseline tier). init is the SD02/SH01 producer;
+    //! storaged/shell are the consumers, in separate `bin` mini-workspaces
+    //! that can't be imported here, so each round-trip drives the real builder
+    //! against a local parser mirroring the consumer's rule — the format is
+    //! pinned on both ends.
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Mirror of storaged's `parse_config` rule.
+    fn parse_sd02(buf: &[u8]) -> Option<(u64, u64, u64, u64, u64)> {
+        if buf.len() < 44 || &buf[..4] != b"SD02" {
+            return None;
+        }
+        let rd = |off: usize| u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+        Some((rd(4), rd(12), rd(20), rd(28), rd(36)))
+    }
+
+    /// Mirror of the shell's SH01 parse (`shell:_start`: `blen >= 12` and the
+    /// `b"SH01"` magic, then the 8-byte time VA).
+    fn parse_sh01(buf: &[u8]) -> Option<u64> {
+        if buf.len() >= 12 && &buf[..4] == b"SH01" {
+            Some(u64::from_le_bytes(buf[4..12].try_into().unwrap()))
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn build_sd02_golden_layout() {
+        let c = build_sd02(0x1122_3344_5566_7788, 0xA, 0xB, 0xC, 0xD);
+        assert_eq!(c.len(), 44);
+        assert_eq!(&c[..4], b"SD02");
+        assert_eq!(&c[4..12], &0x1122_3344_5566_7788u64.to_le_bytes());
+        assert_eq!(&c[36..44], &0xDu64.to_le_bytes());
+    }
+
+    #[test]
+    fn build_sd02_round_trips_through_the_storaged_rule() {
+        let c = build_sd02(0xA000_0000, 0xA100_0000, 0x4321, 64 * 4096, 0xA300_0000);
+        assert_eq!(
+            parse_sd02(&c),
+            Some((0xA000_0000, 0xA100_0000, 0x4321, 64 * 4096, 0xA300_0000))
+        );
+    }
+
+    #[test]
+    fn build_sh01_golden_and_round_trip() {
+        let c = build_sh01(0xA300_0000);
+        assert_eq!(c.len(), 12);
+        assert_eq!(&c[..4], b"SH01");
+        assert_eq!(parse_sh01(&c), Some(0xA300_0000));
+        // The shell's guard refuses a short block (refuse-not-crash, rev1§2.7).
+        assert_eq!(parse_sh01(&c[..11]), None);
+    }
+
+    #[test]
+    fn rtc_sane_threshold_and_zero_freq() {
+        // Below the 2020-01-01 threshold → insane.
+        assert!(!rtc_sane(RTC_MIN_SANE_SECS - 1, 24_000_000));
+        // At / above the threshold with a nonzero counter → sane.
+        assert!(rtc_sane(RTC_MIN_SANE_SECS, 24_000_000));
+        assert!(rtc_sane(RTC_MIN_SANE_SECS + 1_000_000, 62_500_000));
+        // A zero counter frequency → insane regardless of the seconds.
+        assert!(!rtc_sane(RTC_MIN_SANE_SECS + 1_000_000, 0));
+        // 1970 (epoch 0) → insane.
+        assert!(!rtc_sane(0, 24_000_000));
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 256 },
+            ..ProptestConfig::default()
+        })]
+
+        /// `build_sd02` ↔ the storaged rule round-trips any five fields.
+        #[test]
+        fn build_sd02_round_trips_arbitrary_fields(
+            a in any::<u64>(), b in any::<u64>(), c in any::<u64>(),
+            d in any::<u64>(), e in any::<u64>(),
+        ) {
+            prop_assert_eq!(parse_sd02(&build_sd02(a, b, c, d, e)), Some((a, b, c, d, e)));
+        }
+
+        /// `build_sh01` ↔ the shell rule round-trips any time VA.
+        #[test]
+        fn build_sh01_round_trips_arbitrary_va(va in any::<u64>()) {
+            prop_assert_eq!(parse_sh01(&build_sh01(va)), Some(va));
+        }
+    }
 }

@@ -13,6 +13,11 @@ dma-pool = { path = "../../dma-pool" }
 virtio-blk = { path = "../../virtio-blk", default-features = false }
 storage-server = { path = "../../storage-server", default-features = false, features = ["serde"] }
 
+# B15C — host tests for the SD02 startup-block decoder (rev1§6 Baseline tier).
+# Dev-only, so the aarch64 cross-build never pulls it.
+[dev-dependencies]
+proptest = "1"
+
 [profile.release]
 panic = "abort"
 opt-level = "s"
