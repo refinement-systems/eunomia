@@ -67,11 +67,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let size_mib: u64 = args.get(3).map(|s| s.parse()).transpose()?.unwrap_or(64);
 
     let dev = FileDev::create(image, size_mib * 1024 * 1024)?;
-    // A modest WAL: recovery replay buffers the whole region, and the
-    // on-OS server has megabytes of heap, not gigabytes. (Streaming
-    // replay remains future work, tracked in store.rs.)
+    // A deliberately modest WAL — *not* drift from the rev1§4.4 recommended
+    // 64 MiB (rev1§4.4: the numbers are tunable). Two reasons it is tuned down
+    // for the batch tool: recovery replay buffers the whole region and the
+    // on-OS server has a few MiB of heap, not gigabytes (streaming replay is
+    // future work, tracked in store.rs); and the recommended 64 MiB WAL would
+    // not even lay out within the default 64 MiB image. The op-count and
+    // staleness *triggers* are likewise pinned off: they are long-running-server
+    // memtable mechanisms, meaningless for a single-shot image build that takes
+    // one snapshot at the end, and staleness keyed off arbitrary historical host
+    // file mtimes would inject nondeterministic intermediate commits. The byte
+    // budgets keep their defaults — they bound peak populate memory by content.
     let opts = StoreOptions {
         wal_len: 1024 * 1024,
+        op_count_bound: u64::MAX,
+        staleness_ns: u64::MAX,
         ..StoreOptions::default()
     };
     let mut store = Store::format(dev, opts)?;
