@@ -614,12 +614,22 @@ mod tests {
     }
 }
 
-/// Exhaustive Loom proof of the seqlock protocol: under every C11-permitted
-/// interleaving *and reordering* of one writer's odd→stagger→even update and one
-/// reader's `sample()`, the reader never observes a torn `(k, 2k, 3k+1)` triple.
-/// Where the native `torn_writes_are_never_observed` only *hopes* to hit a tear
-/// over 50k real races, Loom enumerates them — and flags a missing/weakened fence
-/// (a fence-removal negative control confirms it).
+/// Loom proof of the seqlock protocol: under every interleaving of one writer's
+/// odd→stagger→even update and one reader's `sample()` — enumerated *around the
+/// explicit Acquire/Release fence* — the reader never observes a torn
+/// `(k, 2k, 3k+1)` triple. Where the native `torn_writes_are_never_observed`
+/// only *hopes* to hit a tear over 50k real races, Loom enumerates the schedules
+/// — and flags a missing/weakened fence (a fence-removal negative control
+/// confirms it).
+///
+/// Honest scope (audit §4.3). This is **not** a proof over "every C11-permitted
+/// reordering": Loom does **not** faithfully model Relaxed-atomic reordering, and
+/// the data fields here are loaded/stored `Relaxed`. The seqlock's correctness
+/// rests on the explicit `fence(Release)` (writer) / `fence(Acquire)` (reader,
+/// `sample()`) pair, and the fence is exactly what Loom *does* model and
+/// enumerate interleavings around — so the conclusion holds **via the fence**,
+/// not via faithful Relaxed reordering. (Cf. the non-certifying Shuttle note
+/// below, which reinterprets the same orderings as SeqCst.)
 ///
 /// Bounded to a single write: the torn-read invariant is per-critical-section,
 /// not cumulative, so one writer epoch over the initial one is the whole

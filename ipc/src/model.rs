@@ -13,6 +13,18 @@
 //!
 //! Compiled only for the model/harnesses; built on `crate::sync` so the same
 //! code runs under std (smoke), loom (exhaustive), and shuttle (randomized).
+//!
+//! Loom vs Shuttle for this crate (audit §4.3, honest scope). `ipc/` is
+//! **atomics-free** — it synchronizes through `crate::sync` `Mutex`/`Condvar`,
+//! never atomics — so Loom's distinctive value (enumerating weak-memory atomic
+//! reorderings) is moot here; **Shuttle** (randomized interleaving / progress)
+//! is the load-bearing concurrency tool for these harnesses. Running a Loom
+//! variant of the lost-wakeup fragment is harmless, but the "Loom-certified"
+//! framing carries **less** weight than for the `urt` seqlock, where Loom models
+//! the load-bearing Acquire fence (`urt/src/time.rs`). The reactor's *sequential*
+//! dispatch is a third, lower tier still: single-threaded state-machine logic,
+//! so it is proptest-routed (`reactor.rs`'s `mod proptests`), not a harness at
+//! all.
 
 use crate::sync::{Arc, Condvar, Mutex};
 use crate::transport::{Chan, Event, Notif, RecvErr, RecvOk, SendErr, Transport};
