@@ -104,6 +104,119 @@ pub fn make_file_entry(
     }
 }
 
+/// Re-chunk only the neighborhood an edit disturbed (rev1§4.3 step 3), reusing
+/// the untouched prefix/suffix chunks of `old`'s chunk list verbatim. The
+/// returned `Content` is byte-for-byte the canonical chunking of `new` — equal
+/// to `store_file(store, params, new)` (history-independent canonical form,
+/// rev1§4.1) — but only the few chunks the edit touched are hashed and stored,
+/// not the whole file (so a 200-byte edit in a 1 GiB file yields ~2–4 new
+/// chunks). Falls back to whole-file `store_file` whenever there is nothing to
+/// reuse: the new content inlines, or `old` was not itself a chunk list.
+///
+/// `old_bytes` is the pre-edit content materialized (used only to find the
+/// unchanged trailing run); `new` is the post-edit content; `first_dirty` is
+/// the offset of the first byte the overlay changed.
+///
+/// Correctness rests on the chunker restarting its gear fingerprint at each
+/// chunk start (`chunk::find_boundary`): a cut depends only on bytes since the
+/// previous cut, so resuming the chunker at an old (hence canonical) boundary
+/// reproduces the canonical cuts forward, and unchanged prefix/suffix chunks
+/// are themselves canonical cuts of `new`.
+pub fn store_file_neighborhood(
+    store: &mut impl NodeStore,
+    params: &ChunkerParams,
+    old: &Content,
+    old_bytes: &[u8],
+    new: &[u8],
+    first_dirty: u64,
+) -> Content {
+    if new.len() <= INLINE_MAX {
+        return Content::Inline(new.to_vec());
+    }
+    // Nothing to reuse unless the old content was itself a readable chunk list.
+    let Content::ChunkList(old_hash) = old else {
+        return store_file(store, params, new);
+    };
+    let Some(list) = store.get(old_hash) else {
+        return store_file(store, params, new);
+    };
+    let Ok(old_chunks) = chunk_list_entries(&list) else {
+        return store_file(store, params, new);
+    };
+
+    // Cumulative old boundaries: `old_cut[k]` is the start of chunk `k`; the
+    // last entry equals the old length.
+    let mut old_cut = Vec::with_capacity(old_chunks.len() + 1);
+    let mut acc = 0u64;
+    old_cut.push(0);
+    for (_, len) in &old_chunks {
+        acc += *len as u64;
+        old_cut.push(acc);
+    }
+    let old_len = acc;
+    let new_len = new.len() as u64;
+    // Overlay writes never shrink or move bytes, so `new` is at least as long
+    // as `old` and `delta >= 0`; computed signed for the index arithmetic.
+    let delta = new_len as i64 - old_len as i64;
+
+    // Prefix: keep every chunk before the one holding `first_dirty`, then back
+    // up one more chunk (rev1§4.3) and resume the chunker there.
+    let containing = old_cut
+        .partition_point(|&c| c <= first_dirty)
+        .saturating_sub(1);
+    let resume_idx = containing.saturating_sub(1);
+    let resume = old_cut[resume_idx] as usize;
+
+    // Longest common suffix: every byte past it is unchanged content, shifted
+    // by `delta`, so the old chunks tile it once the chunker realigns.
+    let common = common_suffix_len(new, old_bytes);
+    let s_new = new_len - common as u64;
+
+    let mut refs: Vec<(Hash, u32)> = Vec::new();
+    refs.extend_from_slice(&old_chunks[..resume_idx]);
+
+    let mut pos = resume;
+    loop {
+        // `pos` is an emitted boundary. Once it sits past the last edit and maps
+        // onto an old boundary, the rest of the old chunk list tiles the
+        // identical tail — splice it in and stop. `pos == new_len` always lands
+        // here (`old_len` is a boundary), guaranteeing termination.
+        if pos as u64 >= s_new {
+            let old_off = pos as i64 - delta;
+            if old_off >= 0 {
+                if let Ok(j) = old_cut.binary_search(&(old_off as u64)) {
+                    refs.extend_from_slice(&old_chunks[j..]);
+                    break;
+                }
+            }
+        }
+        let cut = pos + crate::chunk::next_cut(params, &new[pos..]);
+        let chunk = &new[pos..cut];
+        refs.push((store.put(chunk), chunk.len() as u32));
+        pos = cut;
+    }
+
+    // Encode the spliced chunk list — identical format to `store_file`.
+    let mut out = vec![CHUNK_LIST_MAGIC];
+    out.extend_from_slice(&(refs.len() as u32).to_le_bytes());
+    for (hash, len) in &refs {
+        out.extend_from_slice(hash.as_bytes());
+        out.extend_from_slice(&len.to_le_bytes());
+    }
+    Content::ChunkList(store.put(&out))
+}
+
+/// Length of the longest common suffix of `a` and `b`.
+fn common_suffix_len(a: &[u8], b: &[u8]) -> usize {
+    let (mut ia, mut ib, mut k) = (a.len(), b.len(), 0);
+    while ia > 0 && ib > 0 && a[ia - 1] == b[ib - 1] {
+        ia -= 1;
+        ib -= 1;
+        k += 1;
+    }
+    k
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,5 +258,176 @@ mod tests {
             prop_assert_eq!(c1, c2);
             prop_assert_eq!(store.len(), objects);
         }
+
+        /// Neighborhood re-chunk is behavior-preserving (M-7, the load-bearing
+        /// guard): for an arbitrary edit to a multi-chunk file, the spliced
+        /// result equals the canonical whole-file chunking byte-for-byte (same
+        /// `Content` ⇒ same chunk-list hash ⇒ history-independent canonical
+        /// form, rev1§4.1) and reads back as the new content.
+        #[test]
+        fn neighborhood_matches_whole_file(
+            base in proptest::collection::vec(any::<u8>(), 1024..16384),
+            edit_off in 0usize..16384,
+            edit in proptest::collection::vec(any::<u8>(), 0..512),
+        ) {
+            let mut store = MemStore::new();
+            let old = store_file(&mut store, &TEST_PARAMS, &base);
+            let off = edit_off.min(base.len());
+            let new = apply_edit(&base, off, &edit);
+
+            let nb = store_file_neighborhood(&mut store, &TEST_PARAMS, &old, &base, &new, off as u64);
+            let mut fresh = MemStore::new();
+            let whole = store_file(&mut fresh, &TEST_PARAMS, &new);
+            prop_assert_eq!(nb.clone(), whole);
+
+            let back = read_file(&store, &nb, new.len() as u64)?;
+            prop_assert_eq!(back, new);
+        }
+    }
+
+    /// Overwrite `edit` into `base` at `off`, extending (zero-filling) if it
+    /// runs past the end — the only shapes the overlay produces (writes never
+    /// shrink or move bytes).
+    fn apply_edit(base: &[u8], off: usize, edit: &[u8]) -> Vec<u8> {
+        let mut new = base.to_vec();
+        let end = off + edit.len();
+        if new.len() < end {
+            new.resize(end, 0);
+        }
+        new[off..end].copy_from_slice(edit);
+        new
+    }
+
+    /// Deterministic pseudo-random bytes (LCG) — same generator the chunker's
+    /// self-synchronization test uses, so realignment behaves the same.
+    fn pseudo_random(n: usize, mut state: u64) -> Vec<u8> {
+        (0..n)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (state >> 33) as u8
+            })
+            .collect()
+    }
+
+    /// A `NodeStore` that counts `put` calls — the number of chunks hashed.
+    struct CountingStore {
+        inner: MemStore,
+        puts: usize,
+    }
+
+    impl CountingStore {
+        fn new() -> Self {
+            Self {
+                inner: MemStore::new(),
+                puts: 0,
+            }
+        }
+    }
+
+    impl NodeStore for CountingStore {
+        fn put(&mut self, bytes: &[u8]) -> Hash {
+            self.puts += 1;
+            self.inner.put(bytes)
+        }
+        fn get(&self, hash: &Hash) -> Option<Vec<u8>> {
+            self.inner.get(hash)
+        }
+    }
+
+    /// Write-amplification (M-7): a one-byte edit in a many-chunk file re-hashes
+    /// only the disturbed neighborhood — O(edit), not O(file). Deterministic
+    /// (fixed seed) so the realignment count is stable. A perf-metric test over
+    /// a large file; the splice arithmetic itself is the proptest's Miri
+    /// witness, so this is skipped under the interpreted-BLAKE3 Miri run.
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn neighborhood_rechunks_only_the_edit() {
+        let base = pseudo_random(128 * 1024, 0xC0FFEE);
+        let mut store = CountingStore::new();
+        let old = store_file(&mut store, &TEST_PARAMS, &base);
+        let total_chunks = match &old {
+            Content::ChunkList(h) => chunk_list_entries(&store.get(h).unwrap()).unwrap().len(),
+            _ => panic!("expected a chunk list for a 128 KiB file"),
+        };
+        assert!(
+            total_chunks > 50,
+            "test needs a many-chunk file, got {total_chunks}"
+        );
+
+        // Flip a single byte in the middle.
+        let off = base.len() / 2;
+        let mut new = base.clone();
+        new[off] ^= 0xFF;
+
+        store.puts = 0;
+        let nb = store_file_neighborhood(&mut store, &TEST_PARAMS, &old, &base, &new, off as u64);
+        let nb_puts = store.puts;
+
+        // Same canonical result as a full re-chunk (in a fresh store).
+        let mut fresh = MemStore::new();
+        let whole = store_file(&mut fresh, &TEST_PARAMS, &new);
+        assert_eq!(
+            nb, whole,
+            "neighborhood re-chunk diverged from canonical form"
+        );
+
+        // Only a handful of chunks re-hashed (here 3: two fresh chunks around
+        // the edit + the chunk-list object), bounded and independent of file
+        // size — the rev1§4.3 "~2–4 new chunks" behavior, vs `total_chunks` for
+        // a whole-file re-chunk.
+        assert!(
+            nb_puts <= 8,
+            "neighborhood hashed {nb_puts} chunks; file has {total_chunks}"
+        );
+        assert!(
+            nb_puts < total_chunks,
+            "no savings: {nb_puts} vs {total_chunks}"
+        );
+    }
+
+    /// Prefix reuse alone guarantees strict savings for an interior edit, even
+    /// before CDC realignment reuses the suffix: an edit two-or-more chunks in
+    /// always hashes fewer chunks than a whole-file re-chunk. Perf-metric test
+    /// over a large file; skipped under Miri (see above).
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn neighborhood_reuses_prefix() {
+        let base = pseudo_random(64 * 1024, 0x5EED);
+        let mut store = CountingStore::new();
+        let old = store_file(&mut store, &TEST_PARAMS, &base);
+        let old_chunks = match &old {
+            Content::ChunkList(h) => chunk_list_entries(&store.get(h).unwrap()).unwrap(),
+            _ => panic!("expected a chunk list"),
+        };
+        let total_chunks = old_chunks.len();
+        assert!(total_chunks >= 8);
+
+        // Edit inside the middle chunk: the prefix (the chunks before the one
+        // we back up to) is reused outright.
+        let mid = total_chunks / 2;
+        let mut cut = 0u64;
+        for (_, len) in &old_chunks[..mid] {
+            cut += *len as u64;
+        }
+        let off = cut as usize + 1;
+        let new = apply_edit(&base, off, &[0xAB, 0xCD, 0xEF]);
+
+        store.puts = 0;
+        let nb = store_file_neighborhood(&mut store, &TEST_PARAMS, &old, &base, &new, off as u64);
+        let nb_puts = store.puts;
+
+        let mut fresh = MemStore::new();
+        let whole = store_file(&mut fresh, &TEST_PARAMS, &new);
+        let whole_puts = match &whole {
+            Content::ChunkList(h) => chunk_list_entries(&fresh.get(h).unwrap()).unwrap().len() + 1,
+            _ => panic!(),
+        };
+        assert_eq!(nb, whole);
+        assert!(
+            nb_puts < whole_puts,
+            "expected prefix-reuse savings: {nb_puts} vs {whole_puts}"
+        );
     }
 }

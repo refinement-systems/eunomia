@@ -91,6 +91,19 @@ fn find_boundary(params: &ChunkerParams, data: &[u8]) -> Option<usize> {
     }
 }
 
+/// The next cut in `data`, treating offset 0 as a chunk start; returns
+/// `data.len()` when the remaining bytes form the final (possibly sub-min)
+/// chunk. Lets a caller re-chunk forward from a known boundary one chunk at a
+/// time and stop as soon as it realigns with an existing boundary, instead of
+/// scanning the whole tail — the rev1§4.3 neighborhood re-chunk primitive.
+/// Because `find_boundary` restarts the gear fingerprint at offset 0, the cut
+/// depends only on bytes since the chunk start, so resuming at a canonical
+/// boundary reproduces the canonical cut.
+pub(crate) fn next_cut(params: &ChunkerParams, data: &[u8]) -> usize {
+    debug_assert!(!data.is_empty());
+    find_boundary(params, data).unwrap_or(data.len())
+}
+
 /// Cut positions for a complete buffer (the final sub-min tail is always
 /// emitted as a chunk). Returned positions are exclusive chunk ends; the
 /// last position equals `data.len()` unless `data` is empty.

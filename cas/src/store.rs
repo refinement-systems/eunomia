@@ -18,9 +18,6 @@
 //! old index resurrect overwritten bytes after a crash.
 //!
 //! MVP simplifications, recorded:
-//!   - Flush rebuilds whole dirty files instead of re-chunking only the
-//!     affected neighborhood (rev1§4.3 step 3) — a perf optimization with no
-//!     semantic difference; owed when file sizes warrant it.
 //!   - Oversized writes (record > WAL region) bypass the WAL and commit
 //!     synchronously before acknowledging — same durability contract.
 //!   - The allocator is first-fit over a flat extent list and the tail
@@ -40,7 +37,7 @@ use crate::disk::{
     self, read_u32_le, read_u64_le, IndexEntry, RefEntry, RefTable, SnapRow, Superblock, WalOp,
     CHUNK_HEADER, SB_A_OFF, SB_B_OFF, SB_SIZE, WAL_HEADER, WAL_OFF,
 };
-use crate::file::{make_file_entry, read_file};
+use crate::file::{read_file, store_file, store_file_neighborhood};
 use crate::gc;
 use crate::hash::Hash;
 use crate::overlay::{FileState, Overlay, Path};
@@ -2310,7 +2307,7 @@ impl<D: BlockDev> Store<D> {
                 } else {
                     self.read_from_tree(&entry.root, path)?.unwrap_or_default()
                 };
-                Ok(Some(fo.apply(base)))
+                Ok(Some(fo.apply(&base)))
             }
         }
     }
@@ -2458,7 +2455,11 @@ impl<D: BlockDev> Store<D> {
             let comps: Vec<&[u8]> = path.iter().map(|c| c.as_slice()).collect();
             let (dir, name) = comps.split_at(comps.len() - 1);
             let old = tree::lookup(&self.chunks, &root, &comps)?;
-            let base = match (&old, fo.fresh) {
+            // Reuse the old chunk list only when there is a real base to diff
+            // against — not a fresh create / unlink-then-write, and not a
+            // directory. `reuse` carries the old content (its chunk list) and
+            // the materialized old bytes (for the neighborhood suffix diff).
+            let reuse = match (&old, fo.fresh) {
                 (
                     Some(Entry {
                         kind: EntryKind::Dir,
@@ -2466,21 +2467,37 @@ impl<D: BlockDev> Store<D> {
                     }),
                     _,
                 ) => return Err(StoreError::NotAFile),
-                (Some(e), false) => read_file(&self.chunks, &e.content, e.size)?,
-                _ => Vec::new(),
+                (Some(e), false) => Some((
+                    e.content.clone(),
+                    read_file(&self.chunks, &e.content, e.size)?,
+                )),
+                _ => None,
             };
-            let content = fo.apply(base);
-            let flags = old.map(|e| e.flags).unwrap_or(0);
-            let mut entry = make_file_entry(
-                &mut self.chunks,
-                &self.opts.chunker,
-                name[0],
-                &content,
-                fo.mtime,
-                flags,
-            );
+            let flags = old.as_ref().map(|e| e.flags).unwrap_or(0);
+            let content = fo.apply(reuse.as_ref().map(|(_, b)| b.as_slice()).unwrap_or(&[]));
+            // rev1§4.3 step 3: re-chunk only the edited neighborhood when an old
+            // chunk list is available, hashing O(edit) chunks instead of the
+            // whole file; the result is the same canonical chunking (rev1§4.1).
+            let entry_content = match &reuse {
+                Some((old_content, base)) => store_file_neighborhood(
+                    &mut self.chunks,
+                    &self.opts.chunker,
+                    old_content,
+                    base,
+                    &content,
+                    fo.first_write_offset().unwrap_or(0),
+                ),
+                None => store_file(&mut self.chunks, &self.opts.chunker, &content),
+            };
             self.check_io()?;
-            entry.mtime = fo.mtime;
+            let entry = Entry {
+                name: name[0].to_vec(),
+                kind: EntryKind::File,
+                flags,
+                size: content.len() as u64,
+                mtime: fo.mtime,
+                content: entry_content,
+            };
             root = tree::put(&mut self.chunks, &root, dir, entry, fo.mtime)?;
             self.check_io()?;
         }
