@@ -35,9 +35,22 @@ impl FileOverlay {
             .unwrap_or(0)
     }
 
-    /// Apply the intervals over base content (zero-fill gaps).
-    pub fn apply(&self, base: Vec<u8>) -> Vec<u8> {
-        let mut content = if self.fresh { Vec::new() } else { base };
+    /// Offset of the first byte this overlay changed (`None` only if nothing
+    /// was written). rev1§4.3 neighborhood re-chunk bounds the re-chunked
+    /// region from here.
+    pub fn first_write_offset(&self) -> Option<u64> {
+        self.writes.keys().next().copied()
+    }
+
+    /// Apply the intervals over base content (zero-fill gaps). Borrows `base`
+    /// so the caller can keep the pre-edit bytes alive alongside the result
+    /// (the rev1§4.3 neighborhood re-chunk diffs new against old).
+    pub fn apply(&self, base: &[u8]) -> Vec<u8> {
+        let mut content = if self.fresh {
+            Vec::new()
+        } else {
+            base.to_vec()
+        };
         for (off, data) in &self.writes {
             let off = *off as usize;
             let end = off + data.len();
@@ -184,7 +197,7 @@ mod tests {
         let FileState::Dirty(fo) = o.state(&p) else {
             panic!()
         };
-        assert_eq!(fo.apply(Vec::new()), b"aabbaacccc".to_vec());
+        assert_eq!(fo.apply(&[]), b"aabbaacccc".to_vec());
         assert_eq!(o.bytes(), 10);
     }
 
@@ -199,7 +212,7 @@ mod tests {
             panic!()
         };
         assert!(fo.fresh);
-        assert_eq!(fo.apply(b"old content".to_vec()), vec![0, b'x']);
+        assert_eq!(fo.apply(b"old content"), vec![0, b'x']);
     }
 
     proptest! {
@@ -231,7 +244,7 @@ mod tests {
                 }
             }
             // Untouched gap bytes are zero in both.
-            prop_assert_eq!(fo.apply(Vec::new()), model);
+            prop_assert_eq!(fo.apply(&[]), model);
             // Intervals stay non-overlapping and sorted.
             let mut prev_end = 0u64;
             for (off, data) in &fo.writes {
