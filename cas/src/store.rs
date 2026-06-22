@@ -40,7 +40,7 @@ use crate::disk::{
 use crate::file::{read_file, store_file, store_file_neighborhood};
 use crate::gc;
 use crate::hash::Hash;
-use crate::overlay::{FileState, Overlay, Path};
+use crate::overlay::{FileId, FileState, Overlay, Path};
 use crate::prolly::{Content, Dir, Entry, EntryKind, FormatError, NodeStore};
 use crate::tree;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -1469,6 +1469,10 @@ pub struct Store<D: BlockDev> {
     wal_tail: u64,
     wal_seq: u64,
     wal_records: VecDeque<RecMeta>,
+    /// Monotonic allocator for ephemeral overlay file ids (rev1§4.9). Store-
+    /// global, never persisted, and re-derived deterministically by WAL replay,
+    /// which re-runs the same op stream through `apply_to_overlay`.
+    next_file_id: FileId,
 }
 
 impl<D: BlockDev> Store<D> {
@@ -1543,6 +1547,7 @@ impl<D: BlockDev> Store<D> {
             wal_tail: 0,
             wal_seq: 1,
             wal_records: VecDeque::new(),
+            next_file_id: 0,
         })
     }
 
@@ -1681,6 +1686,7 @@ impl<D: BlockDev> Store<D> {
             wal_tail: sb.wal_head,
             wal_seq: sb.wal_next_seq,
             wal_records: VecDeque::new(),
+            next_file_id: 0,
         };
 
         // WAL replay: contiguous, checksummed, seq-continuous records from the
@@ -2309,6 +2315,9 @@ impl<D: BlockDev> Store<D> {
     }
 
     fn apply_to_overlay(&mut self, op: &WalOp) {
+        // Disjoint field borrows: the id allocator and the overlay map are
+        // separate fields, so write can mint a fresh id while holding the overlay.
+        let next_id = &mut self.next_file_id;
         let overlay = self.overlays.entry(op.ref_name().to_vec()).or_default();
         match op {
             WalOp::Write {
@@ -2318,7 +2327,7 @@ impl<D: BlockDev> Store<D> {
                 data,
                 ..
             } => {
-                overlay.write(path, *offset, data, *mtime);
+                overlay.write(path, *offset, data, *mtime, next_id);
             }
             WalOp::Unlink { path, mtime, .. } => {
                 overlay.unlink(path, *mtime);
