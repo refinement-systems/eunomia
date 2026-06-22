@@ -38,8 +38,11 @@ rev1§2.5 "accepts top-ups", B10A), and
 that bounds *and* rebuilds the run, proving its `laid_out` linking invariant (B7C, T-2;
 folds in the former `replay_bound` maximal-run equality) — the WAL-record structural
 decode (`wal_struct_ok`/`e_payload_ok`, the verified half of `wal_content_ok`),
-`validate_geometry_fields`, `decode_checked_fields`, the single-entry TLV codec), and the
-**gap-freedom composition** (`lemma_gap_freedom` + `lemma_run_len_covers` /
+`validate_geometry_fields`, `decode_checked_fields`, the single-entry TLV codec, and the
+directory **node decoder** — `decode_node`, total ∀ bytes plus the leaf canonical
+round-trip (`canonical_leaf_bytes` / `encode_node_leaf`), the last CAS on-disk decoder
+lifted into the verified surface (B13A; no new seam — Hash-free, composes on `decode_raw`)),
+and the **gap-freedom composition** (`lemma_gap_freedom` + `lemma_run_len_covers` /
 `lemma_laid_out_mono`), now *live* — fired by `recover_records` on the rebuilt run, its
 `laid_out` premise discharged rather than assumed; the IPC fixed header + window-quota
 `Admission`; the shared `FreeList` (extracted to the `freelist` crate in B11A) — **the
@@ -155,7 +158,7 @@ Any phase touching these must re-establish them at ≥ the prior numbers.
 | Surface | Command | Result |
 |---|---|---|
 | kcore object core | `cargo verus verify -p kcore` | 389 verified, 0 errors |
-| CAS decode + recovery cores | `cargo verus verify -p cas --no-default-features` | 65 verified, 0 errors |
+| CAS decode + recovery cores | `cargo verus verify -p cas --no-default-features` | 73 verified, 0 errors (was 65; +8 in B13A: the directory **node decoder** `decode_node` total ∀ bytes + leaf canonical round-trip, `encode_node_leaf`, `entries_bytes`/`canonical_leaf_bytes`/`lemma_entries_push`; no new seam) |
 | IPC header + session codecs | `cargo verus verify -p ipc` | 58 verified, 0 errors |
 | shared `FreeList` (free-list allocator core + `is_full`/`is_allocated` guard accessors; extracted from dma-pool in B11A) | `cargo verus verify -p freelist` | 29 verified, 0 errors |
 | DMA-pool wrapper (plain-Rust PA seam; discharges `FreeList`'s preconditions via the `freelist` guards) | `cargo verus verify -p dma-pool` | 0 verified, 0 errors (the 29 obligations moved to `freelist`, not weakened) |
