@@ -74,6 +74,10 @@ pub const NAME_TIME: u8 = 6;
 pub const NAME_VIRTIO_MMIO: u8 = 16;
 /// The DMA pool region (bring-up; storaged).
 pub const NAME_DMA: u8 = 17;
+/// The PL011 UART MMIO window (bring-up; the console driver, C-M9). The driver
+/// reads its register base from this `REGION` grant's VA rather than the
+/// hardcoded 0x0900_0000, exactly as storaged reads `NAME_VIRTIO_MMIO`.
+pub const NAME_PL011_MMIO: u8 = 18;
 
 /// Grant kind: a kernel cap, named by the cspace slot it was installed into.
 pub const KIND_CAP_SLOT: u8 = 1;

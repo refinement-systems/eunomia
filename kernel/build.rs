@@ -45,6 +45,7 @@ fn main() {
         "user/init",
         "user/storaged",
         "user/shell",
+        "user/console",
         "ipc/src",
         "loader/src",
         "urt/src",
@@ -61,6 +62,7 @@ fn main() {
     let selftest = build_user(root, &user_target, "selftest", "selftest", &[]);
     let storaged = build_user(root, &user_target, "storaged", "storaged", &[]);
     let shell = build_user(root, &user_target, "shell", "ushell", &[]);
+    let console = build_user(root, &user_target, "console", "console", &[]);
     let init = build_user(
         root,
         &user_target,
@@ -69,6 +71,10 @@ fn main() {
         &[
             ("STORAGED_ELF_PATH", storaged.display().to_string()),
             ("SHELL_ELF_PATH", shell.display().to_string()),
+            // C-M9-A: the console ELF is built and its path passed to init; init
+            // consumes it (include_bytes!) only in C-M9-B when it spawns the
+            // console, so in A this is an unread env var — boot stays unchanged.
+            ("CONSOLE_ELF_PATH", console.display().to_string()),
         ],
     );
     // hello + selftest are placed into the demo disk image by the scripts
