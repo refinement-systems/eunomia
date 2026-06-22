@@ -1618,6 +1618,15 @@ mod tests {
         }
     }
 
+    /// Tree height = the root node's `level` field (0 = single leaf, ≥ 1 =
+    /// multi-level). `TlvErr` is not `Debug`, so we match instead of `unwrap`.
+    fn tree_depth(store: &MemStore, root: &Hash) -> u8 {
+        match decode_node(&store.get(root).unwrap()) {
+            Ok((level, _)) => level,
+            Err(_) => panic!("decode_node rejected a canonical root node"),
+        }
+    }
+
     #[test]
     fn empty_dir_roundtrip() {
         let mut store = MemStore::new();
@@ -1922,6 +1931,97 @@ mod tests {
         assert_eq!(loaded.save(&mut store), root); // re-save reproduces the root
     }
 
+    /// Deep, deterministic coverage guard for the headline canonical-form
+    /// property at multi-level scale — the non-regressing complement to the
+    /// `canonical_form` proptest, which samples shapes but cannot *guarantee* a
+    /// given depth per case. This builds a genuine ≥ 3-level tree (root level
+    /// ≥ 2: the forced-boundary cap fires and the spine climbs twice), then
+    /// asserts the depth, that the same logical set built in different orders
+    /// and with churn yields one root, and that the whole tree round-trips
+    /// (the lossless internal-node level).
+    ///
+    /// `DEEP_ENTRIES` is 20_000 — large enough that ⌈N / MAX_NODE_ENTRIES⌉ = 157
+    /// > 128 leaf nodes, so the cap *alone* forces a second internal level
+    /// regardless of the hash (a deterministic, never-flaky depth ≥ 2), while
+    /// still building in a few ms natively. Skipped under Miri: interpreted
+    /// BLAKE3 over thousands of entries is too slow, and the
+    /// `canonical_form`/`roundtrip` proptests (4 Miri cases) carry the UB-check.
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn canonical_form_deep() {
+        const DEEP_ENTRIES: u32 = 20_000;
+
+        fn deep_entry(i: u32) -> Entry {
+            file_entry(format!("entry-{i:08}").as_bytes(), &i.to_le_bytes(), 1, 0)
+        }
+        fn build(order: &[u32]) -> (Hash, MemStore) {
+            let mut store = MemStore::new();
+            let mut dir = Dir::new();
+            for &i in order {
+                dir.upsert(deep_entry(i)).unwrap();
+            }
+            let root = dir.save(&mut store);
+            (root, store)
+        }
+
+        let asc: Vec<u32> = (0..DEEP_ENTRIES).collect();
+        let mut desc = asc.clone();
+        desc.reverse();
+        let mut shuf = asc.clone();
+        let mut s = 0x9E37_79B9_7F4A_7C15u64;
+        for i in (1..shuf.len()).rev() {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            shuf.swap(i, (s >> 33) as usize % (i + 1));
+        }
+
+        let (root_asc, store) = build(&asc);
+        let (root_desc, _) = build(&desc);
+        let (root_shuf, _) = build(&shuf);
+
+        // The root node's level is the tree height; ≥ 2 ⇒ ≥ 3 levels (the cap
+        // fired and the spine climbed twice). Deterministic, not hash-dependent.
+        let level = tree_depth(&store, &root_asc);
+        assert!(
+            level >= 2,
+            "expected a ≥3-level tree, got root level {level}"
+        );
+
+        // Edit-order independence at depth.
+        assert_eq!(root_asc, root_desc, "ascending vs descending root differs");
+        assert_eq!(root_asc, root_shuf, "ascending vs shuffled root differs");
+
+        // Churn at depth: insert 500 extra entries, then remove them — the
+        // final logical set is unchanged, so the root must be unchanged.
+        let mut churn_store = MemStore::new();
+        let mut dir = Dir::new();
+        for i in DEEP_ENTRIES..DEEP_ENTRIES + 500 {
+            dir.upsert(deep_entry(i)).unwrap();
+        }
+        for &i in &shuf {
+            dir.upsert(deep_entry(i)).unwrap();
+        }
+        for i in DEEP_ENTRIES..DEEP_ENTRIES + 500 {
+            dir.remove(format!("entry-{i:08}").as_bytes());
+        }
+        assert_eq!(
+            dir.save(&mut churn_store),
+            root_asc,
+            "churn changed the root"
+        );
+
+        // Whole-tree round-trip at depth: save → load → save reproduces the
+        // root through the internal-node decode/re-encode path.
+        let loaded = Dir::load(&store, &root_asc).unwrap();
+        let mut re = MemStore::new();
+        assert_eq!(
+            loaded.save(&mut re),
+            root_asc,
+            "save→load→save not stable at depth"
+        );
+    }
+
     // ── Proptest strategies ─────────────────────────────────────────────
 
     fn arb_name() -> impl Strategy<Value = Vec<u8>> {
@@ -1986,17 +2086,23 @@ mod tests {
     }
 
     proptest! {
-        // Miri: a few cases cover the same paths; native keeps the full sweep.
+        // The headline property gets the deepest sweep: many shuffled edit
+        // orders × churn over shapes that cross the MAX_NODE_ENTRIES (128) cap
+        // and climb the spine. Miri: 4 cases keep the interpreted-BLAKE3 run
+        // cheap; native runs 1024.
         #![proptest_config(ProptestConfig {
-            cases: if cfg!(miri) { 4 } else { 256 },
+            cases: if cfg!(miri) { 4 } else { 1024 },
             ..ProptestConfig::default()
         })]
         /// rev1§4.1: same logical contents ⇒ same root, regardless of edit
-        /// order and regardless of churn (inserts later removed).
+        /// order and regardless of churn (inserts later removed). Entry counts
+        /// span past the MAX_NODE_ENTRIES (128) cap, so the sweep builds
+        /// multi-level trees and fires the forced boundary — shapes the old
+        /// 64-entry sampling never reached.
         #[test]
         fn canonical_form(
-            entries in arb_entries(64),
-            churn in arb_entries(16),
+            entries in arb_entries(if cfg!(miri) { 64 } else { 320 }),
+            churn in arb_entries(if cfg!(miri) { 8 } else { 64 }),
             order_a in any::<u64>(),
             order_b in any::<u64>(),
         ) {
@@ -2036,12 +2142,33 @@ mod tests {
             let r2 = d2.save(&mut store);
 
             prop_assert_eq!(r1, r2);
-        }
 
+            // Coverage guard: > MAX_NODE_ENTRIES entries force ≥ 2 leaf nodes
+            // (the cap fires regardless of hash), so the root must be internal —
+            // proof the multi-level / spine path was exercised, not just sampled.
+            if entries.len() > 128 {
+                let level = tree_depth(&store, &r1);
+                prop_assert!(
+                    level >= 1,
+                    "expected a multi-level tree for {} entries",
+                    entries.len()
+                );
+            }
+        }
+    }
+
+    proptest! {
+        // Miri: a few cases cover the same paths; native keeps the full sweep.
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 512 },
+            ..ProptestConfig::default()
+        })]
         /// Round-trip: save → load = identity, and re-save reproduces the
-        /// identical root (serialize/deserialize is the identity).
+        /// identical root (serialize/deserialize is the identity). Entry counts
+        /// reach past the 128 cap, so the round-trip covers the lossless
+        /// internal-node decode→re-encode level, not just single leaves.
         #[test]
-        fn roundtrip(entries in arb_entries(64)) {
+        fn roundtrip(entries in arb_entries(if cfg!(miri) { 64 } else { 320 })) {
             let mut store = MemStore::new();
             let mut dir = Dir::new();
             for e in entries.clone() {
@@ -2051,6 +2178,61 @@ mod tests {
             let loaded = Dir::load(&store, &root).unwrap();
             prop_assert_eq!(&loaded, &dir);
             prop_assert_eq!(loaded.save(&mut store), root);
+        }
+
+        /// Split locality (rev1§4.1): a one-entry edit rewrites only the leaf
+        /// holding it plus the spine above — O(depth) nodes, not O(N), because
+        /// the split decision is a pure per-item function, so an edit
+        /// self-synchronizes immediately (unlike a rolling window — the module
+        /// doc's per-item-vs-rolling-window contrast, now tested not just
+        /// asserted). The bound scales with tree depth rather than a fixed
+        /// constant, so it holds as the sweep climbs levels.
+        #[test]
+        fn split_locality(
+            entries in arb_entries(if cfg!(miri) { 64 } else { 1024 }),
+            site in any::<u64>(),
+            remove in any::<bool>(),
+        ) {
+            prop_assume!(entries.len() >= 2);
+            let mut store = MemStore::new();
+            let mut dir = Dir::new();
+            for e in entries.clone() {
+                dir.upsert(e).unwrap();
+            }
+            let root = dir.save(&mut store);
+            let before = store.len();
+            let depth = tree_depth(&store, &root);
+
+            // Edit one existing entry: either remove it, or rewrite its content
+            // (a content change flips that item's boundary bit, the stressful
+            // case for locality).
+            let names: Vec<Vec<u8>> = dir.iter().map(|e| e.name.clone()).collect();
+            let name = names[(site >> 33) as usize % names.len()].clone();
+            if remove {
+                dir.remove(&name);
+            } else {
+                let mut e = dir.get(&name).unwrap().clone();
+                e.kind = EntryKind::File;
+                e.content = Content::Inline(b"locality-probe-edit".to_vec());
+                e.size = b"locality-probe-edit".len() as u64;
+                dir.upsert(e).unwrap();
+            }
+            dir.save(&mut store);
+            let new_nodes = store.len() - before;
+
+            // An edit touches at most the holding leaf and one neighbor (a
+            // boundary flip merges/splits leaves) plus the shared spine; a flag
+            // flip inside a cap-dominated run shifts only that run's
+            // ⌈len/128⌉ cap-cuts. So the rewrite is O(depth), well under a
+            // whole-tree rewrite for the multi-level shapes here. The constant
+            // is empirically tuned: `3 * (depth + 1)` already survives 8000
+            // cases, so `4 * (depth + 1)` keeps margin without losing the
+            // O(depth) ≪ O(N) locality claim.
+            let bound = 4 * (depth as usize + 1);
+            prop_assert!(
+                new_nodes <= bound,
+                "edit rewrote {new_nodes} nodes (depth {depth}, bound {bound})"
+            );
         }
 
         /// Diff against a modified copy reports exactly the touched names.
@@ -2075,9 +2257,12 @@ mod tests {
             );
         }
 
-        /// Decoder is total: arbitrary bytes never panic, only error.
+        /// Decoder is total: arbitrary bytes never panic, only error — checked
+        /// at both the recursive `Dir::load` and the shallow GC-walk
+        /// `parse_node` entry points (the verified totality is the backstop).
         #[test]
-        fn decoder_rejects_garbage(bytes in proptest::collection::vec(any::<u8>(), 0..512)) {
+        fn decoder_rejects_garbage(bytes in proptest::collection::vec(any::<u8>(), 0..1024)) {
+            let _ = parse_node(&bytes);
             let mut store = MemStore::new();
             let hash = store.put(&bytes);
             let _ = Dir::load(&store, &hash);

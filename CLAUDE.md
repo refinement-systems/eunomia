@@ -107,7 +107,13 @@ cargo test -p cas
 
 # Run with Miri. The proptest suites drop to 4 cases under cfg(miri) —
 # blake3 is interpreted (no SIMD), so native-scale case counts would take
-# hours; even reduced, this sweep runs ~25 min. Quickest useful UB pass
+# hours; even reduced, this sweep runs ~25 min (longer when a change adds
+# proptests). Because it is long-running, NEVER pipe it into `tail` (or any
+# buffering filter): `tail` emits nothing until the command exits, so the log
+# stays empty for the whole run and you cannot tell progress from a hang — this
+# has wasted time before. Instead redirect to a file you can inspect mid-run, or
+# run it in the background and watch the live log / check the `miri` PID's CPU
+# with `ps` to confirm it is progressing. Quickest useful UB pass
 # (regression tests + every committed fuzz seed, ~30 s for all 3 crates):
 #   MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri test \
 #     -p cas -p loader -p storage-server \

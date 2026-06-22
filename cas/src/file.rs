@@ -248,6 +248,33 @@ mod tests {
             prop_assert_eq!(back, data);
         }
 
+        /// Canonical-form symmetry, the chunker side (rev1§4.1; B13 Design
+        /// decision 4): the cut set is a pure function of the content, and
+        /// `store_file`'s inline-vs-chunk selection is content-determined (the
+        /// INLINE_MAX rule) — same content ⇒ same chunks ⇒ same `Content`,
+        /// regardless of edit history, mirroring the prolly canonical-form sweep.
+        #[test]
+        fn chunker_selection_symmetry(data in proptest::collection::vec(any::<u8>(), 0..4096)) {
+            // `boundaries` is a pure function of the data.
+            prop_assert_eq!(
+                boundaries(&TEST_PARAMS, &data),
+                boundaries(&TEST_PARAMS, &data)
+            );
+
+            // `store_file` selection is content-determined: same data ⇒ equal
+            // `Content`, and the variant follows the INLINE_MAX rule.
+            let mut s1 = MemStore::new();
+            let mut s2 = MemStore::new();
+            let c1 = store_file(&mut s1, &TEST_PARAMS, &data);
+            let c2 = store_file(&mut s2, &TEST_PARAMS, &data);
+            prop_assert_eq!(&c1, &c2);
+            match &c1 {
+                Content::Inline(_) => prop_assert!(data.len() <= INLINE_MAX),
+                Content::ChunkList(_) => prop_assert!(data.len() > INLINE_MAX),
+                Content::DirRoot(_) => prop_assert!(false, "store_file never yields a DirRoot"),
+            }
+        }
+
         /// Chunk-level dedup: storing the same content twice adds nothing.
         #[test]
         fn dedup_identical_content(data in proptest::collection::vec(any::<u8>(), 513..8192)) {
