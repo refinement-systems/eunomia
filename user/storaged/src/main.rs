@@ -9,8 +9,14 @@
 //! via frame_paddr — the phys-read path, rev1§2.5; the time page under the
 //! `"time"` grant, rev1§2.6/rev1§5.1).
 
-#![no_std]
-#![no_main]
+#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(test), no_main)]
+// Under `cfg(test)` the crate builds as a host harness (Design decision 2,
+// B15C): std and the default test `main` take over, the bare-metal items
+// below are gated out, and only the pure `parse_config` decoder plus the
+// boot-only helpers (dead, but host-compilable) remain — allow the dead-code
+// / unused-import noise that leaves.
+#![cfg_attr(test, allow(dead_code, unused_imports))]
 
 extern crate alloc;
 
@@ -21,6 +27,7 @@ use storage_server::Server;
 use virtio_blk::blockdev::VirtioBlockDev;
 use virtio_blk::{Mmio, VirtioBlk};
 
+#[cfg(not(test))]
 #[global_allocator]
 static HEAP: urt::Heap<{ 3 * 1024 * 1024 }> = urt::Heap::new();
 
@@ -72,6 +79,7 @@ unsafe impl DmaBacking for DmaRegion {
 /// spec representation is signed 64-bit; init refuses an insane RTC at
 /// boot, so the value is positive and the u64 cast at the storage API
 /// boundary carries identical bytes.
+#[cfg(not(test))]
 fn now_utc() -> u64 {
     urt::time::now_utc_ns() as u64
 }
@@ -109,16 +117,54 @@ fn fail(msg: &[u8]) -> ! {
     sys::exit()
 }
 
+/// The init→storaged startup block (rev1§5.1): magic `"SD02"` followed by five
+/// little-endian `u64` fields (MMIO window VA, DMA region VA, DMA device PA,
+/// DMA length, time-page VA).
+#[derive(Debug, PartialEq)]
+struct Config {
+    mmio_va: u64,
+    dma_va: u64,
+    dma_pa: u64,
+    dma_len: u64,
+    time_va: u64,
+}
+
+/// Decode the SD02 config block. This is a decode of an untrusted-shaped
+/// message (rev1§2.7): a too-short or mis-magicked block is *refused* with
+/// `None`, never a panic (a panic in `_start` is a boot failure). Total over
+/// any byte slice — the length guard precedes every index, and a `>= 44`-byte
+/// buffer covers the final `[36..44]` field; trailing bytes are ignored. init
+/// builds the inverse (its `build_sd02`); the format is pinned on both ends.
+fn parse_config(buf: &[u8]) -> Option<Config> {
+    if buf.len() < 44 || &buf[..4] != b"SD02" {
+        return None;
+    }
+    let rd = |off: usize| u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+    Some(Config {
+        mmio_va: rd(4),
+        dma_va: rd(12),
+        dma_pa: rd(20),
+        dma_len: rd(28),
+        time_va: rd(36),
+    })
+}
+
+#[cfg(not(test))]
 #[no_mangle]
 #[link_section = ".text._start"]
 pub extern "C" fn _start() -> ! {
     let mut buf = [0u8; 256];
     let len = recv_blocking(BOOT_CHAN, &mut buf);
-    if len < 44 || &buf[..4] != b"SD02" {
+    let Some(cfg) = parse_config(&buf[..len]) else {
         fail(b"bad config block");
-    }
-    let rd = |off: usize| u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
-    let (mmio_va, dma_va, dma_pa, dma_len, time_va) = (rd(4), rd(12), rd(20), rd(28), rd(36));
+    };
+    let Config {
+        mmio_va,
+        dma_va,
+        dma_pa,
+        dma_len,
+        time_va,
+    } = cfg;
     // Safety: init mapped the read-only time page at this address before
     // starting us, and the mapping lives as long as the process.
     unsafe { urt::time::attach(time_va as usize) };
@@ -252,9 +298,98 @@ impl core::fmt::Write for DebugOut {
     }
 }
 
+#[cfg(not(test))]
 #[panic_handler]
 fn on_panic(info: &core::panic::PanicInfo) -> ! {
     use core::fmt::Write;
     let _ = write!(DebugOut, "[storaged] PANIC: {info}\n");
     sys::thread_exit(sys::STATUS_PANIC)
+}
+
+#[cfg(test)]
+mod tests {
+    //! B15C — host tests for the SD02 startup-block decoder (rev1§6 Baseline
+    //! tier). storaged is the SD02 *consumer*; init the producer. The two are
+    //! separate `bin` mini-workspaces that cannot import each other, so the
+    //! round-trip here drives the real `parse_config` against a local builder
+    //! that mirrors init's `build_sd02` — the format is pinned on both ends.
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Mirror of init's `build_sd02` (the two bins can't share a module).
+    fn sd02(mmio_va: u64, dma_va: u64, dma_pa: u64, dma_len: u64, time_va: u64) -> [u8; 44] {
+        let mut b = [0u8; 44];
+        b[..4].copy_from_slice(b"SD02");
+        b[4..12].copy_from_slice(&mmio_va.to_le_bytes());
+        b[12..20].copy_from_slice(&dma_va.to_le_bytes());
+        b[20..28].copy_from_slice(&dma_pa.to_le_bytes());
+        b[28..36].copy_from_slice(&dma_len.to_le_bytes());
+        b[36..44].copy_from_slice(&time_va.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn parse_config_round_trips_the_five_fields() {
+        let block = sd02(
+            0xA000_0000,
+            0xA100_0000,
+            0x4321_0000,
+            64 * 4096,
+            0xA300_0000,
+        );
+        assert_eq!(
+            parse_config(&block),
+            Some(Config {
+                mmio_va: 0xA000_0000,
+                dma_va: 0xA100_0000,
+                dma_pa: 0x4321_0000,
+                dma_len: 64 * 4096,
+                time_va: 0xA300_0000,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_config_refuses_short_and_garbage() {
+        // Empty, one byte short of the 44-byte minimum, and a wrong magic —
+        // each refused with None, never a panic (rev1§2.7 decode discipline).
+        assert_eq!(parse_config(&[]), None);
+        assert_eq!(parse_config(&sd02(1, 2, 3, 4, 5)[..43]), None);
+        let mut wrong = sd02(1, 2, 3, 4, 5);
+        wrong[3] = b'3'; // "SD03"
+        assert_eq!(parse_config(&wrong), None);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 256 },
+            ..ProptestConfig::default()
+        })]
+
+        /// Total over arbitrary bytes: `parse_config` never panics — the
+        /// refuse-not-crash floor (rev1§2.7).
+        #[test]
+        fn parse_config_is_total(bytes in proptest::collection::vec(any::<u8>(), 0..128)) {
+            let _ = parse_config(&bytes);
+        }
+
+        /// Any "SD02"-prefixed, >= 44-byte buffer parses to `Some` with the
+        /// five fields read at their LE offsets; trailing bytes are ignored.
+        #[test]
+        fn parse_config_accepts_well_formed(
+            mmio_va in any::<u64>(),
+            dma_va in any::<u64>(),
+            dma_pa in any::<u64>(),
+            dma_len in any::<u64>(),
+            time_va in any::<u64>(),
+            tail in proptest::collection::vec(any::<u8>(), 0..16),
+        ) {
+            let mut block = sd02(mmio_va, dma_va, dma_pa, dma_len, time_va).to_vec();
+            block.extend(tail);
+            prop_assert_eq!(
+                parse_config(&block),
+                Some(Config { mmio_va, dma_va, dma_pa, dma_len, time_va })
+            );
+        }
+    }
 }
