@@ -123,3 +123,28 @@ cargo +nightly miri test -p cas
 # one case (the rest stay at 4); no blake3, so the sweep is still quick —
 #   MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri test -p urt
 ```
+
+### Formatting — run `cargo fmt` before every commit
+
+The tree is kept rustfmt-clean **per change**: run `cargo fmt` before committing
+and stage the result, so each commit's diff is only its own work. There are no
+longer periodic "rustfmt" sweep commits — those existed because earlier changes
+skipped fmt; don't bring them back.
+
+The catch is the workspace split (`Cargo.toml`): a plain `cargo fmt` at the root
+formats every **root-workspace** member (`cas`, `kcore`, `kernel`, `ipc`,
+`storage-server`, `mkfs`, `dma-pool`, `freelist`, `virtio-blk`, `loader`, `urt`)
+but **silently skips** the separate workspaces — the `user/*` binaries
+(`storaged`, `init`, `shell`, …, their own mini-workspaces) and the `*/fuzz`
+crates (`cas/fuzz`, `storage-server/fuzz`, `loader/fuzz`, `ipc/fuzz`, excluded so
+a plain build never pulls libfuzzer). If your change touches one of those, format
+it via its own manifest, e.g.:
+
+```sh
+cargo fmt --manifest-path user/storaged/Cargo.toml
+cargo fmt --manifest-path cas/fuzz/Cargo.toml
+```
+
+(The trap this avoids: editing `user/storaged` and running only the root
+`cargo fmt` leaves it untouched, so the next person to fmt that workspace drags
+your file's pre-existing reformatting into their diff.)
