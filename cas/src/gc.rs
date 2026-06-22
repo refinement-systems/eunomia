@@ -81,8 +81,7 @@ pub fn mark(
                         Content::Inline(_) => {}
                         Content::ChunkList(ch) => {
                             if live.insert(ch) {
-                                let list =
-                                    store.get(&ch).ok_or(FormatError::MissingNode(ch))?;
+                                let list = store.get(&ch).ok_or(FormatError::MissingNode(ch))?;
                                 for (chunk, _) in chunk_list_entries(&list)? {
                                     live.insert(chunk); // chunk leaves: mark, never parse
                                 }
@@ -485,7 +484,7 @@ mod tests {
         check_recipe(&[]).unwrap();
         check_recipe(&[1u8; 300]).unwrap(); // deep chain → Ok, sufficient
         check_recipe(&[0, 4]).unwrap(); // dangling ref → refused cleanly
-        // A byte sweep must never panic or report insufficiency.
+                                        // A byte sweep must never panic or report insufficiency.
         for b in 0u8..=255 {
             check_recipe(&[b, b, b, b, b]).unwrap();
         }

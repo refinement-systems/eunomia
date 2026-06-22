@@ -155,14 +155,20 @@ unsafe impl<const N: usize> GlobalAlloc for Heap<N> {
         // just never re-handed-out). A heap must never abort a dealloc, so the
         // witness is a debug_assert, compiled out in release.
         if fl.is_full() {
-            debug_assert!(false, "urt heap: free-list at fragmentation cap; block leaked");
+            debug_assert!(
+                false,
+                "urt heap: free-list at fragmentation cap; block leaked"
+            );
             return;
         }
         // Double-free / overlap guard. `is_allocated` is the verified accessor
         // (in `freelist`); heap input is trusted in-process (note 4 of the B11
         // verification tier), so this is a debug_assert — release rests on
         // `core`'s correctness, the same line dma-pool draws.
-        debug_assert!(fl.is_allocated(off, need), "urt heap: double free / overlap");
+        debug_assert!(
+            fl.is_allocated(off, need),
+            "urt heap: double free / overlap"
+        );
         fl.free(off, need);
     }
 

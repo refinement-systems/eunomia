@@ -2761,7 +2761,10 @@ mod tests {
             hot_total += chunk.len();
             // M-3 invariant: the soft-bound flush fires inside the write that
             // would cross the bound, so the overlay never exceeds it.
-            let hot_bytes = store.overlays.get(b"hot".as_slice()).map_or(0, |o| o.bytes());
+            let hot_bytes = store
+                .overlays
+                .get(b"hot".as_slice())
+                .map_or(0, |o| o.bytes());
             assert!(
                 hot_bytes <= PER_REF,
                 "hot overlay {hot_bytes} exceeded per_ref_budget {PER_REF}"
@@ -2770,10 +2773,19 @@ mod tests {
 
         // The hot ref flushed (its live overlay holds far less than everything
         // written to it) and that data reached the tree (read-backable).
-        let hot_bytes = store.overlays.get(b"hot".as_slice()).map_or(0, |o| o.bytes());
+        let hot_bytes = store
+            .overlays
+            .get(b"hot".as_slice())
+            .map_or(0, |o| o.bytes());
         assert!(hot_bytes < hot_total, "hot ref never flushed");
-        assert_eq!(store.read(b"hot", &p(&["f0"])).unwrap(), Some(chunk.to_vec()));
-        assert_eq!(store.read(b"hot", &p(&["f19"])).unwrap(), Some(chunk.to_vec()));
+        assert_eq!(
+            store.read(b"hot", &p(&["f0"])).unwrap(),
+            Some(chunk.to_vec())
+        );
+        assert_eq!(
+            store.read(b"hot", &p(&["f19"])).unwrap(),
+            Some(chunk.to_vec())
+        );
 
         // The quiet ref stayed dirty — no eviction swept it (it is under its bound).
         assert!(
@@ -2839,10 +2851,18 @@ mod tests {
 
         // Eight 1-byte writes: op_count reaches 8 (== bound, not yet over).
         for i in 0..8u64 {
-            store.write(b"main", &p(&[&format!("f{i}")]), 0, &[1u8], i + 1).unwrap();
+            store
+                .write(b"main", &p(&[&format!("f{i}")]), 0, &[1u8], i + 1)
+                .unwrap();
         }
-        assert_eq!(store.acct.get(b"main".as_slice()).map(|a| a.op_count), Some(8));
-        let bytes = store.overlays.get(b"main".as_slice()).map_or(0, |o| o.bytes());
+        assert_eq!(
+            store.acct.get(b"main".as_slice()).map(|a| a.op_count),
+            Some(8)
+        );
+        let bytes = store
+            .overlays
+            .get(b"main".as_slice())
+            .map_or(0, |o| o.bytes());
         assert_eq!(bytes, 8);
         assert!(bytes < (1 << 20), "byte bound would already have fired");
 
@@ -2852,7 +2872,10 @@ mod tests {
             store.overlays.get(b"main".as_slice()).is_none(),
             "op-count storm did not flush the ref"
         );
-        assert!(store.acct.get(b"main".as_slice()).is_none(), "accounting not reset on flush");
+        assert!(
+            store.acct.get(b"main".as_slice()).is_none(),
+            "accounting not reset on flush"
+        );
         // All nine tiny files reached the tree.
         assert_eq!(store.read(b"main", &p(&["f0"])).unwrap(), Some(vec![1u8]));
         assert_eq!(store.read(b"main", &p(&["f8"])).unwrap(), Some(vec![1u8]));
@@ -2909,11 +2932,18 @@ mod tests {
         );
         assert_eq!(before[1].0, b"b".to_vec());
         assert_eq!((before[1].1, before[1].2, before[1].4), (90, 2, Some(20)));
-        assert!(before[1].3.unwrap() > 0, "ref b's oldest record should sit after a0");
+        assert!(
+            before[1].3.unwrap() > 0,
+            "ref b's oldest record should sit after a0"
+        );
 
         let dev = store.into_dev();
         let recovered = Store::mount(dev, opts).unwrap();
-        assert_eq!(snap(&recovered), before, "replay did not reconstruct accounting");
+        assert_eq!(
+            snap(&recovered),
+            before,
+            "replay did not reconstruct accounting"
+        );
     }
 
     // ── B12B: size-pressure low/high watermarks + flush-the-biggest-offenders ──
@@ -2941,14 +2971,19 @@ mod tests {
             store.create_ref(r).unwrap();
         }
         // Below the low watermark so far: small (200) + mid (2000) = 2200 < LOW.
-        store.write(b"small", &p(&["s"]), 0, &[1u8; 200], 1).unwrap();
+        store
+            .write(b"small", &p(&["s"]), 0, &[1u8; 200], 1)
+            .unwrap();
         store.write(b"mid", &p(&["m"]), 0, &[2u8; 2000], 2).unwrap();
         // The big write pushes the total (8200) over LOW → flush the biggest.
         store.write(b"big", &p(&["b"]), 0, &[3u8; 6000], 3).unwrap();
 
         // The biggest offender flushed; the two smaller refs stayed dirty.
         assert!(
-            store.overlays.get(b"big".as_slice()).map_or(true, |o| o.is_empty()),
+            store
+                .overlays
+                .get(b"big".as_slice())
+                .map_or(true, |o| o.is_empty()),
             "biggest ref was not flushed by size pressure"
         );
         assert!(
@@ -2961,9 +2996,15 @@ mod tests {
         );
         // Total dirty is back at or below the low watermark.
         let total: usize = store.overlays.values().map(|o| o.bytes()).sum();
-        assert!(total <= LOW, "size pressure left total {total} above low watermark {LOW}");
+        assert!(
+            total <= LOW,
+            "size pressure left total {total} above low watermark {LOW}"
+        );
         // The flushed data is durable committed tree (read-backable).
-        assert_eq!(store.read(b"big", &p(&["b"])).unwrap(), Some(vec![3u8; 6000]));
+        assert_eq!(
+            store.read(b"big", &p(&["b"])).unwrap(),
+            Some(vec![3u8; 6000])
+        );
     }
 
     /// rev1§4.4 M-4: because flushing starts at the low watermark, steady traffic
@@ -2994,8 +3035,14 @@ mod tests {
                 .write(r, &p(&[&format!("f{i}")]), 0, &[0x7Eu8; 1024], i + 1)
                 .unwrap();
             let total: usize = store.overlays.values().map(|o| o.bytes()).sum();
-            assert!(total < HIGH, "total {total} reached the high watermark {HIGH}");
-            assert!(total <= LOW, "total {total} above low watermark {LOW} after the flush");
+            assert!(
+                total < HIGH,
+                "total {total} reached the high watermark {HIGH}"
+            );
+            assert!(
+                total <= LOW,
+                "total {total} above low watermark {LOW} after the flush"
+            );
         }
         // Flushing demonstrably happened: 64 KiB was written, but the live dirty
         // set is bounded by the low watermark.
@@ -3237,7 +3284,10 @@ mod tests {
         assert_eq!(rec.records.len(), 2);
         assert!(!rec.forged_max);
         assert_eq!((rec.records[0].off, rec.records[0].seq), (0, 0));
-        assert_eq!((rec.records[1].off, rec.records[1].seq), (r0.len() as u64, 1));
+        assert_eq!(
+            (rec.records[1].off, rec.records[1].seq),
+            (r0.len() as u64, 1)
+        );
         assert_eq!(rec.end_off, (r0.len() + r1.len()) as u64);
         assert_eq!(rec.next_seq, 2);
         assert!(rec.records.iter().all(|m| !m.flushed));

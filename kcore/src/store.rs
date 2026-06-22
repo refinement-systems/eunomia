@@ -144,8 +144,14 @@ pub trait Store {
     /// Map `pages` frames at PA `pa` into aspace `a` at `va` with `perms` (B8A, the symmetric
     /// twin of `aspace_unmap`). Page-table machinery only — the verified cap-side record is
     /// [`crate::cspace::map_frame`]. Fallible: the table pool may be exhausted (`NeedMemory`).
-    fn aspace_map(&mut self, a: ObjId, pa: u64, va: u64, pages: u64, perms: u64)
-        -> Result<(), crate::aspace::MapError>;
+    fn aspace_map(
+        &mut self,
+        a: ObjId,
+        pa: u64,
+        va: u64,
+        pages: u64,
+        perms: u64,
+    ) -> Result<(), crate::aspace::MapError>;
     /// Last-reference teardown of an address space.
     fn aspace_destroy(&mut self, a: ObjId);
     fn tlb_invalidate_page(&mut self, asid: u16, va: u64);

@@ -830,15 +830,17 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if !(*asp_slot).cap.rights.has(Rights::WRITE) {
                 return Some(ERR_PERM);
             }
-            Some(match untyped::aspace_topup(ut_slot, aspace_ptr(asp), pages) {
-                Ok(()) => 0,
-                // not an untyped cap
-                Err(RetypeError::NotUntyped) => ERR_TYPE,
-                // the untyped has no room for `pages` more tables
-                Err(RetypeError::NoMemory) => ERR_NOMEM,
-                // non-abutting untyped, or pages == 0 / overflow
-                Err(_) => ERR_ARG,
-            })
+            Some(
+                match untyped::aspace_topup(ut_slot, aspace_ptr(asp), pages) {
+                    Ok(()) => 0,
+                    // not an untyped cap
+                    Err(RetypeError::NotUntyped) => ERR_TYPE,
+                    // the untyped has no room for `pages` more tables
+                    Err(RetypeError::NoMemory) => ERR_NOMEM,
+                    // non-abutting untyped, or pages == 0 / overflow
+                    Err(_) => ERR_ARG,
+                },
+            )
         }
     }
 }

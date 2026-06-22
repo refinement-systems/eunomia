@@ -25,12 +25,12 @@ use crate::cspace::{
     RevokeStatus, Rights,
 };
 use crate::id::{ObjId, SlotId};
+use crate::irq::{destroy_irq, irq_bind, irq_unbind};
 use crate::notification::{destroy_notif, remove_waiter, signal, wait};
 use crate::store::{Binding, Store};
 use crate::thread::{
     bind as thread_bind, destroy_tcb, report_terminal, Report, ThreadState, BIND_EXIT, BIND_FAULT,
 };
-use crate::irq::{destroy_irq, irq_bind, irq_unbind};
 use crate::timer::{arm, check_expired, destroy_timer, disarm};
 use crate::untyped::{reset, retype_check, retype_install, ObjType, RetypeError};
 use std::collections::{BTreeMap, VecDeque};
@@ -2024,9 +2024,15 @@ fn check_irq_bind(st: &mut ArrayStore, i: ObjId, notif: ObjId, bits: u64) {
     assert!(st.notifs == notifs, "irq_bind post: notif_view unchanged");
     assert!(st.tcbs == tcbs, "irq_bind post: tcb_view unchanged");
     assert!(st.timers == timers, "irq_bind post: timer_view unchanged");
-    assert_eq!(st.refs, expect_refs, "irq_bind: net ref delta (rebind -1, bind +1)");
+    assert_eq!(
+        st.refs, expect_refs,
+        "irq_bind: net ref delta (rebind -1, bind +1)"
+    );
     assert!(st.irqs[&i.0].bound, "irq_bind: i bound");
-    assert!(st.irqs[&i.0].notif == Some(notif), "irq_bind: bound to notif");
+    assert!(
+        st.irqs[&i.0].notif == Some(notif),
+        "irq_bind: bound to notif"
+    );
     assert_eq!(st.irqs[&i.0].bits, bits, "irq_bind: bits set");
 }
 
@@ -2051,12 +2057,18 @@ fn check_irq_unbind(st: &mut ArrayStore, i: ObjId) {
     irq_unbind(st, i);
 
     assert!(irq_wf_exec(st), "irq_unbind post: irq_wf preserved");
-    assert!(fingerprint(st) == fp, "irq_unbind post: slot_view unchanged");
+    assert!(
+        fingerprint(st) == fp,
+        "irq_unbind post: slot_view unchanged"
+    );
     assert!(st.chans == chans, "irq_unbind post: chan_view unchanged");
     assert!(st.notifs == notifs, "irq_unbind post: notif_view unchanged");
     assert!(st.tcbs == tcbs, "irq_unbind post: tcb_view unchanged");
     assert!(st.timers == timers, "irq_unbind post: timer_view unchanged");
-    assert_eq!(st.refs, expect_refs, "irq_unbind: released the ref iff it was bound");
+    assert_eq!(
+        st.refs, expect_refs,
+        "irq_unbind: released the ref iff it was bound"
+    );
     assert!(!st.irqs[&i.0].bound, "irq_unbind: i unbound");
     assert!(st.irqs[&i.0].notif.is_none(), "irq_unbind: notif cleared");
 }
@@ -2539,11 +2551,17 @@ fn set_priority_writes_within_ceiling() {
     // Executable witness on `ArrayStore`.
     let mut st = ArrayStore::new(1);
     st.tcbs.insert(9, tcb_state_default()); // priority starts at 0
-    assert!(crate::thread::set_priority(&mut st, ObjId(9), 5, 16).is_ok(), "in-ceiling accepted");
+    assert!(
+        crate::thread::set_priority(&mut st, ObjId(9), 5, 16).is_ok(),
+        "in-ceiling accepted"
+    );
     assert_eq!(st.tcb_priority(ObjId(9)), 5, "priority written exactly");
     assert!(st.tcb_priority(ObjId(9)) <= 16, "priority within ceiling");
     // Boundary: prio == ceiling is admissible.
-    assert!(crate::thread::set_priority(&mut st, ObjId(9), 16, 16).is_ok(), "prio == ceiling accepted");
+    assert!(
+        crate::thread::set_priority(&mut st, ObjId(9), 16, 16).is_ok(),
+        "prio == ceiling accepted"
+    );
     assert_eq!(st.tcb_priority(ObjId(9)), 16, "prio == ceiling allowed");
 }
 
@@ -2554,14 +2572,24 @@ fn set_priority_refuses_over_ceiling() {
     // `if` involved. A subsequent in-ceiling request still succeeds.
     let mut st = ArrayStore::new(1);
     st.tcbs.insert(7, tcb_state_default()); // priority starts at 0
-    // Seed a known in-ceiling priority so the refusal's "untouched" is observable.
+                                            // Seed a known in-ceiling priority so the refusal's "untouched" is observable.
     assert!(crate::thread::set_priority(&mut st, ObjId(7), 4, 16).is_ok());
     assert_eq!(st.tcb_priority(ObjId(7)), 4);
     // Over-ceiling: refused, priority unchanged.
-    assert!(crate::thread::set_priority(&mut st, ObjId(7), 20, 16).is_err(), "over-ceiling refused");
-    assert_eq!(st.tcb_priority(ObjId(7)), 4, "refused write leaves priority untouched");
+    assert!(
+        crate::thread::set_priority(&mut st, ObjId(7), 20, 16).is_err(),
+        "over-ceiling refused"
+    );
+    assert_eq!(
+        st.tcb_priority(ObjId(7)),
+        4,
+        "refused write leaves priority untouched"
+    );
     // The op stays usable: a fresh in-ceiling request is accepted.
-    assert!(crate::thread::set_priority(&mut st, ObjId(7), 9, 16).is_ok(), "in-ceiling still accepted");
+    assert!(
+        crate::thread::set_priority(&mut st, ObjId(7), 9, 16).is_ok(),
+        "in-ceiling still accepted"
+    );
     assert_eq!(st.tcb_priority(ObjId(7)), 9, "later in-ceiling write lands");
 }
 
@@ -2976,10 +3004,17 @@ fn signal_frame() {
     );
     // B8C-4: and enqueued at the tail of its priority level (0) — the sole node there, with
     // the presence bit set and its qnext cleared (the precise `ready_enqueue` placement).
-    assert_eq!(ready_ids(&st, 0), vec![200], "woken waiter is the sole level-0 ready node");
+    assert_eq!(
+        ready_ids(&st, 0),
+        vec![200],
+        "woken waiter is the sole level-0 ready node"
+    );
     assert!(st.ready_heads[0] == Some(ObjId(200)) && st.ready_tails[0] == Some(ObjId(200)));
     assert_eq!(st.ready_bitmap & 1, 1, "level-0 presence bit set");
-    assert!(st.tcbs[&200].qnext.is_none(), "the enqueued thread's qnext is cleared");
+    assert!(
+        st.tcbs[&200].qnext.is_none(),
+        "the enqueued thread's qnext is cleared"
+    );
 }
 
 #[test]
@@ -3489,19 +3524,35 @@ fn delete_mapped_frame_drops_aspace_ref() {
 fn check_map_frame(st: &mut ArrayStore, slot: SlotId, asp: ObjId, va: u64) {
     assert!(refcount_sound_exec(st), "map_frame pre: refcount_sound");
     assert!(
-        matches!(st.slots[slot.0 as usize].cap.kind, CapKind::Frame { mapping: None, .. }),
+        matches!(
+            st.slots[slot.0 as usize].cap.kind,
+            CapKind::Frame { mapping: None, .. }
+        ),
         "map_frame pre: the frame is unmapped"
     );
-    assert!(st.refs.contains_key(&asp.0), "map_frame pre: the aspace is live");
+    assert!(
+        st.refs.contains_key(&asp.0),
+        "map_frame pre: the aspace is live"
+    );
     let r0 = st.refs[&asp.0];
     let res = map_frame(st, slot, asp, va, 0);
-    assert!(res.is_ok(), "map_frame: the test store's aspace_map always succeeds");
+    assert!(
+        res.is_ok(),
+        "map_frame: the test store's aspace_map always succeeds"
+    );
     assert!(
         cap_frame_aspace_exec(st.slots[slot.0 as usize].cap) == Some(asp),
         "map_frame post: the mapping is recorded on the frame cap"
     );
-    assert_eq!(st.refs[&asp.0], r0 + 1, "map_frame post: the aspace ref is bumped");
-    assert!(refcount_sound_exec(st), "map_frame post: refcount_sound restored");
+    assert_eq!(
+        st.refs[&asp.0],
+        r0 + 1,
+        "map_frame post: the aspace ref is bumped"
+    );
+    assert!(
+        refcount_sound_exec(st),
+        "map_frame post: refcount_sound restored"
+    );
 }
 
 #[test]
@@ -3510,7 +3561,10 @@ fn map_frame_records_and_bumps() {
     st.slots[0] = detached(frame_cap(0x1000)); // an unmapped frame cap
     st.refs.insert(2, 0); // a live, as-yet-unreferenced aspace
     check_map_frame(&mut st, SlotId(0), ObjId(2), 0x4000);
-    assert_eq!(st.refs[&2], 1, "map_frame: refs[asp] == 1 after one mapping");
+    assert_eq!(
+        st.refs[&2], 1,
+        "map_frame: refs[asp] == 1 after one mapping"
+    );
 }
 
 // `map_frame` then `delete` is the identity on the aspace refcount: map records + bumps,
@@ -4498,7 +4552,10 @@ fn gen_chain(n: usize) -> ArrayStore {
         // extending the chain (derive copies the parent's Frame cap into the child).
         derive(&mut st, SlotId(i - 1), SlotId(i), 0xff, 0xFF).expect("derive chain link");
     }
-    assert!(cspace_wf_exec(&st), "gen_chain produced a non-cspace_wf chain");
+    assert!(
+        cspace_wf_exec(&st),
+        "gen_chain produced a non-cspace_wf chain"
+    );
     st
 }
 
@@ -4541,13 +4598,23 @@ fn revoke_step_bounded_completion() {
                 break;
             }
         }
-        assert!(calls <= DESC + 2, "revoke_step must terminate in ⌈n/budget⌉ calls");
+        assert!(
+            calls <= DESC + 2,
+            "revoke_step must terminate in ⌈n/budget⌉ calls"
+        );
     }
 
     // ⌈23/5⌉ = 5 quanta total (4 × More + 1 × Done).
-    assert_eq!(calls, (DESC + BUDGET - 1) / BUDGET, "exactly ⌈descendants/budget⌉ quanta");
+    assert_eq!(
+        calls,
+        (DESC + BUDGET - 1) / BUDGET,
+        "exactly ⌈descendants/budget⌉ quanta"
+    );
     // The un-homed root survives; every descendant is gone.
-    assert!(!st.at(SlotId(0)).cap.is_empty(), "the un-homed root survives");
+    assert!(
+        !st.at(SlotId(0)).cap.is_empty(),
+        "the un-homed root survives"
+    );
     for i in 1..(DESC + 1) as u64 {
         assert!(
             st.at(SlotId(i)).cap.is_empty(),
@@ -4562,7 +4629,10 @@ fn revoke_step_single_quantum_done() {
     // never left set (it is cleared on the same call).
     let mut st = gen_chain(4); // root + 3 descendants
     let status = revoke_step(&mut st, SlotId(0), 64);
-    assert!(status == RevokeStatus::Done, "ample budget completes in one quantum");
+    assert!(
+        status == RevokeStatus::Done,
+        "ample budget completes in one quantum"
+    );
     assert!(st.at(SlotId(0)).first_child.is_none(), "subtree empty");
     assert!(!st.at(SlotId(0)).revoking, "marker cleared on Done");
     assert!(!st.at(SlotId(0)).cap.is_empty(), "un-homed root survives");
@@ -4574,7 +4644,7 @@ fn revoke_step_marker_blocks_derive() {
     // the subtree is refused and the store is untouched; clearing the marker lets the
     // same derivation through. Mirrors the `ancestor_or_self_revoking` guard.
     let mut st = gen_chain(2); // root 0 → child 1
-    // Reserve an empty target slot for the attempted derivation.
+                               // Reserve an empty target slot for the attempted derivation.
     st.slots.push(CapSlot::empty());
     let target = SlotId(2);
 
@@ -4589,12 +4659,19 @@ fn revoke_step_marker_blocks_derive() {
     let res = derive(&mut st, SlotId(1), target, 0xff, 0xFF);
     assert!(res.is_err(), "derive into a revoking subtree is refused");
     // The refused derive is a no-op: no new cap installed, no CDT edge added.
-    assert!(st.at(target).cap.is_empty(), "the refused derive installed no cap");
+    assert!(
+        st.at(target).cap.is_empty(),
+        "the refused derive installed no cap"
+    );
     assert!(
         st.at(SlotId(1)).first_child.is_none(),
         "the refused derive added no child edge"
     );
-    assert_eq!(count_nonempty_exec(&st), live_before, "live count unchanged");
+    assert_eq!(
+        count_nonempty_exec(&st),
+        live_before,
+        "live count unchanged"
+    );
 
     // The root itself is revoking, so deriving *from* it is refused too.
     assert!(derive(&mut st, SlotId(0), target, 0xff, 0xFF).is_err());
@@ -4606,7 +4683,10 @@ fn revoke_step_marker_blocks_derive() {
         "no revoking ancestor once cleared"
     );
     derive(&mut st, SlotId(1), target, 0xff, 0xFF).expect("derive succeeds once unmarked");
-    assert!(!st.at(target).cap.is_empty(), "the derived child is installed");
+    assert!(
+        !st.at(target).cap.is_empty(),
+        "the derived child is installed"
+    );
 }
 
 // ── Channel send/recv: the FIFO core, host-differential ─────────────────────
@@ -5196,7 +5276,13 @@ fn irq_bind_unbind_lifecycle() {
     let n2 = ObjId(101);
     st.irqs.insert(
         400,
-        IrqState { intid: 33, notif: None, bits: 0, bound: false, masked: false },
+        IrqState {
+            intid: 33,
+            notif: None,
+            bits: 0,
+            bound: false,
+            masked: false,
+        },
     );
     // Start sound: `refs[n] == census(n) == 0` (no cap/binding yet), so every bind/unbind
     // below preserves `refcount_sound` — the census round-trip the test pins down.
@@ -5206,7 +5292,10 @@ fn irq_bind_unbind_lifecycle() {
 
     check_irq_bind(&mut st, i, n1, 0b1);
     assert_eq!(st.refs[&100], 1, "bind +1 on n1");
-    assert!(refcount_sound_exec(&st), "sound after bind (census(n1) == 1)");
+    assert!(
+        refcount_sound_exec(&st),
+        "sound after bind (census(n1) == 1)"
+    );
 
     check_irq_bind(&mut st, i, n1, 0b10); // same-notif rebind
     assert_eq!(st.refs[&100], 1, "same-notif rebind is net-zero");
@@ -5216,7 +5305,10 @@ fn irq_bind_unbind_lifecycle() {
     check_irq_bind(&mut st, i, n2, 0b100); // different-notif rebind
     assert_eq!(st.refs[&100], 0, "rebind released n1");
     assert_eq!(st.refs[&101], 1, "rebind acquired n2");
-    assert!(refcount_sound_exec(&st), "sound after different-notif rebind");
+    assert!(
+        refcount_sound_exec(&st),
+        "sound after different-notif rebind"
+    );
 
     check_irq_unbind(&mut st, i);
     assert_eq!(st.refs[&101], 0, "unbind released n2");
@@ -5225,7 +5317,10 @@ fn irq_bind_unbind_lifecycle() {
     check_irq_unbind(&mut st, i); // idempotent no-op
     assert_eq!(st.refs[&101], 0, "a second unbind touches no ref");
     let _ = i;
-    assert_eq!(st.irqs[&400].intid, 33, "intid rides the object, untouched by bind/unbind");
+    assert_eq!(
+        st.irqs[&400].intid, 33,
+        "intid rides the object, untouched by bind/unbind"
+    );
 }
 
 // B-IRQ: `destroy_irq` of a bound IRQ (its last cap gone): `irq_unbind`, releasing the
@@ -5236,7 +5331,13 @@ fn destroy_irq_unbinds() {
     let i = ObjId(400);
     st.irqs.insert(
         400,
-        IrqState { intid: 33, notif: Some(ObjId(100)), bits: 0b1, bound: true, masked: false },
+        IrqState {
+            intid: 33,
+            notif: Some(ObjId(100)),
+            bits: 0b1,
+            bound: true,
+            masked: false,
+        },
     );
     st.refs.insert(100, 1);
     st.refs.insert(400, 0); // last cap gone (the destroy_irq precondition)
@@ -5245,8 +5346,14 @@ fn destroy_irq_unbinds() {
     check_destroy_irq(&mut st, i);
 
     assert!(!st.irqs[&400].bound, "destroy_irq: unbound");
-    assert_eq!(st.refs[&100], 0, "destroy_irq released the notif ref via unbind");
-    assert!(refcount_sound_exec(&st), "destroy_irq: sound after teardown");
+    assert_eq!(
+        st.refs[&100], 0,
+        "destroy_irq released the notif ref via unbind"
+    );
+    assert!(
+        refcount_sound_exec(&st),
+        "destroy_irq: sound after teardown"
+    );
 }
 
 // B-IRQ: `refcount_sound_exec` has teeth on the `irq_binding_refs` term — a bound IRQ
@@ -5256,10 +5363,19 @@ fn refcount_sound_exec_irq_teeth() {
     let mut st = ArrayStore::new(0);
     st.irqs.insert(
         400,
-        IrqState { intid: 33, notif: Some(ObjId(100)), bits: 0, bound: true, masked: false },
+        IrqState {
+            intid: 33,
+            notif: Some(ObjId(100)),
+            bits: 0,
+            bound: true,
+            masked: false,
+        },
     );
     st.refs.insert(100, 1); // bound IRQ ⇒ census(100) == 1, sound
-    assert!(refcount_sound_exec(&st), "sound: refs[100] == irq_binding_refs(100)");
+    assert!(
+        refcount_sound_exec(&st),
+        "sound: refs[100] == irq_binding_refs(100)"
+    );
     // Drop the IRQ's ref without unbinding: now census(100) == 1 but refs[100] == 0.
     st.refs.insert(100, 0);
     assert!(!refcount_sound_exec(&st), "teeth: irq_binding_refs term");
@@ -5276,23 +5392,36 @@ fn delete_irq_cap_releases_notif_ref() {
     let mut st = ArrayStore::new(2);
     st.slots[0] = detached(notif_cap(100)); // the notification's own cap (must survive)
     st.slots[1] = detached(irq_cap(400)); // the IRQ object's lone cap — its delete destroys it
-    // notif 100: one cap (slot 0) + one IRQ binding ⇒ census == refs == 2 (sound at entry).
+                                          // notif 100: one cap (slot 0) + one IRQ binding ⇒ census == refs == 2 (sound at entry).
     st.refs.insert(100, 2);
     st.refs.insert(400, 1); // the IRQ object's lone cap (slot 1)
     st.notifs.insert(
         100,
-        NotifState { word: 0, wait_head: None, wait_tail: None },
+        NotifState {
+            word: 0,
+            wait_head: None,
+            wait_tail: None,
+        },
     );
     st.irqs.insert(
         400,
-        IrqState { intid: 33, notif: Some(ObjId(100)), bits: 0b1, bound: true, masked: false },
+        IrqState {
+            intid: 33,
+            notif: Some(ObjId(100)),
+            bits: 0b1,
+            bound: true,
+            masked: false,
+        },
     );
     assert_eq!(
         obj_census_exec(&st, ObjId(100)),
         2,
         "pre: census(100) = its cap + the IRQ binding"
     );
-    assert!(refcount_sound_exec(&st), "pre: sound (refs[100] == 2 == census)");
+    assert!(
+        refcount_sound_exec(&st),
+        "pre: sound (refs[100] == 2 == census)"
+    );
 
     // The generic delete contract (cspace_wf preserved, count drops, refcount_sound held),
     // then the IRQ-specific accounting.
@@ -5308,7 +5437,10 @@ fn delete_irq_cap_releases_notif_ref() {
         1,
         "the IRQ binding term dropped — only the notif's own cap remains"
     );
-    assert_eq!(st.refs[&100], 1, "notif 100 ref released down to its own cap");
+    assert_eq!(
+        st.refs[&100], 1,
+        "notif 100 ref released down to its own cap"
+    );
     assert!(
         !st.at(SlotId(0)).cap.is_empty(),
         "the notification's own cap survives the IRQ teardown"
@@ -5561,37 +5693,65 @@ fn ready_enqueue_top_dequeue_round_robin() {
     );
 
     // top_ready picks the highest non-empty level (9 over 5).
-    assert_eq!(crate::ready::top_ready(&st), Some(9), "level 9 outranks level 5");
+    assert_eq!(
+        crate::ready::top_ready(&st),
+        Some(9),
+        "level 9 outranks level 5"
+    );
     assert_eq!(
         crate::ready::ready_dequeue(&mut st, 9).map(|x| x.0),
         Some(203),
         "dequeue level 9 pops its sole thread"
     );
     assert!(ready_wf_exec(&st));
-    assert_eq!(st.ready_bitmap & (1 << 9), 0, "emptied level 9 clears its bit");
-    assert_eq!(crate::ready::top_ready(&st), Some(5), "now level 5 is highest");
+    assert_eq!(
+        st.ready_bitmap & (1 << 9),
+        0,
+        "emptied level 9 clears its bit"
+    );
+    assert_eq!(
+        crate::ready::top_ready(&st),
+        Some(5),
+        "now level 5 is highest"
+    );
 
     // round-robin within level 5: FIFO 200, 201, 202.
-    assert_eq!(crate::ready::ready_dequeue(&mut st, 5).map(|x| x.0), Some(200));
-    assert_eq!(crate::ready::ready_dequeue(&mut st, 5).map(|x| x.0), Some(201));
+    assert_eq!(
+        crate::ready::ready_dequeue(&mut st, 5).map(|x| x.0),
+        Some(200)
+    );
+    assert_eq!(
+        crate::ready::ready_dequeue(&mut st, 5).map(|x| x.0),
+        Some(201)
+    );
     assert!(ready_wf_exec(&st));
     assert!(
         st.ready_bitmap & (1 << 5) != 0,
         "level 5 still non-empty (one thread left)"
     );
-    assert_eq!(crate::ready::ready_dequeue(&mut st, 5).map(|x| x.0), Some(202));
+    assert_eq!(
+        crate::ready::ready_dequeue(&mut st, 5).map(|x| x.0),
+        Some(202)
+    );
 
     // fully drained.
     assert!(
         crate::ready::ready_dequeue(&mut st, 5).is_none(),
         "an empty level yields None"
     );
-    assert_eq!(crate::ready::top_ready(&st), None, "empty queue: no ready thread");
+    assert_eq!(
+        crate::ready::top_ready(&st),
+        None,
+        "empty queue: no ready thread"
+    );
     assert_eq!(st.ready_bitmap, 0, "all presence bits clear");
     assert!(ready_wf_exec(&st));
     // dequeued threads are left Runnable-and-off-chain (maybe_switch sets them Running next).
     for id in [200u64, 201, 202, 203] {
-        assert!(st.tcbs[&id].qnext.is_none(), "{id} qnext cleared on dequeue");
+        assert!(
+            st.tcbs[&id].qnext.is_none(),
+            "{id} qnext cleared on dequeue"
+        );
         assert_eq!(
             st.tcbs[&id].state,
             ThreadState::Runnable,
@@ -5633,7 +5793,10 @@ fn ready_unqueue_splices_arbitrary_position() {
         st.tcbs[&10].qnext == Some(ObjId(12)),
         "predecessor re-threaded past the removed node"
     );
-    assert!(st.ready_bitmap & (1 << level) != 0, "non-empty level keeps its bit");
+    assert!(
+        st.ready_bitmap & (1 << level) != 0,
+        "non-empty level keeps its bit"
+    );
 
     // head.
     let mut st = build(&[10, 11, 12]);
@@ -5746,7 +5909,10 @@ fn randomized_ready_sweep() {
                 }
             }
             assert!(ready_wf_exec(&st), "ready_wf after op (seed {seed})");
-            assert!(ready_complete_exec(&st), "ready_complete after op (seed {seed})");
+            assert!(
+                ready_complete_exec(&st),
+                "ready_complete after op (seed {seed})"
+            );
             trials += 1;
         }
     }
@@ -5779,17 +5945,26 @@ fn ready_wf_exec_has_teeth() {
         }
         st
     };
-    assert!(ready_wf_exec(&build(&[10, 11])), "a well-formed ready queue is accepted");
+    assert!(
+        ready_wf_exec(&build(&[10, 11])),
+        "a well-formed ready queue is accepted"
+    );
 
     // bit set on an empty level.
     let mut st = build(&[]);
     st.ready_bitmap |= 1 << level;
-    assert!(!ready_wf_exec(&st), "presence bit set on an empty level rejected");
+    assert!(
+        !ready_wf_exec(&st),
+        "presence bit set on an empty level rejected"
+    );
 
     // bit clear on a non-empty level.
     let mut st = build(&[10]);
     st.ready_bitmap &= !(1 << level);
-    assert!(!ready_wf_exec(&st), "presence bit clear on a non-empty level rejected");
+    assert!(
+        !ready_wf_exec(&st),
+        "presence bit clear on a non-empty level rejected"
+    );
 
     // a charted node not Runnable.
     let mut st = build(&[10, 11]);
@@ -5799,7 +5974,10 @@ fn ready_wf_exec_has_teeth() {
     // a charted node at the wrong level.
     let mut st = build(&[10, 11]);
     st.tcbs.get_mut(&10).unwrap().priority = level as u8 + 1;
-    assert!(!ready_wf_exec(&st), "charted node with mismatched priority rejected");
+    assert!(
+        !ready_wf_exec(&st),
+        "charted node with mismatched priority rejected"
+    );
 
     // tail disagreeing with the chain end.
     let mut st = build(&[10, 11]);
@@ -6151,7 +6329,15 @@ fn map_in_grow_pool_lookup_stable() {
     // Install a new mapping into the grown region; the old one still resolves.
     let va2 = USER_VA_BASE + (1u64 << 30);
     map_in(
-        &mut l1, &mut pool, &mut used, base, 0x4A00_0000, va2, 1, PERM_W, &mut store,
+        &mut l1,
+        &mut pool,
+        &mut used,
+        base,
+        0x4A00_0000,
+        va2,
+        1,
+        PERM_W,
+        &mut store,
     )
     .unwrap();
     assert_eq!(
