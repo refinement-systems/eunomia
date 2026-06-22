@@ -473,3 +473,98 @@ fn resolve_wrong_kind_yields_none() {
     assert_eq!(resolve_storage_slot(&s), None);
     assert_eq!(resolve_time_va(&s), None);
 }
+
+// ---------------------------------------------------------------------------
+// C1D — the shell→child startup-block producer (`build_child_block`). The codec
+// is the shared `loader::startup`, so the producer's output is checked by the
+// real `decode` — no mirrored hand-parser. The producer must be total
+// (rev1§2.7): an over-arena / over-budget block returns `Err`, never a panic or
+// silent truncation.
+// ---------------------------------------------------------------------------
+
+use loader::startup::{decode, GrantKind, NAME_TIME};
+
+/// Encode a child block and decode it back, asserting it is well-formed.
+fn child_block(time_va: u64, argv: &[&[u8]]) -> Vec<u8> {
+    let mut out = [0u8; startup::MAX_BLOCK];
+    let n = build_child_block(&mut out, time_va, argv).expect("within budget");
+    out[..n].to_vec()
+}
+
+#[test]
+fn build_child_block_round_trips_time_and_argv() {
+    let bytes = child_block(0xA300_0000, &[b"bin/selftest", b"254"]);
+    let s = decode(&bytes).expect("valid EUS1 block");
+    // The TIME grant carries the pre-mapped time-page VA (the page length is
+    // informational; the child reads only the VA).
+    assert_eq!(
+        s.grant(NAME_TIME),
+        Some(GrantKind::Region {
+            va: 0xA300_0000,
+            len: TIME_LEN,
+            pa: 0
+        })
+    );
+    // argv round-trips in order: argv[0] the path, argv[1] selftest's mode.
+    assert_eq!(s.nargv, 2);
+    assert_eq!(s.argv[0], b"bin/selftest");
+    assert_eq!(s.argv[1], b"254");
+    // env is carried empty (defined, unpopulated — rev1§5.1, DD5).
+    assert_eq!(s.nenv, 0);
+}
+
+#[test]
+fn build_child_block_no_argv_is_just_the_time_grant() {
+    // runloop's trivial child: argv = [path] only, no mode.
+    let bytes = child_block(0xA300_0000, &[b"bin/selftest"]);
+    let s = decode(&bytes).expect("valid EUS1 block");
+    assert_eq!(s.nargv, 1);
+    assert!(s.grant(NAME_TIME).is_some());
+}
+
+#[test]
+fn build_child_block_refuses_over_arena() {
+    // More argv entries than the arena holds (MAX_ARGV = 8) is refused cleanly,
+    // not truncated — the spawn path maps this to RunErr::Startup.
+    let many = [b"p" as &[u8]; 9];
+    let mut out = [0u8; startup::MAX_BLOCK];
+    assert!(build_child_block(&mut out, 0, &many).is_err());
+}
+
+#[test]
+fn build_child_block_refuses_over_budget() {
+    // A single argv string large enough to push the block past MAX_BLOCK (256):
+    // 7-byte header + 26-byte TIME grant + (2 + 300) argv ≈ 335 bytes.
+    let big = vec![b'x'; 300];
+    let mut out = [0u8; startup::MAX_BLOCK];
+    assert!(build_child_block(&mut out, 0, &[&big]).is_err());
+}
+
+#[test]
+fn build_child_block_oracle_has_teeth() {
+    // The decode oracle must distinguish argv — a tampered expectation fails.
+    let bytes = child_block(0, &[b"prog", b"7"]);
+    let s = decode(&bytes).unwrap();
+    assert_ne!(s.argv[1], b"8");
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: if cfg!(miri) { 4 } else { 256 },
+        ..ProptestConfig::default()
+    })]
+
+    /// Any time VA and any u8 mode (rendered as a decimal argv[1]) round-trip
+    /// through encode→decode: the TIME grant returns the VA, argv[1] the digits.
+    #[test]
+    fn build_child_block_round_trips(time_va in any::<u64>(), mode in any::<u8>()) {
+        let mode_s = format!("{mode}").into_bytes();
+        let bytes = child_block(time_va, &[b"prog", &mode_s]);
+        let s = decode(&bytes).unwrap();
+        prop_assert_eq!(
+            s.grant(NAME_TIME),
+            Some(GrantKind::Region { va: time_va, len: TIME_LEN, pa: 0 })
+        );
+        prop_assert_eq!(s.argv[1], &mode_s[..]);
+    }
+}
