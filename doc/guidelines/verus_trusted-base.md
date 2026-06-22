@@ -38,10 +38,16 @@ rev1§2.5 "accepts top-ups", B10A), and
 that bounds *and* rebuilds the run, proving its `laid_out` linking invariant (B7C, T-2;
 folds in the former `replay_bound` maximal-run equality) — the WAL-record structural
 decode (`wal_struct_ok`/`e_payload_ok`, the verified half of `wal_content_ok`),
-`validate_geometry_fields`, `decode_checked_fields`, the single-entry TLV codec, and the
+`validate_geometry_fields`, `decode_checked_fields`, the single-entry TLV codec, the
 directory **node decoder** — `decode_node`, total ∀ bytes plus the leaf canonical
 round-trip (`canonical_leaf_bytes` / `encode_node_leaf`), the last CAS on-disk decoder
-lifted into the verified surface (B13A; no new seam — Hash-free, composes on `decode_raw`)),
+lifted into the verified surface (B13A; no new seam — Hash-free, composes on `decode_raw`),
+and the directory **level partition core** — `split_points`/`boundary_flags`, proving
+`build_level`'s node-cutting is a lossless, ordered partition (`lemma_partition_flatten`:
+conservation — no item dropped, duplicated, or reordered) with ≤ `MAX_NODE_ENTRIES`
+fanout and boundary discipline (cut only at a boundary or the cap), over the **opaque**
+`is_boundary` predicate so the proof never models BLAKE3 (B13B; +1 trusted seam — the
+BLAKE3 split rule below)),
 and the **gap-freedom composition** (`lemma_gap_freedom` + `lemma_run_len_covers` /
 `lemma_laid_out_mono`), now *live* — fired by `recover_records` on the rebuilt run, its
 `laid_out` premise discharged rather than assumed; the IPC fixed header + window-quota
@@ -65,7 +71,7 @@ so it stays test-routed (B6 Design decision 3). Recorded here so a reviewer sees
 property is test-routed, not Verus-mechanized (the rev1§6.1 "no trust-routed property
 mistaken for mechanized" discipline); this routing leaves the gate unchanged (65/0 after B7C).
 
-## The seams (13 named constructs + the by-construction category)
+## The seams (14 named constructs + the by-construction category)
 
 Grouped by the `verus.md` §11 category. Each interpreted-hash / size / std-gap seam is a
 labeled `ensures`/signature contract, **not** a bare in-proof `assume` (none survive).
@@ -99,6 +105,7 @@ grep-able rather than an implicit consequence of the crash semantics, as rev1§4
 |---|---|---|---|
 | `checksum_ok` | `cas/src/disk.rs:337` | BLAKE3 superblock-body checksum — interpreted hashing, out of SMT scope; trusted total (inspects buffer, returns bool, no panic). `requires buf@.len()==SB_SIZE` keeps the slicing in bounds. | BLAKE3-justified per rev1§6.1(e); exercised by the superblock-decode fuzz/proptest corpora + Miri replay. |
 | `wal_checksum_ok` | `cas/src/store.rs:927` | BLAKE3 WAL-record checksum (`record_checksum` over `seq‖len‖payload`) — interpreted hashing, out of SMT scope; trusted total (inspects the exact-`rlen` record, returns bool, no panic). `requires off+rlen<=wal@.len()` (from `decode_frame`) keeps the slicing in bounds. Paired with the `uninterp spec fn checksum_ok_spec` twin. **The lone uninterpreted part of the record seam after B7B (T-5) split the `WalOp` structural decode into the verified surface (`wal_struct_ok`).** | mount/recovery fuzz corpora + Miri replay; `wal_struct_ok_has_teeth` (`cas/src/store.rs:2445`) pins the structural/checksum split. |
+| `is_boundary` | `cas/src/prolly.rs:1373` | BLAKE3 directory split rule (an item is a node boundary iff the low `SPLIT_BITS` bits of `Hash::of(item)` are zero, rev1§4.1) — interpreted hashing, out of SMT scope; trusted **total** (hashes a slice, returns a bool, never panics — `as_bytes()[..8]` is always 8 of the 32 hash bytes). Totality + determinism only, **no injectivity**: the verified partition core (`split_points`, via `boundary_flags`) is proven *around* it — conservation + boundary discipline + ≤ `MAX_NODE_ENTRIES` — for *any* predicate, so the partition is correct regardless of which items boundary. Paired with the `uninterp spec fn is_boundary_spec` twin. | the `canonical_form`/`roundtrip`/`structural_sharing_on_small_edit` proptests + `split_points_*`/`boundary_flags_faithful_to_predicate` unit tests (`cas/src/prolly.rs`) drive `Dir::save` → `build_level` → `split_points`/`is_boundary`; the `tree_node`/`mount_recovery` fuzz corpora replay it. |
 | `u64::saturating_mul` | `kcore/src/aspace.rs:76` | vstd specs `saturating_add`/`saturating_sub` but not `_mul`; `va_range_ok` needs it. `returns` mirrors documented std saturating semantics. | std-semantics mirror (the `checked_next_multiple_of` precedent); no dedicated unit test. |
 | `usize::checked_next_multiple_of` | `kcore/src/untyped.rs:258` | vstd has no spec yet; the Untyped arm needs only that it returns an `Option`, then re-checks positivity. | positivity re-checked at the call site; signature-only trust. |
 | `CapSlot::empty` | `kcore/src/cspace.rs:1226` | plain-Rust `const fn` shared with the kernel shell; the `ensures` state what it builds (empty cap, all four CDT links `None`) so `slot_move`'s final clear verifies. | consumed by the verified `slot_move`; `ensures` pins the construction. |
@@ -121,9 +128,11 @@ grep-able rather than an implicit consequence of the crash semantics, as rev1§4
 | `Channel::bytes_for` | `kcore/src/untyped.rs:235` | `ensures r > 0`; as above. | `bytes_for_positive`. |
 | `AspaceObj::bytes_for` | `kcore/src/untyped.rs:236` | `ensures r > 0`; as above. | `bytes_for_positive`. |
 
-**Tally:** 7 `external_body` (4 kcore: `ExTcb`/`ExNotifObj`/`ExTimerObj`/`fixed_object_bytes`;
-2 CAS: `checksum_ok`/`wal_checksum_ok`; 1 urt: `debug_check_free`) + 6 `assume_specification`
-(3 `bytes_for` + `saturating_mul` + `checked_next_multiple_of` + `CapSlot::empty`) = **13**.
+**Tally:** 8 `external_body` (4 kcore: `ExTcb`/`ExNotifObj`/`ExTimerObj`/`fixed_object_bytes`;
+3 CAS: `checksum_ok`/`wal_checksum_ok`/`is_boundary`; 1 urt: `debug_check_free`) + 6
+`assume_specification` (3 `bytes_for` + `saturating_mul` + `checked_next_multiple_of` +
+`CapSlot::empty`) = **14** (was 13; +1 in B13B: the `is_boundary` BLAKE3 split rule, the
+3rd CAS interpreted-hash seam, proven *around* by the verified partition core).
 
 > **The `urt` heap arena seam (B11C) is *not* one of these 13.** Like the DMA-pool wrapper, the
 > heap allocator's trusted step — `UnsafeCell<[u8; N]>` interior mutability + `base.add(off)` /
@@ -158,7 +167,7 @@ Any phase touching these must re-establish them at ≥ the prior numbers.
 | Surface | Command | Result |
 |---|---|---|
 | kcore object core | `cargo verus verify -p kcore` | 389 verified, 0 errors |
-| CAS decode + recovery cores | `cargo verus verify -p cas --no-default-features` | 73 verified, 0 errors (was 65; +8 in B13A: the directory **node decoder** `decode_node` total ∀ bytes + leaf canonical round-trip, `encode_node_leaf`, `entries_bytes`/`canonical_leaf_bytes`/`lemma_entries_push`; no new seam) |
+| CAS decode + recovery cores | `cargo verus verify -p cas --no-default-features` | 80 verified, 0 errors (was 73; +7 in B13B: the directory **level partition core** — `split_points`, `boundary_flags`, the `block_start` spec helper, and the conservation lemmas `flatten_blocks`/`lemma_flatten_covers`/`lemma_partition_flatten` — proven over the opaque `is_boundary` seam, the one new trusted construct. B13A added +8 over the prior 65: the **node decoder** `decode_node` total ∀ bytes + leaf canonical round-trip, `encode_node_leaf`, `entries_bytes`/`canonical_leaf_bytes`/`lemma_entries_push`; no new seam) |
 | IPC header + session codecs | `cargo verus verify -p ipc` | 58 verified, 0 errors |
 | shared `FreeList` (free-list allocator core + `is_full`/`is_allocated` guard accessors; extracted from dma-pool in B11A) | `cargo verus verify -p freelist` | 29 verified, 0 errors |
 | DMA-pool wrapper (plain-Rust PA seam; discharges `FreeList`'s preconditions via the `freelist` guards) | `cargo verus verify -p dma-pool` | 0 verified, 0 errors (the 29 obligations moved to `freelist`, not weakened) |
