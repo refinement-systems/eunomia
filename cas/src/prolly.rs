@@ -44,12 +44,12 @@ pub const FLAG_EXECUTABLE: u32 = 1 << 0;
 
 const SPLIT_BITS: u32 = 5;
 const SPLIT_MASK: u64 = (1 << SPLIT_BITS) - 1;
-const MAX_NODE_ENTRIES: usize = 128;
 
-// MAX_OPT_BYTES / OPT_TAG_FLAGS live inside the `verus!{}` block at the end of
-// this file: a const declared outside the macro is invisible to Verus, and the
-// verified TLV core (`decode_raw`/`encode_raw`) names them. They erase to the
-// same `pub const` / `const` so external code is unchanged.
+// MAX_OPT_BYTES / OPT_TAG_FLAGS / MAX_NODE_ENTRIES live inside the `verus!{}`
+// block at the end of this file: a const declared outside the macro is invisible
+// to Verus, and the verified codecs (`decode_raw`/`encode_raw`, `decode_node`)
+// name them. They erase to the same `pub const` / `const` so external code is
+// unchanged.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
@@ -226,6 +226,7 @@ fn tlv_err(e: TlvErr) -> FormatError {
     match e {
         TlvErr::Truncated => FormatError::BadNode("truncated"),
         TlvErr::BadEntry(why) => FormatError::BadEntry(why),
+        TlvErr::BadNode(why) => FormatError::BadNode(why),
     }
 }
 
@@ -279,7 +280,7 @@ pub(crate) fn decode_entry(r: &mut Reader) -> Result<Entry, FormatError> {
     // The verified core (`decode_raw`) parses one entry's structure + optional
     // section (total ∀ bytes, accepts only canonical encodings); `validate_entry`
     // adds the entry-level well-formedness that only shrinks the accept set.
-    let (raw, consumed) = decode_raw(&r.buf[r.pos..]).map_err(tlv_err)?;
+    let (raw, consumed) = decode_raw(r.buf, r.pos).map_err(tlv_err)?;
     r.pos += consumed;
     let entry = raw_to_entry(raw);
     validate_entry(&entry)?;
@@ -431,31 +432,28 @@ pub enum NodeRefs {
 }
 
 pub fn parse_node(bytes: &[u8]) -> Result<NodeRefs, FormatError> {
-    let mut r = Reader { buf: bytes, pos: 0 };
-    let level = r.u8()?;
-    let count = r.u32()? as usize;
-    if count > MAX_NODE_ENTRIES {
-        return Err(FormatError::BadNode("node too wide"));
-    }
-    let refs = if level == 0 {
-        let mut entries = Vec::with_capacity(count);
-        for _ in 0..count {
-            entries.push(decode_entry(&mut r)?);
+    // `decode_node` (verified, total ∀ bytes) does the structural parse —
+    // level/count/items, the ≤ MAX_NODE_ENTRIES cap, and the whole-buffer-consumed
+    // (trailing-bytes) check. Entry-level well-formedness (`validate_entry`) and the
+    // `Hash` wrap stay plain Rust (they only shrink the accept set / touch `Hash`).
+    match decode_node(bytes).map_err(tlv_err)? {
+        (_level, RawNodeBody::Leaf(entries)) => {
+            let mut out = Vec::with_capacity(entries.len());
+            for raw in entries {
+                let entry = raw_to_entry(raw);
+                validate_entry(&entry)?;
+                out.push(entry);
+            }
+            Ok(NodeRefs::Entries(out))
         }
-        NodeRefs::Entries(entries)
-    } else {
-        let mut children = Vec::with_capacity(count);
-        for _ in 0..count {
-            let key_len = r.u8()? as usize;
-            r.take(key_len)?;
-            children.push(r.hash()?);
+        (_level, RawNodeBody::Internal(children)) => {
+            let mut out = Vec::with_capacity(children.len());
+            for c in children {
+                out.push(Hash::from_bytes(c.child));
+            }
+            Ok(NodeRefs::Children(out))
         }
-        NodeRefs::Children(children)
-    };
-    if !r.done() {
-        return Err(FormatError::BadNode("trailing bytes"));
     }
-    Ok(refs)
 }
 
 fn load_node(
@@ -465,44 +463,43 @@ fn load_node(
     out: &mut Vec<Entry>,
 ) -> Result<(), FormatError> {
     let bytes = store.get(hash).ok_or(FormatError::MissingNode(*hash))?;
-    let mut r = Reader {
-        buf: &bytes,
-        pos: 0,
-    };
-    let level = r.u8()?;
+    // `decode_node` (verified) does the structural parse + ≤ MAX cap + trailing
+    // check. The cross-node discipline — level matches the parent's expectation,
+    // empty only at the directory root, and the separator key equals the first key
+    // under each child — needs root-ness/recursion, so it stays here.
+    let (level, body) = decode_node(&bytes).map_err(tlv_err)?;
     if let Some(expect) = expected_level {
         if level != expect {
             return Err(FormatError::BadNode("level mismatch"));
         }
     }
-    let count = r.u32()? as usize;
-    if count > MAX_NODE_ENTRIES {
-        return Err(FormatError::BadNode("node too wide"));
-    }
-    if count == 0 && !(level == 0 && expected_level.is_none()) {
-        // Only the root of an empty directory may be an empty node.
-        return Err(FormatError::BadNode("empty non-root node"));
-    }
-    if level == 0 {
-        for _ in 0..count {
-            out.push(decode_entry(&mut r)?);
-        }
-    } else {
-        for _ in 0..count {
-            let key_len = r.u8()? as usize;
-            let key = r.take(key_len)?.to_vec();
-            let child = r.hash()?;
-            let first_idx = out.len();
-            load_node(store, &child, Some(level - 1), out)?;
-            // The separator key must be the first key under the child —
-            // one encoding per logical tree.
-            if out.get(first_idx).map(|e| e.name.as_slice()) != Some(key.as_slice()) {
-                return Err(FormatError::BadNode("separator key mismatch"));
+    match body {
+        RawNodeBody::Leaf(entries) => {
+            // Only the root of an empty directory may be an empty node.
+            if entries.is_empty() && expected_level.is_some() {
+                return Err(FormatError::BadNode("empty non-root node"));
+            }
+            for raw in entries {
+                let entry = raw_to_entry(raw);
+                validate_entry(&entry)?;
+                out.push(entry);
             }
         }
-    }
-    if !r.done() {
-        return Err(FormatError::BadNode("trailing bytes"));
+        RawNodeBody::Internal(children) => {
+            // An internal node (level > 0) is never the empty-directory root.
+            if children.is_empty() {
+                return Err(FormatError::BadNode("empty non-root node"));
+            }
+            for c in children {
+                let first_idx = out.len();
+                load_node(store, &Hash::from_bytes(c.child), Some(level - 1), out)?;
+                // The separator key must be the first key under the child —
+                // one encoding per logical tree.
+                if out.get(first_idx).map(|e| e.name.as_slice()) != Some(c.key.as_slice()) {
+                    return Err(FormatError::BadNode("separator key mismatch"));
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -570,6 +567,11 @@ pub const MAX_OPT_BYTES: usize = 4096;
 /// The one optional tag defined by format v0 (the advisory flags word).
 const OPT_TAG_FLAGS: u8 = 1;
 
+/// Forced node boundary: at most this many items per directory node (rev1§4.1).
+/// Inside the macro so the verified `decode_node` can name it; erases to the same
+/// module-level `const` that `build_level` uses.
+const MAX_NODE_ENTRIES: usize = 128;
+
 /// The `Hash`-free image of one decoded entry — `[u8; 32]` in place of `Hash`
 /// so the round-trip proof never touches the external `Hash` type.
 pub struct RawEntry {
@@ -587,12 +589,30 @@ pub enum RawContent {
     DirRoot([u8; 32]),
 }
 
+/// One internal-node child slot, `Hash`-free: the separator key plus the raw
+/// 32-byte child node hash (`[u8; 32]` keeps `Hash` off the proof surface, like
+/// `RawContent`). The running `load_node` re-wraps `child` into a `Hash`.
+pub struct RawChild {
+    pub key: Vec<u8>,
+    pub child: [u8; 32],
+}
+
+/// The `Hash`-free image of one decoded node body: leaf entries (`level == 0`)
+/// or internal child slots (`level > 0`). `decode_node` returns it with the
+/// node's level; the running `parse_node`/`load_node` do the thin `Hash` wrap
+/// (the entry path also runs `validate_entry`, which only shrinks the accept set).
+pub enum RawNodeBody {
+    Leaf(Vec<RawEntry>),
+    Internal(Vec<RawChild>),
+}
+
 /// Why `decode_raw` rejected — mapped 1:1 to `FormatError` by `decode_entry`
 /// (an in-block enum because the external `FormatError` cannot be constructed
 /// inside `verus!{}`; its `MissingNode(Hash)` variant would drag in `Hash`).
 pub enum TlvErr {
     Truncated,
     BadEntry(&'static str),
+    BadNode(&'static str),
 }
 
 // ── Spec: the canonical byte image of an entry ───────────────────────────
@@ -634,6 +654,29 @@ pub open spec fn opt_bytes(flags: u32) -> Seq<u8> {
 pub open spec fn canonical_bytes(e: RawEntry) -> Seq<u8> {
     seq![e.name@.len() as u8] + e.name@ + seq![e.kind] + u64_le(e.size) + u64_le(e.mtime)
         + content_bytes(e.content) + opt_bytes(e.flags)
+}
+
+/// The canonical byte image of a leaf node's entry sequence: each entry's
+/// `canonical_bytes`, concatenated in order. Back-recursive (peels the last
+/// entry) so the decode loop's running concat invariant
+/// (`buf[5..pos] == entries_bytes(parsed)`) restores in one `lemma_entries_push`
+/// step per pushed entry.
+pub open spec fn entries_bytes(es: Seq<RawEntry>) -> Seq<u8>
+    decreases es.len(),
+{
+    if es.len() == 0 {
+        Seq::<u8>::empty()
+    } else {
+        entries_bytes(es.drop_last()) + canonical_bytes(es.last())
+    }
+}
+
+/// The canonical byte image of a whole **leaf** node: `[level=0][count u32][entries…]`.
+/// `decode_node` proves the consumed bytes equal this for every accepted leaf —
+/// the node-grain of rev1§4.9 ("exactly one encoding per logical leaf node") and
+/// the rev1§6 decode-then-re-encode oracle.
+pub open spec fn canonical_leaf_bytes(es: Seq<RawEntry>) -> Seq<u8> {
+    seq![0u8] + u32_le(es.len() as u32) + entries_bytes(es)
 }
 
 // ── Exec byte readers (explicit index + shift, not
@@ -912,23 +955,26 @@ fn fits(pos: usize, n: usize, end: usize) -> (b: bool)
 /// `Ok` the consumed prefix equals the entry's `canonical_bytes` — so the
 /// decoder only ever accepts a canonical encoding (the round-trip's hard
 /// direction; the opt-section loop accepts at most one record).
-pub fn decode_raw(buf: &[u8]) -> (r: Result<(RawEntry, usize), TlvErr>)
+pub fn decode_raw(buf: &[u8], start: usize) -> (r: Result<(RawEntry, usize), TlvErr>)
+    requires
+        start <= buf@.len(),
     ensures
-        r matches Ok((e, k)) ==> k <= buf@.len() && canonical_bytes(e) == buf@.subrange(0, k as int),
+        r matches Ok((e, k)) ==> start + k <= buf@.len()
+            && canonical_bytes(e) == buf@.subrange(start as int, start as int + k as int),
 {
     broadcast use vstd::slice::group_slice_axioms;
     let len = buf.len();
 
     // name_len (u8) + name
-    if !fits(0, 1, len) {
+    if !fits(start, 1, len) {
         return Err(TlvErr::Truncated);
     }
-    let name_len = buf[0] as usize;
-    if !fits(1, name_len, len) {
+    let name_len = buf[start] as usize;
+    if !fits(start + 1, name_len, len) {
         return Err(TlvErr::Truncated);
     }
-    let name = copy_range(buf, 1, name_len);
-    let p_kind = 1 + name_len;
+    let name = copy_range(buf, start + 1, name_len);
+    let p_kind = start + 1 + name_len;
 
     // kind (u8)
     if !fits(p_kind, 1, len) {
@@ -1117,22 +1163,183 @@ pub fn decode_raw(buf: &[u8]) -> (r: Result<(RawEntry, usize), TlvErr>)
 
     let e = RawEntry { name, kind, flags, size, mtime, content };
 
-    // Assemble: canonical_bytes(e) == buf[0, opt_end].
-    assert(seq![e.name@.len() as u8] == buf@.subrange(0, 1));
-    assert(e.name@ == buf@.subrange(1, p_kind as int));
+    // Assemble: canonical_bytes(e) == buf[start, opt_end].
+    assert(seq![e.name@.len() as u8] == buf@.subrange(start as int, start as int + 1));
+    assert(e.name@ == buf@.subrange(start as int + 1, p_kind as int));
     assert(seq![e.kind] =~= buf@.subrange(p_kind as int, p_size as int));
     assert(u64_le(e.size) == buf@.subrange(p_size as int, p_mtime as int));
     assert(u64_le(e.mtime) == buf@.subrange(p_mtime as int, gp_content));
     proof {
-        lemma_cat(buf@, 0, 1, p_kind as int);
-        lemma_cat(buf@, 0, p_kind as int, p_size as int);
-        lemma_cat(buf@, 0, p_size as int, p_mtime as int);
-        lemma_cat(buf@, 0, p_mtime as int, gp_content);
-        lemma_cat(buf@, 0, gp_content, gp_optlen);
-        lemma_cat(buf@, 0, gp_optlen, opt_end as int);
+        lemma_cat(buf@, start as int, start as int + 1, p_kind as int);
+        lemma_cat(buf@, start as int, p_kind as int, p_size as int);
+        lemma_cat(buf@, start as int, p_size as int, p_mtime as int);
+        lemma_cat(buf@, start as int, p_mtime as int, gp_content);
+        lemma_cat(buf@, start as int, gp_content, gp_optlen);
+        lemma_cat(buf@, start as int, gp_optlen, opt_end as int);
     }
-    assert(canonical_bytes(e) == buf@.subrange(0, opt_end as int));
-    Ok((e, opt_end))
+    assert(canonical_bytes(e) == buf@.subrange(start as int, opt_end as int));
+    Ok((e, opt_end - start))
+}
+
+// ── Node decode/encode: the leaf-grain canonical round-trip ────────────────
+
+/// One unfold step of [`entries_bytes`]: appending an entry appends its
+/// `canonical_bytes`. The decode/encode loops cite it to restore their running
+/// concat invariant after each pushed entry.
+proof fn lemma_entries_push(es: Seq<RawEntry>, e: RawEntry)
+    ensures
+        entries_bytes(es.push(e)) == entries_bytes(es) + canonical_bytes(e),
+{
+    assert(es.push(e).drop_last() =~= es);
+    assert(es.push(e).last() == e);
+}
+
+/// Decode one stored directory node — `[level u8][count u32][items…]` — into its
+/// `Hash`-free image, **total ∀ bytes** (verifying the body *is* the no-panic
+/// theorem). Leaf items (`level == 0`) are entries via the verified `decode_raw`
+/// loop; internal items are `[key_len u8][key][child u8;32]`. The whole buffer
+/// must be consumed (a node is one stored object; trailing bytes are rejected).
+/// For a **leaf** the consumed bytes equal `canonical_leaf_bytes` — the
+/// node-grain canonical round-trip (rev1§4.9/§6). Internal nodes get **totality
+/// only**: `parse_node` lowers separator keys into child hashes, so there is no
+/// lossless single-node internal re-encoder (B13C's whole-tree oracle covers it).
+pub fn decode_node(buf: &[u8]) -> (r: Result<(u8, RawNodeBody), TlvErr>)
+    ensures
+        r matches Ok((lvl, RawNodeBody::Leaf(es))) ==> lvl == 0 && canonical_leaf_bytes(es@)
+            == buf@,
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    let len = buf.len();
+
+    // [level u8][count u32]
+    if !fits(0, 1, len) {
+        return Err(TlvErr::Truncated);
+    }
+    let level = buf[0];
+    if !fits(1, 4, len) {
+        return Err(TlvErr::Truncated);
+    }
+    let count = read_u32_le(buf, 1);
+    if count as usize > MAX_NODE_ENTRIES {
+        return Err(TlvErr::BadNode("node too wide"));
+    }
+    assert(buf@.subrange(0, 1) =~= seq![level]);
+
+    if level == 0 {
+        let mut entries: Vec<RawEntry> = Vec::new();
+        let mut i: u32 = 0;
+        let mut pos: usize = 5;
+        assert(buf@.subrange(5, 5) =~= entries_bytes(entries@));
+        while i < count
+            invariant
+                5 <= pos <= len,
+                len == buf@.len(),
+                i <= count,
+                entries@.len() == i,
+                buf@.subrange(0, 1) == seq![level],
+                buf@.subrange(1, 5) == u32_le(count),
+                buf@.subrange(5, pos as int) == entries_bytes(entries@),
+            decreases count - i,
+        {
+            let ghost old_pos = pos;
+            let ghost old_entries = entries@;
+            match decode_raw(buf, pos) {
+                Ok((e, k)) => {
+                    // decode_raw: pos + k <= len && canonical_bytes(e) == buf[pos, pos+k]
+                    entries.push(e);
+                    proof {
+                        lemma_entries_push(old_entries, e);
+                        lemma_cat(buf@, 5, old_pos as int, (old_pos + k) as int);
+                    }
+                    pos = pos + k;
+                }
+                Err(er) => {
+                    return Err(er);
+                }
+            }
+            i += 1;
+        }
+        // count entries parsed; the whole buffer must be consumed.
+        if pos != len {
+            return Err(TlvErr::BadNode("trailing bytes"));
+        }
+        proof {
+            lemma_cat(buf@, 0, 1, 5);
+            lemma_cat(buf@, 0, 5, len as int);
+        }
+        assert(buf@.subrange(0, 1) =~= seq![0u8]);
+        assert(entries@.len() == count);
+        assert(entries@.len() as u32 == count);
+        assert(buf@ =~= buf@.subrange(0, len as int));
+        assert(canonical_leaf_bytes(entries@) =~= buf@);
+        Ok((level, RawNodeBody::Leaf(entries)))
+    } else {
+        let mut children: Vec<RawChild> = Vec::new();
+        let mut i: u32 = 0;
+        let mut pos: usize = 5;
+        while i < count
+            invariant
+                5 <= pos <= len,
+                len == buf@.len(),
+                i <= count,
+                children@.len() == i,
+            decreases count - i,
+        {
+            if !fits(pos, 1, len) {
+                return Err(TlvErr::Truncated);
+            }
+            let key_len = buf[pos] as usize;
+            if !fits(pos + 1, key_len, len) {
+                return Err(TlvErr::Truncated);
+            }
+            let key = copy_range(buf, pos + 1, key_len);
+            let hpos = pos + 1 + key_len;
+            if !fits(hpos, 32, len) {
+                return Err(TlvErr::Truncated);
+            }
+            let child = read_arr32(buf, hpos);
+            children.push(RawChild { key, child });
+            pos = hpos + 32;
+            i += 1;
+        }
+        if pos != len {
+            return Err(TlvErr::BadNode("trailing bytes"));
+        }
+        Ok((level, RawNodeBody::Internal(children)))
+    }
+}
+
+/// Serialize a **leaf** node's entries to their canonical bytes
+/// (`[0][count u32][entries…]`), appended to `out`. The encode half of the
+/// node-grain round-trip (mirrors `encode_raw` at the node grain): produces
+/// exactly `canonical_leaf_bytes`, so `decode_node(encode_node_leaf(es)) == es`
+/// and `encode_node_leaf(decode_node(b)) == b` for accepted leaf `b`.
+pub fn encode_node_leaf(es: &Vec<RawEntry>, out: &mut Vec<u8>)
+    ensures
+        final(out)@ == old(out)@ + canonical_leaf_bytes(es@),
+{
+    out.push(0u8);
+    push_u32_le(out, es.len() as u32);
+    assert(es@.subrange(0, 0) =~= Seq::<RawEntry>::empty());
+    let mut i: usize = 0;
+    while i < es.len()
+        invariant
+            i <= es@.len(),
+            out@ == old(out)@ + seq![0u8] + u32_le(es@.len() as u32) + entries_bytes(
+                es@.subrange(0, i as int),
+            ),
+        decreases es@.len() - i,
+    {
+        let ghost prev = es@.subrange(0, i as int);
+        encode_raw(&es[i], out);
+        proof {
+            lemma_entries_push(prev, es@[i as int]);
+            assert(es@.subrange(0, i as int + 1) =~= prev.push(es@[i as int]));
+        }
+        i += 1;
+    }
+    assert(es@.subrange(0, es@.len() as int) =~= es@);
+    assert(out@ =~= old(out)@ + canonical_leaf_bytes(es@));
 }
 
 } // verus!
@@ -1266,6 +1473,140 @@ mod tests {
             ]
         );
         assert!(diff(&store, &r1, &r1).unwrap().is_empty());
+    }
+
+    // ── Node-decoder rejection cases (B13A) ─────────────────────────────
+    //
+    // The node decoder is verified total ∀ bytes; these pin the rejection
+    // *messages* the running path returns (the verified totality is the
+    // no-panic backstop behind them).
+
+    /// Assemble a leaf node the way `build_level` does, for crafting hostile
+    /// parents below.
+    fn leaf_node_bytes(entries: &[Entry]) -> Vec<u8> {
+        let mut node = vec![0u8];
+        node.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+        for e in entries {
+            encode_entry(e, &mut node);
+        }
+        node
+    }
+
+    #[test]
+    fn node_decoder_rejects_overwide_count() {
+        // [level=0][count=200]: count exceeds MAX_NODE_ENTRIES (128).
+        let mut bytes = vec![0u8];
+        bytes.extend_from_slice(&200u32.to_le_bytes());
+        // `NodeRefs` is not `PartialEq`, so match the error variant directly.
+        assert!(matches!(
+            parse_node(&bytes),
+            Err(FormatError::BadNode("node too wide"))
+        ));
+    }
+
+    #[test]
+    fn node_decoder_rejects_trailing_bytes() {
+        // A valid empty leaf node ([0][0]) plus one trailing byte.
+        let mut bytes = vec![0u8];
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.push(0xff);
+        assert!(matches!(
+            parse_node(&bytes),
+            Err(FormatError::BadNode("trailing bytes"))
+        ));
+    }
+
+    #[test]
+    fn node_decoder_rejects_truncated_header() {
+        // Fewer than the 5-byte [level][count] header.
+        assert!(matches!(
+            parse_node(&[]),
+            Err(FormatError::BadNode("truncated"))
+        ));
+        assert!(matches!(
+            parse_node(&[0u8, 1, 2]),
+            Err(FormatError::BadNode("truncated"))
+        ));
+    }
+
+    #[test]
+    fn node_decoder_rejects_level_mismatch() {
+        let mut store = MemStore::new();
+        let e = file_entry(b"a", b"x", 1, 0);
+        let child_hash = store.put(&leaf_node_bytes(&[e.clone()])); // a level-0 leaf
+                                                                    // Parent claims level 2, so its leaf child is expected at level 1, not 0.
+        let mut parent = vec![2u8];
+        parent.extend_from_slice(&1u32.to_le_bytes());
+        parent.push(e.name.len() as u8);
+        parent.extend_from_slice(&e.name);
+        parent.extend_from_slice(child_hash.as_bytes());
+        let root = store.put(&parent);
+        assert_eq!(
+            Dir::load(&store, &root),
+            Err(FormatError::BadNode("level mismatch"))
+        );
+    }
+
+    #[test]
+    fn node_decoder_rejects_separator_mismatch() {
+        let mut store = MemStore::new();
+        let e = file_entry(b"actual", b"x", 1, 0);
+        let child_hash = store.put(&leaf_node_bytes(&[e]));
+        // Level-1 parent whose separator key does not equal the child's first key.
+        let mut parent = vec![1u8];
+        parent.extend_from_slice(&1u32.to_le_bytes());
+        parent.push(5u8);
+        parent.extend_from_slice(b"wrong");
+        parent.extend_from_slice(child_hash.as_bytes());
+        let root = store.put(&parent);
+        assert_eq!(
+            Dir::load(&store, &root),
+            Err(FormatError::BadNode("separator key mismatch"))
+        );
+    }
+
+    #[test]
+    fn node_decoder_rejects_empty_non_root() {
+        let mut store = MemStore::new();
+        // An empty leaf node is fine as a directory root, but not as a child.
+        let child_hash = store.put(&leaf_node_bytes(&[]));
+        let mut parent = vec![1u8];
+        parent.extend_from_slice(&1u32.to_le_bytes());
+        parent.push(1u8);
+        parent.push(b'a');
+        parent.extend_from_slice(child_hash.as_bytes());
+        let root = store.put(&parent);
+        assert_eq!(
+            Dir::load(&store, &root),
+            Err(FormatError::BadNode("empty non-root node"))
+        );
+    }
+
+    #[test]
+    fn node_leaf_decode_encode_roundtrip() {
+        // Build a real (single-leaf) directory, then decode→re-encode its root
+        // node: the verified leaf canonical round-trip, on real BLAKE3 bytes.
+        let mut store = MemStore::new();
+        let mut dir = Dir::new();
+        for i in 0..5u32 {
+            let name = format!("f-{i}");
+            dir.upsert(file_entry(name.as_bytes(), b"x", 1, 0)).unwrap();
+        }
+        let root = dir.save(&mut store);
+        let bytes = store.get(&root).unwrap();
+        let (level, body) = match decode_node(&bytes) {
+            Ok(x) => x,
+            Err(_) => panic!("decode_node rejected a canonical leaf node"),
+        };
+        assert_eq!(level, 0);
+        match body {
+            RawNodeBody::Leaf(entries) => {
+                let mut out = Vec::new();
+                encode_node_leaf(&entries, &mut out);
+                assert_eq!(out, bytes, "leaf node decode→encode is not the identity");
+            }
+            RawNodeBody::Internal(_) => panic!("expected a single leaf root node"),
+        }
     }
 
     // ── Proptest strategies ─────────────────────────────────────────────
