@@ -501,6 +501,16 @@ impl WalOp {
         }
     }
 
+    /// The op's server-assigned UTC-nanos timestamp (rev1§4.7). Both variants
+    /// carry it; the per-ref dirty-staleness accounting (rev1§4.4) uses it as
+    /// the oldest-dirty key, reconstructed identically on WAL replay since the
+    /// value is the same one persisted in the record.
+    pub fn mtime(&self) -> u64 {
+        match self {
+            WalOp::Write { mtime, .. } | WalOp::Unlink { mtime, .. } => *mtime,
+        }
+    }
+
     fn encode_payload(&self) -> Vec<u8> {
         let mut out = Vec::new();
         let put_path = |out: &mut Vec<u8>, path: &[Vec<u8>]| {

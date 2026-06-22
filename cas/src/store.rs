@@ -156,16 +156,54 @@ pub enum RefEdit {
 pub struct StoreOptions {
     pub wal_len: u64,
     pub chunker: ChunkerParams,
-    /// Global dirty-overlay budget (rev1§4.4); exceeding it forces sync.
-    pub overlay_budget: usize,
+    /// Global dirty-overlay byte budget (rev1§4.4 high watermark): the sum of
+    /// every per-ref overlay may not exceed it. Crossing it forces a flush —
+    /// the "global budget exists because memory is finite" half of the policy.
+    pub global_budget: usize,
+    /// Per-ref soft byte bound (rev1§4.4 containment): a single ref's overlay
+    /// flushes once it exceeds this size, so one ref cannot consume the whole
+    /// `global_budget` (the per-ref soft quota under the global budget). The
+    /// recommended default (8 MiB) is shipped by B12F; this struct only carries
+    /// it as a tunable number — the mechanism, not the figure, is mandatory.
+    pub per_ref_budget: usize,
+    /// Per-ref operation-count secondary bound (rev1§4.4): a ref also flushes
+    /// once it has accumulated this many unflushed mutating ops, so a metadata
+    /// storm whose dirty *bytes* stay small cannot hide under the byte budget.
+    pub op_count_bound: u64,
+    /// Size-pressure low watermark (rev1§4.4): flushing the biggest offenders
+    /// starts here, below the high watermark (`global_budget`), so writers
+    /// rarely hit the high one. Consumed by B12B; carried here as the substrate
+    /// (stubbed equal to `global_budget` until then).
+    pub size_low_watermark: usize,
+    /// WAL-usage watermark that triggers flush-the-pinner (rev1§4.4, the
+    /// recommended 50% of `wal_len`). Consumed by B12C's circular ring; carried
+    /// here as the substrate (stubbed equal to `wal_len` until then).
+    pub wal_watermark: u64,
+    /// Staleness bound in nanoseconds (rev1§4.4 timer trigger): a quietly dirty
+    /// ref eventually becomes committed tree once its oldest-dirty age exceeds
+    /// this. Consumed by B12D; carried here as the substrate (stubbed to no
+    /// staleness flush until then).
+    pub staleness_ns: u64,
 }
 
 impl Default for StoreOptions {
     fn default() -> Self {
+        // B12A keeps the pre-B12 magnitudes (the rev1§4.4 recommended defaults —
+        // S-9 — are shipped by B12F). The new bounds are stubbed to
+        // non-triggering values so the reshape changes no behavior: a single ref
+        // may still fill the whole budget, no op-count/watermark/staleness flush
+        // fires by default. Tests that exercise the bounds pass tight opts.
+        let global_budget = 8 * 1024 * 1024;
+        let wal_len = 16 * 1024 * 1024;
         StoreOptions {
-            wal_len: 16 * 1024 * 1024,
+            wal_len,
             chunker: ChunkerParams::DEFAULT,
-            overlay_budget: 8 * 1024 * 1024,
+            global_budget,
+            per_ref_budget: global_budget,
+            op_count_bound: u64::MAX,
+            size_low_watermark: global_budget,
+            wal_watermark: wal_len,
+            staleness_ns: u64::MAX,
         }
     }
 }
@@ -1370,6 +1408,26 @@ fn recover_records(wal: &[u8], wal_head: u64, wal_next_seq: u64) -> (r: Recovere
 
 } // verus!
 
+/// Per-ref flush-scheduler accounting (rev1§4.4), riding alongside `overlays`.
+/// Every field is *derived* from the ref's currently-unflushed records, so it
+/// is reconstructed at mount during WAL replay and never persisted — B12 is
+/// format-stable (no `SB_VERSION` bump, no corpus regen). Reset when the ref
+/// flushes (its overlay becomes immutable tree). The dirty *byte* count is not
+/// duplicated here — it already lives in `Overlay::bytes()`.
+#[derive(Debug, Default)]
+struct RefAcct {
+    /// Mutating ops applied to this ref since its last flush — the op-count
+    /// secondary bound (rev1§4.4), so a metadata storm with tiny bytes flushes.
+    op_count: u64,
+    /// WAL position of this ref's oldest unflushed record: the flush-the-pinner
+    /// sort key (rev1§4.4). Set by the first op after a flush, untouched after.
+    /// `None` while the ref is clean. Consumed by B12C.
+    oldest_wal_pos: Option<u64>,
+    /// UTC-nanos timestamp at which this ref first became dirty: the staleness
+    /// trigger's age key (rev1§4.4). `None` while clean. Consumed by B12D.
+    oldest_dirty_ns: Option<u64>,
+}
+
 pub struct Store<D: BlockDev> {
     chunks: ChunkStore<D>,
     opts: StoreOptions,
@@ -1385,6 +1443,9 @@ pub struct Store<D: BlockDev> {
     /// once, and a no-op commit ticks nothing.
     dirty_refs: BTreeSet<Vec<u8>>,
     overlays: BTreeMap<Vec<u8>, Overlay>,
+    /// Per-ref flush-scheduler accounting (rev1§4.4), keyed like `overlays`.
+    /// Derived runtime state, reconstructed on WAL replay (B12 is format-stable).
+    acct: BTreeMap<Vec<u8>, RefAcct>,
     wal_tail: u64,
     wal_seq: u64,
     wal_records: VecDeque<RecMeta>,
@@ -1442,6 +1503,7 @@ impl<D: BlockDev> Store<D> {
             table,
             dirty_refs: BTreeSet::new(),
             overlays: BTreeMap::new(),
+            acct: BTreeMap::new(),
             wal_tail: 0,
             wal_seq: 1,
             wal_records: VecDeque::new(),
@@ -1579,6 +1641,7 @@ impl<D: BlockDev> Store<D> {
             table,
             dirty_refs: BTreeSet::new(),
             overlays: BTreeMap::new(),
+            acct: BTreeMap::new(),
             wal_tail: sb.wal_head,
             wal_seq: sb.wal_next_seq,
             wal_records: VecDeque::new(),
@@ -1617,6 +1680,11 @@ impl<D: BlockDev> Store<D> {
                 }
             }
             store.apply_to_overlay(&op);
+            // Reconstruct per-ref flush accounting from the replayed records
+            // (rev1§4.4): nothing of it is persisted, so the live state is
+            // recomputed here exactly as the write path built it (B12 is
+            // format-stable). `rec.off` is the record's WAL position.
+            store.account_op(&op, rec.off);
             store.wal_records.push_back(RecMeta {
                 seq: rec.seq,
                 off: rec.off,
@@ -1908,25 +1976,58 @@ impl<D: BlockDev> Store<D> {
             self.sync_all()?;
             debug_assert_eq!(self.wal_tail, 0);
         }
-        self.chunks.dev.write(WAL_OFF + self.wal_tail, &rec)?;
+        let rec_off = self.wal_tail;
+        self.chunks.dev.write(WAL_OFF + rec_off, &rec)?;
         self.chunks.dev.flush()?;
         self.wal_records.push_back(RecMeta {
             seq: self.wal_seq,
-            off: self.wal_tail,
+            off: rec_off,
             ref_name: op.ref_name().to_vec(),
             flushed: false,
         });
         self.wal_tail += rec.len() as u64;
         self.wal_seq += 1;
+        let r = op.ref_name().to_vec();
         self.apply_to_overlay(&op);
+        self.account_op(&op, rec_off);
 
-        // Size pressure (rev1§4.4), collapsed to the simplest correct policy:
-        // blow the global budget → sync everything.
+        // Per-ref soft bound (rev1§4.4 containment, M-3/M-6): a ref that
+        // crosses its byte quota or its op-count secondary bound self-flushes,
+        // so one hot ref cannot consume the whole global budget and a metadata
+        // storm with tiny bytes still flushes. Backpressure is a synchronous
+        // blocking flush (no eviction, no `FULL` return): the write proceeds
+        // once the overlay has become tree. The flush + commit rides the
+        // existing partial-head-advance (`advance_head` pops the contiguous
+        // flushed prefix); B12C's ring reclaims the rest of the WAL span.
+        let over_bytes = self.overlays.get(&r).map_or(0, |o| o.bytes()) > self.opts.per_ref_budget;
+        let over_ops = self.acct.get(&r).map_or(0, |a| a.op_count) > self.opts.op_count_bound;
+        if over_bytes || over_ops {
+            self.flush_ref(&r)?;
+            self.commit()?;
+        }
+
+        // Global size pressure (rev1§4.4 high watermark): still flush-everything
+        // here — B12B replaces this with the low/high-watermark,
+        // flush-the-biggest-offenders policy.
         let total: usize = self.overlays.values().map(|o| o.bytes()).sum();
-        if total > self.opts.overlay_budget {
+        if total > self.opts.global_budget {
             self.sync_all()?;
         }
         Ok(())
+    }
+
+    /// Update a ref's flush-scheduler accounting after one mutating op lands in
+    /// its overlay (rev1§4.4). `wal_pos` is the op's byte offset in the WAL.
+    /// Pure derived state: called on the live write path and again, identically,
+    /// during mount WAL replay, so a remounted store recomputes it (B12 is
+    /// format-stable). Reset in `flush_ref` when the ref's overlay becomes tree.
+    fn account_op(&mut self, op: &WalOp, wal_pos: u64) {
+        let a = self.acct.entry(op.ref_name().to_vec()).or_default();
+        a.op_count += 1;
+        // The first op after a flush pins the oldest position/timestamp; later
+        // ops leave them — "oldest" never moves forward until the ref flushes.
+        a.oldest_wal_pos.get_or_insert(wal_pos);
+        a.oldest_dirty_ns.get_or_insert(op.mtime());
     }
 
     fn apply_to_overlay(&mut self, op: &WalOp) {
@@ -2086,6 +2187,10 @@ impl<D: BlockDev> Store<D> {
     /// Turn one ref's overlay into immutable tree (path-copy to a new
     /// root). Nothing on disk references the result until commit.
     pub fn flush_ref(&mut self, ref_name: &[u8]) -> Result<(), StoreError> {
+        // The overlay becomes immutable tree, so the ref is no longer dirty:
+        // drop its flush-scheduler accounting (rev1§4.4). No-op when clean —
+        // a clean ref never has an accounting entry.
+        self.acct.remove(ref_name);
         let Some(overlay) = self.overlays.remove(ref_name) else {
             return Ok(());
         };
@@ -2526,7 +2631,22 @@ mod tests {
                 avg: 256,
                 max: 1024,
             },
-            overlay_budget: 32 * 1024,
+            global_budget: 32 * 1024,
+            // The per-ref/op-count/watermark/staleness bounds inherit their
+            // non-triggering defaults, so this shared fixture preserves the
+            // pre-B12 flush behavior; tests that exercise a bound pass tight opts.
+            ..StoreOptions::default()
+        }
+    }
+
+    /// `test_opts` with a tight per-ref op-count bound so the B12A per-ref
+    /// soft-bound auto-flush (rev1§4.4) fires mid-stream — used by the
+    /// crash-injection proptest to re-witness all-acked-survives across the new
+    /// selective-flush path (flush_ref + commit inside a write).
+    fn crash_opts() -> StoreOptions {
+        StoreOptions {
+            op_count_bound: 4,
+            ..test_opts()
         }
     }
 
@@ -2546,6 +2666,197 @@ mod tests {
         rec.extend_from_slice(&[0u8; 32]); // checksum placeholder
         rec.extend_from_slice(payload);
         rec
+    }
+
+    // ── B12A: per-ref accounting + per-ref soft bound (rev1§4.4, M-3/M-6) ──
+    //
+    // `mod tests` is a child module of `store`, so these read the private
+    // `Store::overlays` / `Store::acct` directly — no accessors needed.
+
+    /// rev1§4.4 M-3: a ref written far past its per-ref soft bound self-flushes
+    /// (backpressure, not eviction — the overlay becomes committed tree), so it
+    /// cannot consume the whole global budget; a quiet ref under its bound stays
+    /// dirty. The flushed data is materialized to tree (read-backable), not lost.
+    #[test]
+    fn per_ref_soft_bound_flushes_hot_ref_keeps_quiet_ref_dirty() {
+        const PER_REF: usize = 4096;
+        const GLOBAL: usize = 1 << 20;
+        let opts = StoreOptions {
+            wal_len: 1 << 20,
+            global_budget: GLOBAL,
+            per_ref_budget: PER_REF,
+            ..test_opts()
+        };
+        let mut store = Store::format(MemDev::new(4 << 20), opts).unwrap();
+        store.create_ref(b"hot").unwrap();
+        store.create_ref(b"quiet").unwrap();
+
+        // One small write to the quiet ref, well under the soft bound.
+        store.write(b"quiet", &p(&["q"]), 0, &[7u8; 64], 1).unwrap();
+
+        // Drive the hot ref far past PER_REF with distinct 512-byte files.
+        let chunk = [0xABu8; 512];
+        let mut hot_total = 0usize;
+        for i in 0..20 {
+            store
+                .write(b"hot", &p(&[&format!("f{i}")]), 0, &chunk, (i + 2) as u64)
+                .unwrap();
+            hot_total += chunk.len();
+            // M-3 invariant: the soft-bound flush fires inside the write that
+            // would cross the bound, so the overlay never exceeds it.
+            let hot_bytes = store.overlays.get(b"hot".as_slice()).map_or(0, |o| o.bytes());
+            assert!(
+                hot_bytes <= PER_REF,
+                "hot overlay {hot_bytes} exceeded per_ref_budget {PER_REF}"
+            );
+        }
+
+        // The hot ref flushed (its live overlay holds far less than everything
+        // written to it) and that data reached the tree (read-backable).
+        let hot_bytes = store.overlays.get(b"hot".as_slice()).map_or(0, |o| o.bytes());
+        assert!(hot_bytes < hot_total, "hot ref never flushed");
+        assert_eq!(store.read(b"hot", &p(&["f0"])).unwrap(), Some(chunk.to_vec()));
+        assert_eq!(store.read(b"hot", &p(&["f19"])).unwrap(), Some(chunk.to_vec()));
+
+        // The quiet ref stayed dirty — no eviction swept it (it is under its bound).
+        assert!(
+            !store.overlays.get(b"quiet".as_slice()).unwrap().is_empty(),
+            "quiet ref was flushed despite staying under its soft bound"
+        );
+        assert!(store.acct.contains_key(b"quiet".as_slice()));
+    }
+
+    proptest! {
+        // Miri: a few cases cover the same paths; native keeps the full sweep.
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 256 },
+            ..ProptestConfig::default()
+        })]
+        /// rev1§4.4 M-3 invariant under arbitrary multi-ref write sequences: the
+        /// per-ref soft-bound flush keeps every ref's overlay at or below the
+        /// soft bound after every op, so no single ref can ever reach the global
+        /// budget — containment holds regardless of interleaving.
+        #[test]
+        fn per_ref_overlay_never_exceeds_soft_bound(
+            ops in proptest::collection::vec((0usize..3, 1usize..400), 1..80),
+        ) {
+            const PER_REF: usize = 4096;
+            const GLOBAL: usize = 1 << 20;
+            let opts = StoreOptions {
+                wal_len: 4 << 20,
+                global_budget: GLOBAL,
+                per_ref_budget: PER_REF,
+                ..test_opts()
+            };
+            let mut store = Store::format(MemDev::new(8 << 20), opts).unwrap();
+            let refs: [&[u8]; 3] = [b"r0", b"r1", b"r2"];
+            for r in &refs {
+                store.create_ref(r).unwrap();
+            }
+            for (i, (ri, len)) in ops.iter().enumerate() {
+                let data = vec![0x5Au8; *len];
+                store.write(refs[*ri], &p(&[&format!("f{i}")]), 0, &data, (i + 1) as u64).unwrap();
+                for r in &refs {
+                    let b = store.overlays.get(*r).map_or(0, |o| o.bytes());
+                    prop_assert!(b <= PER_REF, "ref {:?} overlay {} > per_ref_budget {}", r, b, PER_REF);
+                    prop_assert!(b < GLOBAL);
+                }
+            }
+        }
+    }
+
+    /// rev1§4.4 M-6 (op-count half): a metadata storm — many tiny ops whose
+    /// dirty bytes stay far under the per-ref byte bound — still flushes once it
+    /// crosses the op-count secondary bound. The byte-only bound would miss it.
+    #[test]
+    fn op_count_bound_flushes_a_metadata_storm_under_the_byte_bound() {
+        let opts = StoreOptions {
+            wal_len: 64 * 1024,
+            global_budget: 1 << 20,
+            per_ref_budget: 1 << 20, // loose: bytes never trigger
+            op_count_bound: 8,
+            ..test_opts()
+        };
+        let mut store = Store::format(MemDev::new(2 << 20), opts).unwrap();
+        store.create_ref(b"main").unwrap();
+
+        // Eight 1-byte writes: op_count reaches 8 (== bound, not yet over).
+        for i in 0..8u64 {
+            store.write(b"main", &p(&[&format!("f{i}")]), 0, &[1u8], i + 1).unwrap();
+        }
+        assert_eq!(store.acct.get(b"main".as_slice()).map(|a| a.op_count), Some(8));
+        let bytes = store.overlays.get(b"main".as_slice()).map_or(0, |o| o.bytes());
+        assert_eq!(bytes, 8);
+        assert!(bytes < (1 << 20), "byte bound would already have fired");
+
+        // The ninth op crosses op_count_bound (9 > 8) → the ref flushes.
+        store.write(b"main", &p(&["f8"]), 0, &[1u8], 9).unwrap();
+        assert!(
+            store.overlays.get(b"main".as_slice()).is_none(),
+            "op-count storm did not flush the ref"
+        );
+        assert!(store.acct.get(b"main".as_slice()).is_none(), "accounting not reset on flush");
+        // All nine tiny files reached the tree.
+        assert_eq!(store.read(b"main", &p(&["f0"])).unwrap(), Some(vec![1u8]));
+        assert_eq!(store.read(b"main", &p(&["f8"])).unwrap(), Some(vec![1u8]));
+    }
+
+    /// rev1§4.4 / Design decision 1: all per-ref accounting is derived runtime
+    /// state, reconstructed at mount from WAL replay — B12 is format-stable. A
+    /// remount must recompute bytes / op-count / oldest-WAL-position /
+    /// oldest-dirty-timestamp identical to the pre-remount live state.
+    #[test]
+    fn per_ref_accounting_is_reconstructed_on_remount() {
+        // Loose bounds + ample WAL so nothing flushes; the dirty records sit in
+        // the WAL to be replayed.
+        let opts = StoreOptions {
+            wal_len: 1 << 20,
+            global_budget: 1 << 20,
+            per_ref_budget: 1 << 20,
+            op_count_bound: u64::MAX,
+            ..test_opts()
+        };
+        let mut store = Store::format(MemDev::new(4 << 20), opts).unwrap();
+        store.create_ref(b"a").unwrap();
+        store.create_ref(b"b").unwrap();
+        // Interleave writes across refs at distinct mtimes.
+        store.write(b"a", &p(&["a0"]), 0, &[1u8; 100], 10).unwrap();
+        store.write(b"b", &p(&["b0"]), 0, &[2u8; 50], 20).unwrap();
+        store.write(b"a", &p(&["a1"]), 0, &[3u8; 70], 30).unwrap();
+        store.write(b"b", &p(&["b1"]), 0, &[4u8; 40], 40).unwrap();
+
+        let snap = |s: &Store<MemDev>| -> Vec<(Vec<u8>, usize, u64, Option<u64>, Option<u64>)> {
+            s.acct
+                .iter()
+                .map(|(name, a)| {
+                    (
+                        name.clone(),
+                        s.overlays.get(name).map_or(0, |o| o.bytes()),
+                        a.op_count,
+                        a.oldest_wal_pos,
+                        a.oldest_dirty_ns,
+                    )
+                })
+                .collect()
+        };
+        let before = snap(&store);
+        // Sanity on the live state (encoding-independent): bytes are additive
+        // over distinct files, op-count is one per write, the oldest position is
+        // the ref's first record (ref "a" pins WAL offset 0; "b" sits after it),
+        // and the oldest-dirty timestamp is the first op's mtime.
+        assert_eq!(before.len(), 2);
+        assert_eq!(before[0].0, b"a".to_vec());
+        assert_eq!(
+            (before[0].1, before[0].2, before[0].3, before[0].4),
+            (170, 2, Some(0), Some(10))
+        );
+        assert_eq!(before[1].0, b"b".to_vec());
+        assert_eq!((before[1].1, before[1].2, before[1].4), (90, 2, Some(20)));
+        assert!(before[1].3.unwrap() > 0, "ref b's oldest record should sit after a0");
+
+        let dev = store.into_dev();
+        let recovered = Store::mount(dev, opts).unwrap();
+        assert_eq!(snap(&recovered), before, "replay did not reconstruct accounting");
     }
 
     /// B7B/T-5: the structural decode split out of `wal_content_ok` and verified
@@ -3325,7 +3636,10 @@ mod tests {
             fail_at in 4u64..600,
             crash_seed in any::<u64>(),
         ) {
-            let mut store = Store::format(CrashDev::new(1 << 20), test_opts()).unwrap();
+            // B12A: tight op-count bound so the per-ref soft-bound auto-flush
+            // (flush_ref + commit) fires mid-stream; the crash point can then
+            // land inside a selective flush, re-witnessing all-acked-survives.
+            let mut store = Store::format(CrashDev::new(1 << 20), crash_opts()).unwrap();
             store.create_ref(b"main").unwrap();
             store.dev_mut().set_fail_after(fail_at);
 
@@ -3427,7 +3741,7 @@ mod tests {
             let mut dev = store.into_dev();
             dev.clear_fail();
             dev.crash(crash_seed);
-            let recovered = Store::mount(dev, test_opts()).unwrap();
+            let recovered = Store::mount(dev, crash_opts()).unwrap();
 
             for (path, expect) in &model {
                 let got = recovered.read(b"main", path).unwrap();

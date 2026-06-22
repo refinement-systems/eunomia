@@ -33,7 +33,8 @@ fn fresh() -> (Server<MemDev>, u64) {
             avg: 256,
             max: 1024,
         },
-        overlay_budget: 16 * 1024,
+        global_budget: 16 * 1024,
+        ..StoreOptions::default()
     };
     let mut store = Store::format(MemDev::new(64 * 1024), opts).unwrap();
     store.create_ref(b"main").unwrap();

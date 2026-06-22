@@ -128,7 +128,8 @@ fn storage_engine_runs_over_virtio() {
             avg: 256,
             max: 1024,
         },
-        overlay_budget: 64 * 1024,
+        global_budget: 64 * 1024,
+        ..StoreOptions::default()
     };
     let p =
         |parts: &[&str]| -> Vec<Vec<u8>> { parts.iter().map(|s| s.as_bytes().to_vec()).collect() };
