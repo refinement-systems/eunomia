@@ -236,7 +236,11 @@ mod tests {
             ..ProptestConfig::default()
         })]
         #[test]
-        fn file_roundtrip(data in proptest::collection::vec(any::<u8>(), 0..16384)) {
+        fn file_roundtrip(
+            // Miri interprets blake3 per chunk; a 4 KiB cap still crosses INLINE_MAX
+            // and exercises the chunked path. Native keeps the full 16 KiB range.
+            data in proptest::collection::vec(any::<u8>(), 0..if cfg!(miri) { 4096 } else { 16384 }),
+        ) {
             let mut store = MemStore::new();
             let content = store_file(&mut store, &TEST_PARAMS, &data);
             match &content {
@@ -293,8 +297,11 @@ mod tests {
         /// form, rev1§4.1) and reads back as the new content.
         #[test]
         fn neighborhood_matches_whole_file(
-            base in proptest::collection::vec(any::<u8>(), 1024..16384),
-            edit_off in 0usize..16384,
+            // Miri interprets blake3 per chunk, so cap the base file (still
+            // multi-chunk at 4 KiB); the neighborhood==whole-file invariant is
+            // size-independent. Native keeps the full 16 KiB range.
+            base in proptest::collection::vec(any::<u8>(), 1024..if cfg!(miri) { 4096 } else { 16384 }),
+            edit_off in 0usize..if cfg!(miri) { 4096 } else { 16384 },
             edit in proptest::collection::vec(any::<u8>(), 0..512),
         ) {
             let mut store = MemStore::new();

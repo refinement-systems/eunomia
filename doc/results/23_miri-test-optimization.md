@@ -358,3 +358,76 @@ warm cache).
   `cas/src` for `proptest!` / `cfg!(miri)` / `.take(max_ops)` sites.
 * Machine: macOS, 8 logical CPUs (4 performance + 4 efficiency), miri 0.1.0
   (2026-06-09 nightly).
+
+---
+
+## 5. Implementation outcome (2026-06-22)
+
+The analysis above is no longer "analysis only" — Options 4 and 1 were
+implemented, plus an extension. Two corrections to the analysis surfaced during
+implementation; both are recorded here so the document stays honest.
+
+### What landed
+
+* **Option 4 (cap the 3 named proptests):** `size_pressure_holds_total_below_high_watermark`,
+  `per_ref_overlay_never_exceeds_soft_bound`, `staleness_sweep_leaves_no_overdue_ref`
+  in `cas/src/store.rs` got the `let max_ops = if cfg!(miri) { 16 } else { ops.len() }`
+  + `.take(max_ops)` cap. The three together drop from ~12.6 min (`size_pressure`
+  alone) to **80 s** total under Miri; native still runs full case counts.
+* **Option 1 (parallelize):** chose **1b — cargo-nextest**
+  (`cargo install cargo-nextest --locked`). `cargo +nightly miri nextest run -p
+  cas -j4` runs one process per test (nextest auto-selects its `default-miri`
+  profile) → genuine multi-core (user 2683 s over 765 s wall ≈ 3.5 cores).
+  CLAUDE.md now documents this as the canonical sweep.
+* **Extension — 6 additional poles** (see correction 2) capped the same way.
+
+### Correction 1 — the bare `cargo miri test -p cas` line was broken
+
+`cargo +nightly miri test -p cas` **with isolation enabled fails immediately**
+under proptest 1.11: its failure-persistence path calls `std::env::current_dir()`
+(`getcwd`), which Miri's isolation refuses. Every cas proptest aborts. The
+canonical invocation **requires `MIRIFLAGS=-Zmiri-disable-isolation`** (which the
+§Appendix per-test runs already used, and which every other crate's documented
+line already passed — `cas` was the lone omission). Fixed in CLAUDE.md. Note
+isolation governs only host-resource access, not the aliasing/validity checks
+that are Miri's point, so coverage is unaffected.
+
+### Correction 2 — `size_pressure` was not the only long pole
+
+§2's per-test table sampled 8 tests and concluded `size_pressure` (757 s) was
+*the* Amdahl ceiling. The first full `nextest` sweep (which runs **every** test)
+showed it was not — six heavier tests the sample missed dominated:
+
+| test | before | type |
+|------|-------:|------|
+| `store::ring_wrap_front_pinner_reclaim_and_remount` | 505 s | `#[test]` |
+| `gc::check_recipe_handles_recipes` | 480 s | `#[test]` |
+| `file::neighborhood_matches_whole_file` | 280 s | proptest |
+| `store::gc_reclaims_superseded_roots_and_reuses_space` | 225 s | `#[test]` |
+| `gc::mark_set_sufficient_over_random_trees` | 173 s | proptest |
+| `file::file_roundtrip` | 165 s | proptest |
+
+All six were capped under `cfg(miri)` with the established knobs (WAL 16→2 KiB;
+churn 10→4 iters × 20→4 KB; sweep `0..=255`→`0..=31` + deep chain 300→48 — note
+`step_by(16)` would alias the `b % 6` opcode to {0,2,4} and was *not* used;
+max file 16→4 KiB; entries 16→6, content 2→0.5 KiB). Native keeps full ranges.
+
+### Measured result
+
+| stage | cas wall-clock (nextest -j4) |
+|-------|------------------------------|
+| serial single-core (sum of all) | ~69 min |
+| after Option 4 only | ~21 min |
+| after all 9 caps | **~12 min** (765 s measured, then `check_recipe` trimmed 185→45 s) |
+
+All **122 cas tests pass** (3 `#[cfg_attr(miri, ignore)]`). dma-pool 11.9 s, urt
+17.1 s under nextest. No Verus impact (all edits are `#[cfg(test)]`/`#[cfg(miri)]`).
+
+The TL;DR's "a few minutes" is **not** reached: after the caps the sweep is
+**throughput-bound**, not pole-gated (longest test 185→~45 s ≪ the 765 s wall),
+across a flat tier of ~100–180 s tests the caps didn't touch — the crash-recovery
+family, chunk-boundary proptests (`chunk::shared_suffix_boundaries_agree...`
+155 s), `store::per_ref_soft_bound...` (138 s), and the `gc_mark` corpus replay
+(137 s, *not* the decode-only cheap path §1 assumed). Getting to a few minutes
+means capping that tier too, or adopting Option 2 (the `#[cfg(miri)]` cheap hash)
+which cuts every hashing test at once — neither was in this change's scope.
