@@ -63,6 +63,39 @@ qemu-system-aarch64 -machine virt,gic-version=3 -cpu cortex-a72 -m 256M \
 Note: the cargo target directory is at the workspace root (`target/`), not
 under `kernel/`.
 
+#### Running the QEMU smoke non-interactively (and killing it cleanly)
+
+`scripts/run-demo.sh` builds + boots the full stack (mkfs image → virtio-blk →
+storaged → mount → shell) and `exec`s QEMU. It is interactive by default but
+reads scripted commands on stdin. The recurring trap: **QEMU must be killed by
+the harness, or it runs forever** (it sits at the shell waiting for more stdin
+after your piped commands hit EOF), and the usual one-liners don't kill it:
+
+- `timeout`/`gtimeout` are **not installed** on this machine (no GNU coreutils).
+- `perl -e 'alarm N; exec @ARGV' bash scripts/run-demo.sh` does **not** work:
+  `alarm` survives `exec` into bash but `run-demo.sh` `fork`s QEMU as a child,
+  and the timer is not inherited — at N seconds only `bash` dies while the
+  orphaned `qemu-system-aarch64` keeps running (this is what hung for 14 min).
+
+Reliable pattern — a Perl parent that puts the script in its own process group
+and signals the **whole group** on timeout (kill `-pid`):
+
+```sh
+printf 'write docs/smoke hello\nsync\ncat docs/smoke\nls docs\ndf\n' | \
+perl -MPOSIX=setsid -e '
+  my $t = shift @ARGV;
+  defined(my $pid = fork) or die "fork: $!";
+  if ($pid == 0) { setsid() or die "setsid: $!"; exec @ARGV or die "exec: $!"; }
+  local $SIG{ALRM} = sub { kill "TERM", -$pid; sleep 2; kill "KILL", -$pid; exit 124; };
+  alarm $t; waitpid($pid, 0); exit($? >> 8);
+' 90 bash scripts/run-demo.sh 2>&1 | tail -60
+```
+
+The boot is green when the log shows `[storaged] store mounted` → `serving`,
+your shell commands echo their results (e.g. `cat` returns what `write` stored),
+and there is no panic/`Corrupt`/`unwrap` trace. If a run is ever orphaned,
+`pkill -f qemu-system-aarch64` cleans it up.
+
 ### Host crates (storage-server, cas, mkfs, etc.)
 
 ```sh

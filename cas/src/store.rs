@@ -21,10 +21,6 @@
 //!   - Flush rebuilds whole dirty files instead of re-chunking only the
 //!     affected neighborhood (rev1§4.3 step 3) — a perf optimization with no
 //!     semantic difference; owed when file sizes warrant it.
-//!   - The WAL is linear, not circular: when full, everything is flushed
-//!     and committed and the log resets to offset 0 (head can only ever
-//!     advance past flushed records, so the rev1§4.4 invariant holds; the
-//!     flush-the-pinner scheduler arrives with real multi-ref traffic).
 //!   - Oversized writes (record > WAL region) bypass the WAL and commit
 //!     synchronously before acknowledging — same durability contract.
 //!   - The allocator is first-fit over a flat extent list and the tail
@@ -525,13 +521,15 @@ struct HeadAdvance {
 /// log drains (rev1§4.4). **Total** ∀ records, **terminating**. Pure sequence
 /// reasoning — the prefix-scan kcore already did for the channel FIFO head.
 ///
-/// Out of scope here (a Store-level invariant, not a property of this pure
-/// function): cross-commit head monotonicity (`new head >= old head`) rests on
-/// WAL offsets strictly increasing by construction in `log_then_apply`, which
-/// the plain-Rust call site can't hand Verus as a precondition. The per-piece
-/// contract below is precondition-free and justifies the extraction; the
-/// monotone fact is left to the composition where the invariant is in scope
-/// (per-piece contracts before the composed theorem).
+/// Out of scope here (a Store-level concern, not a property of this pure
+/// function): nothing this function does assumes WAL offsets are monotonic.
+/// Under the B12C circular ring they are *not* — `wal_tail` wraps, so a later
+/// record can sit at a lower physical offset than an earlier one, and the head
+/// this returns can move "backwards" in raw-offset terms when it crosses the
+/// wrap. That is sound because this function only **selects** a record's `off`
+/// (it copies `records[i].off`); it never adds, compares, or orders offsets.
+/// The per-piece contract below is precondition-free and justifies the
+/// extraction over the rotated/linearized view `recover_records` rebuilds.
 fn advance_head(records: &[RecMeta], wal_seq: u64) -> (r: HeadAdvance)
     ensures
         r.n_flushed <= records@.len(),
@@ -1419,9 +1417,13 @@ struct RefAcct {
     /// Mutating ops applied to this ref since its last flush — the op-count
     /// secondary bound (rev1§4.4), so a metadata storm with tiny bytes flushes.
     op_count: u64,
-    /// WAL position of this ref's oldest unflushed record: the flush-the-pinner
-    /// sort key (rev1§4.4). Set by the first op after a flush, untouched after.
-    /// `None` while the ref is clean. Consumed by B12C.
+    /// Physical WAL offset of this ref's oldest unflushed record (rev1§4.4). Set
+    /// by the first op after a flush, untouched after; `None` while clean. For
+    /// the tail-pinner this equals the live `wal_head`. B12C does **not** pick
+    /// the pinner by sorting on this field — that is wrong across the ring wrap
+    /// (a newer ref can sit at a lower offset than the tail-pinner). The runtime
+    /// pinner is the front of `wal_records` (the record at `wal_head`); this
+    /// field stays as the per-ref position datum the tests assert against.
     oldest_wal_pos: Option<u64>,
     /// UTC-nanos timestamp at which this ref first became dirty: the staleness
     /// trigger's age key (rev1§4.4). `None` while clean. Consumed by B12D.
@@ -1657,13 +1659,39 @@ impl<D: BlockDev> Store<D> {
         // the applier below decodes + applies each record over that verified
         // skeleton — the content layer (`WalOp` decode) and the extent gate stay
         // plain Rust (rev1§6.1(e)).
+        //
+        // Circular WAL (B12C, rev1§4.4, M-5): the live window runs from the
+        // committed `wal_head` around the ring to the tail and may straddle the
+        // buffer end. Rotate the buffer so the head sits at offset 0, linearizing
+        // the ring into the contiguous run `recover_records` walks — so the
+        // verified decision core is reused **unchanged** (no new Verus; the cas
+        // gate holds). `validate_geometry` above guarantees `wal_head <= wal_len`,
+        // so `rotate_left` cannot panic and mount stays total over hostile
+        // contents. The offsets the walk returns are *rotated*; map them back to
+        // physical ring positions with `(wal_head + rotated) mod wal_len` for the
+        // live `wal_records`/accounting/tail (the persisted head is already
+        // physical). The applier decodes from the *rotated* buffer at the rotated
+        // offset, so a straddling record reads contiguously.
         let mut wal = vec![0u8; sb.wal_len as usize];
         store.chunks.dev.read(WAL_OFF, &mut wal)?;
-        let recovered = recover_records(&wal, sb.wal_head, sb.wal_next_seq);
+        debug_assert!(sb.wal_head as usize <= wal.len());
+        wal.rotate_left(sb.wal_head as usize);
+        let recovered = recover_records(&wal, 0, sb.wal_next_seq);
+        // `wal_len == 0` (degenerate empty WAL) admits no records, so the mod is
+        // never reached for a real offset; guard it so the call is total.
+        let to_phys = |rotated: u64| -> u64 {
+            if sb.wal_len == 0 {
+                0
+            } else {
+                (sb.wal_head + rotated) % sb.wal_len
+            }
+        };
         for rec in recovered.records.iter() {
             // `recover_records` proved each rebuilt record frames, checksums, and
             // continues the sequence — so `decode_record` returns `Some` here (the
-            // call is total because the verified core's contract says so).
+            // call is total because the verified core's contract says so). `rec.off`
+            // is a rotated offset into the rotated buffer, where the record is
+            // contiguous even if it physically straddled the wrap.
             let (_rseq, op, _rlen) = WalOp::decode_record(&wal[rec.off as usize..])
                 .expect("recover_records accepted this record");
             // Mirror of the pre-WAL extent gate in Store::write: no image
@@ -1683,11 +1711,13 @@ impl<D: BlockDev> Store<D> {
             // Reconstruct per-ref flush accounting from the replayed records
             // (rev1§4.4): nothing of it is persisted, so the live state is
             // recomputed here exactly as the write path built it (B12 is
-            // format-stable). `rec.off` is the record's WAL position.
-            store.account_op(&op, rec.off);
+            // format-stable). The accounted position is the record's *physical*
+            // ring offset, so `oldest_wal_pos` matches the live write path.
+            let phys = to_phys(rec.off);
+            store.account_op(&op, phys);
             store.wal_records.push_back(RecMeta {
                 seq: rec.seq,
-                off: rec.off,
+                off: phys,
                 ref_name: op.ref_name().to_vec(),
                 flushed: false,
             });
@@ -1699,7 +1729,10 @@ impl<D: BlockDev> Store<D> {
         if recovered.forged_max {
             return Err(StoreError::Corrupt("wal sequence exhausted"));
         }
-        store.wal_tail = recovered.end_off;
+        // Physical tail: just past the last live record on the ring. When the run
+        // fills the whole buffer (`end_off == wal_len`) this maps to `wal_head`,
+        // the exactly-full ring `wal_usage` reports as full (not empty).
+        store.wal_tail = to_phys(recovered.end_off);
         store.wal_seq = recovered.next_seq;
         Ok(store)
     }
@@ -1959,33 +1992,81 @@ impl<D: BlockDev> Store<D> {
         &mut self.chunks.dev
     }
 
+    /// Live WAL usage in bytes (rev1§4.4): the span the unflushed records occupy
+    /// on the circular ring, `[wal_head, wal_tail)` modulo `wal_len`. `0` when the
+    /// log is empty; `wal_len` when it is exactly full (the tail has wrapped back
+    /// onto the head — the only non-empty state where the raw difference is `0`,
+    /// so it must read as full, not empty). `wal_head` is `self.sb.wal_head` (it
+    /// only ever moves at commit).
+    fn wal_usage(&self) -> u64 {
+        if self.wal_records.is_empty() {
+            return 0;
+        }
+        // No underflow: `wal_tail + wal_len >= wal_head` since `wal_head <= wal_len`.
+        let raw = (self.wal_tail + self.opts.wal_len - self.sb.wal_head) % self.opts.wal_len;
+        if raw == 0 {
+            self.opts.wal_len
+        } else {
+            raw
+        }
+    }
+
+    /// Append a WAL record's bytes at ring offset `off`, splitting the write
+    /// across the buffer end when the record wraps (rev1§4.4 circular ring), then
+    /// a **single** `flush()` after both halves. The single fsync is load-bearing
+    /// for crash-safety: a flush *between* the halves would make one half durable
+    /// while the other is not, and that half-record was never acked — a later
+    /// same-offset write could then partially overlay a torn, ack-less record.
+    /// Keep it one fsync. A header that itself straddles the wrap is handled (the
+    /// first segment is then shorter than `WAL_HEADER`); replay reassembles it
+    /// after the mount-time rotation.
+    fn wal_write(&mut self, off: u64, rec: &[u8]) -> Result<(), StoreError> {
+        let wal_len = self.opts.wal_len;
+        // Not oversized (caller's bypass), so `rec.len() <= wal_len` and
+        // `off + rec.len() < 2*wal_len` — no overflow.
+        if off + rec.len() as u64 <= wal_len {
+            self.chunks.dev.write(WAL_OFF + off, rec)?;
+        } else {
+            let first = (wal_len - off) as usize;
+            self.chunks.dev.write(WAL_OFF + off, &rec[..first])?;
+            self.chunks.dev.write(WAL_OFF, &rec[first..])?;
+        }
+        self.chunks.dev.flush()?;
+        Ok(())
+    }
+
     /// WAL append + fsync before the overlay sees the write — the ack
     /// implies durability (rev1§4.3 step 2).
     fn log_then_apply(&mut self, op: WalOp) -> Result<(), StoreError> {
         let rec = op.encode_record(self.wal_seq);
-        if rec.len() as u64 > self.opts.wal_len {
+        let reclen = rec.len() as u64;
+        if reclen > self.opts.wal_len {
             // Oversized: bypass the WAL, commit synchronously before ack.
             let r = op.ref_name().to_vec();
             self.apply_to_overlay(&op);
             self.flush_ref(&r)?;
             return self.commit();
         }
-        if self.wal_tail + rec.len() as u64 > self.opts.wal_len {
-            // WAL full: flush everything, commit (covers all records),
-            // log resets to offset 0.
-            self.sync_all()?;
-            debug_assert_eq!(self.wal_tail, 0);
-        }
+        // WAL pressure (rev1§4.4 trigger 2, M-5): make room for this record on the
+        // ring and, if usage crosses the watermark, flush the tail-pinning ref so
+        // `wal_head` advances past the freed prefix. This may `commit()` (which
+        // can move `wal_tail`), so `rec_off` MUST be read *after* it returns.
+        self.relieve_wal_pressure(reclen)?;
+        // Read the tail only now: relief's `commit` may have moved it. Relief
+        // guarantees the record fits the free gap, so the ring write stays within
+        // `[wal_tail, wal_head)` and never overruns the live window.
+        debug_assert!(self.wal_usage() + reclen <= self.opts.wal_len);
         let rec_off = self.wal_tail;
-        self.chunks.dev.write(WAL_OFF + rec_off, &rec)?;
-        self.chunks.dev.flush()?;
+        self.wal_write(rec_off, &rec)?;
         self.wal_records.push_back(RecMeta {
             seq: self.wal_seq,
             off: rec_off,
             ref_name: op.ref_name().to_vec(),
             flushed: false,
         });
-        self.wal_tail += rec.len() as u64;
+        // Ring advance: the tail wraps mod `wal_len` (the record may have
+        // straddled the buffer end). `rec_off + reclen < 2*wal_len`, no overflow.
+        self.wal_tail = (rec_off + reclen) % self.opts.wal_len;
         self.wal_seq += 1;
         let r = op.ref_name().to_vec();
         self.apply_to_overlay(&op);
@@ -2062,6 +2143,49 @@ impl<D: BlockDev> Store<D> {
         }
         // One commit folds in every flush this round (rev1§4.2 atomicity).
         if flushed_any {
+            self.commit()?;
+        }
+        Ok(())
+    }
+
+    /// WAL-pressure flush (rev1§4.4 trigger 2, M-5): keep the circular WAL below
+    /// its watermark and make room for the next `incoming`-byte record by flushing
+    /// the ref **pinning the tail** — the ref whose oldest unflushed record sits
+    /// at `wal_head`, i.e. the front of `wal_records`. Flushing it lets `commit`'s
+    /// Verus-verified `advance_head` move `wal_head` past the now-flushed
+    /// contiguous prefix, reclaiming exactly that span of the ring. (The old
+    /// linear WAL could only reclaim by resetting to 0 when *everything* flushed —
+    /// the M-5 gap: flush-the-pinner was meaningless without space reclaim.)
+    ///
+    /// Repeats until comfortable: `usage + incoming` fits and `usage` is below the
+    /// watermark. Each iteration flushes the front ref (which always has an overlay
+    /// — `advance_head` leaves a non-flushed record at the front, and a non-flushed
+    /// record implies a live overlay), so `commit` pops at least that front record,
+    /// `usage` strictly shrinks, and the loop terminates. Under interleaved refs it
+    /// may flush more than the lone pinner, which is fine. When one ref pins the
+    /// whole ring, flushing it empties the WAL and `commit` resets the tail to 0 —
+    /// the normative "a full WAL flushes everything and resets" edge case (rev1§4.4).
+    ///
+    /// Picking the victim by `front()` is mandatory: sorting refs by their raw
+    /// `oldest_wal_pos` is wrong across the ring wrap (a newer ref can sit at a
+    /// lower physical offset than the tail-pinner). Backpressure is the synchronous
+    /// flush itself (Design decision 4): no eviction, no `FULL` return.
+    fn relieve_wal_pressure(&mut self, incoming: u64) -> Result<(), StoreError> {
+        loop {
+            let usage = self.wal_usage();
+            // `usage <= wal_len` and `incoming <= wal_len` (oversized bypassed), so
+            // `usage + incoming` cannot overflow.
+            let fits = usage + incoming <= self.opts.wal_len;
+            let comfortable = usage < self.opts.wal_watermark;
+            if fits && comfortable {
+                break;
+            }
+            // An empty ring can't be relieved further; `incoming <= wal_len` always
+            // fits an empty ring, so this only breaks once there is nothing to flush.
+            let Some(pinner) = self.wal_records.front().map(|r| r.ref_name.clone()) else {
+                break;
+            };
+            self.flush_ref(&pinner)?;
             self.commit()?;
         }
         Ok(())
@@ -3048,6 +3172,478 @@ mod tests {
         // set is bounded by the low watermark.
         let total: usize = store.overlays.values().map(|o| o.bytes()).sum();
         assert!(total <= LOW);
+    }
+
+    // ── B12C: circular WAL ring + flush-the-pinner (rev1§4.4 trigger 2, M-5) ──
+
+    /// Options that isolate the WAL-pressure trigger: a small ring with the given
+    /// watermark, every *other* flush trigger disabled (huge byte budgets, no
+    /// op-count / staleness / per-ref bound). So only the circular-WAL scheduler
+    /// flushes and the tests observe it in isolation.
+    fn wal_opts(wal_len: u64, wal_watermark: u64) -> StoreOptions {
+        StoreOptions {
+            wal_len,
+            wal_watermark,
+            global_budget: 1 << 30,
+            size_low_watermark: 1 << 30,
+            per_ref_budget: 1 << 30,
+            op_count_bound: u64::MAX,
+            ..test_opts()
+        }
+    }
+
+    /// rev1§4.4 M-5 headline: WAL pressure flushes the ref **pinning the tail**
+    /// (the oldest record, at `wal_head`), not everything. A pinner sits at the
+    /// head while a newer ref fills the ring; crossing the watermark flushes the
+    /// pinner — its overlay becomes committed tree and `wal_head` advances past
+    /// it, reclaiming its WAL span — while the newer ref stays dirty (versus the
+    /// pre-B12 flush-everything-and-reset).
+    #[test]
+    fn wal_pressure_flushes_pinner_keeps_newer_dirty() {
+        let wal_len = 8 * 1024u64;
+        let mut store = Store::format(MemDev::new(1 << 20), wal_opts(wal_len, wal_len / 2)).unwrap();
+        store.create_ref(b"pin").unwrap();
+        store.create_ref(b"new").unwrap();
+
+        // The pinner's single (larger) record is the oldest in the WAL: it sits
+        // at offset 0 == wal_head.
+        store.write(b"pin", &p(&["p"]), 0, &[1u8; 512], 1).unwrap();
+        assert_eq!(
+            store.acct.get(b"pin".as_slice()).unwrap().oldest_wal_pos,
+            Some(0)
+        );
+        let head_before = store.sb.wal_head;
+
+        // Hammer 'new' until the scheduler flushes the pinner (the front of the
+        // queue). Smaller 'new' records, so flushing the larger pinner drops usage
+        // well below the watermark and the relief loop stops before touching 'new'.
+        let mut i = 0u64;
+        while store.acct.contains_key(b"pin".as_slice()) {
+            store
+                .write(b"new", &p(&[&format!("n{i}")]), 0, &[2u8; 64], i + 2)
+                .unwrap();
+            i += 1;
+            assert!(i < 100_000, "pinner never flushed");
+        }
+        // The pinner flushed; the newer ref stayed dirty (M-5, not flush-everything).
+        assert!(
+            store
+                .overlays
+                .get(b"pin".as_slice())
+                .map_or(true, |o| o.is_empty()),
+            "pinner overlay should be flushed to committed tree"
+        );
+        assert!(
+            store
+                .overlays
+                .get(b"new".as_slice())
+                .map_or(false, |o| !o.is_empty()),
+            "newer ref should still be dirty after flush-the-pinner"
+        );
+        // The head advanced past the flushed pinner — its WAL span was reclaimed.
+        assert_ne!(
+            store.sb.wal_head, head_before,
+            "wal_head did not advance past the flushed pinner"
+        );
+        // The flushed data is durable committed tree (read-backable).
+        assert_eq!(store.read(b"pin", &p(&["p"])).unwrap(), Some(vec![1u8; 512]));
+    }
+
+    /// rev1§4.4 M-5 across a ring **wrap**: the victim is the front of the WAL
+    /// queue (the record at `wal_head`), *not* the ref with the smallest
+    /// `oldest_wal_pos` — those differ once the ring has wrapped (a newer ref sits
+    /// at a lower physical offset than the pinner). Flushing the front advances
+    /// the head (progress); flushing the min-offset ref would not. Also exercises
+    /// a straddling record and recovery across the wrap on remount.
+    #[test]
+    fn ring_wrap_front_pinner_reclaim_and_remount() {
+        // Watermark == wal_len, so the auto-scheduler fires only on a genuine
+        // won't-fit; we drive flushes explicitly to control head/tail precisely.
+        // Single-char refs + fixed-length paths + fixed data ⇒ uniform record size.
+        let wal_len = 16 * 1024u64;
+        let opts = wal_opts(wal_len, wal_len);
+        let mut store = Store::format(MemDev::new(1 << 20), opts).unwrap();
+        for r in [b"a".as_slice(), b"p", b"w", b"n"] {
+            store.create_ref(r).unwrap();
+        }
+        let data = [0u8; 200];
+        let mut seq = 1u64;
+        let mut write = |s: &mut Store<MemDev>, r: &[u8]| {
+            s.write(r, &p(&[&format!("{seq:05}")]), 0, &data, seq).unwrap();
+            let used = format!("{seq:05}");
+            seq += 1;
+            used
+        };
+
+        // Measure the uniform record size.
+        write(&mut store, b"a");
+        let rsz = store.wal_tail;
+        assert!(rsz > 0 && rsz < wal_len / 4);
+
+        // 'a' block to ~half the ring.
+        while store.wal_tail + rsz <= wal_len / 2 {
+            write(&mut store, b"a");
+        }
+        let pin_off = store.wal_tail; // the pinner record will sit here (mid-ring)
+        write(&mut store, b"p"); // the future tail-pinner
+                                 // 'a' block again, up to near the end.
+        while store.wal_tail + rsz <= wal_len {
+            write(&mut store, b"a");
+        }
+
+        // Flush 'a': its records before the pinner are the contiguous flushed
+        // prefix, so the head advances to the pinner; the 'a' records after the
+        // pinner stay flushed-but-unpopped.
+        store.flush_ref(b"a").unwrap();
+        store.commit().unwrap();
+        assert_eq!(
+            store.sb.wal_head, pin_off,
+            "head should advance past the 'a' prefix to the pinner"
+        );
+
+        // A 'w' record straddles the buffer end into the freed low region, moving
+        // the tail to a low offset; then 'n' lands at that low offset.
+        let tail_before_wrap = store.wal_tail;
+        assert!(
+            tail_before_wrap + rsz > wal_len,
+            "the 'w' write should straddle the wrap"
+        );
+        let w_path = write(&mut store, b"w");
+        assert!(
+            store.wal_tail < tail_before_wrap,
+            "tail should have wrapped to a low offset"
+        );
+        let n_path = write(&mut store, b"n");
+        let n_off = store.acct.get(b"n".as_slice()).unwrap().oldest_wal_pos.unwrap();
+        assert!(
+            n_off < pin_off,
+            "the newer ref ({n_off}) should sit below the pinner ({pin_off}) after the wrap"
+        );
+
+        // Victim selection: the front of the queue is the pinner 'p', even though
+        // 'n' has the smallest oldest_wal_pos. Min-by-oldest_wal_pos would be wrong.
+        assert_eq!(store.wal_records.front().unwrap().ref_name, b"p".to_vec());
+        let min_ref = store
+            .acct
+            .iter()
+            .min_by_key(|(_, a)| a.oldest_wal_pos.unwrap())
+            .unwrap()
+            .0
+            .clone();
+        assert_eq!(
+            min_ref,
+            b"n".to_vec(),
+            "sanity: a min-offset victim policy would (wrongly) pick 'n'"
+        );
+
+        // Flushing the front pinner advances the head; flushing 'n' would not.
+        let head_before = store.sb.wal_head;
+        store.flush_ref(b"p").unwrap();
+        store.commit().unwrap();
+        assert_ne!(
+            store.sb.wal_head, head_before,
+            "flushing the front pinner must advance wal_head"
+        );
+        assert!(!store.acct.contains_key(b"p".as_slice()), "pinner flushed");
+        assert!(
+            store.acct.contains_key(b"n".as_slice()),
+            "newer ref still dirty"
+        );
+
+        // Remount: rotation linearizes the ring and reassembles the straddling
+        // 'w' record; every live and flushed value reads back.
+        let dev = store.into_dev();
+        let recovered = Store::mount(dev, opts).unwrap();
+        assert_eq!(
+            recovered.read(b"w", &p(&[&w_path])).unwrap(),
+            Some(vec![0u8; 200]),
+            "straddling record lost across remount"
+        );
+        assert_eq!(
+            recovered.read(b"n", &p(&[&n_path])).unwrap(),
+            Some(vec![0u8; 200])
+        );
+        // A flushed-'a' record (committed tree before the wrap) survives too.
+        assert_eq!(recovered.read(b"a", &p(&["00001"])).unwrap(), Some(vec![0u8; 200]));
+    }
+
+    /// rev1§4.4 edge case: an exactly-full ring. With `wal_len` a multiple of the
+    /// record size, the tail wraps back exactly onto the head — `wal_usage` must
+    /// report `wal_len` (full), not `0` (empty). The next write then relieves; one
+    /// ref pinning the whole ring degenerates to flush-everything-and-reset.
+    #[test]
+    fn ring_exactly_full_reports_full_then_relieves() {
+        // Measure the record size on a scratch store, then size the ring to an
+        // exact multiple of it.
+        let mut scratch =
+            Store::format(MemDev::new(1 << 20), wal_opts(1 << 16, 1 << 16)).unwrap();
+        scratch.create_ref(b"a").unwrap();
+        scratch.write(b"a", &p(&["00001"]), 0, &[0u8; 200], 1).unwrap();
+        let rsz = scratch.wal_tail;
+
+        let wal_len = 4 * rsz;
+        let opts = wal_opts(wal_len, wal_len);
+        let mut store = Store::format(MemDev::new(1 << 20), opts).unwrap();
+        store.create_ref(b"a").unwrap();
+        // Four records fill the ring exactly: tail wraps to 0 == head.
+        for s in 1..=4u64 {
+            store
+                .write(b"a", &p(&[&format!("{s:05}")]), 0, &[0u8; 200], s)
+                .unwrap();
+        }
+        assert_eq!(store.wal_tail, 0, "tail should wrap exactly onto the head");
+        assert!(!store.wal_records.is_empty());
+        assert_eq!(
+            store.wal_usage(),
+            wal_len,
+            "an exactly-full ring must report full, not empty"
+        );
+
+        // The fifth write can't fit: relief flushes the lone pinner — i.e.
+        // everything — and the ring resets, so the write proceeds.
+        store.write(b"a", &p(&["00005"]), 0, &[1u8; 200], 5).unwrap();
+        // The earlier records flushed to committed tree (read-backable).
+        assert_eq!(store.read(b"a", &p(&["00001"])).unwrap(), Some(vec![0u8; 200]));
+        assert_eq!(store.read(b"a", &p(&["00005"])).unwrap(), Some(vec![1u8; 200]));
+    }
+
+    /// rev1§4.4 edge case: a record whose **header** (not just payload) straddles
+    /// the wrap. The write must split mid-header, and the mount-time rotation must
+    /// reassemble it so `decode_frame` reads a contiguous header.
+    #[test]
+    fn wal_record_header_straddles_wrap() {
+        // Measure the record size, then size the ring so a record boundary lands
+        // 30 bytes (< WAL_HEADER = 48) before the buffer end.
+        let mut scratch =
+            Store::format(MemDev::new(1 << 20), wal_opts(1 << 16, 1 << 16)).unwrap();
+        scratch.create_ref(b"a").unwrap();
+        scratch.write(b"a", &p(&["00001"]), 0, &[0u8; 200], 1).unwrap();
+        let rsz = scratch.wal_tail;
+        assert!(rsz > WAL_HEADER as u64 + 30);
+
+        let wal_len = 5 * rsz + 30;
+        let opts = wal_opts(wal_len, wal_len);
+        let mut store = Store::format(MemDev::new(1 << 20), opts).unwrap();
+        store.create_ref(b"a").unwrap();
+        store.create_ref(b"b").unwrap();
+        store.create_ref(b"c").unwrap();
+
+        let mut seq = 1u64;
+        let mut write = |s: &mut Store<MemDev>, r: &[u8]| {
+            let path = format!("{seq:05}");
+            s.write(r, &p(&[&path]), 0, &[7u8; 200], seq).unwrap();
+            seq += 1;
+            path
+        };
+
+        // One 'a' record, then 'b' records until the tail is exactly 30 bytes
+        // before the end (a record boundary at wal_len - 30).
+        write(&mut store, b"a");
+        while store.wal_tail + rsz <= wal_len {
+            write(&mut store, b"b");
+        }
+        assert_eq!(
+            store.wal_tail,
+            wal_len - 30,
+            "tail should sit 30 bytes before the end"
+        );
+
+        // Flush 'a' to free the low region so the next write doesn't trip the
+        // won't-fit relief (it would flush everything and reset to 0).
+        store.flush_ref(b"a").unwrap();
+        store.commit().unwrap();
+
+        // 'c' starts at wal_len - 30: its 48-byte header straddles the wrap.
+        let c_path = write(&mut store, b"c");
+        assert!(
+            store.wal_tail < wal_len - 30,
+            "the 'c' write should have wrapped"
+        );
+
+        let dev = store.into_dev();
+        let recovered = Store::mount(dev, opts).unwrap();
+        assert_eq!(
+            recovered.read(b"c", &p(&[&c_path])).unwrap(),
+            Some(vec![7u8; 200]),
+            "record with a header straddling the wrap lost across remount"
+        );
+    }
+
+    /// rev1§4.4 normative edge case: an oversized record (larger than the whole
+    /// WAL region) bypasses the log and commits synchronously before ack — even
+    /// while the ring already holds live records. The bypass must not corrupt the
+    /// ring's tail; the prior live record and the oversized write both survive.
+    #[test]
+    fn oversized_write_while_ring_nonempty() {
+        let wal_len = 4 * 1024u64;
+        let opts = wal_opts(wal_len, wal_len);
+        let mut store = Store::format(MemDev::new(4 << 20), opts).unwrap();
+        store.create_ref(b"a").unwrap();
+        store.create_ref(b"b").unwrap();
+
+        // A normal live record on the ring.
+        store.write(b"a", &p(&["small"]), 0, &[1u8; 64], 1).unwrap();
+        assert!(!store.wal_records.is_empty());
+
+        // An oversized write (record > wal_len) to a different ref: bypass.
+        let big = vec![2u8; wal_len as usize + 1024];
+        store.write(b"b", &p(&["big"]), 0, &big, 2).unwrap();
+
+        // Both read back; the ring tail stayed in range.
+        assert_eq!(store.read(b"a", &p(&["small"])).unwrap(), Some(vec![1u8; 64]));
+        assert_eq!(store.read(b"b", &p(&["big"])).unwrap(), Some(big.clone()));
+        assert!(store.wal_tail < wal_len);
+
+        // And it all survives a remount across the bypass.
+        let dev = store.into_dev();
+        let recovered = Store::mount(dev, opts).unwrap();
+        assert_eq!(recovered.read(b"a", &p(&["small"])).unwrap(), Some(vec![1u8; 64]));
+        assert_eq!(recovered.read(b"b", &p(&["big"])).unwrap(), Some(big));
+    }
+
+    proptest! {
+        // Miri: a few cases cover the same paths; native keeps the full sweep.
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 256 },
+            ..ProptestConfig::default()
+        })]
+        /// rev1§4.4 M-5 ring-arithmetic guard: across arbitrary multi-ref write
+        /// streams on a small ring (so it wraps repeatedly and flush-the-pinner
+        /// fires), the WAL invariants hold after every op — `wal_head` equals the
+        /// front record's offset, `wal_usage` equals the independent sum of live
+        /// record spans, and usage never exceeds `wal_len` (relief always makes
+        /// room). A min-offset victim policy (the wrap bug) would stall relief and
+        /// blow the usage bound.
+        #[test]
+        fn wal_ring_invariants_hold_across_random_wraps(
+            ops in proptest::collection::vec((0usize..3, 1usize..400), 1..200),
+        ) {
+            let wal_len = 4096u64;
+            let opts = wal_opts(wal_len, wal_len / 2);
+            // Native: an ample chunk region, since frequent flushing without GC
+            // accumulates dead chunks (stop cleanly if it still fills — chunk
+            // capacity is not what this test is about, the WAL ring is). Miri
+            // interprets blake3 and tracks every device byte, so there it uses a
+            // small device and a short op stream — the wrap still happens within a
+            // handful of records, and the deterministic ring tests carry the rest
+            // of the Miri UB coverage.
+            let dev_bytes = if cfg!(miri) { 2 << 20 } else { 64 << 20 };
+            let max_ops = if cfg!(miri) { 16 } else { ops.len() };
+            let mut store = Store::format(MemDev::new(dev_bytes), opts).unwrap();
+            let refs: [&[u8]; 3] = [b"r0", b"r1", b"r2"];
+            for r in &refs {
+                store.create_ref(r).unwrap();
+            }
+            for (i, (ri, len)) in ops.iter().take(max_ops).enumerate() {
+                let data = vec![0x33u8; *len];
+                if store
+                    .write(refs[*ri], &p(&[&format!("{i:05}")]), 0, &data, (i + 1) as u64)
+                    .is_err()
+                {
+                    break; // chunk region full (no GC here) — WAL invariants already checked
+                }
+
+                // Invariant 1: the head tracks the front of the queue.
+                if let Some(front) = store.wal_records.front() {
+                    prop_assert_eq!(store.sb.wal_head, front.off);
+                }
+                // Invariant 2: usage equals the independent sum of live spans
+                // (each record tiles [its off, the next off) around the ring).
+                let offs: Vec<u64> = store.wal_records.iter().map(|r| r.off).collect();
+                if offs.is_empty() {
+                    prop_assert_eq!(store.wal_usage(), 0);
+                } else {
+                    let mut sum = 0u64;
+                    for w in 0..offs.len() {
+                        let next = if w + 1 < offs.len() { offs[w + 1] } else { store.wal_tail };
+                        sum += (next + wal_len - offs[w]) % wal_len;
+                    }
+                    let sum = if sum == 0 { wal_len } else { sum };
+                    prop_assert_eq!(store.wal_usage(), sum);
+                }
+                // Invariant 3: relief keeps usage within the ring.
+                prop_assert!(store.wal_usage() <= wal_len);
+            }
+        }
+    }
+
+    proptest! {
+        // Crash-injection: the storage-layer convention (64 native / 4 Miri).
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 64 },
+            ..ProptestConfig::default()
+        })]
+        /// rev1§4.4 M-5 under crash injection: the circular-WAL flush-the-pinner
+        /// path — selective flush, partial head advance, **split writes across the
+        /// wrap** — preserves all-acked-survives. A small ring (not record-aligned)
+        /// with a 50% watermark makes writes wrap and straddle and the scheduler
+        /// flush mid-stream; the crash point can land between the two halves of a
+        /// split write. Every acked write must still recover from durable state.
+        #[test]
+        fn crash_recovery_survives_wal_wrap(
+            ops in proptest::collection::vec(
+                (0u8..3, 0u8..6, 0u64..200, proptest::collection::vec(any::<u8>(), 1..200)),
+                1..60,
+            ),
+            fail_at in 4u64..600,
+            crash_seed in any::<u64>(),
+        ) {
+            let wal_len = 3000u64; // small, deliberately not record-aligned
+            let opts = wal_opts(wal_len, wal_len / 2);
+            let refs: [&[u8]; 3] = [b"r0", b"r1", b"r2"];
+            let mut store = Store::format(CrashDev::new(1 << 20), opts).unwrap();
+            for r in &refs {
+                store.create_ref(r).unwrap();
+            }
+            store.dev_mut().set_fail_after(fail_at);
+
+            let mut model: std::collections::HashMap<(usize, Path), Vec<u8>> =
+                std::collections::HashMap::new();
+            let mut inflight: Option<((usize, Path), Vec<u8>)> = None;
+
+            // Miri interprets blake3, so cap the op stream there (still wraps and
+            // flushes within a handful of records); native runs the full stream.
+            let max_ops = if cfg!(miri) { 12 } else { ops.len() };
+            for (rsel, psel, off, data) in ops.iter().take(max_ops) {
+                let ri = *rsel as usize;
+                let path = p(&[&format!("f{psel}")]);
+                let mut content = model.get(&(ri, path.clone())).cloned().unwrap_or_default();
+                let end = *off as usize + data.len();
+                if content.len() < end {
+                    content.resize(end, 0);
+                }
+                content[*off as usize..end].copy_from_slice(data);
+                let r = store.write(refs[ri], &path, *off, data, 1);
+                if r.is_ok() {
+                    model.insert((ri, path), content);
+                } else {
+                    inflight = Some(((ri, path), content));
+                    break;
+                }
+            }
+
+            let mut dev = store.into_dev();
+            dev.clear_fail();
+            dev.crash(crash_seed);
+            let recovered = Store::mount(dev, opts).unwrap();
+
+            for ((ri, path), expect) in &model {
+                let got = recovered.read(refs[*ri], path).unwrap();
+                let matches_model = got.as_deref() == Some(expect.as_slice());
+                let matches_inflight = inflight.as_ref().is_some_and(|((iri, ip), iv)| {
+                    iri == ri && ip == path && got.as_deref() == Some(iv.as_slice())
+                });
+                prop_assert!(
+                    matches_model || matches_inflight,
+                    "ref {} path {:?}: got {:?}, want {:?} (inflight {:?})",
+                    ri,
+                    path,
+                    got,
+                    expect,
+                    inflight
+                );
+            }
+        }
     }
 
     proptest! {
