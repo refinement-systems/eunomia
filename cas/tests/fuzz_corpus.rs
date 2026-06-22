@@ -125,6 +125,36 @@ fn wal_replay_scan() {
     }
 }
 
+/// Generator for the C2B tag-3 (Rename) corpus seed (`corpus/wal_replay_scan/
+/// rename`): a Write then a Rename record so the fuzzer — and the Miri replay
+/// in `wal_replay_scan` above — exercise the new rename decode path. `#[ignore]`d
+/// because it rewrites a committed file; run explicitly to regenerate:
+/// `cargo test -p cas --test fuzz_corpus gen_rename_corpus_seed -- --ignored`.
+#[test]
+#[ignore = "regenerates a committed corpus seed"]
+fn gen_rename_corpus_seed() {
+    let mut chain = WalOp::Write {
+        ref_name: b"main".to_vec(),
+        path: vec![b"a".to_vec()],
+        offset: 0,
+        mtime: 1,
+        data: b"hello".to_vec(),
+    }
+    .encode_record(0);
+    chain.extend_from_slice(
+        &WalOp::Rename {
+            ref_name: b"main".to_vec(),
+            from: vec![b"a".to_vec()],
+            to: vec![b"b".to_vec()],
+            mtime: 2,
+        }
+        .encode_record(1),
+    );
+    let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    dir.push("fuzz/corpus/wal_replay_scan");
+    fs::write(dir.join("rename"), &chain).unwrap();
+}
+
 #[test]
 fn chunker() {
     let params = cas::chunk::ChunkerParams {

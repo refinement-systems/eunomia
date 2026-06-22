@@ -134,11 +134,13 @@ verus! {
 pub const SB_SIZE: usize = 4096;
 /// First byte of the WAL region (after the two 4 KiB superblock slots).
 pub const WAL_OFF: u64 = 8192;
-/// On-disk format version (format v4, rev1§2.6). Inside the macro for the version
+/// On-disk format version (format v5, rev1§2.6). Inside the macro for the version
 /// gate in `decode_checked_fields`. Bumped 3 → 4 in B5A: each `RefEntry` now carries
 /// a fixed-width `edit_version` (rev1§4.7), so a v3 reader handed a v4 ref record would
-/// desync — the version gate refuses old images cleanly rather than mis-decode.
-pub(crate) const SB_VERSION: u32 = 4;
+/// desync. Bumped 4 → 5 in C2B: the WAL gains a tag-3 `Rename` op, so a v4 (pre-C2B)
+/// reader could decode a tag-3 record as a torn tail and silently drop a renamed-but-
+/// unflushed write — the version gate refuses such a store cleanly rather than mis-replay.
+pub(crate) const SB_VERSION: u32 = 5;
 /// Chunk frame header size (magic + len + birth gen + hash). Inside the macro
 /// because the geometry spec bounds the index frame by it.
 pub const CHUNK_HEADER: usize = 4 + 4 + 8 + 32;
@@ -492,12 +494,23 @@ pub enum WalOp {
         path: Vec<Vec<u8>>,
         mtime: u64,
     },
+    /// Move `from` to `to` within one ref (rev1§4.9). The WAL stays purely
+    /// path-keyed: replaying this record reconstructs the same ephemeral
+    /// file-id swap the live op produced, so the ids never touch disk.
+    Rename {
+        ref_name: Vec<u8>,
+        from: Vec<Vec<u8>>,
+        to: Vec<Vec<u8>>,
+        mtime: u64,
+    },
 }
 
 impl WalOp {
     pub fn ref_name(&self) -> &[u8] {
         match self {
-            WalOp::Write { ref_name, .. } | WalOp::Unlink { ref_name, .. } => ref_name,
+            WalOp::Write { ref_name, .. }
+            | WalOp::Unlink { ref_name, .. }
+            | WalOp::Rename { ref_name, .. } => ref_name,
         }
     }
 
@@ -507,7 +520,9 @@ impl WalOp {
     /// value is the same one persisted in the record.
     pub fn mtime(&self) -> u64 {
         match self {
-            WalOp::Write { mtime, .. } | WalOp::Unlink { mtime, .. } => *mtime,
+            WalOp::Write { mtime, .. }
+            | WalOp::Unlink { mtime, .. }
+            | WalOp::Rename { mtime, .. } => *mtime,
         }
     }
 
@@ -546,6 +561,19 @@ impl WalOp {
                 out.push(ref_name.len() as u8);
                 out.extend_from_slice(ref_name);
                 put_path(&mut out, path);
+                out.extend_from_slice(&mtime.to_le_bytes());
+            }
+            WalOp::Rename {
+                ref_name,
+                from,
+                to,
+                mtime,
+            } => {
+                out.push(3);
+                out.push(ref_name.len() as u8);
+                out.extend_from_slice(ref_name);
+                put_path(&mut out, from);
+                put_path(&mut out, to);
                 out.extend_from_slice(&mtime.to_le_bytes());
             }
         }
@@ -588,6 +616,19 @@ impl WalOp {
                 WalOp::Unlink {
                     ref_name,
                     path,
+                    mtime,
+                }
+            }
+            3 => {
+                let rl = r.u8()? as usize;
+                let ref_name = r.take(rl)?.to_vec();
+                let from = take_path(&mut r)?;
+                let to = take_path(&mut r)?;
+                let mtime = r.u64()?;
+                WalOp::Rename {
+                    ref_name,
+                    from,
+                    to,
                     mtime,
                 }
             }
