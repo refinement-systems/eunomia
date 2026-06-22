@@ -3270,7 +3270,8 @@ mod tests {
     #[test]
     fn wal_pressure_flushes_pinner_keeps_newer_dirty() {
         let wal_len = 8 * 1024u64;
-        let mut store = Store::format(MemDev::new(1 << 20), wal_opts(wal_len, wal_len / 2)).unwrap();
+        let mut store =
+            Store::format(MemDev::new(1 << 20), wal_opts(wal_len, wal_len / 2)).unwrap();
         store.create_ref(b"pin").unwrap();
         store.create_ref(b"new").unwrap();
 
@@ -3315,7 +3316,10 @@ mod tests {
             "wal_head did not advance past the flushed pinner"
         );
         // The flushed data is durable committed tree (read-backable).
-        assert_eq!(store.read(b"pin", &p(&["p"])).unwrap(), Some(vec![1u8; 512]));
+        assert_eq!(
+            store.read(b"pin", &p(&["p"])).unwrap(),
+            Some(vec![1u8; 512])
+        );
     }
 
     /// rev1§4.4 M-5 across a ring **wrap**: the victim is the front of the WAL
@@ -3338,7 +3342,8 @@ mod tests {
         let data = [0u8; 200];
         let mut seq = 1u64;
         let mut write = |s: &mut Store<MemDev>, r: &[u8]| {
-            s.write(r, &p(&[&format!("{seq:05}")]), 0, &data, seq).unwrap();
+            s.write(r, &p(&[&format!("{seq:05}")]), 0, &data, seq)
+                .unwrap();
             let used = format!("{seq:05}");
             seq += 1;
             used
@@ -3383,7 +3388,12 @@ mod tests {
             "tail should have wrapped to a low offset"
         );
         let n_path = write(&mut store, b"n");
-        let n_off = store.acct.get(b"n".as_slice()).unwrap().oldest_wal_pos.unwrap();
+        let n_off = store
+            .acct
+            .get(b"n".as_slice())
+            .unwrap()
+            .oldest_wal_pos
+            .unwrap();
         assert!(
             n_off < pin_off,
             "the newer ref ({n_off}) should sit below the pinner ({pin_off}) after the wrap"
@@ -3433,7 +3443,10 @@ mod tests {
             Some(vec![0u8; 200])
         );
         // A flushed-'a' record (committed tree before the wrap) survives too.
-        assert_eq!(recovered.read(b"a", &p(&["00001"])).unwrap(), Some(vec![0u8; 200]));
+        assert_eq!(
+            recovered.read(b"a", &p(&["00001"])).unwrap(),
+            Some(vec![0u8; 200])
+        );
     }
 
     /// rev1§4.4 edge case: an exactly-full ring. With `wal_len` a multiple of the
@@ -3444,10 +3457,11 @@ mod tests {
     fn ring_exactly_full_reports_full_then_relieves() {
         // Measure the record size on a scratch store, then size the ring to an
         // exact multiple of it.
-        let mut scratch =
-            Store::format(MemDev::new(1 << 20), wal_opts(1 << 16, 1 << 16)).unwrap();
+        let mut scratch = Store::format(MemDev::new(1 << 20), wal_opts(1 << 16, 1 << 16)).unwrap();
         scratch.create_ref(b"a").unwrap();
-        scratch.write(b"a", &p(&["00001"]), 0, &[0u8; 200], 1).unwrap();
+        scratch
+            .write(b"a", &p(&["00001"]), 0, &[0u8; 200], 1)
+            .unwrap();
         let rsz = scratch.wal_tail;
 
         let wal_len = 4 * rsz;
@@ -3470,10 +3484,18 @@ mod tests {
 
         // The fifth write can't fit: relief flushes the lone pinner — i.e.
         // everything — and the ring resets, so the write proceeds.
-        store.write(b"a", &p(&["00005"]), 0, &[1u8; 200], 5).unwrap();
+        store
+            .write(b"a", &p(&["00005"]), 0, &[1u8; 200], 5)
+            .unwrap();
         // The earlier records flushed to committed tree (read-backable).
-        assert_eq!(store.read(b"a", &p(&["00001"])).unwrap(), Some(vec![0u8; 200]));
-        assert_eq!(store.read(b"a", &p(&["00005"])).unwrap(), Some(vec![1u8; 200]));
+        assert_eq!(
+            store.read(b"a", &p(&["00001"])).unwrap(),
+            Some(vec![0u8; 200])
+        );
+        assert_eq!(
+            store.read(b"a", &p(&["00005"])).unwrap(),
+            Some(vec![1u8; 200])
+        );
     }
 
     /// rev1§4.4 edge case: a record whose **header** (not just payload) straddles
@@ -3483,10 +3505,11 @@ mod tests {
     fn wal_record_header_straddles_wrap() {
         // Measure the record size, then size the ring so a record boundary lands
         // 30 bytes (< WAL_HEADER = 48) before the buffer end.
-        let mut scratch =
-            Store::format(MemDev::new(1 << 20), wal_opts(1 << 16, 1 << 16)).unwrap();
+        let mut scratch = Store::format(MemDev::new(1 << 20), wal_opts(1 << 16, 1 << 16)).unwrap();
         scratch.create_ref(b"a").unwrap();
-        scratch.write(b"a", &p(&["00001"]), 0, &[0u8; 200], 1).unwrap();
+        scratch
+            .write(b"a", &p(&["00001"]), 0, &[0u8; 200], 1)
+            .unwrap();
         let rsz = scratch.wal_tail;
         assert!(rsz > WAL_HEADER as u64 + 30);
 
@@ -3559,14 +3582,20 @@ mod tests {
         store.write(b"b", &p(&["big"]), 0, &big, 2).unwrap();
 
         // Both read back; the ring tail stayed in range.
-        assert_eq!(store.read(b"a", &p(&["small"])).unwrap(), Some(vec![1u8; 64]));
+        assert_eq!(
+            store.read(b"a", &p(&["small"])).unwrap(),
+            Some(vec![1u8; 64])
+        );
         assert_eq!(store.read(b"b", &p(&["big"])).unwrap(), Some(big.clone()));
         assert!(store.wal_tail < wal_len);
 
         // And it all survives a remount across the bypass.
         let dev = store.into_dev();
         let recovered = Store::mount(dev, opts).unwrap();
-        assert_eq!(recovered.read(b"a", &p(&["small"])).unwrap(), Some(vec![1u8; 64]));
+        assert_eq!(
+            recovered.read(b"a", &p(&["small"])).unwrap(),
+            Some(vec![1u8; 64])
+        );
         assert_eq!(recovered.read(b"b", &p(&["big"])).unwrap(), Some(big));
     }
 
