@@ -3,11 +3,11 @@
 //! protocol to the shell over a channel.
 //!
 //! World (built by init, rev1§5.1): slot 0 = bootstrap channel whose first
-//! message is the config block; slot 1 = the shell's session channel.
-//! The MMIO window, DMA region, and time page are pre-mapped by init;
-//! their addresses arrive in the config block (the DMA device address
-//! via frame_paddr — the phys-read path, rev1§2.5; the time page under the
-//! `"time"` grant, rev1§2.6/rev1§5.1).
+//! message is the unified startup block (`b"EUS1"`, the rev1§5.1 named-grant
+//! table — C1B); slot 1 = the shell's session channel. The MMIO window, DMA
+//! region, and time page are pre-mapped by init and arrive in the block as three
+//! `REGION` grants — `virtio-mmio`, `dma` (its device address read via
+//! frame_paddr, the phys-read path, rev1§2.5), and `time` (rev1§2.6/rev1§5.1).
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(not(test), no_main)]
@@ -22,6 +22,7 @@ extern crate alloc;
 
 use dma_pool::{DeviceAddress, DmaBacking, DmaPool};
 use ipc::{sys, Endpoint, Message, Reactor, RecvErr, SendErr, Signals, SyscallTransport};
+use loader::startup::{self, GrantKind};
 use storage_server::wire;
 use storage_server::Server;
 use virtio_blk::blockdev::VirtioBlockDev;
@@ -117,9 +118,11 @@ fn fail(msg: &[u8]) -> ! {
     sys::exit()
 }
 
-/// The init→storaged startup block (rev1§5.1): magic `"SD02"` followed by five
-/// little-endian `u64` fields (MMIO window VA, DMA region VA, DMA device PA,
-/// DMA length, time-page VA).
+/// The three pre-mapped regions storaged needs from the init→storaged startup
+/// block (rev1§5.1): the virtio MMIO window VA, the DMA region (VA, length, and
+/// device PA — the phys-read path, rev1§2.5), and the time-page VA (rev1§2.6).
+/// All three arrive as `REGION` grants in the unified `b"EUS1"` block (C1B);
+/// init maps each page before start, so only the VAs travel — never assumed.
 #[derive(Debug, PartialEq)]
 struct Config {
     mmio_va: u64,
@@ -129,23 +132,33 @@ struct Config {
     time_va: u64,
 }
 
-/// Decode the SD02 config block. This is a decode of an untrusted-shaped
-/// message (rev1§2.7): a too-short or mis-magicked block is *refused* with
-/// `None`, never a panic (a panic in `_start` is a boot failure). Total over
-/// any byte slice — the length guard precedes every index, and a `>= 44`-byte
-/// buffer covers the final `[36..44]` field; trailing bytes are ignored. init
-/// builds the inverse (its `build_sd02`); the format is pinned on both ends.
-fn parse_config(buf: &[u8]) -> Option<Config> {
-    if buf.len() < 44 || &buf[..4] != b"SD02" {
-        return None;
+/// The `(va, len, pa)` of the first `REGION` grant named `name`, or `None` if
+/// the name is absent or carries a non-region kind.
+fn region(s: &startup::Startup, name: u8) -> Option<(u64, u64, u64)> {
+    match s.grant(name)? {
+        GrantKind::Region { va, len, pa } => Some((va, len, pa)),
+        _ => None,
     }
-    let rd = |off: usize| u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
+}
+
+/// Decode the init→storaged startup block and extract the three required
+/// regions. The block is an untrusted-shaped message (rev1§2.7): a malformed
+/// block — bad magic, a truncated entry, or a missing/wrong-kind required region
+/// — is *refused* with `None`, never a panic (a panic in `_start` is a boot
+/// failure). Totality is `loader::startup::decode`'s (fuzzed) guarantee; this
+/// layer adds only the name lookups. init builds the inverse (its
+/// `build_storaged_block`); the codec is now shared on both ends (C1B).
+fn parse_config(buf: &[u8]) -> Option<Config> {
+    let s = startup::decode(buf)?;
+    let (mmio_va, _mmio_len, _) = region(&s, startup::NAME_VIRTIO_MMIO)?;
+    let (dma_va, dma_len, dma_pa) = region(&s, startup::NAME_DMA)?;
+    let (time_va, _time_len, _) = region(&s, startup::NAME_TIME)?;
     Some(Config {
-        mmio_va: rd(4),
-        dma_va: rd(12),
-        dma_pa: rd(20),
-        dma_len: rd(28),
-        time_va: rd(36),
+        mmio_va,
+        dma_va,
+        dma_pa,
+        dma_len,
+        time_va,
     })
 }
 
@@ -308,29 +321,62 @@ fn on_panic(info: &core::panic::PanicInfo) -> ! {
 
 #[cfg(test)]
 mod tests {
-    //! B15C — host tests for the SD02 startup-block decoder (rev1§6 Baseline
-    //! tier). storaged is the SD02 *consumer*; init the producer. The two are
-    //! separate `bin` mini-workspaces that cannot import each other, so the
-    //! round-trip here drives the real `parse_config` against a local builder
-    //! that mirrors init's `build_sd02` — the format is pinned on both ends.
+    //! C1B — host tests for the storaged startup-block *consumer* (rev1§6
+    //! Baseline tier). storaged decodes the unified `b"EUS1"` block (init is the
+    //! producer); the codec is now the **shared** `loader::startup`, so these
+    //! tests drive the real `decode` through `parse_config` against blocks built
+    //! by the real `encode` — the format is pinned on both ends by the same code,
+    //! not by mirrored hand-parsers. `parse_config`'s own job is the three name
+    //! lookups + the region-kind check; decode totality is `loader`'s (fuzzed).
     use super::*;
     use proptest::prelude::*;
 
-    /// Mirror of init's `build_sd02` (the two bins can't share a module).
-    fn sd02(mmio_va: u64, dma_va: u64, dma_pa: u64, dma_len: u64, time_va: u64) -> [u8; 44] {
-        let mut b = [0u8; 44];
-        b[..4].copy_from_slice(b"SD02");
-        b[4..12].copy_from_slice(&mmio_va.to_le_bytes());
-        b[12..20].copy_from_slice(&dma_va.to_le_bytes());
-        b[20..28].copy_from_slice(&dma_pa.to_le_bytes());
-        b[28..36].copy_from_slice(&dma_len.to_le_bytes());
-        b[36..44].copy_from_slice(&time_va.to_le_bytes());
-        b
+    /// Build the storaged startup block via the shared codec — the inverse of
+    /// `parse_config`, mirroring init's `build_storaged_block` (the two bins
+    /// can't share a module, but they now share `loader::startup`).
+    fn storaged_block(
+        mmio_va: u64,
+        dma_va: u64,
+        dma_pa: u64,
+        dma_len: u64,
+        time_va: u64,
+    ) -> Vec<u8> {
+        let mut s = startup::Startup::new();
+        s.push_grant(startup::Grant {
+            name: startup::NAME_VIRTIO_MMIO,
+            kind: GrantKind::Region {
+                va: mmio_va,
+                len: 32 * 0x200,
+                pa: 0,
+            },
+        })
+        .unwrap();
+        s.push_grant(startup::Grant {
+            name: startup::NAME_DMA,
+            kind: GrantKind::Region {
+                va: dma_va,
+                len: dma_len,
+                pa: dma_pa,
+            },
+        })
+        .unwrap();
+        s.push_grant(startup::Grant {
+            name: startup::NAME_TIME,
+            kind: GrantKind::Region {
+                va: time_va,
+                len: 4096,
+                pa: 0,
+            },
+        })
+        .unwrap();
+        let mut buf = [0u8; startup::MAX_BLOCK];
+        let n = startup::encode(&s, &mut buf).unwrap();
+        buf[..n].to_vec()
     }
 
     #[test]
-    fn parse_config_round_trips_the_five_fields() {
-        let block = sd02(
+    fn parse_config_round_trips_the_three_regions() {
+        let block = storaged_block(
             0xA000_0000,
             0xA100_0000,
             0x4321_0000,
@@ -350,14 +396,76 @@ mod tests {
     }
 
     #[test]
-    fn parse_config_refuses_short_and_garbage() {
-        // Empty, one byte short of the 44-byte minimum, and a wrong magic —
-        // each refused with None, never a panic (rev1§2.7 decode discipline).
+    fn parse_config_refuses_bad_magic_and_truncation() {
+        // Empty, a wrong magic, and a one-byte-truncated valid block — each
+        // refused with None, never a panic (rev1§2.7 decode discipline).
         assert_eq!(parse_config(&[]), None);
-        assert_eq!(parse_config(&sd02(1, 2, 3, 4, 5)[..43]), None);
-        let mut wrong = sd02(1, 2, 3, 4, 5);
-        wrong[3] = b'3'; // "SD03"
-        assert_eq!(parse_config(&wrong), None);
+        assert_eq!(parse_config(b"SD02\x00\x00\x00"), None);
+        let block = storaged_block(1, 2, 3, 4, 5);
+        assert_eq!(parse_config(&block[..block.len() - 1]), None);
+    }
+
+    #[test]
+    fn parse_config_refuses_a_missing_required_region() {
+        // A well-formed EUS1 block that simply omits the MMIO region: decode
+        // succeeds, but the name lookup fails, so parse_config refuses cleanly
+        // (a missing required grant is a boot failure, never a panic).
+        let mut s = startup::Startup::new();
+        s.push_grant(startup::Grant {
+            name: startup::NAME_DMA,
+            kind: GrantKind::Region {
+                va: 0xA100_0000,
+                len: 4096,
+                pa: 0x4321,
+            },
+        })
+        .unwrap();
+        s.push_grant(startup::Grant {
+            name: startup::NAME_TIME,
+            kind: GrantKind::Region {
+                va: 0xA300_0000,
+                len: 4096,
+                pa: 0,
+            },
+        })
+        .unwrap();
+        let mut buf = [0u8; startup::MAX_BLOCK];
+        let n = startup::encode(&s, &mut buf).unwrap();
+        assert!(startup::decode(&buf[..n]).is_some()); // the block itself is valid…
+        assert_eq!(parse_config(&buf[..n]), None); // …but MMIO is absent.
+    }
+
+    #[test]
+    fn parse_config_refuses_a_wrong_kind_region() {
+        // The TIME name carried as a cap-slot rather than a region: present but
+        // the wrong kind, so the region lookup refuses (no panic, no misread).
+        let mut s = startup::Startup::new();
+        s.push_grant(startup::Grant {
+            name: startup::NAME_VIRTIO_MMIO,
+            kind: GrantKind::Region {
+                va: 0xA000_0000,
+                len: 4096,
+                pa: 0,
+            },
+        })
+        .unwrap();
+        s.push_grant(startup::Grant {
+            name: startup::NAME_DMA,
+            kind: GrantKind::Region {
+                va: 0xA100_0000,
+                len: 4096,
+                pa: 0x4321,
+            },
+        })
+        .unwrap();
+        s.push_grant(startup::Grant {
+            name: startup::NAME_TIME,
+            kind: GrantKind::CapSlot(5),
+        })
+        .unwrap();
+        let mut buf = [0u8; startup::MAX_BLOCK];
+        let n = startup::encode(&s, &mut buf).unwrap();
+        assert_eq!(parse_config(&buf[..n]), None);
     }
 
     proptest! {
@@ -367,14 +475,15 @@ mod tests {
         })]
 
         /// Total over arbitrary bytes: `parse_config` never panics — the
-        /// refuse-not-crash floor (rev1§2.7).
+        /// refuse-not-crash floor (rev1§2.7), inherited from `decode`.
         #[test]
-        fn parse_config_is_total(bytes in proptest::collection::vec(any::<u8>(), 0..128)) {
+        fn parse_config_is_total(bytes in proptest::collection::vec(any::<u8>(), 0..256)) {
             let _ = parse_config(&bytes);
         }
 
-        /// Any "SD02"-prefixed, >= 44-byte buffer parses to `Some` with the
-        /// five fields read at their LE offsets; trailing bytes are ignored.
+        /// Any block carrying the three required regions parses to `Some` with
+        /// the looked-up VAs/PA/len; trailing bytes (the recv buffer's zero
+        /// padding) are ignored.
         #[test]
         fn parse_config_accepts_well_formed(
             mmio_va in any::<u64>(),
@@ -384,7 +493,7 @@ mod tests {
             time_va in any::<u64>(),
             tail in proptest::collection::vec(any::<u8>(), 0..16),
         ) {
-            let mut block = sd02(mmio_va, dma_va, dma_pa, dma_len, time_va).to_vec();
+            let mut block = storaged_block(mmio_va, dma_va, dma_pa, dma_len, time_va);
             block.extend(tail);
             prop_assert_eq!(
                 parse_config(&block),

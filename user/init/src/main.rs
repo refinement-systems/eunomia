@@ -17,6 +17,9 @@
 #![cfg_attr(test, allow(dead_code, unused_imports))]
 
 use ipc::sys::{self, OBJ_CHANNEL, OBJ_FRAME, PERM_DEVICE, PERM_W, RIGHT_READ};
+// The shared startup-block codec (rev1§5.1, C1B) — host-buildable, used by both
+// `_start` (the producer) and the builder tests.
+use loader::startup::{self, Grant, GrantKind};
 // `loader::spawn` exists only on the bare-metal target (it is gated
 // `target_os = "none"`), so the import is boot-only — gated out of the host
 // test build alongside the `_start` that is its sole user.
@@ -55,6 +58,13 @@ const SD_SPAWN_BASE: u32 = 20;
 const SH_SPAWN_BASE: u32 = 40;
 
 const MMIO_VA: u64 = 0xA000_0000;
+/// The virtio-mmio window storaged probes: 32 transports × 0x200 each. Carried
+/// in the `virtio-mmio` region grant for completeness — storaged drives its own
+/// probe loop and does not consume the length (it is informational).
+const MMIO_LEN: u64 = 32 * 0x200;
+/// The time page is a single frame (rev1§2.6); its length rides the `time`
+/// region grant. storaged `attach`es by VA and ignores the length.
+const TIME_LEN: u64 = 4096;
 const DMA_VA: u64 = 0xA100_0000;
 /// PL031 window in init's own aspace (the one self-mapping in the system).
 const RTC_VA: u64 = 0xA200_0000;
@@ -77,19 +87,48 @@ fn rtc_sane(secs: u64, cntfrq: u64) -> bool {
     secs >= RTC_MIN_SANE_SECS && cntfrq != 0
 }
 
-/// Build the init→storaged startup block (rev1§5.1): magic `"SD02"` followed
-/// by five little-endian `u64` fields (MMIO VA, DMA VA, DMA device PA, DMA
-/// length, time-page VA). storaged decodes the inverse (its `parse_config`);
-/// the format is pinned on both ends (B15C).
-fn build_sd02(mmio_va: u64, dma_va: u64, dma_pa: u64, dma_len: u64, time_va: u64) -> [u8; 44] {
-    let mut c = [0u8; 44];
-    c[..4].copy_from_slice(b"SD02");
-    c[4..12].copy_from_slice(&mmio_va.to_le_bytes());
-    c[12..20].copy_from_slice(&dma_va.to_le_bytes());
-    c[20..28].copy_from_slice(&dma_pa.to_le_bytes());
-    c[28..36].copy_from_slice(&dma_len.to_le_bytes());
-    c[36..44].copy_from_slice(&time_va.to_le_bytes());
-    c
+/// Build the init→storaged startup block (rev1§5.1, C1B): the unified `b"EUS1"`
+/// format carrying three `REGION` grants — the virtio MMIO window, the DMA pool
+/// (with its device PA, the phys-read path rev1§2.5), and the time page
+/// (rev1§2.6). Supersedes the bespoke `"SD02"` fixed layout; storaged decodes
+/// the inverse (its `parse_config`), the codec now shared on both ends. Returns
+/// the encoded length or a clean `EncodeError` (the producer maps it to a boot
+/// failure — refuse, never panic). The regions carry no new authority: init
+/// `map`s every page before start, so only the VAs travel.
+fn build_storaged_block(
+    out: &mut [u8],
+    mmio_va: u64,
+    dma_va: u64,
+    dma_pa: u64,
+    dma_len: u64,
+    time_va: u64,
+) -> Result<usize, startup::EncodeError> {
+    let mut s = startup::Startup::new();
+    s.push_grant(Grant {
+        name: startup::NAME_VIRTIO_MMIO,
+        kind: GrantKind::Region {
+            va: mmio_va,
+            len: MMIO_LEN,
+            pa: 0,
+        },
+    })?;
+    s.push_grant(Grant {
+        name: startup::NAME_DMA,
+        kind: GrantKind::Region {
+            va: dma_va,
+            len: dma_len,
+            pa: dma_pa,
+        },
+    })?;
+    s.push_grant(Grant {
+        name: startup::NAME_TIME,
+        kind: GrantKind::Region {
+            va: time_va,
+            len: TIME_LEN,
+            pa: 0,
+        },
+    })?;
+    startup::encode(&s, out)
 }
 
 /// Build the init→shell startup block (rev1§5.1): magic `"SH01"` followed by
@@ -216,9 +255,25 @@ pub extern "C" fn _start() -> ! {
         b"time sd map",
     );
 
-    let config = build_sd02(MMIO_VA, DMA_VA, dma_pa, DMA_PAGES * 4096, TIME_VA);
+    let mut sd_block = [0u8; startup::MAX_BLOCK];
+    let sd_len = match build_storaged_block(
+        &mut sd_block,
+        MMIO_VA,
+        DMA_VA,
+        dma_pa,
+        DMA_PAGES * 4096,
+        TIME_VA,
+    ) {
+        Ok(n) => n,
+        // The block is built from fixed init constants, so an overflow would be
+        // a build-time bug — but refuse cleanly rather than panic (rev1§2.7).
+        Err(_) => {
+            sys::debug_write(b"[init] FAILED: build storaged block\n");
+            sys::exit();
+        }
+    };
     check(
-        sys::chan_send(SD_BOOT_A, &config, None),
+        sys::chan_send(SD_BOOT_A, &sd_block[..sd_len], None),
         b"sd startup block",
     );
     // Block-don't-spin: requests wake storaged through a readable→
@@ -309,26 +364,17 @@ fn on_panic(_: &core::panic::PanicInfo) -> ! {
 
 #[cfg(test)]
 mod tests {
-    //! B15C — host tests for init's startup-block *builders* and the RTC
-    //! sanity rule (rev1§6 Baseline tier). init is the SD02/SH01 producer;
-    //! storaged/shell are the consumers, in separate `bin` mini-workspaces
-    //! that can't be imported here, so each round-trip drives the real builder
-    //! against a local parser mirroring the consumer's rule — the format is
-    //! pinned on both ends.
+    //! Host tests for init's startup-block *builders* and the RTC sanity rule
+    //! (rev1§6 Baseline tier). C1B: the init→storaged block now uses the shared
+    //! `loader::startup` codec, so its round-trip drives the real `encode`
+    //! through the real `decode` — no mirrored hand-parser. The init→shell block
+    //! is still the bespoke `SH01` (migrated by C1C), so its test keeps the local
+    //! `parse_sh01` mirror of the shell's rule until then.
     use super::*;
     use proptest::prelude::*;
 
-    /// Mirror of storaged's `parse_config` rule.
-    fn parse_sd02(buf: &[u8]) -> Option<(u64, u64, u64, u64, u64)> {
-        if buf.len() < 44 || &buf[..4] != b"SD02" {
-            return None;
-        }
-        let rd = |off: usize| u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
-        Some((rd(4), rd(12), rd(20), rd(28), rd(36)))
-    }
-
     /// Mirror of the shell's SH01 parse (`shell:_start`: `blen >= 12` and the
-    /// `b"SH01"` magic, then the 8-byte time VA).
+    /// `b"SH01"` magic, then the 8-byte time VA). Retired by C1C.
     fn parse_sh01(buf: &[u8]) -> Option<u64> {
         if buf.len() >= 12 && &buf[..4] == b"SH01" {
             Some(u64::from_le_bytes(buf[4..12].try_into().unwrap()))
@@ -338,21 +384,46 @@ mod tests {
     }
 
     #[test]
-    fn build_sd02_golden_layout() {
-        let c = build_sd02(0x1122_3344_5566_7788, 0xA, 0xB, 0xC, 0xD);
-        assert_eq!(c.len(), 44);
-        assert_eq!(&c[..4], b"SD02");
-        assert_eq!(&c[4..12], &0x1122_3344_5566_7788u64.to_le_bytes());
-        assert_eq!(&c[36..44], &0xDu64.to_le_bytes());
-    }
-
-    #[test]
-    fn build_sd02_round_trips_through_the_storaged_rule() {
-        let c = build_sd02(0xA000_0000, 0xA100_0000, 0x4321, 64 * 4096, 0xA300_0000);
+    fn build_storaged_block_carries_the_three_regions() {
+        let mut buf = [0u8; startup::MAX_BLOCK];
+        let n = build_storaged_block(
+            &mut buf,
+            0xA000_0000,
+            0xA100_0000,
+            0x4321_0000,
+            64 * 4096,
+            0xA300_0000,
+        )
+        .unwrap();
+        let s = startup::decode(&buf[..n]).unwrap();
+        assert_eq!(s.ngrants, 3);
         assert_eq!(
-            parse_sd02(&c),
-            Some((0xA000_0000, 0xA100_0000, 0x4321, 64 * 4096, 0xA300_0000))
+            s.grant(startup::NAME_VIRTIO_MMIO),
+            Some(GrantKind::Region {
+                va: 0xA000_0000,
+                len: MMIO_LEN,
+                pa: 0
+            })
         );
+        assert_eq!(
+            s.grant(startup::NAME_DMA),
+            Some(GrantKind::Region {
+                va: 0xA100_0000,
+                len: 64 * 4096,
+                pa: 0x4321_0000
+            })
+        );
+        assert_eq!(
+            s.grant(startup::NAME_TIME),
+            Some(GrantKind::Region {
+                va: 0xA300_0000,
+                len: TIME_LEN,
+                pa: 0
+            })
+        );
+        // The storaged block carries no argv/env (rev1§5.1 fields, empty here).
+        assert_eq!(s.nargv, 0);
+        assert_eq!(s.nenv, 0);
     }
 
     #[test]
@@ -384,13 +455,29 @@ mod tests {
             ..ProptestConfig::default()
         })]
 
-        /// `build_sd02` ↔ the storaged rule round-trips any five fields.
+        /// `build_storaged_block` ↔ the real `loader::startup::decode`
+        /// round-trips any region fields (the codec is shared, so this drives
+        /// the actual producer→consumer path, not a mirror).
         #[test]
-        fn build_sd02_round_trips_arbitrary_fields(
-            a in any::<u64>(), b in any::<u64>(), c in any::<u64>(),
-            d in any::<u64>(), e in any::<u64>(),
+        fn build_storaged_block_round_trips_arbitrary_fields(
+            mmio_va in any::<u64>(), dma_va in any::<u64>(), dma_pa in any::<u64>(),
+            dma_len in any::<u64>(), time_va in any::<u64>(),
         ) {
-            prop_assert_eq!(parse_sd02(&build_sd02(a, b, c, d, e)), Some((a, b, c, d, e)));
+            let mut buf = [0u8; startup::MAX_BLOCK];
+            let n = build_storaged_block(&mut buf, mmio_va, dma_va, dma_pa, dma_len, time_va).unwrap();
+            let s = startup::decode(&buf[..n]).unwrap();
+            prop_assert_eq!(
+                s.grant(startup::NAME_VIRTIO_MMIO),
+                Some(GrantKind::Region { va: mmio_va, len: MMIO_LEN, pa: 0 })
+            );
+            prop_assert_eq!(
+                s.grant(startup::NAME_DMA),
+                Some(GrantKind::Region { va: dma_va, len: dma_len, pa: dma_pa })
+            );
+            prop_assert_eq!(
+                s.grant(startup::NAME_TIME),
+                Some(GrantKind::Region { va: time_va, len: TIME_LEN, pa: 0 })
+            );
         }
 
         /// `build_sh01` ↔ the shell rule round-trips any time VA.
