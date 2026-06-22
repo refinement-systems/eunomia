@@ -5,14 +5,18 @@ edition = "2021"
 
 # Built by kernel/build.rs for aarch64-unknown-none-softfloat; not a
 # workspace member. The bare-metal items are gated behind cfg(not(test)) so a
-# host `cargo test` can drive the pure ST01 decoder (B15C, rev1§6 Baseline).
+# host `cargo test` can drive the pure startup-block decoder (C1D, rev1§6 Baseline).
 [workspace]
 
 [dependencies]
 ipc = { path = "../../ipc" }
 urt = { path = "../../urt" }
+# C1D — the unified startup-block codec (loader::startup), shared with the shell
+# producer. no_std, host-buildable; default-features off keeps it pulling only
+# elf + startup (no target_os-gated spawn).
+loader = { path = "../../loader", default-features = false }
 
-# B15C — host tests for the ST01 startup-block decoder (rev1§6 Baseline tier).
+# C1D — host tests for the startup-block decoder (rev1§6 Baseline tier).
 # Dev-only, so the aarch64 cross-build never pulls it.
 [dev-dependencies]
 proptest = "1"
