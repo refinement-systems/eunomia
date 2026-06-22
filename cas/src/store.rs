@@ -2006,12 +2006,63 @@ impl<D: BlockDev> Store<D> {
             self.commit()?;
         }
 
-        // Global size pressure (rev1§4.4 high watermark): still flush-everything
-        // here — B12B replaces this with the low/high-watermark,
-        // flush-the-biggest-offenders policy.
-        let total: usize = self.overlays.values().map(|o| o.bytes()).sum();
-        if total > self.opts.global_budget {
-            self.sync_all()?;
+        // Size pressure (rev1§4.4, M-4): when total dirty overlay bytes cross
+        // the *low* watermark, flush the biggest offenders — not flush-everything
+        // at one hard threshold. Small refs stay dirty; the high watermark
+        // (`global_budget`) is the backpressure point, rarely reached because
+        // flushing starts at the low one.
+        self.relieve_size_pressure()?;
+        Ok(())
+    }
+
+    /// Size-pressure flush (rev1§4.4 trigger 3, M-4): when total dirty overlay
+    /// bytes cross the *low* watermark, flush the **biggest offenders** — sort
+    /// the dirty refs by overlay bytes descending and `flush_ref` them until the
+    /// total is back at or below the low watermark (or only one ref remains) —
+    /// *not* `sync_all`, so the smallest refs stay dirty. The *high* watermark is
+    /// `global_budget`, the backpressure point; because flushing starts at the
+    /// low one, writers rarely reach it.
+    ///
+    /// Backpressure is the synchronous flush itself (Design decision 4): the
+    /// flush runs inline and the write proceeds once pressure is relieved — no
+    /// eviction (overlay leaves memory only by becoming tree) and no `FULL`
+    /// return (a refusal a single-threaded server can never need — the flush
+    /// always relieves; the async `FULL` reply is recorded future work). In the
+    /// synchronous model this keeps `total <= size_low_watermark < global_budget`,
+    /// so the high watermark is never crossed by normal traffic and needs no
+    /// separate enforcement here.
+    ///
+    /// The flush + commit rides `commit`'s partial-head-advance (the verified
+    /// `advance_head` pops the contiguous flushed prefix), exactly as B12A's
+    /// per-ref soft-bound flush does; B12C's ring reclaims the rest of the span.
+    fn relieve_size_pressure(&mut self) -> Result<(), StoreError> {
+        let total = |s: &Self| -> usize { s.overlays.values().map(|o| o.bytes()).sum() };
+        if total(self) <= self.opts.size_low_watermark {
+            return Ok(());
+        }
+        // Biggest offenders first; ties broken by ref name for determinism. The
+        // snapshot is consistent — this is the only flusher (single-threaded).
+        let mut by_size: Vec<(usize, Vec<u8>)> = self
+            .overlays
+            .iter()
+            .map(|(name, o)| (o.bytes(), name.clone()))
+            .collect();
+        by_size.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        let mut flushed_any = false;
+        for (_, name) in by_size {
+            // Leave at least one ref dirty: size pressure flushes the biggest
+            // offenders, never everything (that is the WAL-full / explicit-sync
+            // path). A single ref over the low watermark is contained instead by
+            // the per-ref soft bound (rev1§4.4 M-3), not by size pressure.
+            if self.overlays.len() <= 1 || total(self) <= self.opts.size_low_watermark {
+                break;
+            }
+            self.flush_ref(&name)?;
+            flushed_any = true;
+        }
+        // One commit folds in every flush this round (rev1§4.2 atomicity).
+        if flushed_any {
+            self.commit()?;
         }
         Ok(())
     }
@@ -2632,7 +2683,13 @@ mod tests {
                 max: 1024,
             },
             global_budget: 32 * 1024,
-            // The per-ref/op-count/watermark/staleness bounds inherit their
+            // Keep the low watermark consistent with this fixture's tightened
+            // global_budget (rev1§4.4 invariant: size_low_watermark <= the high
+            // watermark). Default would leave it at 8 MiB, above this 32 KiB high
+            // watermark; pinning it equal preserves the pre-B12 size trigger
+            // threshold, now realized as flush-the-biggest-offenders.
+            size_low_watermark: 32 * 1024,
+            // The per-ref/op-count/wal/staleness bounds inherit their
             // non-triggering defaults, so this shared fixture preserves the
             // pre-B12 flush behavior; tests that exercise a bound pass tight opts.
             ..StoreOptions::default()
@@ -2857,6 +2914,235 @@ mod tests {
         let dev = store.into_dev();
         let recovered = Store::mount(dev, opts).unwrap();
         assert_eq!(snap(&recovered), before, "replay did not reconstruct accounting");
+    }
+
+    // ── B12B: size-pressure low/high watermarks + flush-the-biggest-offenders ──
+    //         (rev1§4.4 trigger 3, M-4)
+
+    /// rev1§4.4 M-4 headline: crossing the size low watermark flushes the
+    /// *biggest offenders*, not everything. Three refs of unequal size cross the
+    /// low watermark; the largest flushes (overlay → committed tree, read-backable)
+    /// while the smaller two stay dirty — versus the pre-B12 `sync_all` that
+    /// emptied all of them. Size pressure is the only trigger here (ample WAL,
+    /// loose per-ref/op-count bounds).
+    #[test]
+    fn size_pressure_flushes_biggest_offenders_keeps_small_dirty() {
+        const LOW: usize = 4096;
+        let opts = StoreOptions {
+            wal_len: 1 << 20,        // ample: WAL pressure never interferes
+            global_budget: 1 << 20,  // high watermark well above LOW
+            per_ref_budget: 1 << 20, // loose: the per-ref bound never fires
+            op_count_bound: u64::MAX,
+            size_low_watermark: LOW,
+            ..test_opts()
+        };
+        let mut store = Store::format(MemDev::new(4 << 20), opts).unwrap();
+        for r in [b"big".as_slice(), b"mid", b"small"] {
+            store.create_ref(r).unwrap();
+        }
+        // Below the low watermark so far: small (200) + mid (2000) = 2200 < LOW.
+        store.write(b"small", &p(&["s"]), 0, &[1u8; 200], 1).unwrap();
+        store.write(b"mid", &p(&["m"]), 0, &[2u8; 2000], 2).unwrap();
+        // The big write pushes the total (8200) over LOW → flush the biggest.
+        store.write(b"big", &p(&["b"]), 0, &[3u8; 6000], 3).unwrap();
+
+        // The biggest offender flushed; the two smaller refs stayed dirty.
+        assert!(
+            store.overlays.get(b"big".as_slice()).map_or(true, |o| o.is_empty()),
+            "biggest ref was not flushed by size pressure"
+        );
+        assert!(
+            !store.overlays.get(b"mid".as_slice()).unwrap().is_empty(),
+            "mid ref was swept though it was not the biggest offender"
+        );
+        assert!(
+            !store.overlays.get(b"small".as_slice()).unwrap().is_empty(),
+            "small ref was swept though it was the smallest"
+        );
+        // Total dirty is back at or below the low watermark.
+        let total: usize = store.overlays.values().map(|o| o.bytes()).sum();
+        assert!(total <= LOW, "size pressure left total {total} above low watermark {LOW}");
+        // The flushed data is durable committed tree (read-backable).
+        assert_eq!(store.read(b"big", &p(&["b"])).unwrap(), Some(vec![3u8; 6000]));
+    }
+
+    /// rev1§4.4 M-4: because flushing starts at the low watermark, steady traffic
+    /// keeps total dirty bytes around the low watermark and never reaches the high
+    /// watermark (`global_budget`) — the writer "rarely hits FULL at the high one".
+    #[test]
+    fn low_watermark_shields_high_watermark_under_steady_writes() {
+        const LOW: usize = 8 * 1024;
+        const HIGH: usize = 16 * 1024;
+        let opts = StoreOptions {
+            wal_len: 1 << 20,
+            global_budget: HIGH,
+            per_ref_budget: 1 << 20, // loose: size pressure is the only flusher
+            op_count_bound: u64::MAX,
+            size_low_watermark: LOW,
+            ..test_opts()
+        };
+        let mut store = Store::format(MemDev::new(8 << 20), opts).unwrap();
+        let refs: [&[u8]; 4] = [b"r0", b"r1", b"r2", b"r3"];
+        for r in &refs {
+            store.create_ref(r).unwrap();
+        }
+        // Steady ~1 KiB round-robin writes: after each, the low-watermark flush
+        // has already run, so total stays at or below LOW, far under HIGH.
+        for i in 0..64u64 {
+            let r = refs[(i % 4) as usize];
+            store
+                .write(r, &p(&[&format!("f{i}")]), 0, &[0x7Eu8; 1024], i + 1)
+                .unwrap();
+            let total: usize = store.overlays.values().map(|o| o.bytes()).sum();
+            assert!(total < HIGH, "total {total} reached the high watermark {HIGH}");
+            assert!(total <= LOW, "total {total} above low watermark {LOW} after the flush");
+        }
+        // Flushing demonstrably happened: 64 KiB was written, but the live dirty
+        // set is bounded by the low watermark.
+        let total: usize = store.overlays.values().map(|o| o.bytes()).sum();
+        assert!(total <= LOW);
+    }
+
+    proptest! {
+        // Miri: a few cases cover the same paths; native keeps the full sweep.
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 256 },
+            ..ProptestConfig::default()
+        })]
+        /// rev1§4.4 M-4 containment under arbitrary multi-ref write interleavings:
+        /// the per-ref soft bound caps each ref, and size pressure caps the total,
+        /// so dirty bytes stay at or below the low watermark and the high watermark
+        /// (`global_budget`) is never reached — except the documented one-ref guard
+        /// (size pressure never empties the store), which the assertion allows for.
+        #[test]
+        fn size_pressure_holds_total_below_high_watermark(
+            ops in proptest::collection::vec((0usize..4, 1usize..600), 1..120),
+        ) {
+            const LOW: usize = 8 * 1024;
+            const HIGH: usize = 16 * 1024;
+            let opts = StoreOptions {
+                wal_len: 1 << 20,
+                global_budget: HIGH,
+                // Per-ref bound at the low watermark contains a single hot ref, so
+                // the one-ref guard never strands a ref above LOW (matches the spec
+                // relationship per_ref_budget <= global_budget).
+                per_ref_budget: LOW,
+                op_count_bound: u64::MAX,
+                size_low_watermark: LOW,
+                ..test_opts()
+            };
+            let mut store = Store::format(MemDev::new(8 << 20), opts).unwrap();
+            let refs: [&[u8]; 4] = [b"r0", b"r1", b"r2", b"r3"];
+            for r in &refs {
+                store.create_ref(r).unwrap();
+            }
+            for (i, (ri, len)) in ops.iter().enumerate() {
+                let data = vec![0x5Au8; *len];
+                store
+                    .write(refs[*ri], &p(&[&format!("f{i}")]), 0, &data, (i + 1) as u64)
+                    .unwrap();
+                let total: usize = store.overlays.values().map(|o| o.bytes()).sum();
+                prop_assert!(total < HIGH, "total {} reached the high watermark {}", total, HIGH);
+                prop_assert!(
+                    total <= LOW || store.overlays.len() <= 1,
+                    "total {} above low watermark with {} dirty refs",
+                    total,
+                    store.overlays.len()
+                );
+            }
+        }
+    }
+
+    proptest! {
+        // Crash-injection: the storage-layer convention (64 native / 4 Miri).
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 64 },
+            ..ProptestConfig::default()
+        })]
+        /// rev1§4.4 M-4 under crash injection: the size-pressure flush-the-biggest-
+        /// offenders path (`flush_ref` + `commit`, partial head advance) preserves
+        /// all-acked-survives. Multi-ref writes of unequal size cross a tight low
+        /// watermark mid-stream, so the crash point can land inside a *partial*
+        /// size-pressure flush (some refs flushed, some still dirty); every acked
+        /// write must still recover from durable state.
+        ///
+        /// A dedicated multi-ref test, not an extension of the single-ref
+        /// `crash_recovery_preserves_acked_state`: the "one ref remains" guard means
+        /// size pressure never flushes a lone ref, so only a multi-ref workload
+        /// witnesses "some flushed, some not". Size pressure is the flusher here
+        /// (ample WAL, loose per-ref/op-count bounds).
+        #[test]
+        fn crash_recovery_survives_size_pressure_flush(
+            ops in proptest::collection::vec(
+                (0u8..3, 0u8..4, 0u64..200, proptest::collection::vec(any::<u8>(), 1..200)),
+                1..40,
+            ),
+            fail_at in 4u64..600,
+            crash_seed in any::<u64>(),
+        ) {
+            let opts = StoreOptions {
+                wal_len: 64 * 1024,      // ample for the small op stream; fits the
+                                         // 1 MiB device and isolates the size path
+                                         // from the WAL-full trigger
+                global_budget: 16 * 1024,
+                per_ref_budget: 1 << 20, // loose: size pressure (not per-ref) flushes
+                op_count_bound: u64::MAX,
+                size_low_watermark: 4 * 1024,
+                ..test_opts()
+            };
+            let refs: [&[u8]; 3] = [b"r0", b"r1", b"r2"];
+            let mut store = Store::format(CrashDev::new(1 << 20), opts).unwrap();
+            for r in &refs {
+                store.create_ref(r).unwrap();
+            }
+            store.dev_mut().set_fail_after(fail_at);
+
+            // Acked logical state keyed by (ref index, path); the failing write
+            // (if any) is the one ambiguous mutation.
+            let mut model: std::collections::HashMap<(usize, Path), Vec<u8>> =
+                std::collections::HashMap::new();
+            let mut inflight: Option<((usize, Path), Vec<u8>)> = None;
+
+            for (rsel, psel, off, data) in &ops {
+                let ri = *rsel as usize;
+                let path = p(&[&format!("f{psel}")]);
+                let mut content = model.get(&(ri, path.clone())).cloned().unwrap_or_default();
+                let end = *off as usize + data.len();
+                if content.len() < end {
+                    content.resize(end, 0);
+                }
+                content[*off as usize..end].copy_from_slice(data);
+                let r = store.write(refs[ri], &path, *off, data, 1);
+                if r.is_ok() {
+                    model.insert((ri, path), content);
+                } else {
+                    inflight = Some(((ri, path), content));
+                    break;
+                }
+            }
+
+            let mut dev = store.into_dev();
+            dev.clear_fail();
+            dev.crash(crash_seed);
+            let recovered = Store::mount(dev, opts).unwrap();
+
+            for ((ri, path), expect) in &model {
+                let got = recovered.read(refs[*ri], path).unwrap();
+                let matches_model = got.as_deref() == Some(expect.as_slice());
+                let matches_inflight = inflight.as_ref().is_some_and(|((iri, ip), iv)| {
+                    iri == ri && ip == path && got.as_deref() == Some(iv.as_slice())
+                });
+                prop_assert!(
+                    matches_model || matches_inflight,
+                    "ref {} path {:?}: got {:?}, want {:?} (inflight {:?})",
+                    ri,
+                    path,
+                    got,
+                    expect,
+                    inflight
+                );
+            }
+        }
     }
 
     /// B7B/T-5: the structural decode split out of `wal_content_ok` and verified
