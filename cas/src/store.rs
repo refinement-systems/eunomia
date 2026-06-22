@@ -2093,6 +2093,13 @@ impl<D: BlockDev> Store<D> {
         // (`global_budget`) is the backpressure point, rarely reached because
         // flushing starts at the low one.
         self.relieve_size_pressure()?;
+
+        // Staleness (rev1§4.4 trigger 4, M-6 timer half): lowest priority, after
+        // WAL/size pressure relieved. The incoming op's mtime is the clock — a
+        // write whose timestamp leaves an *older* quiet ref past the bound flushes
+        // that ref, so the write path itself bounds staleness without a timer.
+        // Disabled by default (staleness_ns == u64::MAX); B12F ships the 30 s figure.
+        self.relieve_staleness(op.mtime())?;
         Ok(())
     }
 
@@ -2189,6 +2196,68 @@ impl<D: BlockDev> Store<D> {
             self.commit()?;
         }
         Ok(())
+    }
+
+    /// Staleness flush (rev1§4.4 trigger 4, M-6 timer half): a quietly dirty ref
+    /// whose *oldest-dirty* age exceeds `staleness_ns` becomes committed tree, so
+    /// no dirty byte sits unflushed indefinitely — "a quietly dirty ref
+    /// eventually becomes committed tree." It keys on the ref's oldest unflushed
+    /// op (`RefAcct::oldest_dirty_ns`, set once per dirty epoch and reset on
+    /// flush), so it bounds the *maximum* staleness of any dirty byte, not the
+    /// time since the last touch.
+    ///
+    /// Lowest priority of the four triggers (Design decision 5): it fires only
+    /// after WAL/size/per-ref pressure had their say, opportunistically at the
+    /// points the single-threaded server already runs — the write path
+    /// (`log_then_apply`, with the incoming op's mtime as the clock) and the
+    /// storage server's reactor idle (`flush_stale`) — so no background thread or
+    /// armed kernel timer is needed. `now` is the caller-injected UTC-nanos clock
+    /// (the same source as op mtimes; there is no internal store clock), so tests
+    /// drive it deterministically. `saturating_sub` makes a non-monotone clock a
+    /// no-op rather than a spurious flush.
+    ///
+    /// Selective like size pressure (not flush-everything): only overdue refs
+    /// flush; fresher dirty refs stay in overlay. Backpressure is the synchronous
+    /// flush itself (Design decision 4) — `flush_ref` turns the overlay into tree
+    /// and a single `commit` folds in the whole sweep, riding the verified
+    /// `advance_head` exactly as the other relievers do.
+    fn relieve_staleness(&mut self, now: u64) -> Result<(), StoreError> {
+        // Disabled stub (the default until B12F ships the 30 s figure): skip the
+        // scan entirely. `staleness_ns == u64::MAX` can never be exceeded anyway,
+        // but the early return keeps the hot write path free of the acct walk.
+        if self.opts.staleness_ns == u64::MAX {
+            return Ok(());
+        }
+        // Collect overdue refs first (can't flush while borrowing `acct`).
+        let stale: Vec<Vec<u8>> = self
+            .acct
+            .iter()
+            .filter(|(_, a)| {
+                a.oldest_dirty_ns
+                    .map_or(false, |t| now.saturating_sub(t) > self.opts.staleness_ns)
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        let mut flushed_any = false;
+        for name in stale {
+            self.flush_ref(&name)?;
+            flushed_any = true;
+        }
+        // One commit folds in every staleness flush this sweep (rev1§4.2 atomicity).
+        if flushed_any {
+            self.commit()?;
+        }
+        Ok(())
+    }
+
+    /// The storage server's opportunistic staleness sweep (rev1§4.4 trigger 4):
+    /// flush every ref dirty past the `staleness_ns` bound as of `now`. Called at
+    /// request boundaries and at reactor idle (Design decision 5), the points a
+    /// single-threaded request-driven server already runs — so a quietly dirty
+    /// ref eventually becomes committed tree even with no further writes. A no-op
+    /// at the default-stubbed `staleness_ns == u64::MAX` until B12F ships 30 s.
+    pub fn flush_stale(&mut self, now: u64) -> Result<(), StoreError> {
+        self.relieve_staleness(now)
     }
 
     /// Update a ref's flush-scheduler accounting after one mutating op lands in
@@ -5193,5 +5262,189 @@ mod tests {
             .map(|r| (r.id, r.timestamp))
             .collect();
         assert_eq!(rows, vec![(a, 1000), (b, 1001), (c, 1002)]);
+    }
+
+    // ── B12D: staleness-timer trigger (rev1§4.4 trigger 4, M-6 timer half) ──
+    //
+    // Time is the caller-injected `now`/`mtime` (UTC-nanos, the same source op
+    // mtimes carry) — there is no internal store clock — so these drive it with
+    // plain integers; no wall-clock sleeps, deterministic and Miri-safe.
+
+    /// Options that isolate the staleness trigger: every byte/op/WAL bound
+    /// disabled (huge budgets, watermark == wal_len so the ring never proactively
+    /// flushes), only `staleness_ns` finite — so the only flush the tests observe
+    /// is the staleness sweep.
+    fn stale_opts(staleness_ns: u64) -> StoreOptions {
+        StoreOptions {
+            staleness_ns,
+            wal_len: 64 * 1024,
+            wal_watermark: 64 * 1024,
+            global_budget: 1 << 30,
+            size_low_watermark: 1 << 30,
+            per_ref_budget: 1 << 30,
+            op_count_bound: u64::MAX,
+            ..test_opts()
+        }
+    }
+
+    /// rev1§4.4 trigger 4 (M-6 timer half): the explicit staleness sweep
+    /// (`flush_stale`, the reactor-idle / request-boundary entry point) flushes a
+    /// ref whose oldest-dirty age exceeds `staleness_ns` to committed tree, while
+    /// a ref dirtied within the bound stays dirty — selective, not flush-everything.
+    #[test]
+    fn staleness_flushes_quietly_dirty_ref_keeps_fresh_ref_dirty() {
+        let staleness = 1000u64;
+        let mut store = Store::format(MemDev::new(1 << 20), stale_opts(staleness)).unwrap();
+        store.create_ref(b"old").unwrap();
+        store.create_ref(b"fresh").unwrap();
+
+        // 'old' first dirtied at t=100.
+        store.write(b"old", &p(&["o"]), 0, &[1u8; 64], 100).unwrap();
+        // 'fresh' first dirtied at t=1050. The in-write staleness scan runs with
+        // now=1050: 'old' age = 950 < 1000, not yet stale → both stay dirty.
+        store
+            .write(b"fresh", &p(&["f"]), 0, &[2u8; 64], 1050)
+            .unwrap();
+        assert!(
+            !store.overlays.get(b"old".as_slice()).unwrap().is_empty(),
+            "'old' should still be dirty before it goes stale"
+        );
+        assert!(
+            !store.overlays.get(b"fresh".as_slice()).unwrap().is_empty(),
+            "'fresh' should be dirty"
+        );
+
+        // Simulated reactor-idle sweep at t=1200: 'old' age = 1100 > 1000 → flush;
+        // 'fresh' age = 150 < 1000 → stays dirty.
+        store.flush_stale(1200).unwrap();
+        assert!(
+            store
+                .overlays
+                .get(b"old".as_slice())
+                .map_or(true, |o| o.is_empty()),
+            "stale 'old' should have been flushed to committed tree"
+        );
+        assert!(
+            store.acct.get(b"old".as_slice()).is_none(),
+            "flushed ref's accounting should be cleared"
+        );
+        assert!(
+            store
+                .overlays
+                .get(b"fresh".as_slice())
+                .map_or(false, |o| !o.is_empty()),
+            "'fresh' (within the staleness bound) should stay dirty"
+        );
+        // The flushed data is durable committed tree (read-backable).
+        assert_eq!(store.read(b"old", &p(&["o"])).unwrap(), Some(vec![1u8; 64]));
+    }
+
+    /// The staleness trigger also fires opportunistically on the write path
+    /// (rev1§4.4: a check at the request entry, lowest priority): a write whose
+    /// timestamp leaves an *older* quiet ref past the bound flushes that quiet
+    /// ref, while the just-written ref stays dirty.
+    #[test]
+    fn staleness_fires_on_next_write_request() {
+        let staleness = 1000u64;
+        let mut store = Store::format(MemDev::new(1 << 20), stale_opts(staleness)).unwrap();
+        store.create_ref(b"quiet").unwrap();
+        store.create_ref(b"active").unwrap();
+
+        // 'quiet' first dirtied at t=100.
+        store
+            .write(b"quiet", &p(&["q"]), 0, &[1u8; 64], 100)
+            .unwrap();
+        // A later write to 'active' at t=1200 makes 'quiet' (age 1100 > 1000)
+        // stale; the in-write staleness scan flushes it. 'active' was just
+        // dirtied (age 0), so it stays.
+        store
+            .write(b"active", &p(&["a"]), 0, &[2u8; 64], 1200)
+            .unwrap();
+        assert!(
+            store
+                .overlays
+                .get(b"quiet".as_slice())
+                .map_or(true, |o| o.is_empty()),
+            "stale 'quiet' should flush on the next write request"
+        );
+        assert!(
+            store
+                .overlays
+                .get(b"active".as_slice())
+                .map_or(false, |o| !o.is_empty()),
+            "just-written 'active' should stay dirty"
+        );
+        assert_eq!(
+            store.read(b"quiet", &p(&["q"])).unwrap(),
+            Some(vec![1u8; 64])
+        );
+    }
+
+    /// With the default-stubbed `staleness_ns == u64::MAX` (what `test_opts` and
+    /// every shipped/B12A-C fixture inherit until B12F), the staleness sweep never
+    /// fires — a dirty ref stays dirty no matter how far the clock advances. Guards
+    /// that B12D installs the mechanism without changing default behavior.
+    #[test]
+    fn staleness_disabled_by_default_never_flushes() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"r").unwrap();
+        store.write(b"r", &p(&["x"]), 0, &[1u8; 64], 1).unwrap();
+        // The clock jumps to the far end; with the bound disabled nothing flushes.
+        store.flush_stale(u64::MAX).unwrap();
+        assert!(
+            !store.overlays.get(b"r".as_slice()).unwrap().is_empty(),
+            "no staleness flush when the bound is the disabled stub"
+        );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 256 },
+            ..ProptestConfig::default()
+        })]
+
+        /// After a staleness sweep at any clock value, no ref left dirty is overdue
+        /// (the sweep is total over the dirty set) and refs within the bound stay
+        /// dirty (selective). Random multi-ref streams under a monotone-increasing
+        /// clock, then `flush_stale(now)`.
+        #[test]
+        fn staleness_sweep_leaves_no_overdue_ref(
+            ops in proptest::collection::vec((0usize..4, 1u64..600), 1..40),
+            sweep_at in 0u64..2000,
+        ) {
+            let staleness = 1000u64;
+            let mut store =
+                Store::format(MemDev::new(16 << 20), stale_opts(staleness)).unwrap();
+            for r in 0..4u8 {
+                store.create_ref(&[b'a' + r]).unwrap();
+            }
+            let mut clock = 0u64;
+            for (ref_idx, dt) in ops {
+                clock += dt;
+                let name = [b'a' + ref_idx as u8];
+                // Heavy flush-without-GC can fill the chunk region (the limit is
+                // chunk capacity, not staleness — B12C finding 5); a NoSpace ends
+                // the run early and the invariant still holds on the state reached.
+                if store.write(&name, &p(&["f"]), 0, &[1u8; 32], clock).is_err() {
+                    break;
+                }
+            }
+            // Sweep at a clock value at or after the last write (the clock only
+            // moves forward). If the sweep itself NoSpaces, skip the assertion —
+            // an incomplete flush can leave an overdue ref legitimately.
+            let now = clock.saturating_add(sweep_at);
+            if store.flush_stale(now).is_ok() {
+                for (name, a) in &store.acct {
+                    if let Some(t) = a.oldest_dirty_ns {
+                        prop_assert!(
+                            now.saturating_sub(t) <= staleness,
+                            "ref {:?} left dirty while overdue (age {})",
+                            name,
+                            now.saturating_sub(t)
+                        );
+                    }
+                }
+            }
+        }
     }
 }
