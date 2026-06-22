@@ -43,6 +43,15 @@ loom = "0.7"
 [target.'cfg(shuttle)'.dependencies]
 shuttle = "0.7"
 
+# proptest is the baseline (rev1§6) property tier for the reactor's *sequential*
+# dispatch (the `used`-mask bit allocation, the `pending` drain, the lowest-bit
+# scan) and the endpoint cap marshalling — single-threaded state-machine logic,
+# not the concurrent protocol (that is the Loom/Shuttle harnesses' + the TLA
+# model's). A dev-dep, so it never reaches a normal/aarch64 build. Per-crate
+# `proptest = "1"`, the workspace convention (dma-pool/urt/cas).
+[dev-dependencies]
+proptest = "1"
+
 # The seed generator uses the fuzz-only DemoMsg, so it is skipped unless the
 # `fuzzing` feature is on (otherwise a plain `cargo test`/`build` would try to
 # compile it and fail on the missing `fuzz_support`).
