@@ -1,0 +1,29 @@
+[package]
+name = "console"
+version = "0.1.0"
+edition = "2021"
+
+# Built by kernel/build.rs for aarch64-unknown-none-softfloat; not a workspace
+# member (a host build of a no_std EL0 binary makes no sense). Under `cfg(test)`
+# the crate builds as a std harness for the PL011-layer host tests (src/pl011.rs).
+[workspace]
+
+[dependencies]
+ipc = { path = "../../ipc" }
+# C-M9-A — the unified startup-block codec (loader::startup), to read the PL011
+# MMIO REGION grant. no_std, host-buildable; default-features off keeps it to
+# elf + startup with no alloc (the hello precedent — the console needs no heap).
+loader = { path = "../../loader", default-features = false }
+
+# C-M9-A — host tests for the PL011 register layer (rev1§6 Baseline tier).
+# Dev-only, so the aarch64 cross-build never pulls it.
+[dev-dependencies]
+proptest = "1"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+
+[profile.dev]
+panic = "abort"
