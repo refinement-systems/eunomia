@@ -11,9 +11,13 @@
 //! resolves a path to its id, and an `id → name` map (`names`) is what a future
 //! rename swaps in O(1) regardless of how much dirty state the file holds. IDs
 //! are runtime-only and never touch disk — they are re-derived by replaying the
-//! path-keyed WAL on mount. Rename itself and unlink-while-open land in later C2
-//! sub-phases; this module is the re-keying that makes them O(1), with behavior
-//! otherwise identical to the path-keyed overlay it replaces.
+//! path-keyed WAL on mount.
+//!
+//! C2C adds the rev1§4.9 *open handle*: an id can be held open across an unlink.
+//! `open` refcounts the live handles per id; unlinking an *open* id orphans it
+//! (`names[id] = None`) instead of reaping it, so the handle keeps working
+//! against the overlay, and at flush an orphaned id (resolving to no name) is
+//! discarded — "which is what unlink means here." Rename itself lands in C2B.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
@@ -137,6 +141,13 @@ pub struct Overlay {
     /// Tombstones: names that read as absent until flush removes them from the
     /// tree (the old `unlinks` set, unchanged in role).
     tombs: BTreeSet<Path>,
+    /// Open-handle refcount per id (rev1§4.9). `open[id] > 0` means a live handle
+    /// holds the id, which changes two things: unlinking the id *orphans* it
+    /// (`names[id] = None`, data kept) rather than reaping it, and the handle's
+    /// id↔name binding is carried across a flush so it keeps working. Empty until
+    /// an id is `open`ed; ephemeral, like the ids themselves (never persisted, no
+    /// open/close WAL record — a crash leaves no open handles, see [`Self::carry_open`]).
+    open: BTreeMap<FileId, u32>,
     bytes: usize,
 }
 
@@ -160,50 +171,186 @@ impl Overlay {
         // A write resurrects an unlinked path as a fresh file.
         let fresh = self.tombs.remove(path);
         let id = if let Some(&id) = self.by_name.get(path) {
-            // An existing live name keeps its id (and is never `fresh`: a live
-            // name cannot also be tombstoned).
+            // An existing live name keeps its id. It may be a dirty file or an
+            // opened-but-unwritten handle (a `by_name` entry with no `by_id` yet,
+            // C2C); either way the id is reused.
             id
         } else {
-            // First touch of this name in the window: allocate an id and fix its
-            // base origin — `None` for a fresh/resurrected file (no base bytes).
+            // First touch of this name in the window: allocate an id and bind it.
             let id = *next_id;
             *next_id += 1;
-            self.by_id.insert(
-                id,
-                FileOverlay {
-                    fresh,
-                    origin: if fresh { None } else { Some(path.clone()) },
-                    ..FileOverlay::default()
-                },
-            );
             self.by_name.insert(path.clone(), id);
             self.names.insert(id, Some(path.clone()));
             id
         };
-        let fo = self.by_id.get_mut(&id).unwrap();
+        // Materialize the interval map on first write to the id, fixing its base
+        // origin — `None` for a fresh/resurrected file (no base bytes). A live
+        // dirty name can never be tombstoned, so `fresh` is only true here when
+        // the id had no `by_id` entry yet (a first, opened-handle, or resurrecting
+        // write); for an already-dirty id `or_insert_with` does not run.
+        let fo = self.by_id.entry(id).or_insert_with(|| FileOverlay {
+            fresh,
+            origin: if fresh { None } else { Some(path.clone()) },
+            ..FileOverlay::default()
+        });
         fo.mtime = mtime;
         let delta = fo.insert(offset, data.to_vec());
         self.bytes = (self.bytes as isize + delta).max(0) as usize;
     }
 
     pub fn unlink(&mut self, path: &Path, _mtime: u64) {
-        // C2A reaps the id outright; keeping an unlinked-but-open id alive (with
-        // a `None` name) is the unlink-while-open semantic deferred to C2C.
         if let Some(id) = self.by_name.remove(path) {
-            if let Some(fo) = self.by_id.remove(&id) {
-                let drop_bytes: usize = fo.writes.values().map(|v| v.len()).sum();
-                self.bytes = self.bytes.saturating_sub(drop_bytes);
+            if self.is_open(id) {
+                // rev1§4.9 unlink-while-open: the id is held by a live handle, so
+                // keep its dirty data and mark it nameless (`None`). The handle
+                // keeps working against the overlay; at flush the now-orphaned id
+                // resolves to no name and `files()` skips it, so the data is
+                // discarded. `bytes` is unchanged — the data is still held.
+                self.names.insert(id, None);
+            } else {
+                // No open handle: reap the id outright (the C2A behavior).
+                if let Some(fo) = self.by_id.remove(&id) {
+                    let drop_bytes: usize = fo.writes.values().map(|v| v.len()).sum();
+                    self.bytes = self.bytes.saturating_sub(drop_bytes);
+                }
+                self.names.remove(&id);
             }
-            self.names.remove(&id);
         }
         self.tombs.insert(path.clone());
+    }
+
+    /// Whether a live handle holds `id` (rev1§4.9). Drives the orphan-vs-reap
+    /// choice in [`Self::unlink`] and the carry in [`Self::carry_open`].
+    fn is_open(&self, id: FileId) -> bool {
+        self.open.get(&id).copied().unwrap_or(0) > 0
+    }
+
+    /// Open a handle on `path`, returning its ephemeral [`FileId`] (rev1§4.9
+    /// "assigned per open file"). Resolves an existing binding — a dirty file or
+    /// an already-open handle — or allocates a fresh id bound to the name with no
+    /// `by_id` entry yet (an open file holds no dirty data until first written).
+    /// Idempotent on the id: repeated opens of one name share it and bump the
+    /// refcount. Does not touch `tombs`: opening a tombstoned name reserves the id
+    /// but leaves the name reading-as-absent until a write resurrects it.
+    pub fn open(&mut self, path: &Path, next_id: &mut FileId) -> FileId {
+        let id = if let Some(&id) = self.by_name.get(path) {
+            id
+        } else {
+            let id = *next_id;
+            *next_id += 1;
+            self.by_name.insert(path.clone(), id);
+            self.names.insert(id, Some(path.clone()));
+            id
+        };
+        *self.open.entry(id).or_insert(0) += 1;
+        id
+    }
+
+    /// Close one handle on `id`, returning whether it was the last (so the store
+    /// can drop its id→ref entry). On the last close, reap by state (rev1§4.9):
+    /// an orphaned id (`names[id] == None`) discards its dirty data; an opened-
+    /// but-never-written name drops its binding (it represented nothing — back to
+    /// `Clean`); a dirty, still-named id is kept (it flushes normally, just no
+    /// longer pinned open).
+    pub fn close(&mut self, id: FileId) -> bool {
+        match self.open.get_mut(&id) {
+            Some(c) if *c > 1 => {
+                *c -= 1;
+                false
+            }
+            Some(_) => {
+                self.open.remove(&id);
+                match self.names.get(&id) {
+                    Some(None) => {
+                        // Orphaned (unlinked-while-open): discard the held data.
+                        if let Some(fo) = self.by_id.remove(&id) {
+                            let drop: usize = fo.writes.values().map(|v| v.len()).sum();
+                            self.bytes = self.bytes.saturating_sub(drop);
+                        }
+                        self.names.remove(&id);
+                    }
+                    Some(Some(name)) if !self.by_id.contains_key(&id) => {
+                        // Opened, never written, still named: nothing dirty — drop
+                        // the reservation so the name reverts to the tree.
+                        let name = name.clone();
+                        self.by_name.remove(&name);
+                        self.names.remove(&id);
+                    }
+                    _ => {} // dirty and still named: keep; it flushes normally.
+                }
+                true
+            }
+            None => true,
+        }
+    }
+
+    /// The current name an open id resolves to (rev1§4.9 "ID → current-path
+    /// map"): `Some(path)` while named, `None` once unlinked-while-open. The store
+    /// routes `write_id`/`read_id` on this — a named handle through the durable
+    /// path-addressed write, an orphaned one through [`Self::write_orphan`].
+    pub fn name_of(&self, id: FileId) -> Option<Path> {
+        self.names.get(&id).cloned().flatten()
+    }
+
+    /// Write to an *orphaned* (nameless) open id (rev1§4.9): the handle keeps
+    /// working against the overlay after its name was unlinked. The data has no
+    /// path, so it is never WAL-logged and is discarded at flush — purely
+    /// ephemeral. Returns nothing; `bytes` tracks it until close/flush drops it.
+    pub fn write_orphan(&mut self, id: FileId, offset: u64, data: &[u8], mtime: u64) {
+        let fo = self.by_id.entry(id).or_insert_with(|| FileOverlay {
+            fresh: true, // orphaned: no base path to read, apply over empty.
+            origin: None,
+            ..FileOverlay::default()
+        });
+        fo.mtime = mtime;
+        let delta = fo.insert(offset, data.to_vec());
+        self.bytes = (self.bytes as isize + delta).max(0) as usize;
+    }
+
+    /// Read an *orphaned* open id's content against an empty base (rev1§4.9): the
+    /// name is gone, so there is no tree base to fall through to. Empty if the
+    /// handle was orphaned before any write.
+    pub fn read_orphan(&self, id: FileId) -> Vec<u8> {
+        self.by_id
+            .get(&id)
+            .map(|fo| fo.apply(&[]))
+            .unwrap_or_default()
+    }
+
+    /// Consume the overlay at flush, returning a fresh one that carries only the
+    /// open handles forward (rev1§4.9 "the open handle keeps working") — their
+    /// refcounts and id↔name bindings, with **no** dirty data (`by_id`/`tombs`
+    /// empty, `bytes == 0`): the named data was just committed to the tree and the
+    /// orphaned data discarded. `None` when nothing is open, so the store removes
+    /// the overlay entirely (the C2A flush behavior). Re-deriving the bindings
+    /// here is why an open handle survives the auto-flushes that WAL/byte pressure
+    /// can trigger mid-write.
+    pub fn carry_open(self) -> Option<Overlay> {
+        if self.open.is_empty() {
+            return None;
+        }
+        let mut next = Overlay::default();
+        for (&id, &refs) in &self.open {
+            let name = self.names.get(&id).cloned().flatten();
+            if let Some(p) = &name {
+                next.by_name.insert(p.clone(), id);
+            }
+            next.names.insert(id, name);
+            next.open.insert(id, refs);
+        }
+        Some(next)
     }
 
     pub fn state(&self, path: &Path) -> FileState<'_> {
         if self.tombs.contains(path) {
             FileState::Unlinked
         } else if let Some(id) = self.by_name.get(path) {
-            FileState::Dirty(self.by_id.get(id).unwrap())
+            // An opened-but-unwritten name has a `by_name` entry but no `by_id`
+            // (C2C): no overlay opinion yet, so fall through to the tree.
+            match self.by_id.get(id) {
+                Some(fo) => FileState::Dirty(fo),
+                None => FileState::Clean,
+            }
         } else {
             FileState::Clean
         }
@@ -216,9 +363,11 @@ impl Overlay {
     pub fn files(&self) -> impl Iterator<Item = (&Path, &FileOverlay)> {
         // Resolve name → id → interval map. `by_name` order matches the old
         // path-keyed iteration, so flush walks the same names in the same order.
+        // An opened-but-unwritten name (a `by_name` entry with no `by_id`, C2C)
+        // holds no dirty data and is skipped — flush has nothing to write for it.
         self.by_name
             .iter()
-            .map(move |(name, id)| (name, self.by_id.get(id).unwrap()))
+            .filter_map(move |(name, id)| self.by_id.get(id).map(|fo| (name, fo)))
     }
 
     /// Dirty files directly inside `dir` (for merged listings).
@@ -229,7 +378,7 @@ impl Overlay {
         self.by_name
             .iter()
             .filter(move |(p, _)| p.len() == dir.len() + 1 && p[..dir.len()] == *dir)
-            .map(move |(p, id)| (p, self.by_id.get(id).unwrap()))
+            .filter_map(move |(p, id)| self.by_id.get(id).map(|fo| (p, fo)))
     }
 
     pub fn unlinked_in_dir<'a>(
@@ -242,43 +391,57 @@ impl Overlay {
     }
 
     /// Cross-check the id indirection (test-only): the indices stay mutually
-    /// consistent after every op. `by_name`/`names` are inverses for live files,
-    /// `by_id` and `names` cover the same id set, and no name is both live and
-    /// tombstoned.
+    /// consistent after every op. `by_name`/`names` are inverses for live files;
+    /// every id is either dirty (`by_id`) or open (or both); a nameless id is an
+    /// unlinked-while-open orphan and must be held open; and a *dirty* live name
+    /// is never tombstoned (an opened-but-unwritten one may be).
     #[cfg(test)]
-    fn check_invariants(&self) {
+    pub(crate) fn check_invariants(&self) {
         for (name, id) in &self.by_name {
             assert!(
-                self.by_id.contains_key(id),
-                "by_name id {id} absent from by_id"
+                self.by_id.contains_key(id) || self.is_open(*id),
+                "by_name id {id} neither dirty nor open"
             );
             assert_eq!(
                 self.names.get(id),
                 Some(&Some(name.clone())),
                 "by_name/names disagree for id {id}"
             );
-            assert!(
-                !self.tombs.contains(name),
-                "name live and tombstoned: {name:?}"
-            );
+            // A dirty live name can never be tombstoned; an opened-but-unwritten
+            // name may be (opening a tombstoned name reserves the id without
+            // resurrecting it — a write would clear the tomb and set `fresh`).
+            if self.by_id.contains_key(id) {
+                assert!(
+                    !self.tombs.contains(name),
+                    "dirty name live and tombstoned: {name:?}"
+                );
+            }
         }
         for (id, maybe) in &self.names {
             assert!(
-                self.by_id.contains_key(id),
-                "names id {id} absent from by_id"
+                self.by_id.contains_key(id) || self.is_open(*id),
+                "names id {id} neither dirty nor open"
             );
-            if let Some(name) = maybe {
-                assert_eq!(
+            match maybe {
+                Some(name) => assert_eq!(
                     self.by_name.get(name),
                     Some(id),
                     "names/by_name disagree for id {id}"
-                );
+                ),
+                None => assert!(self.is_open(*id), "nameless (orphan) id {id} not open"),
             }
         }
         for id in self.by_id.keys() {
             assert!(
                 self.names.contains_key(id),
                 "by_id id {id} absent from names"
+            );
+        }
+        for (id, refs) in &self.open {
+            assert!(*refs > 0, "open id {id} has zero refcount");
+            assert!(
+                self.names.contains_key(id),
+                "open id {id} absent from names"
             );
         }
     }
