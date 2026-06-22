@@ -27,6 +27,20 @@
 //! Decoders here are strict (they are cargo-fuzz targets, rev1§3.7/rev1§6): every
 //! canonicality rule checked on encode is also rejected on decode, and
 //! trailing bytes are errors.
+//!
+//! Verification (rev1§6, doc/guidelines/verus.md). The node **decoder**
+//! (`decode_node`) is Verus-total over arbitrary bytes with a leaf canonical
+//! round-trip (B13A). The level **partition** — `build_level`'s node-cutting —
+//! is verified to conserve and order its input (no item dropped, duplicated, or
+//! reordered: `lemma_partition_flatten`), cut only at a boundary or the
+//! `MAX_NODE_ENTRIES` cap, and emit non-empty ≤ MAX nodes, for *any* split
+//! predicate (`split_points`/`boundary_flags`, B13B). The split rule
+//! `is_boundary` is the one trusted-total BLAKE3 seam, proven *around* (the
+//! partition is correct regardless of *which* items boundary), never *through*.
+//! The *concrete* tree shape — which contents map to which root hash, the
+//! hash-determined clustering — stays test-routed at the rev1§6 baseline tier
+//! (the `canonical_form`/`roundtrip` proptests, Miri-replayed), not
+//! Verus-mechanized: mechanizing it would drag interpreted BLAKE3 into the proof.
 
 use crate::hash::Hash;
 use alloc::collections::BTreeMap;
@@ -288,11 +302,12 @@ pub(crate) fn decode_entry(r: &mut Reader) -> Result<Entry, FormatError> {
 }
 
 // ── Node building ───────────────────────────────────────────────────────
-
-fn is_boundary(item_bytes: &[u8]) -> bool {
-    let h = Hash::of(item_bytes);
-    u64::from_le_bytes(h.as_bytes()[..8].try_into().unwrap()) & SPLIT_MASK == 0
-}
+//
+// The split predicate `is_boundary` and the level-cutting core (`boundary_flags`,
+// `split_points`) live inside the `verus!{}` block at the end of this file: the
+// cut logic is verified (conservation + boundary discipline + ≤ MAX_NODE_ENTRIES
+// fanout) over the *opaque* `is_boundary` seam (B13B, rev1§4.1). `build_level`
+// below stays plain Rust — it drives the proven cut points and does the I/O.
 
 fn encode_internal_item(key: &[u8], child: &Hash, out: &mut Vec<u8>) {
     out.push(key.len() as u8);
@@ -300,30 +315,34 @@ fn encode_internal_item(key: &[u8], child: &Hash, out: &mut Vec<u8>) {
     out.extend_from_slice(child.as_bytes());
 }
 
-/// Split one level's items into nodes and store them.
-/// `items` is (first key under item, encoded item bytes).
+/// Split one level's items into nodes and store them. `keys[i]` is the first
+/// key under item `i`; `byte_images[i]` is its encoded bytes (the two run in
+/// lockstep). The cut points come from the verified `split_points` (driven by
+/// the verified `boundary_flags` over the `is_boundary` seam), so the running
+/// node boundaries *are* the proven ones (conservation + ≤ MAX_NODE_ENTRIES);
+/// only the node assembly and `store.put` I/O stay plain Rust (B13B).
 fn build_level(
     store: &mut impl NodeStore,
     level: u8,
-    items: &[(Vec<u8>, Vec<u8>)],
+    keys: &[Vec<u8>],
+    byte_images: &Vec<Vec<u8>>,
 ) -> Vec<(Vec<u8>, Hash)> {
     let mut out = Vec::new();
-    let mut node_start = 0;
-    let mut count_in_node = 0;
-    for (i, (_, bytes)) in items.iter().enumerate() {
-        count_in_node += 1;
-        if is_boundary(bytes) || count_in_node == MAX_NODE_ENTRIES || i + 1 == items.len() {
-            let node_items = &items[node_start..=i];
-            let mut node = vec![level];
-            node.extend_from_slice(&(node_items.len() as u32).to_le_bytes());
-            for (_, b) in node_items {
-                node.extend_from_slice(b);
-            }
-            let hash = store.put(&node);
-            out.push((node_items[0].0.clone(), hash));
-            node_start = i + 1;
-            count_in_node = 0;
+    if byte_images.is_empty() {
+        return out;
+    }
+    let flags = boundary_flags(byte_images);
+    let ends = split_points(&flags);
+    let mut start = 0usize;
+    for &end in ends.iter() {
+        let mut node = vec![level];
+        node.extend_from_slice(&((end - start) as u32).to_le_bytes());
+        for b in &byte_images[start..end] {
+            node.extend_from_slice(b);
         }
+        let hash = store.put(&node);
+        out.push((keys[start].clone(), hash));
+        start = end;
     }
     out
 }
@@ -373,28 +392,27 @@ impl Dir {
             let node = [&[0u8][..], &0u32.to_le_bytes()].concat();
             return store.put(&node);
         }
-        let items: Vec<(Vec<u8>, Vec<u8>)> = self
-            .entries
-            .values()
-            .map(|e| {
-                let mut bytes = Vec::new();
-                encode_entry(e, &mut bytes);
-                (e.name.clone(), bytes)
-            })
-            .collect();
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+        let mut byte_images: Vec<Vec<u8>> = Vec::new();
+        for e in self.entries.values() {
+            let mut bytes = Vec::new();
+            encode_entry(e, &mut bytes);
+            keys.push(e.name.clone());
+            byte_images.push(bytes);
+        }
         let mut level = 0u8;
-        let mut nodes = build_level(store, level, &items);
+        let mut nodes = build_level(store, level, &keys, &byte_images);
         while nodes.len() > 1 {
             level = level.checked_add(1).expect("tree deeper than 255 levels");
-            let items: Vec<(Vec<u8>, Vec<u8>)> = nodes
-                .iter()
-                .map(|(key, hash)| {
-                    let mut bytes = Vec::new();
-                    encode_internal_item(key, hash, &mut bytes);
-                    (key.clone(), bytes)
-                })
-                .collect();
-            nodes = build_level(store, level, &items);
+            let mut keys: Vec<Vec<u8>> = Vec::new();
+            let mut byte_images: Vec<Vec<u8>> = Vec::new();
+            for (key, hash) in &nodes {
+                let mut bytes = Vec::new();
+                encode_internal_item(key, hash, &mut bytes);
+                keys.push(key.clone());
+                byte_images.push(bytes);
+            }
+            nodes = build_level(store, level, &keys, &byte_images);
         }
         nodes[0].1
     }
@@ -1342,6 +1360,218 @@ pub fn encode_node_leaf(es: &Vec<RawEntry>, out: &mut Vec<u8>)
     assert(out@ =~= old(out)@ + canonical_leaf_bytes(es@));
 }
 
+// ── Node partition: the level-cutting core (B13B) ──────────────────────────
+//
+// `build_level` cuts a level's item sequence into nodes at a content-defined
+// boundary or a forced cap (`MAX_NODE_ENTRIES`). The cut logic is verified here
+// over an *opaque* split predicate — the partition is proven to **conserve and
+// order** its input (no item dropped, duplicated, or reordered), to cut **only**
+// where the predicate or the cap says, and to emit non-empty ≤ MAX blocks, for
+// *any* predicate. So it holds under the real (BLAKE3) `is_boundary` without the
+// proof ever modeling BLAKE3 (rev1§4.1, detail 14_b13-detail.md Design dec. 3).
+
+/// Spec model of the per-item split decision — `uninterp` because its witness
+/// (`is_boundary`) is BLAKE3. The partition core needs only that this is a
+/// deterministic total function of the item bytes, never injectivity (the
+/// partition is correct regardless of *which* items boundary).
+uninterp spec fn is_boundary_spec(item: Seq<u8>) -> bool;
+
+/// An item is a node boundary iff the low `SPLIT_BITS` bits of BLAKE3(item) are
+/// zero (rev1§4.1). `external_body` because BLAKE3 is interpreted hashing — out
+/// of SMT scope; trusted **total** (hashes a slice and returns a bool, never
+/// panics — `as_bytes()[..8]` is always 8 of the 32 hash bytes). Totality +
+/// determinism only; no collision-freedom is assumed. The same boundary drawn
+/// for `checksum_ok` (`disk.rs`) / `wal_checksum_ok` (`store.rs`): the 3rd CAS
+/// interpreted-hash seam.
+#[verifier::external_body]
+fn is_boundary(item_bytes: &[u8]) -> (b: bool)
+    ensures
+        b == is_boundary_spec(item_bytes@),
+{
+    let h = Hash::of(item_bytes);
+    u64::from_le_bytes(h.as_bytes()[..8].try_into().unwrap()) & SPLIT_MASK == 0
+}
+
+/// Compute the per-item boundary flags for one level's item byte-images,
+/// faithfully reflecting `is_boundary_spec`. The verified consumer that ties the
+/// `is_boundary` seam into the partition proof (so the seam is not dead weight).
+fn boundary_flags(byte_images: &Vec<Vec<u8>>) -> (flags: Vec<bool>)
+    ensures
+        flags.len() == byte_images.len(),
+        forall|i: int|
+            0 <= i < byte_images@.len() ==> flags@[i] == is_boundary_spec(
+                #[trigger] byte_images@[i]@,
+            ),
+{
+    let mut flags: Vec<bool> = Vec::new();
+    let n = byte_images.len();
+    let mut i: usize = 0;
+    while i < n
+        invariant
+            i <= n,
+            n == byte_images@.len(),
+            flags@.len() == i,
+            forall|j: int|
+                0 <= j < i ==> flags@[j] == is_boundary_spec(#[trigger] byte_images@[j]@),
+        decreases n - i,
+    {
+        let b = is_boundary(byte_images[i].as_slice());
+        flags.push(b);
+        i += 1;
+    }
+    flags
+}
+
+/// The start index of partition block `k` given the end-index list `ends`:
+/// 0 for the first block, else the previous block's end. Lets the
+/// boundary-discipline clause name each block's span.
+spec fn block_start(ends: Seq<usize>, k: int) -> int {
+    if k == 0 {
+        0int
+    } else {
+        ends[k - 1] as int
+    }
+}
+
+/// Split one level's items into nodes, returning the **end-index list** (the
+/// exclusive end of each block; the cut-index representation that keeps the
+/// conservation proof a single subrange concat). Cuts where `flags[i]` (a
+/// boundary), or the block reaches `MAX_NODE_ENTRIES`, or the input ends —
+/// byte-for-byte the cut points `build_level` used before B13B. Proven, for any
+/// `flags`:
+///   * **conservation/order** — the ends strictly increase from ≥ 1 to
+///     `flags.len()`, so the blocks tile `[0, flags.len())` losslessly and in
+///     order (see [`lemma_partition_flatten`]);
+///   * **well-formedness** — every block is non-empty and ≤ `MAX_NODE_ENTRIES`;
+///   * **boundary discipline** — every block except the last ends at a boundary
+///     item or exactly at the cap (rev1§4.1 / detail Design decision 3).
+fn split_points(flags: &Vec<bool>) -> (ends: Vec<usize>)
+    requires
+        flags@.len() >= 1,
+    ensures
+        ends@.len() >= 1,
+        ends@[ends@.len() - 1] == flags@.len(),
+        ends@[0] >= 1,
+        ends@[0] <= MAX_NODE_ENTRIES,
+        forall|k: int| 0 < k < ends@.len() ==> (#[trigger] ends@[k - 1]) < ends@[k],
+        forall|k: int|
+            0 < k < ends@.len() ==> (#[trigger] ends@[k]) as int - ends@[k - 1] as int
+                <= MAX_NODE_ENTRIES as int,
+        forall|k: int|
+            0 <= k < ends@.len() && flags@.len() > (#[trigger] ends@[k]) as int ==> (flags@[ends@[k]
+                as int - 1] || ends@[k] as int - block_start(ends@, k) == MAX_NODE_ENTRIES as int),
+{
+    let mut ends: Vec<usize> = Vec::new();
+    let n = flags.len();
+    let mut start: usize = 0;
+    let mut i: usize = 0;
+    while i < n
+        invariant
+            n == flags@.len(),
+            i <= n,
+            start <= i,
+            (i as int) - (start as int) < MAX_NODE_ENTRIES as int,
+            i == n ==> start == n,
+            ends@.len() == 0 ==> start == 0,
+            ends@.len() > 0 ==> ends@[ends@.len() - 1] == start,
+            ends@.len() > 0 ==> ends@[0] >= 1,
+            ends@.len() > 0 ==> ends@[0] <= MAX_NODE_ENTRIES,
+            forall|k: int| 0 <= k < ends@.len() ==> (#[trigger] ends@[k]) <= start,
+            forall|k: int| 0 < k < ends@.len() ==> (#[trigger] ends@[k - 1]) < ends@[k],
+            forall|k: int|
+                0 < k < ends@.len() ==> (#[trigger] ends@[k]) as int - ends@[k - 1] as int
+                    <= MAX_NODE_ENTRIES as int,
+            forall|k: int|
+                0 <= k < ends@.len() && (n as int) > (#[trigger] ends@[k]) as int ==> (flags@[ends@[k]
+                    as int - 1] || ends@[k] as int - block_start(ends@, k) == MAX_NODE_ENTRIES as int),
+        decreases n - i,
+    {
+        let ghost old_ends = ends@;
+        let count = i - start + 1;
+        if flags[i] || count == MAX_NODE_ENTRIES || i + 1 == n {
+            ends.push(i + 1);
+            proof {
+                assert(ends@.len() == old_ends.len() + 1);
+                assert(ends@[ends@.len() - 1] == i + 1);
+                assert(forall|k: int|
+                    0 <= k < old_ends.len() ==> (#[trigger] ends@[k]) == old_ends[k]);
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    ends
+}
+
+/// The item image of an end-index partition: each block
+/// `items[block_start(ends,k) .. ends[k]]`, concatenated in order. Back-recursive
+/// (peels the last block) so conservation is one subrange-concat step per block.
+spec fn flatten_blocks<T>(items: Seq<T>, ends: Seq<usize>) -> Seq<T>
+    decreases ends.len(),
+{
+    if ends.len() == 0 {
+        Seq::<T>::empty()
+    } else {
+        flatten_blocks(items, ends.drop_last()) + items.subrange(
+            block_start(ends, ends.len() - 1),
+            ends.last() as int,
+        )
+    }
+}
+
+/// The blocks of a monotone end-list that ends at `items.len()` tile `items`
+/// exactly: the concatenation reproduces the prefix `items[0 .. ends.last()]`.
+proof fn lemma_flatten_covers<T>(items: Seq<T>, ends: Seq<usize>)
+    requires
+        ends.len() >= 1,
+        ends[0] >= 1,
+        forall|k: int| 0 < k < ends.len() ==> (#[trigger] ends[k - 1]) < ends[k],
+        ends[ends.len() - 1] as int <= items.len(),
+    ensures
+        flatten_blocks(items, ends) == items.subrange(0, ends[ends.len() - 1] as int),
+    decreases ends.len(),
+{
+    let m = ends.len();
+    if m == 1 {
+        assert(ends.drop_last().len() == 0);
+        assert(flatten_blocks(items, ends.drop_last()) == Seq::<T>::empty());
+        assert(block_start(ends, 0) == 0);
+        assert(ends.last() == ends[0]);
+        assert(flatten_blocks(items, ends) =~= items.subrange(0, ends[0] as int));
+    } else {
+        let pre = ends.drop_last();
+        assert(pre.len() == m - 1);
+        assert(forall|k: int| 0 <= k < m - 1 ==> pre[k] == ends[k]);
+        assert(pre[pre.len() - 1] == ends[m - 2]);
+        lemma_flatten_covers(items, pre);
+        // flatten(pre) == items[0 .. ends[m-2]]; the last block is
+        // items[ends[m-2] .. ends[m-1]]; the two concatenate to items[0 .. ends[m-1]].
+        assert(block_start(ends, m - 1) == ends[m - 2] as int);
+        assert(items.subrange(0, ends[m - 2] as int) + items.subrange(
+            ends[m - 2] as int,
+            ends[m - 1] as int,
+        ) =~= items.subrange(0, ends[m - 1] as int));
+        assert(flatten_blocks(items, ends) =~= items.subrange(0, ends[m - 1] as int));
+    }
+}
+
+/// **Conservation** (the load-bearing rev1§4.1 property): the partition emitted
+/// by [`split_points`] reproduces its whole input — no item dropped, duplicated,
+/// or reordered. Stated generically over the item type, so it holds whatever the
+/// per-level items are (leaf entries or internal child slots).
+proof fn lemma_partition_flatten<T>(items: Seq<T>, ends: Seq<usize>)
+    requires
+        ends.len() >= 1,
+        ends[0] >= 1,
+        forall|k: int| 0 < k < ends.len() ==> (#[trigger] ends[k - 1]) < ends[k],
+        ends[ends.len() - 1] as int == items.len(),
+    ensures
+        flatten_blocks(items, ends) == items,
+{
+    lemma_flatten_covers(items, ends);
+    assert(items.subrange(0, items.len() as int) =~= items);
+}
+
 } // verus!
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -1607,6 +1837,89 @@ mod tests {
             }
             RawNodeBody::Internal(_) => panic!("expected a single leaf root node"),
         }
+    }
+
+    // ── Partition core (B13B) ───────────────────────────────────────────
+    //
+    // `split_points` is verified (conservation + ≤ MAX_NODE_ENTRIES + boundary
+    // discipline over the opaque `is_boundary`); these pin the concrete cut
+    // points it returns for controlled flag patterns. `MAX_NODE_ENTRIES` is 128.
+
+    #[test]
+    fn split_points_forced_cap() {
+        // No boundary anywhere: cut only at the forced cap and at the end.
+        let ends = split_points(&vec![false; 300]);
+        assert_eq!(ends, vec![128, 256, 300]);
+    }
+
+    #[test]
+    fn split_points_every_item_is_boundary() {
+        // Every item a boundary: one item per node.
+        assert_eq!(split_points(&vec![true; 5]), vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn split_points_single_item() {
+        assert_eq!(split_points(&vec![false]), vec![1]);
+        assert_eq!(split_points(&vec![true]), vec![1]);
+    }
+
+    #[test]
+    fn split_points_mixed() {
+        // f f t f t f → cut after idx 2 (boundary), idx 4 (boundary), end.
+        let flags = vec![false, false, true, false, true, false];
+        let ends = split_points(&flags);
+        assert_eq!(ends, vec![3, 5, 6]);
+        // Conservation/well-formedness witnesses (the verified ensures, observed):
+        assert_eq!(*ends.last().unwrap(), flags.len()); // covers the whole input
+        let mut prev = 0;
+        for &e in &ends {
+            assert!(e > prev && e - prev <= 128); // non-empty, ≤ MAX, strictly increasing
+            prev = e;
+        }
+    }
+
+    #[test]
+    fn split_points_exactly_cap() {
+        // Exactly MAX_NODE_ENTRIES items, no boundary: one full node.
+        assert_eq!(split_points(&vec![false; 128]), vec![128]);
+        // One more: the cap forces a second (singleton) node.
+        assert_eq!(split_points(&vec![false; 129]), vec![128, 129]);
+    }
+
+    #[test]
+    fn boundary_flags_faithful_to_predicate() {
+        // boundary_flags reflects is_boundary item-by-item, same length.
+        let imgs: Vec<Vec<u8>> = (0u8..40).map(|i| vec![i; i as usize + 1]).collect();
+        let flags = boundary_flags(&imgs);
+        assert_eq!(flags.len(), imgs.len());
+        for (f, img) in flags.iter().zip(imgs.iter()) {
+            assert_eq!(*f, is_boundary(img.as_slice()));
+        }
+    }
+
+    #[test]
+    fn build_level_fires_multi_level_and_roundtrips() {
+        // ≥ MAX_NODE_ENTRIES entries: the forced cap fires and the spine climbs
+        // past level 0, so the partition core runs on internal levels too. The
+        // root must be an internal node and the tree must round-trip (the
+        // format-stable witness that the rewired build_level cuts as before).
+        let mut store = MemStore::new();
+        let mut dir = Dir::new();
+        for i in 0..400u32 {
+            let name = format!("entry-{i:04}");
+            dir.upsert(file_entry(name.as_bytes(), &i.to_le_bytes(), 1, 0))
+                .unwrap();
+        }
+        let root = dir.save(&mut store);
+        assert!(store.len() > 1, "400 entries should not fit in one node");
+        match parse_node(&store.get(&root).unwrap()).unwrap() {
+            NodeRefs::Children(_) => {} // internal root ⇒ the spine climbed
+            NodeRefs::Entries(_) => panic!("400 entries collapsed into one leaf"),
+        }
+        let loaded = Dir::load(&store, &root).unwrap();
+        assert_eq!(&loaded, &dir);
+        assert_eq!(loaded.save(&mut store), root); // re-save reproduces the root
     }
 
     // ── Proptest strategies ─────────────────────────────────────────────
