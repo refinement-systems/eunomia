@@ -53,7 +53,10 @@ pub mod wire;
 // epoll-shaped reactor, and the wire codec, over the kernel transport seam.
 pub use endpoint::{Endpoint, Message, MAX_PAYLOAD};
 pub use reactor::{Key, Reactor, RegisterErr, Signals};
-pub use session::{admit_connect, Admission, ConnectErr, ConnectReq, GrantReply, WindowGrant};
+pub use session::{
+    admit_connect, negotiate, version_ok, Admission, ConnectErr, ConnectReq, GrantReply,
+    VersionRange, WindowGrant, PROTOCOL_VERSION,
+};
 pub use transport::{Chan, Event, RecvErr, RecvOk, SendErr, SyscallTransport, Transport};
 #[cfg(feature = "wire")]
 pub use wire::{decode, encode, WireError};

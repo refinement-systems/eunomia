@@ -638,7 +638,9 @@ mod tests {
     fn fairness_smoke(num_clients: usize, budget: u32) {
         use crate::endpoint::{Endpoint, Message};
         use crate::reactor::{Reactor, Signals};
-        use crate::session::{admit_connect, Admission, ConnectReq, GrantReply};
+        use crate::session::{
+            admit_connect, Admission, ConnectReq, GrantReply, VersionRange, PROTOCOL_VERSION,
+        };
         use crate::transport::{Chan, Notif};
         const SERVER_NOTIF: Notif = 0;
         const WINDOW: u32 = 1; // each client requests one window byte
@@ -673,7 +675,15 @@ mod tests {
                     match req_ep.recv_nb(&mut msg) {
                         Ok(()) => {
                             assert!(replies[key].is_none(), "client {key} serviced twice");
-                            let reply = admit_connect(&mut adm, msg.payload());
+                            // The server speaks the single deployed version; the
+                            // client's `for_window` offers the same, so negotiation
+                            // succeeds and the grant/refuse counts asserted below
+                            // are governed solely by the window quota (unchanged).
+                            let reply = admit_connect(
+                                &mut adm,
+                                VersionRange::single(PROTOCOL_VERSION),
+                                msg.payload(),
+                            );
                             let (bytes, n) = reply.encode();
                             reply_ep.send_nb(&Message::bytes(&bytes[..n])).unwrap();
                             replies[key] = Some(reply);
@@ -725,7 +735,7 @@ mod tests {
         // The quota never over-grants: exactly min(budget, N) grants.
         let grants = client_views
             .iter()
-            .filter(|r| matches!(r, GrantReply::Grant(_)))
+            .filter(|r| matches!(r, GrantReply::Grant(..)))
             .count();
         let refused = client_views
             .iter()
