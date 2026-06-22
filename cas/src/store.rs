@@ -3107,7 +3107,8 @@ mod tests {
             for r in &refs {
                 store.create_ref(r).unwrap();
             }
-            for (i, (ri, len)) in ops.iter().enumerate() {
+            let max_ops = if cfg!(miri) { 16 } else { ops.len() };
+            for (i, (ri, len)) in ops.iter().take(max_ops).enumerate() {
                 let data = vec![0x5Au8; *len];
                 store.write(refs[*ri], &p(&[&format!("f{i}")]), 0, &data, (i + 1) as u64).unwrap();
                 for r in &refs {
@@ -3425,7 +3426,10 @@ mod tests {
         // Watermark == wal_len, so the auto-scheduler fires only on a genuine
         // won't-fit; we drive flushes explicitly to control head/tail precisely.
         // Single-char refs + fixed-length paths + fixed data ⇒ uniform record size.
-        let wal_len = 16 * 1024u64;
+        // Miri interprets blake3 per write, so use a small ring there — it still
+        // wraps and exercises the front-pinner reclaim/remount scenario within a
+        // handful of records (rsz stays < wal_len/4); native keeps the 16 KiB ring.
+        let wal_len: u64 = if cfg!(miri) { 2 * 1024 } else { 16 * 1024 };
         let opts = wal_opts(wal_len, wal_len);
         let mut store = Store::format(MemDev::new(1 << 20), opts).unwrap();
         for r in [b"a".as_slice(), b"p", b"w", b"n"] {
@@ -3869,7 +3873,8 @@ mod tests {
             for r in &refs {
                 store.create_ref(r).unwrap();
             }
-            for (i, (ri, len)) in ops.iter().enumerate() {
+            let max_ops = if cfg!(miri) { 16 } else { ops.len() };
+            for (i, (ri, len)) in ops.iter().take(max_ops).enumerate() {
                 let data = vec![0x5Au8; *len];
                 store
                     .write(refs[*ri], &p(&[&format!("f{i}")]), 0, &data, (i + 1) as u64)
@@ -4388,8 +4393,12 @@ mod tests {
         // chunks; without reclamation `used` grows without bound, with it
         // the footprint stays flat (freed extents get reused).
         let mut used_after_first = 0;
-        for i in 0..10u8 {
-            let data: Vec<u8> = (0..20_000).map(|j| (j as u8).wrapping_add(i)).collect();
+        // Miri interprets blake3 over every chunk, so churn fewer/smaller writes
+        // there — the supersede→reclaim→reuse invariant holds at any scale.
+        let iters: u8 = if cfg!(miri) { 4 } else { 10 };
+        let n: usize = if cfg!(miri) { 4_000 } else { 20_000 };
+        for i in 0..iters {
+            let data: Vec<u8> = (0..n).map(|j| (j as u8).wrapping_add(i)).collect();
             store
                 .write(b"main", &p(&["churn"]), 0, &data, i as u64)
                 .unwrap();
@@ -4410,7 +4419,7 @@ mod tests {
         );
 
         // The store still works and survives a remount with its free list.
-        let expect: Vec<u8> = (0..20_000).map(|j| (j as u8).wrapping_add(9)).collect();
+        let expect: Vec<u8> = (0..n).map(|j| (j as u8).wrapping_add(iters - 1)).collect();
         assert_eq!(
             store.read(b"main", &p(&["churn"])).unwrap().unwrap(),
             expect
@@ -5540,7 +5549,8 @@ mod tests {
                 store.create_ref(&[b'a' + r]).unwrap();
             }
             let mut clock = 0u64;
-            for (ref_idx, dt) in ops {
+            let max_ops = if cfg!(miri) { 16 } else { ops.len() };
+            for (ref_idx, dt) in ops.into_iter().take(max_ops) {
                 clock += dt;
                 let name = [b'a' + ref_idx as u8];
                 // Heavy flush-without-GC can fill the chunk region (the limit is

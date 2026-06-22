@@ -423,8 +423,10 @@ mod tests {
                     ),
                     proptest::sample::select(vec![b"f1".to_vec(), b"f2".to_vec(), b"f3".to_vec()]),
                 ),
-                proptest::collection::vec(any::<u8>(), 0..2048),
-                2..16,
+                // Miri interprets blake3 per chunk, so smaller files and fewer
+                // entries there; the mark-set sufficiency invariant is structural.
+                proptest::collection::vec(any::<u8>(), 0..if cfg!(miri) { 512 } else { 2048 }),
+                if cfg!(miri) { 2..6 } else { 2..16 },
             ),
         ) {
             let mut store = MemStore::new();
@@ -482,10 +484,16 @@ mod tests {
     #[test]
     fn check_recipe_handles_recipes() {
         check_recipe(&[]).unwrap();
-        check_recipe(&[1u8; 300]).unwrap(); // deep chain → Ok, sufficient
+        // Deep DirRoot chain → Ok, sufficient. One op per byte, each a blake3
+        // save under Miri, so a shorter (still deep) chain there; native runs 300.
+        check_recipe(&[1u8; if cfg!(miri) { 48 } else { 300 }]).unwrap();
         check_recipe(&[0, 4]).unwrap(); // dangling ref → refused cleanly
                                         // A byte sweep must never panic or report insufficiency.
-        for b in 0u8..=255 {
+                                        // The op selector is `b % 6` and the arg reductions are `% 8`/`% 16`, so a
+                                        // contiguous 0..=31 sample already covers every opcode and the full arg
+                                        // range under Miri (where each call interprets blake3); native sweeps all.
+        let last: u8 = if cfg!(miri) { 31 } else { 255 };
+        for b in 0u8..=last {
             check_recipe(&[b, b, b, b, b]).unwrap();
         }
     }

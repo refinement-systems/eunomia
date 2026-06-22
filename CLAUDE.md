@@ -105,10 +105,19 @@ cargo build -p cas -p storage-server -p mkfs ...
 # Run tests for cas (primary proptest target)
 cargo test -p cas
 
-# Run with Miri. The proptest suites drop to 4 cases under cfg(miri) —
-# blake3 is interpreted (no SIMD), so native-scale case counts would take
-# hours; even reduced, this sweep runs ~25 min (longer when a change adds
-# proptests). Because it is long-running, NEVER pipe it into `tail` (or any
+# Run with Miri. Under cfg(miri) the proptests drop to 4 cases AND cap their
+# op streams (blake3 is interpreted — no SIMD — so native-scale work would take
+# hours). cas is the heavy crate: every store/tree/file test drives interpreted
+# blake3. Miri is a SINGLE-THREADED interpreter — inside one `cargo miri test`
+# process even `--test-threads=N` runs on one core, so don't expect it to help;
+# cross-process parallelism is the lever (nextest, below). Single-core serial is
+# ~an hour (sum of all tests); nextest -j4 runs ~12 min here — now throughput-
+# bound across the 4 cores, not gated by one pole (the cfg(miri) op/size caps
+# flattened the long tail). Driving it lower means capping more of the remaining
+# ~100-180 s tests (the crash-recovery family, chunk-boundary proptests, the
+# gc_mark corpus). See doc/results/23_miri-test-optimization.md. Because it is
+# long-running, NEVER
+# pipe it into `tail` (or any
 # buffering filter): `tail` emits nothing until the command exits, so the log
 # stays empty for the whole run and you cannot tell progress from a hang — this
 # has wasted time before. Instead redirect to a file you can inspect mid-run, or
@@ -118,16 +127,24 @@ cargo test -p cas
 #   MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri test \
 #     -p cas -p loader -p storage-server \
 #     --test fuzz_regressions --test fuzz_corpus
-cargo +nightly miri test -p cas
+# Full cas sweep (canonical, parallel). -Zmiri-disable-isolation is REQUIRED:
+# proptest's failure-persistence calls current_dir(), which Miri's isolation
+# blocks (getcwd unsupported) — every other crate's line below already passes
+# it. nextest runs one process per test, so -j4 fans the suite across the 4
+# performance cores (use -j8 to also use the efficiency cores). One-time setup:
+# `cargo install cargo-nextest --locked`.
+MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri nextest run -p cas -j4
+# Serial fallback (no nextest, single-core), same required flag:
+#   MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri test -p cas
 # The DMA-pool wrapper (the one place PAs are visible) joins the sweep as of
 # B4C: it has no fuzz corpus, so its proptests run as the crate's lib tests —
-#   MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri test -p dma-pool
+#   MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri nextest run -p dma-pool -j4
 # The urt heap allocator wrapper joins as of B11C (same posture as dma-pool: no
 # fuzz corpus, so its proptests run as the crate's lib tests — randomized
 # alloc/dealloc/realloc, exhaustion, and the fragmentation-cap leak path). The
 # fragmentation-cap proptest fully carves a ~2050-block heap, so it caps Miri at
 # one case (the rest stay at 4); no blake3, so the sweep is still quick —
-#   MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri test -p urt
+#   MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri nextest run -p urt -j4
 ```
 
 ### Formatting — run `cargo fmt` before every commit
