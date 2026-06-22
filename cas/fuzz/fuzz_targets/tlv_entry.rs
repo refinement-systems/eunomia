@@ -10,9 +10,6 @@ use libfuzzer_sys::fuzz_target;
 fuzz_target!(|data: &[u8]| {
     if let Ok(entry) = cas::tlv::decode(data) {
         let re = cas::tlv::encode(&entry);
-        assert_eq!(
-            re, data,
-            "decoder accepted a non-canonical entry encoding"
-        );
+        assert_eq!(re, data, "decoder accepted a non-canonical entry encoding");
     }
 });

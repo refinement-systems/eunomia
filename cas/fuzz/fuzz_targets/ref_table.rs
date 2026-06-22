@@ -21,7 +21,9 @@ use libfuzzer_sys::fuzz_target;
 use cas::disk::RefTable;
 
 fuzz_target!(|data: &[u8]| {
-    let Ok(table) = RefTable::decode(data) else { return };
+    let Ok(table) = RefTable::decode(data) else {
+        return;
+    };
     let bytes = table.encode();
     let table2 = RefTable::decode(&bytes).expect("encoder emitted an undecodable ref table");
     assert_eq!(table, table2, "ref table decode is not round-trip stable");

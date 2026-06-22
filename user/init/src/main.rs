@@ -71,7 +71,10 @@ fn check(r: i64, what: &[u8]) -> i64 {
 /// pair seconds-since-epoch from RTCDR with CNTVCT, and never touch the
 /// device again — there is deliberately no RTC driver.
 fn read_boot_utc() -> (i64, u64, u64) {
-    check(sys::map(SELF_ASPACE, PL031_FRAME, RTC_VA, PERM_DEVICE), b"map pl031");
+    check(
+        sys::map(SELF_ASPACE, PL031_FRAME, RTC_VA, PERM_DEVICE),
+        b"map pl031",
+    );
     // RTCDR (offset 0): seconds since the Unix epoch. Safety: the map
     // above just established RTC_VA as a live read-only device mapping.
     let secs = unsafe { (RTC_VA as *const u32).read_volatile() } as u64;
@@ -97,16 +100,28 @@ fn read_boot_utc() -> (i64, u64, u64) {
 pub extern "C" fn _start() -> ! {
     sys::debug_write(b"[init] wiring the system\n");
 
-    check(sys::retype(UNTYPED, OBJ_CHANNEL, 4, SD_BOOT_A, SD_BOOT_B), b"sd boot chan");
-    check(sys::retype(UNTYPED, OBJ_CHANNEL, 4, SH_BOOT_A, SH_BOOT_B), b"sh boot chan");
-    check(sys::retype(UNTYPED, OBJ_CHANNEL, 4, SESSION_A, SESSION_B), b"session chan");
+    check(
+        sys::retype(UNTYPED, OBJ_CHANNEL, 4, SD_BOOT_A, SD_BOOT_B),
+        b"sd boot chan",
+    );
+    check(
+        sys::retype(UNTYPED, OBJ_CHANNEL, 4, SH_BOOT_A, SH_BOOT_B),
+        b"sh boot chan",
+    );
+    check(
+        sys::retype(UNTYPED, OBJ_CHANNEL, 4, SESSION_A, SESSION_B),
+        b"session chan",
+    );
 
     // ── the time page (rev1§2.6) ────────────────────────────────────────
     // Funded from init's untyped — the rev1§2.5 grant rule in its degenerate,
     // correct form: the supervisor whose liveness dominates everyone's
     // funds the mapping everyone shares, so nobody can fault anybody.
     let (wall_base_ns, cntvct_base, cntfrq) = read_boot_utc();
-    check(sys::retype(UNTYPED, OBJ_FRAME, 1, TIME_FRAME, 0), b"time frame");
+    check(
+        sys::retype(UNTYPED, OBJ_FRAME, 1, TIME_FRAME, 0),
+        b"time frame",
+    );
     let page = urt::time::encode_boot(wall_base_ns, cntvct_base, cntfrq);
     check(sys::frame_write(TIME_FRAME, 0, &page), b"time page write");
 
@@ -120,17 +135,35 @@ pub extern "C" fn _start() -> ! {
     };
     // The MMIO window: a phys-capable copy, device-mapped into the
     // child. The phys-read bit travels only along this one grant (rev1§2.5).
-    check(sys::cap_copy(DEVICE_FRAME, DEV_COPY, RIGHTS_WITH_PHYS), b"dev copy");
-    check(sys::map(sd.aspace_slot, DEV_COPY, MMIO_VA, PERM_DEVICE | PERM_W), b"map mmio");
+    check(
+        sys::cap_copy(DEVICE_FRAME, DEV_COPY, RIGHTS_WITH_PHYS),
+        b"dev copy",
+    );
+    check(
+        sys::map(sd.aspace_slot, DEV_COPY, MMIO_VA, PERM_DEVICE | PERM_W),
+        b"map mmio",
+    );
     // The DMA pool: ordinary RAM whose PA init reads and tells the
     // driver — the only place a PA crosses into userspace.
-    check(sys::retype(UNTYPED, OBJ_FRAME, DMA_PAGES, DMA_FRAME, 0), b"dma frame");
+    check(
+        sys::retype(UNTYPED, OBJ_FRAME, DMA_PAGES, DMA_FRAME, 0),
+        b"dma frame",
+    );
     let dma_pa = check(sys::frame_paddr(DMA_FRAME), b"frame_paddr") as u64;
-    check(sys::map(sd.aspace_slot, DMA_FRAME, DMA_VA, PERM_W), b"map dma");
+    check(
+        sys::map(sd.aspace_slot, DMA_FRAME, DMA_VA, PERM_W),
+        b"map dma",
+    );
     // The "time" grant (rev1§5.1): a read-only derivation per consumer —
     // rights-level read-only, so no holder can ever map it writable.
-    check(sys::cap_copy(TIME_FRAME, TIME_SD, RIGHT_READ), b"time sd copy");
-    check(sys::map(sd.aspace_slot, TIME_SD, TIME_VA, 0), b"time sd map");
+    check(
+        sys::cap_copy(TIME_FRAME, TIME_SD, RIGHT_READ),
+        b"time sd copy",
+    );
+    check(
+        sys::map(sd.aspace_slot, TIME_SD, TIME_VA, 0),
+        b"time sd map",
+    );
 
     let mut config = [0u8; 44];
     config[..4].copy_from_slice(b"SD02");
@@ -139,15 +172,33 @@ pub extern "C" fn _start() -> ! {
     config[20..28].copy_from_slice(&dma_pa.to_le_bytes());
     config[28..36].copy_from_slice(&(DMA_PAGES * 4096).to_le_bytes());
     config[36..44].copy_from_slice(&TIME_VA.to_le_bytes());
-    check(sys::chan_send(SD_BOOT_A, &config, None), b"sd startup block");
+    check(
+        sys::chan_send(SD_BOOT_A, &config, None),
+        b"sd startup block",
+    );
     // Block-don't-spin: requests wake storaged through a readable→
     // notification binding (rev1§3.6) — under strict priorities a busy-poll
     // server would starve its clients.
-    check(sys::retype(UNTYPED, sys::OBJ_NOTIF, 0, SD_NOTIF, 0), b"sd notif");
-    check(sys::chan_bind(SESSION_A, sys::EV_READABLE, SD_NOTIF, 1), b"sd bind");
-    check(sys::cap_install(sd.cspace_slot, SD_BOOT_B, 0), b"sd boot install");
-    check(sys::cap_install(sd.cspace_slot, SESSION_A, 1), b"sd session install");
-    check(sys::cap_install(sd.cspace_slot, SD_NOTIF, 2), b"sd notif install");
+    check(
+        sys::retype(UNTYPED, sys::OBJ_NOTIF, 0, SD_NOTIF, 0),
+        b"sd notif",
+    );
+    check(
+        sys::chan_bind(SESSION_A, sys::EV_READABLE, SD_NOTIF, 1),
+        b"sd bind",
+    );
+    check(
+        sys::cap_install(sd.cspace_slot, SD_BOOT_B, 0),
+        b"sd boot install",
+    );
+    check(
+        sys::cap_install(sd.cspace_slot, SESSION_A, 1),
+        b"sd session install",
+    );
+    check(
+        sys::cap_install(sd.cspace_slot, SD_NOTIF, 2),
+        b"sd notif install",
+    );
     check(spawn::start(&sd, 5).map_or(-1, |_| 0), b"start storaged");
 
     // ── shell ───────────────────────────────────────────────────────
@@ -161,21 +212,45 @@ pub extern "C" fn _start() -> ! {
             sys::exit();
         }
     };
-    check(sys::cap_copy(TIME_FRAME, TIME_SH, RIGHT_READ), b"time sh copy");
-    check(sys::map(sh.aspace_slot, TIME_SH, TIME_VA, 0), b"time sh map");
+    check(
+        sys::cap_copy(TIME_FRAME, TIME_SH, RIGHT_READ),
+        b"time sh copy",
+    );
+    check(
+        sys::map(sh.aspace_slot, TIME_SH, TIME_VA, 0),
+        b"time sh map",
+    );
     // Re-grantable copy in the shell's cspace slot 5: the shell holds a
     // read-only time cap it can copy and map into each child it spawns,
     // extending the rev1§2.6 time grant one hop (init→shell→child, rev1§5.1).
-    check(sys::cap_copy(TIME_FRAME, TIME_SH_CHILD, RIGHT_READ), b"time child copy");
-    check(sys::cap_install(sh.cspace_slot, TIME_SH_CHILD, 5), b"time child install");
+    check(
+        sys::cap_copy(TIME_FRAME, TIME_SH_CHILD, RIGHT_READ),
+        b"time child copy",
+    );
+    check(
+        sys::cap_install(sh.cspace_slot, TIME_SH_CHILD, 5),
+        b"time child install",
+    );
 
     let mut sh_config = [0u8; 12];
     sh_config[..4].copy_from_slice(b"SH01");
     sh_config[4..12].copy_from_slice(&TIME_VA.to_le_bytes());
-    check(sys::chan_send(SH_BOOT_A, &sh_config, None), b"sh startup block");
-    check(sys::cap_install(sh.cspace_slot, SH_BOOT_B, 0), b"sh boot install");
-    check(sys::cap_install(sh.cspace_slot, SESSION_B, 1), b"sh session install");
-    check(sys::cap_install(sh.cspace_slot, UNTYPED2, 2), b"sh untyped install");
+    check(
+        sys::chan_send(SH_BOOT_A, &sh_config, None),
+        b"sh startup block",
+    );
+    check(
+        sys::cap_install(sh.cspace_slot, SH_BOOT_B, 0),
+        b"sh boot install",
+    );
+    check(
+        sys::cap_install(sh.cspace_slot, SESSION_B, 1),
+        b"sh session install",
+    );
+    check(
+        sys::cap_install(sh.cspace_slot, UNTYPED2, 2),
+        b"sh untyped install",
+    );
     check(spawn::start(&sh, 4).map_or(-1, |_| 0), b"start shell");
 
     sys::debug_write(b"[init] system up\n");

@@ -239,7 +239,10 @@ fn report(resp: Response) {
 }
 
 fn cmd_ls(arg: &[u8]) {
-    match request(&Request::List { handle: 0, path: parse_path(arg) }) {
+    match request(&Request::List {
+        handle: 0,
+        path: parse_path(arg),
+    }) {
         Response::Listing(ents) => {
             for e in ents {
                 match e {
@@ -309,7 +312,11 @@ fn cmd_date() {
 
 fn cmd_gc() {
     match request(&Request::Gc { handle: 0 }) {
-        Response::GcReport { live_objects, freed_objects, freed_bytes } => {
+        Response::GcReport {
+            live_objects,
+            freed_objects,
+            freed_bytes,
+        } => {
             out(b"gc: freed ");
             out_num(freed_objects);
             out(b" objects / ");
@@ -345,12 +352,14 @@ fn cmd_prune(n: u64) {
         Response::Snapshots { snaps: rows, .. } => rows,
         r => return report(r),
     };
-    let candidates: Vec<u64> =
-        rows.iter().filter(|r| r.class != 0).map(|r| r.id).collect();
+    let candidates: Vec<u64> = rows.iter().filter(|r| r.class != 0).map(|r| r.id).collect();
     let excess = candidates.len().saturating_sub(n as usize);
     let mut deleted = 0u64;
     for &id in &candidates[..excess] {
-        match request(&Request::DeleteSnapshot { handle: 0, snap_id: id }) {
+        match request(&Request::DeleteSnapshot {
+            handle: 0,
+            snap_id: id,
+        }) {
             Response::Ok => deleted += 1,
             Response::Err(e) => {
                 out(b"#");
@@ -435,11 +444,11 @@ fn print_exit(e: Exit) {
 /// The slots one spawn consumes from the recyclable window — allocated up
 /// front, returned as a unit once the child is reaped (or aborted).
 struct SpawnSlots {
-    range: u32,  // [range, range+span): aspace, tcb, cspace, frames, stack
+    range: u32, // [range, range+span): aspace, tcb, cspace, frames, stack
     span: u32,
-    chan_a: u32, // shell's bootstrap endpoint
-    chan_b: u32, // child's endpoint (moved into the child's cspace)
-    scratch: u32, // staging slot for the moved-in notification copies
+    chan_a: u32,    // shell's bootstrap endpoint
+    chan_b: u32,    // child's endpoint (moved into the child's cspace)
+    scratch: u32,   // staging slot for the moved-in notification copies
     time_copy: u32, // per-child read-only time-page copy (mapped into it)
 }
 
@@ -460,7 +469,9 @@ struct Spawner {
 
 impl Spawner {
     fn new() -> Spawner {
-        Spawner { slots: SlotAlloc::new(SPAWN_BASE, SPAWN_CAP) }
+        Spawner {
+            slots: SlotAlloc::new(SPAWN_BASE, SPAWN_CAP),
+        }
     }
 
     /// Spawn `image` with startup mode `mode`, wait for it to terminate,
@@ -559,7 +570,10 @@ impl Spawner {
         // absorbs the by-hand bit-group scan the loop here used to do. Both keys
         // mean "go reap"; reap reads back which (exit vs fault) from the report.
         let (key, _signals) = reactor.wait();
-        debug_assert!(key == EXIT_KEY || key == FAULT_KEY, "unexpected reactor key");
+        debug_assert!(
+            key == EXIT_KEY || key == FAULT_KEY,
+            "unexpected reactor key"
+        );
         // Unmap the time grant before reap's revoke frees the child aspace
         // (rev1§2.5), then read_report strictly before revoke (enforced in reap).
         let _ = sys::cap_delete(s.time_copy);

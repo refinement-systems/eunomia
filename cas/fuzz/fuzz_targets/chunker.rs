@@ -9,11 +9,19 @@ use libfuzzer_sys::fuzz_target;
 use cas::chunk::{boundaries, Chunker, ChunkerParams};
 
 // Small params so cases stay fast; identical code paths to production.
-const PARAMS: ChunkerParams = ChunkerParams { min: 64, avg: 256, max: 1024 };
+const PARAMS: ChunkerParams = ChunkerParams {
+    min: 64,
+    avg: 256,
+    max: 1024,
+};
 
 fuzz_target!(|data: &[u8]| {
     let cuts = boundaries(&PARAMS, data);
-    assert_eq!(cuts, boundaries(&PARAMS, data), "chunking is non-deterministic");
+    assert_eq!(
+        cuts,
+        boundaries(&PARAMS, data),
+        "chunking is non-deterministic"
+    );
 
     // Cut positions are strictly increasing and end exactly at the input.
     let mut prev = 0usize;

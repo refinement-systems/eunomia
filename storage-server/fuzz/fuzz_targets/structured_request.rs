@@ -15,6 +15,9 @@ use storage_server::{wire, Request};
 fuzz_target!(|req: Request| {
     if let Ok(bytes) = wire::encode_request(&req) {
         let back = wire::decode_request(&bytes).expect("encoded request failed to decode");
-        assert_eq!(back, req, "request did not survive encode/decode round-trip");
+        assert_eq!(
+            back, req,
+            "request did not survive encode/decode round-trip"
+        );
     }
 });
