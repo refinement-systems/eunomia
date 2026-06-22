@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 5af170b73ba17790dbcd1a8d552b0a5260eece6da51314acb7765f4d61bcc528 # shrinks to grants = [Grant { name: 0, kind: Region { va: 0, len: 0, pa: 0 } }, Grant { name: 0, kind: Region { va: 0, len: 0, pa: 0 } }, Grant { name: 0, kind: CapSlot(0) }, Grant { name: 0, kind: CapSlot(0) }, Grant { name: 0, kind: Region { va: 0, len: 0, pa: 0 } }, Grant { name: 0, kind: CapSlot(0) }, Grant { name: 0, kind: CapSlot(0) }, Grant { name: 0, kind: Region { va: 0, len: 0, pa: 7 } }], argv = [[13, 42, 251], [39, 83, 12, 64, 67, 13, 253, 178], [215, 204, 76, 197, 112, 84, 19], [182], [216, 68, 243, 183, 245, 49, 24, 147, 145], [237, 126, 232, 103, 99, 178, 148, 91, 71, 17], [246, 54, 68, 158, 108, 129]], env = [[230, 147, 184, 71, 112, 11], [169, 242, 48, 133, 25, 51], [247, 241, 183, 50, 96, 42, 147, 237, 211, 99], [75, 251], [19, 176, 181, 104, 252, 39, 112, 189, 222, 129, 232], [118, 158, 56, 181, 115, 129], [125, 219], [138, 200, 132, 204, 251, 115, 151]]

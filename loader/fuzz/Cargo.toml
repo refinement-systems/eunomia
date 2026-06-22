@@ -34,3 +34,10 @@ path = "fuzz_targets/segment_layout.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "startup"
+path = "fuzz_targets/startup.rs"
+test = false
+doc = false
+bench = false

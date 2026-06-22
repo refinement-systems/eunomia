@@ -1,13 +1,14 @@
 //! Replay the committed fuzz corpora through their targets, re-checking the
 //! invariants. Keeps fuzz inputs alive as ordinary tests and lets `cargo miri
-//! test` UB-check them on each. Covers both targets — `elf_parse` (the parser)
-//! and `segment_layout` (the page-rounding math, the I-5 site) — so the one
-//! documented Miri command (`--test fuzz_corpus`) replays both.
+//! test` UB-check them on each. Covers all targets — `elf_parse` (the parser),
+//! `segment_layout` (the page-rounding math, the I-5 site), and `startup` (the
+//! startup-block codec) — so the one documented Miri command (`--test
+//! fuzz_corpus`) replays them all.
 
 use std::fs;
 use std::path::PathBuf;
 
-use loader::elf;
+use loader::{elf, startup};
 
 fn corpus_files(target: &str) -> Vec<Vec<u8>> {
     let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -91,6 +92,31 @@ fn segment_layout() {
                 assert_eq!(e, elf::ElfError::BadSegment);
                 assert!(overflows);
             }
+        }
+    }
+}
+
+#[test]
+fn startup() {
+    for data in corpus_files("startup") {
+        let Some(s) = startup::decode(&data) else {
+            continue;
+        };
+        assert!(s.ngrants <= startup::MAX_GRANTS);
+        assert!(s.nargv <= startup::MAX_ARGV);
+        assert!(s.nenv <= startup::MAX_ENV);
+        // Every borrowed byte-string lies inside the input slice.
+        let range = data.as_ptr_range();
+        for v in s.argv[..s.nargv].iter().chain(&s.env[..s.nenv]) {
+            if !v.is_empty() {
+                let r = v.as_ptr_range();
+                assert!(r.start >= range.start && r.end <= range.end);
+            }
+        }
+        // A decoded block that fits the budget re-encodes and round-trips.
+        let mut buf = [0u8; startup::MAX_BLOCK];
+        if let Ok(n) = startup::encode(&s, &mut buf) {
+            assert_eq!(startup::decode(&buf[..n]), Some(s));
         }
     }
 }

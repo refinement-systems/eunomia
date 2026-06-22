@@ -7,6 +7,7 @@
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
 pub mod elf;
+pub mod startup;
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub mod spawn;
