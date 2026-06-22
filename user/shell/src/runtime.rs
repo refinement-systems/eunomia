@@ -52,7 +52,7 @@ const CHILD_CSPACE_SLOTS: u64 = 8;
 const CHILD_PRIO: u64 = 3;
 /// Where the time page lands in each child's aspace (init's convention,
 /// rev1§2.6). Above the ELF (0x8000_0000) and stack (~0x9000_0000); the VA
-/// still travels in the ST01 block — never assumed.
+/// still travels in the startup block's TIME region grant — never assumed.
 const CHILD_TIME_VA: u64 = 0xA300_0000;
 
 /// Notification bits the kernel raises for this child (rev1§5.1). Distinct so the
@@ -347,6 +347,9 @@ enum RunErr {
     BadElf,
     Carve,
     Start,
+    /// The startup block could not be encoded (too many argv entries, or the
+    /// block would exceed `MAX_BLOCK`) — refused cleanly (rev1§2.7), not a panic.
+    Startup,
 }
 
 /// Owns the recyclable slot window and drives the rev1§5.1 spawn/reap loop. One
@@ -367,7 +370,7 @@ impl Spawner {
     /// read its report, then reclaim every resource it held. Returns how it
     /// terminated. The donation untyped and the slot window come back clean
     /// for the next call — this is the whole burn fix.
-    fn run_once(&mut self, image: &[u8], mode: u8) -> Result<Exit, RunErr> {
+    fn run_once(&mut self, image: &[u8], argv: &[&[u8]]) -> Result<Exit, RunErr> {
         let img = loader::elf::parse(image).map_err(|_| RunErr::BadElf)?;
         // Loader slot layout: aspace, tcb, cspace, one frame per segment,
         // stack frame (loader/spawn.rs).
@@ -380,7 +383,7 @@ impl Spawner {
             scratch: self.slots.alloc().ok_or(RunErr::NoSlots)?,
             time_copy: self.slots.alloc().ok_or(RunErr::NoSlots)?,
         };
-        let exit = self.spawn_inner(image, mode, &s);
+        let exit = self.spawn_inner(image, argv, &s);
         // Whether it ran to completion or aborted mid-setup, the donation is
         // now empty (reap revoked it, or abort below did) and these slots
         // with it — return the window to the free list.
@@ -388,7 +391,12 @@ impl Spawner {
         exit
     }
 
-    fn spawn_inner(&mut self, image: &[u8], mode: u8, s: &SpawnSlots) -> Result<Exit, RunErr> {
+    fn spawn_inner(
+        &mut self,
+        image: &[u8],
+        argv: &[&[u8]],
+        s: &SpawnSlots,
+    ) -> Result<Exit, RunErr> {
         // Bootstrap channel and every child object descend from DONATION, so
         // the child is one CDT subtree teardown collapses in one revoke.
         if sys::retype(DONATION, sys::OBJ_CHANNEL, 4, s.chan_a, s.chan_b) < 0 {
@@ -413,14 +421,20 @@ impl Spawner {
             self.scrub(s.time_copy);
             return Err(RunErr::Carve);
         }
-        // Explicit child world (rev1§5.1): bootstrap endpoint in slot 0, startup
-        // block ("ST01" + mode + time-page VA) queued before the child runs.
+        // Explicit child world (rev1§5.1): bootstrap endpoint in slot 0, the
+        // unified "EUS1" startup block (a TIME region grant for the time page +
+        // the command-line argv, C1D) queued before the child runs. An over-budget
+        // block is a clean spawn failure, never a panic (rev1§2.7).
         sys::cap_install(prepared.cspace_slot, s.chan_b, 0);
-        let mut block = [0u8; 13];
-        block[..4].copy_from_slice(b"ST01");
-        block[4] = mode;
-        block[5..13].copy_from_slice(&CHILD_TIME_VA.to_le_bytes());
-        sys::chan_send(s.chan_a, &block, None);
+        let mut block = [0u8; loader::startup::MAX_BLOCK];
+        let n = match crate::build_child_block(&mut block, CHILD_TIME_VA, argv) {
+            Ok(n) => n,
+            Err(_) => {
+                self.scrub(s.time_copy);
+                return Err(RunErr::Startup);
+            }
+        };
+        sys::chan_send(s.chan_a, &block[..n], None);
 
         let rec = SpawnRec {
             donation: DONATION,
@@ -500,13 +514,19 @@ fn run_err(e: RunErr) {
         RunErr::BadElf => b"error: bad ELF\n",
         RunErr::Carve => b"error: resource carve failed\n",
         RunErr::Start => b"error: start failed\n",
+        RunErr::Startup => b"error: startup block rejected\n",
     });
 }
 
 fn cmd_run(sp: &mut Spawner, arg: &[u8]) {
-    let mut parts = arg.splitn(2, |&b| b == b' ');
-    let path = parts.next().unwrap_or(b"");
-    let mode = parts.next().and_then(parse_u64).unwrap_or(0) as u8;
+    // argv from the command line (rev1§5.1, C1D): whitespace-split tokens,
+    // empties dropped. argv[0] is the program path; the rest are arguments the
+    // child reads from the startup block (e.g. selftest's mode in argv[1]).
+    let argv: Vec<&[u8]> = arg
+        .split(|&b| b == b' ')
+        .filter(|t| !t.is_empty())
+        .collect();
+    let path = argv.first().copied().unwrap_or(b"");
 
     let Some(image) = read_file(path) else {
         out(b"error: not found\n");
@@ -515,7 +535,7 @@ fn cmd_run(sp: &mut Spawner, arg: &[u8]) {
     out(b"loaded ");
     out_num(image.len() as u64);
     out(b" bytes from the store\n");
-    match sp.run_once(&image, mode) {
+    match sp.run_once(&image, &argv) {
         Ok(exit) => print_exit(exit),
         Err(e) => run_err(e),
     }
@@ -538,8 +558,11 @@ fn cmd_runloop(sp: &mut Spawner, arg: &[u8]) {
     };
     let before = sp.available();
     let mut ok = 0u64;
+    // No mode argument → the child sees argv = [path] only (selftest defaults to
+    // mode 0, a clean exit(0)) — the burn-fix witness wants a trivial child.
+    let argv: [&[u8]; 1] = [path];
     for _ in 0..n {
-        match sp.run_once(&image, 0) {
+        match sp.run_once(&image, &argv) {
             Ok(Exit::Exited(0)) => ok += 1,
             Ok(other) => {
                 out(b"unexpected: ");

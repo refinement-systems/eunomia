@@ -1,9 +1,10 @@
 //! A spawn/reclaim test subject. Its whole world arrives via the rev1§5.1
 //! startup convention: a bootstrap channel in cspace slot 0 whose first
-//! queued message is `"ST01"` + a one-byte mode + the time-page VA the
-//! parent mapped in (rev1§2.6). The mode selects how the program terminates,
-//! so one binary witnesses every path the parent's reclaim loop must
-//! handle:
+//! queued message is the unified `b"EUS1"` startup block (C1D) — a `TIME`
+//! region grant for the time page the parent mapped in (rev1§2.6) plus an
+//! `argv` vector. `argv[1]` (a decimal integer) selects how the program
+//! terminates, so one binary witnesses every path the parent's reclaim loop
+//! must handle:
 //!
 //!   mode 0xFF → fault (wild store to an unmapped address): suspended, not
 //!               destroyed (rev1§5.3); the parent reads `faulted(...)`.
@@ -24,12 +25,13 @@
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(not(test), no_main)]
 // Under `cfg(test)` the crate builds as a host harness (Design decision 2,
-// B15C): std and the default test `main` take over, the bare-metal items are
-// gated out, and only the pure `parse_st01` decoder remains. Allow the
+// B15C/C1D): std and the default test `main` take over, the bare-metal items
+// are gated out, and only the pure `parse_startup` decoder remains. Allow the
 // dead-code / unused-import noise the boot-only items leave behind.
 #![cfg_attr(test, allow(dead_code, unused_imports))]
 
 use ipc::sys;
+use loader::startup::{self, GrantKind};
 
 const BOOT_CHAN: u32 = 0;
 
@@ -55,27 +57,52 @@ fn probe_bss() -> u8 {
     acc
 }
 
-/// The parent→selftest startup block (rev1§5.1): magic `"ST01"`, a one-byte
-/// mode, then (optionally) the time-page VA as a little-endian `u64`. A decode
-/// of an untrusted-shaped message (rev1§2.7): a short or mis-magicked block is
-/// *refused* into the safe default (mode `0`, no clock), never a panic. Total
-/// over any byte slice — `len >= 5` guards the magic + mode, `len >= 13` guards
-/// the VA.
+/// What selftest reads out of the startup block (rev1§5.1): the termination
+/// `mode` (from `argv[1]`) and the time-page VA (from the `TIME` region grant,
+/// `None` when no clock was granted). See [`parse_startup`] for the decode.
 #[derive(Debug, PartialEq)]
-struct St01 {
+struct Boot {
     mode: u8,
     time_va: Option<u64>,
 }
 
-fn parse_st01(buf: &[u8]) -> St01 {
-    let is_block = buf.len() >= 5 && &buf[..4] == b"ST01";
-    let mode = if is_block { buf[4] } else { 0 };
-    let time_va = if is_block && buf.len() >= 13 {
-        Some(u64::from_le_bytes(buf[5..13].try_into().unwrap()))
-    } else {
-        None
+/// Decode the unified `b"EUS1"` startup block (C1D), shared with the shell's
+/// `build_child_block` producer via `loader::startup`. The mode is `argv[1]`
+/// (a decimal integer); the clock is the `TIME` region grant's VA. Total over
+/// arbitrary bytes (rev1§2.7): `decode` returns `None` on any malformed input,
+/// so a non-EUS1 / short / mis-magicked block falls back to the safe default
+/// (mode `0`, no clock) — never a panic.
+fn parse_startup(buf: &[u8]) -> Boot {
+    let Some(s) = startup::decode(buf) else {
+        return Boot {
+            mode: 0,
+            time_va: None,
+        };
     };
-    St01 { mode, time_va }
+    let mode = if s.nargv > 1 {
+        parse_mode(s.argv[1])
+    } else {
+        0
+    };
+    let time_va = match s.grant(startup::NAME_TIME) {
+        Some(GrantKind::Region { va, .. }) => Some(va),
+        _ => None,
+    };
+    Boot { mode, time_va }
+}
+
+/// Decimal byte-string → `u8`, mirroring the shell's old `parse_u64(..) as u8`
+/// (empty / non-digit → `0`). Wrapping arithmetic so it is total on arbitrary
+/// argv bytes — the modes used are `0..=255`, but the decoder must not panic.
+fn parse_mode(s: &[u8]) -> u8 {
+    if s.is_empty() || !s.iter().all(|b| b.is_ascii_digit()) {
+        return 0;
+    }
+    let mut n: u64 = 0;
+    for &b in s {
+        n = n.wrapping_mul(10).wrapping_add((b - b'0') as u64);
+    }
+    n as u8
 }
 
 #[cfg(not(test))]
@@ -104,10 +131,10 @@ pub extern "C" fn _start() -> ! {
         }
         sys::yield_now();
     };
-    let St01 { mode, time_va } = parse_st01(&buf[..len]);
+    let Boot { mode, time_va } = parse_startup(&buf[..len]);
     // The "time" grant (rev1§2.6): the parent mapped the read-only time page
-    // into us and put its VA in the block. Attach so `urt::time` can read
-    // the clock. Absent (short block) → no clock, mode 0xFD reports it.
+    // into us and put its VA in the block's TIME region. Attach so `urt::time`
+    // can read the clock. Absent (no grant) → no clock, mode 0xFD reports it.
     if let Some(time_va) = time_va {
         // Safety: the shell established this VA as a live read-only mapping
         // of the time page before queueing the block; it outlives us.
@@ -155,30 +182,46 @@ fn on_panic(_: &core::panic::PanicInfo) -> ! {
 
 #[cfg(test)]
 mod tests {
-    //! B15C — host tests for the ST01 startup-block decoder (rev1§6 Baseline
-    //! tier). The decode must be total: a short / mis-magicked block falls
-    //! back to the safe default (mode `0`, no clock), never a panic (rev1§2.7).
+    //! C1D — host tests for the unified `b"EUS1"` startup-block decoder
+    //! (rev1§6 Baseline tier). The codec is the shared `loader::startup`, so the
+    //! consumer (`parse_startup`) is checked against the real `encode` — the
+    //! same bytes the shell producer emits, no mirrored hand-parser. The decode
+    //! must be total: a short / mis-magicked block falls back to the safe
+    //! default (mode `0`, no clock), never a panic (rev1§2.7).
     use super::*;
     use proptest::prelude::*;
 
-    /// Build an ST01 block: magic + mode, plus the time VA when `time_va` is set.
-    fn st01(mode: u8, time_va: Option<u64>) -> Vec<u8> {
-        let mut b = Vec::new();
-        b.extend_from_slice(b"ST01");
-        b.push(mode);
+    /// Build an EUS1 block the way the shell does: a `TIME` region grant (when
+    /// `time_va` is set) and an argv whose `argv[0]` is the path; `mode`, when
+    /// present, is the decimal `argv[1]` selftest reads.
+    fn block(mode: Option<u8>, time_va: Option<u64>) -> Vec<u8> {
+        let mut s = startup::Startup::new();
         if let Some(va) = time_va {
-            b.extend_from_slice(&va.to_le_bytes());
+            s.push_grant(startup::Grant {
+                name: startup::NAME_TIME,
+                kind: GrantKind::Region {
+                    va,
+                    len: 4096,
+                    pa: 0,
+                },
+            })
+            .unwrap();
         }
-        b
+        s.push_argv(b"selftest").unwrap();
+        let mode_s = mode.map(|m| format!("{m}").into_bytes());
+        if let Some(ref m) = mode_s {
+            s.push_argv(m).unwrap();
+        }
+        let mut out = [0u8; startup::MAX_BLOCK];
+        let n = startup::encode(&s, &mut out).unwrap();
+        out[..n].to_vec()
     }
 
     #[test]
-    fn parse_st01_full_block_yields_mode_and_time() {
-        let b = st01(0xFD, Some(0xA300_0000));
-        assert_eq!(b.len(), 13);
+    fn parse_startup_full_block_yields_mode_and_time() {
         assert_eq!(
-            parse_st01(&b),
-            St01 {
+            parse_startup(&block(Some(0xFD), Some(0xA300_0000))),
+            Boot {
                 mode: 0xFD,
                 time_va: Some(0xA300_0000)
             }
@@ -186,14 +229,25 @@ mod tests {
     }
 
     #[test]
-    fn parse_st01_five_byte_block_is_mode_only() {
-        // A 5-byte block: mode present, no time VA (len < 13) — current
-        // behaviour pinned (mode runs, the clock simply never attaches).
-        let b = st01(0x07, None);
-        assert_eq!(b.len(), 5);
+    fn parse_startup_no_mode_arg_is_mode_zero() {
+        // argv = [path] only (the runloop child): mode defaults to 0, clock
+        // still attaches when the TIME grant is present.
         assert_eq!(
-            parse_st01(&b),
-            St01 {
+            parse_startup(&block(None, Some(0xA300_0000))),
+            Boot {
+                mode: 0,
+                time_va: Some(0xA300_0000)
+            }
+        );
+    }
+
+    #[test]
+    fn parse_startup_no_time_grant_is_clockless() {
+        // A block without a TIME grant: mode runs, the clock simply never
+        // attaches (mode 0xFD reports `time-bad`).
+        assert_eq!(
+            parse_startup(&block(Some(0x07), None)),
+            Boot {
                 mode: 0x07,
                 time_va: None
             }
@@ -201,32 +255,27 @@ mod tests {
     }
 
     #[test]
-    fn parse_st01_short_or_wrong_magic_is_default() {
-        // len < 5 → mode 0 / no time (refuse-not-crash).
-        assert_eq!(
-            parse_st01(&[]),
-            St01 {
-                mode: 0,
-                time_va: None
-            }
-        );
-        assert_eq!(
-            parse_st01(b"ST0"),
-            St01 {
-                mode: 0,
-                time_va: None
-            }
-        );
-        // Wrong magic but long enough → still the safe default, no attach.
-        let mut wrong = st01(0xFF, Some(1));
-        wrong[3] = b'2'; // "ST02"
-        assert_eq!(
-            parse_st01(&wrong),
-            St01 {
-                mode: 0,
-                time_va: None
-            }
-        );
+    fn parse_startup_malformed_is_default() {
+        // Non-EUS1 / short / mis-magicked → mode 0, no clock (refuse-not-crash).
+        let safe = Boot {
+            mode: 0,
+            time_va: None,
+        };
+        assert_eq!(parse_startup(&[]), safe);
+        assert_eq!(parse_startup(b"ST01\x07"), safe); // the retired magic
+        let mut wrong = block(Some(0xFF), Some(1));
+        wrong[3] = b'2'; // "EUS2" — bad magic
+        assert_eq!(parse_startup(&wrong), safe);
+    }
+
+    #[test]
+    fn parse_mode_matches_old_truncation() {
+        // The shell used `parse_u64(..) as u8`: decimal, empty/non-digit → 0,
+        // values > 255 wrap to the low byte.
+        assert_eq!(parse_mode(b"254"), 254);
+        assert_eq!(parse_mode(b""), 0);
+        assert_eq!(parse_mode(b"x9"), 0);
+        assert_eq!(parse_mode(b"256"), 0); // 256 as u8
     }
 
     proptest! {
@@ -235,18 +284,18 @@ mod tests {
             ..ProptestConfig::default()
         })]
 
-        /// Total over arbitrary bytes: `parse_st01` never panics (rev1§2.7 floor).
+        /// Total over arbitrary bytes: `parse_startup` never panics (rev1§2.7).
         #[test]
-        fn parse_st01_is_total(bytes in proptest::collection::vec(any::<u8>(), 0..32)) {
-            let _ = parse_st01(&bytes);
+        fn parse_startup_is_total(bytes in proptest::collection::vec(any::<u8>(), 0..64)) {
+            let _ = parse_startup(&bytes);
         }
 
-        /// A 13-byte ST01 block round-trips mode + time VA.
+        /// An EUS1 block round-trips the mode (decimal argv[1]) and time VA.
         #[test]
-        fn parse_st01_round_trips_full_block(mode in any::<u8>(), va in any::<u64>()) {
+        fn parse_startup_round_trips_full_block(mode in any::<u8>(), va in any::<u64>()) {
             prop_assert_eq!(
-                parse_st01(&st01(mode, Some(va))),
-                St01 { mode, time_va: Some(va) }
+                parse_startup(&block(Some(mode), Some(va))),
+                Boot { mode, time_va: Some(va) }
             );
         }
     }

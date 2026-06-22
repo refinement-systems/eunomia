@@ -31,6 +31,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use loader::startup::{self, Grant, GrantKind};
 use storage_server::SnapInfo;
 
 #[cfg(not(test))]
@@ -183,6 +184,41 @@ pub(crate) fn prune_victims(rows: &[SnapInfo], keep_n: u64) -> Vec<u64> {
     let candidates: Vec<u64> = rows.iter().filter(|r| r.class != 0).map(|r| r.id).collect();
     let excess = candidates.len().saturating_sub(keep_n as usize);
     candidates[..excess].to_vec()
+}
+
+/// The time page is one frame (kcore `PAGE`, rev1§2.6). The child reads only the
+/// VA; the length is informational on the `REGION` grant (matches init's `TIME_LEN`).
+pub(crate) const TIME_LEN: u64 = 4096;
+
+/// Build the shell→child startup block (rev1§5.1, C1D): the unified `b"EUS1"`
+/// format carrying a `TIME` `REGION` grant for the pre-mapped time page plus the
+/// command-line `argv` (`argv[0]` is the program path). Supersedes the bespoke
+/// `"ST01"` magic + mode-byte layout; the codec is now shared with the consumer
+/// (selftest's `parse_startup`), so the round-trip drives the real `encode`.
+/// Total in the producer direction (rev1§2.7): an over-arena (`> MAX_ARGV`) or
+/// over-budget (`> MAX_BLOCK`) block returns a clean `EncodeError` the spawn path
+/// maps to a `RunErr` — refuse, never panic or silently truncate. `env` is left
+/// empty (defined and round-tripped, unpopulated; rev1§5.1). The region carries
+/// no new authority: the shell `map`s the time page before start, only the VA
+/// travels.
+pub(crate) fn build_child_block(
+    out: &mut [u8],
+    time_va: u64,
+    argv: &[&[u8]],
+) -> Result<usize, startup::EncodeError> {
+    let mut s = startup::Startup::new();
+    s.push_grant(Grant {
+        name: startup::NAME_TIME,
+        kind: GrantKind::Region {
+            va: time_va,
+            len: TIME_LEN,
+            pa: 0,
+        },
+    })?;
+    for &a in argv {
+        s.push_argv(a)?;
+    }
+    startup::encode(&s, out)
 }
 
 #[cfg(test)]
