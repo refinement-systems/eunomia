@@ -51,7 +51,9 @@ BLAKE3 split rule below)),
 and the **gap-freedom composition** (`lemma_gap_freedom` + `lemma_run_len_covers` /
 `lemma_laid_out_mono`), now *live* — fired by `recover_records` on the rebuilt run, its
 `laid_out` premise discharged rather than assumed; the IPC fixed header + window-quota
-`Admission`; the shared `FreeList` (extracted to the `freelist` crate in B11A) — **the
+`Admission` (joined in B14B by the reactor's verified `used`-mask bit-allocator core
+`lowest_clear_bit`, the kcore ready-queue-bitmap pattern — Baselines below); the
+shared `FreeList` (extracted to the `freelist` crate in B11A) — **the
 verified allocation algorithm behind both `dma-pool` and, since B11B, the `urt` heap
 allocator** (first-fit search, alignment round-up, split, two-sided address-ordered coalesce,
 proven over the side-stored `(offset, len)`-extent model); and `urt`'s slot bitmap, seqlock
@@ -70,6 +72,22 @@ depth O(1)). Mechanizing reachability would drag `Hash` into the Hash-free recov
 so it stays test-routed (B6 Design decision 3). Recorded here so a reviewer sees the
 property is test-routed, not Verus-mechanized (the rev1§6.1 "no trust-routed property
 mistaken for mechanized" discipline); this routing leaves the gate unchanged (65/0 after B7C).
+
+The IPC reactor's **multi-source dispatch** (the `used`-mask bit allocation *beyond* the
+verified `lowest_clear_bit` core, the `pending` drain, the `trailing_zeros` lowest-bit
+scan over the slot array) and the endpoint **cap-marshalling** (`cap_slots` ↔ the
+kernel-ABI `[u32;4]`/`SLOT_NONE`) are, by design, *neither* TLA-mechanized *nor* a
+trusted seam. The `IpcReactor` TLA model is **single-source by construction** (one
+on-readable + one on-writable bit; `tla/ipc_reactor/IpcReactor.tla` scope note), so the
+multi-bit dispatch arithmetic is delivered at the rev1§6 baseline tier — the six B14B
+proptests (bit-allocation bijection / lowest-clear / 64-bit ceiling, pending-drain
+completeness + lowest-first ordering, cap-marshalling round-trip), all Miri-replayed —
+and the *concurrent* wakeup/backpressure execution is the Loom/Shuttle harnesses'
+(`ipc/src/model.rs`), with the TLA model as the protocol-design oracle. Only the pure
+`used`-mask bit-scan core (`lowest_clear_bit`) is Verus-mechanized (Baselines `-p ipc`
+row). Recorded here so a reviewer does not read the B14A TLA completion *or* the
+allocator proof as covering the full multi-source dispatch (the same rev1§6.1 "no
+trust-routed property mistaken for mechanized" discipline).
 
 ## The seams (14 named constructs + the by-construction category)
 
@@ -134,11 +152,11 @@ grep-able rather than an implicit consequence of the crash semantics, as rev1§4
 `CapSlot::empty`) = **14** (was 13; +1 in B13B: the `is_boundary` BLAKE3 split rule, the
 3rd CAS interpreted-hash seam, proven *around* by the verified partition core).
 
-> **The `urt` heap arena seam (B11C) is *not* one of these 13.** Like the DMA-pool wrapper, the
+> **The `urt` heap arena seam (B11C) is *not* one of these 14.** Like the DMA-pool wrapper, the
 > heap allocator's trusted step — `UnsafeCell<[u8; N]>` interior mutability + `base.add(off)` /
 > `(p as usize) - base` — is plain-Rust wrapper code, **not** a `verus!{}` `external_body` /
 > `assume_specification` construct. It is kept honest by the B11C Miri+proptest tier (Baselines),
-> so it leaves this tally unchanged at **13**. The heap's *algorithm* is verified (the `freelist`
+> so it leaves this tally unchanged at **14**. The heap's *algorithm* is verified (the `freelist`
 > proof), not trusted; only the byte-region boundary is trusted, exactly as for `dma-pool`.
 
 > **Reconciliation with audit §4.1.** The audit (`doc/results/0_audit_rev0.md` §4.1)
@@ -168,11 +186,11 @@ Any phase touching these must re-establish them at ≥ the prior numbers.
 |---|---|---|
 | kcore object core | `cargo verus verify -p kcore` | 389 verified, 0 errors |
 | CAS decode + recovery cores | `cargo verus verify -p cas --no-default-features` | 80 verified, 0 errors (was 73; +7 in B13B: the directory **level partition core** — `split_points`, `boundary_flags`, the `block_start` spec helper, and the conservation lemmas `flatten_blocks`/`lemma_flatten_covers`/`lemma_partition_flatten` — proven over the opaque `is_boundary` seam, the one new trusted construct. B13A added +8 over the prior 65: the **node decoder** `decode_node` total ∀ bytes + leaf canonical round-trip, `encode_node_leaf`, `entries_bytes`/`canonical_leaf_bytes`/`lemma_entries_push`; no new seam) |
-| IPC header + session codecs | `cargo verus verify -p ipc` | 58 verified, 0 errors |
+| IPC header + session codecs + reactor bit-allocator core | `cargo verus verify -p ipc` | 62 verified, 0 errors (was 58; +4 in B14B: the reactor's `used`-mask bit-allocator core `lowest_clear_bit` — lowest-clear-bit correctness, no-double-allocation, and the 64-bit structural bound — a pure `u64` bitmask over `vstd`'s `axiom_u64_trailing_zeros`, the kcore ready-queue-bitmap pattern; **no new trusted seam**, tally stays 14) |
 | shared `FreeList` (free-list allocator core + `is_full`/`is_allocated` guard accessors; extracted from dma-pool in B11A) | `cargo verus verify -p freelist` | 29 verified, 0 errors |
 | DMA-pool wrapper (plain-Rust PA seam; discharges `FreeList`'s preconditions via the `freelist` guards) | `cargo verus verify -p dma-pool` | 0 verified, 0 errors (the 29 obligations moved to `freelist`, not weakened) |
 | urt slots + time + heap | `cargo verus verify -p urt` | **29 verified, 0 errors** — urt's *own* surface (slot bitmap + `utc_ns_at`). The heap allocator's *algorithm* is the `freelist` dep it re-checks transitively (**29/0**, the proof rewired in B11B); the heap *wrapper* is a plain-Rust arena seam (`UnsafeCell<[u8; N]>` + `base.add(off)`), **0 obligations**, kept honest by the B11C Miri+proptest tier (`cargo +nightly miri test -p urt`). Disclosed MVP bounds in that wrapper (test-routed, not Verus-mechanized): `HEAP_RANGES = 1024` fragmentation cap, `MAX_ALIGN = 64`, `dealloc`-at-cap → safe leak (never aborts a free) — see `urt/src/lib.rs` module doc. *(Corrects B11A's findings-table "58": that was 29 urt + 29 freelist summed; urt's own count is and was 29/0.)* |
-| TLA+ | `CommitProtocol` (6886 states; the `RecoverReconstructs` replay-equality action property + the committed negative control `CommitProtocol_NegControl.cfg`, which reports the expected violation), `CapRevocation` (B9C: stepwise revoke — `RevokeBegin`/`RevokeStep`/`RevokeEnd` over a `revoking` marker, `Copy` derive-guard; 503,070 distinct states with the safety invariants checked at every mid-revoke interleaved state + `EventuallyRevoked` liveness under weak fairness; two committed negative controls — `CapRevocation_NegControl.cfg` reports the `LiveParent` violation under a non-leaf delete, `CapRevocation_NegLiveness.cfg` the `EventuallyRevoked` livelock when the guard is dropped; constants trimmed to Threads 1 / QueueDepth 1 because the full-scale liveness tableau exhausts heap — see `doc/results/4_b9c-findings.md`), `CapRevocation_Teardown` (TSpec, 252 states, unchanged), `IpcReactor` (with a negative control) | pass |
+| TLA+ | `CommitProtocol` (6886 states; the `RecoverReconstructs` replay-equality action property + the committed negative control `CommitProtocol_NegControl.cfg`, which reports the expected violation), `CapRevocation` (B9C: stepwise revoke — `RevokeBegin`/`RevokeStep`/`RevokeEnd` over a `revoking` marker, `Copy` derive-guard; 503,070 distinct states with the safety invariants checked at every mid-revoke interleaved state + `EventuallyRevoked` liveness under weak fairness; two committed negative controls — `CapRevocation_NegControl.cfg` reports the `LiveParent` violation under a non-leaf delete, `CapRevocation_NegLiveness.cfg` the `EventuallyRevoked` livelock when the guard is dropped; constants trimmed to Threads 1 / QueueDepth 1 because the full-scale liveness tableau exhausts heap — see `doc/results/4_b9c-findings.md`), `CapRevocation_Teardown` (TSpec, 252 states, unchanged), `IpcReactor` (B14A: the completed reactor protocol — `Register` + the poll-once self-signal, the symmetric writable/backpressure half, and the 3-state receiver that blocks on the notification *word*, not the queue; the new `NoLostWakeupWritable` safety invariant alongside `TypeOK`/`NoLostWakeup`/`NoDrop`/`FifoPerChannel` + `EventuallyDelivered` liveness under weak fairness; **39 distinct states** (59 generated, depth 13) at MaxMsgs 3 / QueueDepth 2; **three committed negative controls** — `IpcReactor_NegControl.cfg` reports `NoLostWakeup` violated when `Register` drops the poll-once self-signal (the send-before-bind hazard), `IpcReactor_NegBackpressure.cfg` reports `NoLostWakeupWritable` violated when `RecvGet` drops the on-writable fire, `IpcReactor_NegLostWakeup.cfg` reports `NoLostWakeup` violated when `RecvBlock` drops the `word = 0` guard; the S-12 `CHECK_DEADLOCK FALSE` ↔ `EventuallyDelivered` dependency pinned as a cfg comment. **Single-source by design** — the multi-source dispatch (the `used`-mask allocation beyond the verified `lowest_clear_bit` core, the `pending` drain, the `trailing_zeros` lowest-bit scan over the slot array) and the cap-marshalling are proptest-routed (B14B), and the live concurrent execution is Loom/Shuttle-routed (`ipc/src/model.rs`), **not** TLA-mechanized — see the IPC dispatch routing note above) | pass |
 | Fuzzing | wire/on-disk/ELF decoders + mount/recovery cargo-fuzz targets + the GC mark-walk target (`gc_mark`), committed corpora + Miri replay | green |
 
 ---
