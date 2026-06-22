@@ -130,17 +130,42 @@ pub extern "C" fn kernel_main() -> ! {
         // all device resources … MMIO frames, IRQ caps") — the device-MMIO-frame
         // precedent (slots 3/4), boot-static not retyped (B-IRQ Design dec. 3).
         //
-        // Gated to the m1-test path. The real-boot init's 64-slot cspace is
-        // fully hand-packed — `user/init` lays out its allocations (6..=18) and
-        // the storaged/shell spawn windows (`SD_SPAWN_BASE = 20`, slots 20.. used
-        // by `spawn::prepare` as aspace/tcb/cspace/segment frames; `SH_SPAWN_BASE
-        // = 40`), so any fixed slot here collides with a child's spawn scratch
-        // (slot 23/24 are storaged's first segment frames). The real-boot init
-        // also has no consumer for these caps until the console driver exists.
-        // So the real-boot grant + the init-cspace restructuring it needs land
-        // with C-M9 (which spawns the driver and delegates these caps); B-IRQ-C
-        // proves the mechanism on the m1-test init, whose ROOT_CSPACE is free
-        // above the exerciser's retype range (6..=22).
+        // Granted as of C-M9-B: real `user/init` holds the PL011 MMIO frame + IRQ
+        // cap at slots 62/63 and delegates them to the console driver it spawns
+        // (`user/console`), resolving the deferral B-IRQ-C recorded here. The
+        // real-boot init's 64-slot cspace is hand-packed — its allocations (6..=18)
+        // and the storaged/shell spawn windows (`SD_SPAWN_BASE = 20`, `SH_SPAWN_BASE
+        // = 40`, each `spawn::prepare`-scratch reaching base+3+nsegments) occupy the
+        // low/mid table, so the grant goes in the **contiguous top pair 62/63**,
+        // clear of every spawn range by construction (C-M9 Design decision 4). The
+        // two `cfg`s are mutually exclusive: real boot writes 62/63 (consumed by
+        // `user/init`); the m1-test build writes 23/24 for the embedded EL0
+        // exerciser, whose ROOT_CSPACE is free above its retype range (6..=22).
+        #[cfg(not(feature = "m1-test"))]
+        {
+            // Slot 62: the PL011 MMIO frame (UART at 0x0900_0000 on QEMU virt) —
+            // the driver's register window. init `cap_copy`s + maps it into the
+            // console's aspace at spawn and the VA travels as a `NAME_PL011_MMIO`
+            // region grant (rev1§5.1); the original here stays the master cap.
+            let slot62 = CSpaceObj::slot(root, 62);
+            (*slot62).cap = Cap {
+                kind: CapKind::Frame {
+                    base: 0x0900_0000,
+                    pages: 1,
+                    mapping: None,
+                },
+                rights: Rights(Rights::READ | Rights::WRITE | Rights::PHYS),
+            };
+            // Slot 63: the PL011 IRQ-handler cap (rev1§1) — INTID 33 (SPI 1, RX).
+            // A plain designating handle to the boot-static `IrqObj`; the console
+            // driver binds it via `IrqBind` / clears it via `IrqAck`. The handlers
+            // gate on the cap kind, not its rights, so READ|WRITE keeps it delegable.
+            let slot63 = CSpaceObj::slot(root, 63);
+            (*slot63).cap = Cap {
+                kind: CapKind::Irq(irq::pl011_objid()),
+                rights: Rights(Rights::READ | Rights::WRITE),
+            };
+        }
         #[cfg(feature = "m1-test")]
         {
             // Slot 23: the PL011 MMIO frame (UART at 0x0900_0000 on QEMU virt) —
