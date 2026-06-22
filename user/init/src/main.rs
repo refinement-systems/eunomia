@@ -92,15 +92,40 @@ fn build_sd02(mmio_va: u64, dma_va: u64, dma_pa: u64, dma_len: u64, time_va: u64
     c
 }
 
-/// Build the init→shell startup block (rev1§5.1): magic `"SH01"` followed by
-/// the time-page VA as a little-endian `u64`. The shell decodes the inverse
-/// (`&boot[..4] == b"SH01"` + the 8-byte VA, `shell:_start`); B15C pins the
-/// producer side.
-fn build_sh01(time_va: u64) -> [u8; 12] {
-    let mut c = [0u8; 12];
-    c[..4].copy_from_slice(b"SH01");
-    c[4..12].copy_from_slice(&time_va.to_le_bytes());
-    c
+/// The shell's cspace slot holding the storage-session channel (rev1§5.1):
+/// init `cap_install`s `SESSION_B` here and the startup table names it as the
+/// `storage` grant, so the name and the install can never drift.
+const SHELL_SESSION_SLOT: u32 = 1;
+
+/// Build the init→shell startup block (rev1§5.1, C1C): the unified `b"EUS1"`
+/// named-grant table (`loader::startup`) carrying the standard names the shell
+/// holds today — `time` (the read-only page init mapped at `TIME_VA`, as a
+/// region grant carrying the VA), `storage` (the session channel at the shell's
+/// cspace slot 1), and `root` (the full-rights ref at handle 0 on that session).
+/// `stdin`/`stdout` (Design decision 4, C-M9 populates) and `tmp` (Design
+/// decision 3, no subtree today) are reserved names, deliberately not emitted.
+/// Returns the encoded length, or an `EncodeError` the caller maps to a clean
+/// boot failure (refuse-not-crash, rev1§2.7) — never a panic.
+fn build_shell_block(out: &mut [u8]) -> Result<usize, loader::startup::EncodeError> {
+    use loader::startup::*;
+    let mut s = Startup::new();
+    s.push_grant(Grant {
+        name: NAME_TIME,
+        kind: GrantKind::Region {
+            va: TIME_VA,
+            len: 4096,
+            pa: 0,
+        },
+    })?;
+    s.push_grant(Grant {
+        name: NAME_STORAGE,
+        kind: GrantKind::CapSlot(SHELL_SESSION_SLOT),
+    })?;
+    s.push_grant(Grant {
+        name: NAME_ROOT,
+        kind: GrantKind::StorageHandle(0),
+    })?;
+    encode(&s, out)
 }
 
 fn check(r: i64, what: &[u8]) -> i64 {
@@ -277,9 +302,16 @@ pub extern "C" fn _start() -> ! {
         b"time child install",
     );
 
-    let sh_config = build_sh01(TIME_VA);
+    let mut sh_config = [0u8; loader::startup::MAX_BLOCK];
+    let sh_len = match build_shell_block(&mut sh_config) {
+        Ok(n) => n,
+        Err(_) => {
+            sys::debug_write(b"[init] FAILED: encode shell startup block\n");
+            sys::exit();
+        }
+    };
     check(
-        sys::chan_send(SH_BOOT_A, &sh_config, None),
+        sys::chan_send(SH_BOOT_A, &sh_config[..sh_len], None),
         b"sh startup block",
     );
     check(
@@ -287,7 +319,7 @@ pub extern "C" fn _start() -> ! {
         b"sh boot install",
     );
     check(
-        sys::cap_install(sh.cspace_slot, SESSION_B, 1),
+        sys::cap_install(sh.cspace_slot, SESSION_B, SHELL_SESSION_SLOT),
         b"sh session install",
     );
     check(
@@ -309,12 +341,12 @@ fn on_panic(_: &core::panic::PanicInfo) -> ! {
 
 #[cfg(test)]
 mod tests {
-    //! B15C — host tests for init's startup-block *builders* and the RTC
-    //! sanity rule (rev1§6 Baseline tier). init is the SD02/SH01 producer;
-    //! storaged/shell are the consumers, in separate `bin` mini-workspaces
-    //! that can't be imported here, so each round-trip drives the real builder
-    //! against a local parser mirroring the consumer's rule — the format is
-    //! pinned on both ends.
+    //! B15C/C1C — host tests for init's startup-block *builders* and the RTC
+    //! sanity rule (rev1§6 Baseline tier). init produces the SD02 block (still
+    //! bespoke until C1B) and the shell block (C1C: the unified `b"EUS1"` table,
+    //! `loader::startup`). SD02 round-trips through a local parser mirroring
+    //! storaged's rule; the shell block drives the *shared* codec on both ends
+    //! (`encode` here, `decode` via `loader::startup`) — no mirror needed.
     use super::*;
     use proptest::prelude::*;
 
@@ -325,16 +357,6 @@ mod tests {
         }
         let rd = |off: usize| u64::from_le_bytes(buf[off..off + 8].try_into().unwrap());
         Some((rd(4), rd(12), rd(20), rd(28), rd(36)))
-    }
-
-    /// Mirror of the shell's SH01 parse (`shell:_start`: `blen >= 12` and the
-    /// `b"SH01"` magic, then the 8-byte time VA).
-    fn parse_sh01(buf: &[u8]) -> Option<u64> {
-        if buf.len() >= 12 && &buf[..4] == b"SH01" {
-            Some(u64::from_le_bytes(buf[4..12].try_into().unwrap()))
-        } else {
-            None
-        }
     }
 
     #[test]
@@ -356,13 +378,31 @@ mod tests {
     }
 
     #[test]
-    fn build_sh01_golden_and_round_trip() {
-        let c = build_sh01(0xA300_0000);
-        assert_eq!(c.len(), 12);
-        assert_eq!(&c[..4], b"SH01");
-        assert_eq!(parse_sh01(&c), Some(0xA300_0000));
-        // The shell's guard refuses a short block (refuse-not-crash, rev1§2.7).
-        assert_eq!(parse_sh01(&c[..11]), None);
+    fn shell_block_carries_named_grants() {
+        // The init→shell block (C1C) is now the unified `b"EUS1"` table; drive
+        // the real shared codec on both ends (encode here, decode via
+        // `loader::startup`) — no mirrored hand-parser.
+        use loader::startup::*;
+        let mut buf = [0u8; MAX_BLOCK];
+        let n = build_shell_block(&mut buf).expect("encode shell block");
+        let s = decode(&buf[..n]).expect("decode shell block");
+        // `time`: the read-only page init mapped at TIME_VA (rev1§2.6).
+        assert_eq!(
+            s.grant(NAME_TIME),
+            Some(GrantKind::Region {
+                va: TIME_VA,
+                len: 4096,
+                pa: 0
+            })
+        );
+        // `storage`: the session channel at the shell's cspace slot 1.
+        assert_eq!(s.grant(NAME_STORAGE), Some(GrantKind::CapSlot(1)));
+        // `root`: the full-rights ref at handle 0.
+        assert_eq!(s.grant(NAME_ROOT), Some(GrantKind::StorageHandle(0)));
+        // stdin/stdout (DD4) and tmp (DD3) are reserved but unpopulated in C1.
+        assert_eq!(s.grant(NAME_STDIN), None);
+        assert_eq!(s.grant(NAME_STDOUT), None);
+        assert_eq!(s.grant(NAME_TMP), None);
     }
 
     #[test]
@@ -391,12 +431,6 @@ mod tests {
             d in any::<u64>(), e in any::<u64>(),
         ) {
             prop_assert_eq!(parse_sd02(&build_sd02(a, b, c, d, e)), Some((a, b, c, d, e)));
-        }
-
-        /// `build_sh01` ↔ the shell rule round-trips any time VA.
-        #[test]
-        fn build_sh01_round_trips_arbitrary_va(va in any::<u64>()) {
-            prop_assert_eq!(parse_sh01(&build_sh01(va)), Some(va));
         }
     }
 }

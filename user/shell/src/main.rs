@@ -1,12 +1,13 @@
 //! The Eunomia shell (spec rev1§7): built-ins over a storage session.
 //!
 //! World (built by init, rev1§5.1): slot 0 = bootstrap channel (first message
-//! is the "SH01" startup block carrying the time-page address, rev1§2.6),
-//! slot 1 = storage session (handle 0 = main ref root, full rights),
-//! slot 2 = untyped pool for spawning, slot 5 = a read-only time-frame
-//! cap the shell re-grants to children. The shell carves slot 3 (a
-//! persistent event notification) and slot 4 (a reusable child donation
-//! untyped) from the pool, and keeps slots 8.. as a recyclable cap window.
+//! is the `b"EUS1"` startup block — a `loader::startup` named-grant table; C1C
+//! resolves `time`/`storage`/`root` from it), slot 1 = storage session
+//! (handle 0 = main ref root, full rights), slot 2 = untyped pool for spawning,
+//! slot 5 = a read-only time-frame cap the shell re-grants to children. The
+//! shell carves slot 3 (a persistent event notification) and slot 4 (a reusable
+//! child donation untyped) from the pool, and keeps slots 8.. as a recyclable
+//! cap window.
 //!
 //! `run`/`runloop` spawn a child from the store and reclaim it on exit
 //! (rev1§5.1): one donation untyped per child, the whole subtree revoked and
@@ -183,6 +184,39 @@ pub(crate) fn prune_victims(rows: &[SnapInfo], keep_n: u64) -> Vec<u64> {
     let candidates: Vec<u64> = rows.iter().filter(|r| r.class != 0).map(|r| r.id).collect();
     let excess = candidates.len().saturating_sub(keep_n as usize);
     candidates[..excess].to_vec()
+}
+
+// ---------------------------------------------------------------------------
+// Standard-name resolution (rev1§5.1, C1C). init delivers the shell's world as
+// a `loader::startup` named-grant table; `runtime::_start` resolves each name
+// once at boot. These are pure (no syscalls) so they are host-tested below; the
+// `runtime` callers store the results and read them on every request. An absent
+// or wrong-kind grant yields `None` — the caller keeps today's default
+// (graceful degradation, e.g. `date` reports "no time grant").
+// ---------------------------------------------------------------------------
+
+/// `storage` → the cspace slot holding the storage-session channel.
+fn resolve_storage_slot(s: &loader::startup::Startup) -> Option<u32> {
+    match s.grant(loader::startup::NAME_STORAGE)? {
+        loader::startup::GrantKind::CapSlot(slot) => Some(slot),
+        _ => None,
+    }
+}
+
+/// `root` → the storage handle number for the full-rights ref root.
+fn resolve_root_handle(s: &loader::startup::Startup) -> Option<u32> {
+    match s.grant(loader::startup::NAME_ROOT)? {
+        loader::startup::GrantKind::StorageHandle(h) => Some(h),
+        _ => None,
+    }
+}
+
+/// `time` → the virtual address of the read-only time page (rev1§2.6).
+fn resolve_time_va(s: &loader::startup::Startup) -> Option<u64> {
+    match s.grant(loader::startup::NAME_TIME)? {
+        loader::startup::GrantKind::Region { va, .. } => Some(va),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

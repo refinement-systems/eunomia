@@ -9,8 +9,12 @@
 //! aarch64-bare-metal only (no host stub). The pure formatting/parsing/policy
 //! logic these built-ins use lives in `main.rs` and is host-tested there.
 
-use crate::{fault_class, fmt_hex, fmt_num, fmt_utc, parse_path, parse_u64, prune_victims};
+use crate::{
+    fault_class, fmt_hex, fmt_num, fmt_utc, parse_path, parse_u64, prune_victims,
+    resolve_root_handle, resolve_storage_slot, resolve_time_va,
+};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, Ordering};
 use ipc::{sys, Reactor, SyscallTransport};
 use storage_server::{wire, DirEnt, Request, Response};
 use urt::slots::SlotAlloc;
@@ -69,6 +73,25 @@ const FAULT_BIT: u64 = 1 << 1;
 const EXIT_KEY: ipc::Key = 0;
 const FAULT_KEY: ipc::Key = 1;
 
+/// The shell's storage authority, resolved from the init→shell `b"EUS1"`
+/// named-grant table once in `_start` (rev1§5.1, C1C): `storage` → the session
+/// channel slot, `root` → the handle on that session. Defaults match init's
+/// convention (`STORE_CHAN`, handle 0) so an absent grant degrades to today's
+/// behaviour. The shell is single-threaded (cooperative `yield_now`) and these
+/// are written before the REPL runs, so `Relaxed` ordering is sufficient.
+static STORE_SLOT: AtomicU32 = AtomicU32::new(STORE_CHAN);
+static ROOT_HANDLE: AtomicU32 = AtomicU32::new(0);
+
+/// The cspace slot of the storage-session channel (`storage`, rev1§5.1).
+fn store_slot() -> u32 {
+    STORE_SLOT.load(Ordering::Relaxed)
+}
+
+/// The storage handle for the ref root (`root`, rev1§5.1).
+fn root_handle() -> u32 {
+    ROOT_HANDLE.load(Ordering::Relaxed)
+}
+
 fn out(s: &[u8]) {
     sys::debug_write(s);
 }
@@ -96,12 +119,13 @@ fn request(req: &Request) -> Response {
         Ok(b) => b,
         Err(_) => return Response::Err(storage_server::ErrorCode::Internal),
     };
-    while sys::chan_send(STORE_CHAN, &bytes, None) == sys::ERR_FULL {
+    let store = store_slot();
+    while sys::chan_send(store, &bytes, None) == sys::ERR_FULL {
         sys::yield_now();
     }
     let mut buf = [0u8; 256];
     loop {
-        let (len, _) = sys::chan_recv(STORE_CHAN, buf.as_mut_ptr(), None);
+        let (len, _) = sys::chan_recv(store, buf.as_mut_ptr(), None);
         if len >= 0 {
             return wire::decode_response(&buf[..len as usize])
                 .unwrap_or(Response::Err(storage_server::ErrorCode::Internal));
@@ -116,7 +140,7 @@ fn read_file(path: &[u8]) -> Option<Vec<u8>> {
     let mut data = Vec::new();
     loop {
         match request(&Request::Read {
-            handle: 0,
+            handle: root_handle(),
             path: p.clone(),
             offset: data.len() as u64,
             len: 160,
@@ -170,7 +194,7 @@ fn report(resp: Response) {
 
 fn cmd_ls(arg: &[u8]) {
     match request(&Request::List {
-        handle: 0,
+        handle: root_handle(),
         path: parse_path(arg),
     }) {
         Response::Listing(ents) => {
@@ -206,7 +230,9 @@ fn cmd_cat(arg: &[u8]) {
 }
 
 fn cmd_snaps() {
-    match request(&Request::ListSnapshots { handle: 0 }) {
+    match request(&Request::ListSnapshots {
+        handle: root_handle(),
+    }) {
         Response::Snapshots { snaps: rows, .. } => {
             for r in rows {
                 out(b"#");
@@ -241,7 +267,9 @@ fn cmd_date() {
 }
 
 fn cmd_gc() {
-    match request(&Request::Gc { handle: 0 }) {
+    match request(&Request::Gc {
+        handle: root_handle(),
+    }) {
         Response::GcReport {
             live_objects,
             freed_objects,
@@ -260,7 +288,9 @@ fn cmd_gc() {
 }
 
 fn cmd_df() {
-    match request(&Request::Statfs { handle: 0 }) {
+    match request(&Request::Statfs {
+        handle: root_handle(),
+    }) {
         Response::Space { total, used, free } => {
             out(b"chunk region: ");
             out_num(used);
@@ -278,14 +308,16 @@ fn cmd_df() {
 /// not interpret policy). [`prune_victims`] selects the ids to delete; this
 /// keeps the IPC loop over them. `keep`-class and tagged rows survive.
 fn cmd_prune(n: u64) {
-    let rows = match request(&Request::ListSnapshots { handle: 0 }) {
+    let rows = match request(&Request::ListSnapshots {
+        handle: root_handle(),
+    }) {
         Response::Snapshots { snaps: rows, .. } => rows,
         r => return report(r),
     };
     let mut deleted = 0u64;
     for id in prune_victims(&rows, n) {
         match request(&Request::DeleteSnapshot {
-            handle: 0,
+            handle: root_handle(),
             snap_id: id,
         }) {
             Response::Ok => deleted += 1,
@@ -575,26 +607,26 @@ fn dispatch(sp: &mut Spawner, line: &[u8]) {
         b"date" => cmd_date(),
         b"ls" => cmd_ls(arg),
         b"cat" => cmd_cat(arg),
-        b"rm" => report(request(&Request::Unlink { handle: 0, path: parse_path(arg) })),
-        b"sync" => report(request(&Request::Sync { handle: 0 })),
+        b"rm" => report(request(&Request::Unlink { handle: root_handle(), path: parse_path(arg) })),
+        b"sync" => report(request(&Request::Sync { handle: root_handle() })),
         // class 1 = auto: subject to `prune`; promote survivors via `keep`.
         b"snap" => report(request(&Request::Snapshot {
-            handle: 0,
+            handle: root_handle(),
             message: arg.to_vec(),
             class: 1,
         })),
         b"snaps" => cmd_snaps(),
         b"rollback" => match parse_u64(arg) {
-            Some(id) => report(request(&Request::Rollback { handle: 0, snap_id: id })),
+            Some(id) => report(request(&Request::Rollback { handle: root_handle(), snap_id: id })),
             None => out(b"usage: rollback <id>\n"),
         },
         b"snapdel" => match parse_u64(arg) {
-            Some(id) => report(request(&Request::DeleteSnapshot { handle: 0, snap_id: id })),
+            Some(id) => report(request(&Request::DeleteSnapshot { handle: root_handle(), snap_id: id })),
             None => out(b"usage: snapdel <id>\n"),
         },
         b"keep" => match parse_u64(arg) {
             Some(id) => {
-                report(request(&Request::SetClass { handle: 0, snap_id: id, class: 0 }))
+                report(request(&Request::SetClass { handle: root_handle(), snap_id: id, class: 0 }))
             }
             None => out(b"usage: keep <id>\n"),
         },
@@ -609,7 +641,7 @@ fn dispatch(sp: &mut Spawner, line: &[u8]) {
             let path = wa.next().unwrap_or(b"");
             let text = wa.next().unwrap_or(b"");
             report(request(&Request::Write {
-                handle: 0,
+                handle: root_handle(),
                 path: parse_path(path),
                 offset: 0,
                 data: text.to_vec(),
@@ -624,16 +656,26 @@ fn dispatch(sp: &mut Spawner, line: &[u8]) {
 #[no_mangle]
 #[link_section = ".text._start"]
 pub extern "C" fn _start() -> ! {
-    // The rev1§5.1 startup block, queued by init before this thread started:
-    // "SH01" + time-page VA. No grant, no clock — `date` degrades, the
-    // store-backed built-ins don't.
+    // The rev1§5.1 startup block, queued by init before this thread started: the
+    // unified `b"EUS1"` named-grant table (`loader::startup`, C1C). Resolve the
+    // standard names `storage`/`root`/`time` once here. A malformed block is
+    // refused, not a crash (decode is total, rev1§2.7); an absent name keeps the
+    // default — no `time` grant means no clock (`date` degrades), `storage`/`root`
+    // default to init's convention.
     let mut boot = [0u8; 256];
     let (blen, _) = sys::chan_recv(BOOT_CHAN, boot.as_mut_ptr(), None);
-    if blen >= 12 && &boot[..4] == b"SH01" {
-        let time_va = u64::from_le_bytes(boot[4..12].try_into().unwrap());
-        // Safety: init mapped the read-only time page at this address
-        // before starting us; the mapping outlives the process.
-        unsafe { urt::time::attach(time_va as usize) };
+    if let Some(s) = loader::startup::decode(&boot[..blen.max(0) as usize]) {
+        if let Some(slot) = resolve_storage_slot(&s) {
+            STORE_SLOT.store(slot, Ordering::Relaxed);
+        }
+        if let Some(h) = resolve_root_handle(&s) {
+            ROOT_HANDLE.store(h, Ordering::Relaxed);
+        }
+        if let Some(va) = resolve_time_va(&s) {
+            // Safety: init mapped the read-only time page at this address
+            // before starting us; the mapping outlives the process.
+            unsafe { urt::time::attach(va as usize) };
+        }
     }
 
     // Carve the two persistent spawn objects from the pool (slot 2): the

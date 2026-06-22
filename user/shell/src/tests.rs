@@ -404,3 +404,72 @@ fn reference_has_teeth() {
                                                        // And `fmt_utc`'s output distinguishes a wrong rendering.
     assert_ne!(utc(0), b"1970-01-01T00:00:00.000000001Z");
 }
+
+// ---------------------------------------------------------------------------
+// C1C — standard-name resolution (rev1§5.1). The shell resolves `storage`,
+// `root`, and `time` from the init→shell `loader::startup` table; these pin the
+// pure resolvers `runtime::_start` calls. The block is built and round-tripped
+// through the *shared* codec, so the test drives the real decode the shell runs.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn resolve_names_golden() {
+    use loader::startup::*;
+    let mut s = Startup::new();
+    s.push_grant(Grant {
+        name: NAME_TIME,
+        kind: GrantKind::Region {
+            va: 0xA300_0000,
+            len: 4096,
+            pa: 0,
+        },
+    })
+    .unwrap();
+    s.push_grant(Grant {
+        name: NAME_STORAGE,
+        kind: GrantKind::CapSlot(1),
+    })
+    .unwrap();
+    s.push_grant(Grant {
+        name: NAME_ROOT,
+        kind: GrantKind::StorageHandle(0),
+    })
+    .unwrap();
+    // Round-trip through the shared codec — what init sends, the shell decodes.
+    let mut buf = [0u8; MAX_BLOCK];
+    let n = encode(&s, &mut buf).unwrap();
+    let dec = decode(&buf[..n]).unwrap();
+    assert_eq!(resolve_time_va(&dec), Some(0xA300_0000));
+    assert_eq!(resolve_storage_slot(&dec), Some(1));
+    assert_eq!(resolve_root_handle(&dec), Some(0));
+}
+
+#[test]
+fn resolve_names_absent_yields_none() {
+    // An empty table (e.g. a degraded producer) → every name absent, so the
+    // caller keeps its default (graceful degradation, rev1§5.1).
+    let s = loader::startup::Startup::new();
+    assert_eq!(resolve_time_va(&s), None);
+    assert_eq!(resolve_storage_slot(&s), None);
+    assert_eq!(resolve_root_handle(&s), None);
+}
+
+#[test]
+fn resolve_wrong_kind_yields_none() {
+    // The oracle has teeth: a name delivered as the wrong kind is not resolvable
+    // (a `storage` handle is not a cap slot; a `time` handle is not a region).
+    use loader::startup::*;
+    let mut s = Startup::new();
+    s.push_grant(Grant {
+        name: NAME_STORAGE,
+        kind: GrantKind::StorageHandle(7),
+    })
+    .unwrap();
+    s.push_grant(Grant {
+        name: NAME_TIME,
+        kind: GrantKind::CapSlot(9),
+    })
+    .unwrap();
+    assert_eq!(resolve_storage_slot(&s), None);
+    assert_eq!(resolve_time_va(&s), None);
+}
