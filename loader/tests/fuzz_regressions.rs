@@ -1,7 +1,7 @@
 //! Regression tests for cases surfaced by loader/fuzz. Each pins the
 //! hardened behavior so the case cannot silently regress.
 
-use loader::elf;
+use loader::{elf, startup};
 
 /// An `e_phoff` near u64::MAX must not make `parse` panic with an arithmetic
 /// overflow in `u32le` (`off + 4`) / `phoff + i*phentsize`: elf.rs promises
@@ -63,4 +63,39 @@ fn elf2_page_rounding_overflow_refused() {
     e[0x60..0x68].copy_from_slice(&8u64.to_le_bytes()); // filesz
     e[0x68..0x70].copy_from_slice(&8u64.to_le_bytes()); // memsz
     assert!(matches!(elf::parse(&e), Err(elf::ElfError::BadSegment)));
+}
+
+/// startup-1: a startup block whose declared counts/lengths far exceed the
+/// bytes that follow must `decode` to `None`, never panic, over-read, or drive
+/// an unbounded allocation (rev1§2.7 — the block is untrusted-shaped input read
+/// in `_start`). The analog of `elf1`: a count from untrusted input validated
+/// against ground truth before use. Pinned three ways — an over-cap grant
+/// count, a within-cap grant count with no bodies, and an argv length past the
+/// buffer.
+#[test]
+fn startup1_oversized_counts_refused() {
+    // Header declaring 255 grants, with no grant bodies following. The count is
+    // both over the arena cap and unbacked; decode refuses without reading a
+    // single body.
+    let mut a = startup::MAGIC.to_vec();
+    a.extend_from_slice(&[255, 0, 0]); // ngrants=255, nargv=0, nenv=0
+    assert_eq!(startup::decode(&a), None);
+
+    // A within-cap grant count (1) but the single grant's body is absent: the
+    // length-from-input is validated against the remaining slice before the
+    // read, so this refuses rather than over-reading.
+    let mut b = startup::MAGIC.to_vec();
+    b.extend_from_slice(&[1, 0, 0]);
+    b.push(startup::NAME_TIME);
+    b.push(startup::KIND_REGION); // promises 24 body bytes…
+                                  // …none follow.
+    assert_eq!(startup::decode(&b), None);
+
+    // One argv string declaring u16::MAX bytes, only a few present: the length
+    // is bounds-checked against the remaining slice, so no unbounded read/alloc.
+    let mut c = startup::MAGIC.to_vec();
+    c.extend_from_slice(&[0, 1, 0]); // one argv
+    c.extend_from_slice(&u16::MAX.to_le_bytes());
+    c.extend_from_slice(b"short");
+    assert_eq!(startup::decode(&c), None);
 }
