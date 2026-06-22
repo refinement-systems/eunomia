@@ -20,10 +20,16 @@ use libfuzzer_sys::fuzz_target;
 use cas::disk::{decode_index, encode_index};
 
 fuzz_target!(|data: &[u8]| {
-    let Ok((entries, free)) = decode_index(data) else { return };
+    let Ok((entries, free)) = decode_index(data) else {
+        return;
+    };
     // Re-encode with no padding (pad is extent-fill slack, not part of the
     // logical value) and confirm the encoder emits decodable, stable bytes.
     let bytes = encode_index(&entries, &free, 0);
     let (e2, f2) = decode_index(&bytes).expect("encoder emitted an undecodable index");
-    assert_eq!((entries, free), (e2, f2), "index decode is not round-trip stable");
+    assert_eq!(
+        (entries, free),
+        (e2, f2),
+        "index decode is not round-trip stable"
+    );
 });

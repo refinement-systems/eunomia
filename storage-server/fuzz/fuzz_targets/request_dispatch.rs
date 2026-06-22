@@ -16,9 +16,7 @@ use libfuzzer_sys::fuzz_target;
 use cas::chunk::ChunkerParams;
 use cas::dev::MemDev;
 use cas::store::{Store, StoreOptions};
-use storage_server::{
-    wire, HandleEntry, HandleTarget, Server, SessionId, R_ENUMERATE, R_READ,
-};
+use storage_server::{wire, HandleEntry, HandleTarget, Server, SessionId, R_ENUMERATE, R_READ};
 
 const NOW: u64 = 1_000;
 
@@ -30,16 +28,35 @@ const NOW: u64 = 1_000;
 fn fresh() -> (Server<MemDev>, SessionId) {
     let opts = StoreOptions {
         wal_len: 4096,
-        chunker: ChunkerParams { min: 64, avg: 256, max: 1024 },
+        chunker: ChunkerParams {
+            min: 64,
+            avg: 256,
+            max: 1024,
+        },
         global_budget: 16 * 1024,
         ..StoreOptions::default()
     };
     let mut store = Store::format(MemDev::new(64 * 1024), opts).unwrap();
     store.create_ref(b"main").unwrap();
-    store.write(b"main", &vec![b"etc".to_vec(), b"conf".to_vec()], 0, b"hello", 1).unwrap();
+    store
+        .write(
+            b"main",
+            &vec![b"etc".to_vec(), b"conf".to_vec()],
+            0,
+            b"hello",
+            1,
+        )
+        .unwrap();
     store.sync_all().unwrap();
-    store.snapshot(b"main", b"seed", b"v1", cas::disk::CLASS_AUTO, 10).unwrap();
-    let gen = store.refs().find(|(n, _)| n.as_slice() == b"main").unwrap().1.generation;
+    store
+        .snapshot(b"main", b"seed", b"v1", cas::disk::CLASS_AUTO, 10)
+        .unwrap();
+    let gen = store
+        .refs()
+        .find(|(n, _)| n.as_slice() == b"main")
+        .unwrap()
+        .1
+        .generation;
     let snap_root = store.snapshot_root(b"main", 1).unwrap();
 
     let mut server = Server::new(store, 0xA5A5_A5A5);

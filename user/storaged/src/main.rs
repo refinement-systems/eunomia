@@ -126,7 +126,9 @@ pub extern "C" fn _start() -> ! {
     // Probe the 32 virtio-mmio transports for the block device.
     let mut blk = None;
     for i in 0..32usize {
-        let win = MmioWindow { base: mmio_va as usize + i * 0x200 };
+        let win = MmioWindow {
+            base: mmio_va as usize + i * 0x200,
+        };
         if win.read32(0) != 0x7472_6976 || win.read32(8) != 2 {
             continue;
         }
@@ -146,7 +148,9 @@ pub extern "C" fn _start() -> ! {
             Err(_) => continue,
         }
     }
-    let Some(blk) = blk else { fail(b"no virtio-blk device") };
+    let Some(blk) = blk else {
+        fail(b"no virtio-blk device")
+    };
     sys::debug_write(b"[storaged] virtio-blk up\n");
 
     let dev = VirtioBlockDev::new(blk);
@@ -178,7 +182,10 @@ pub extern "C" fn _start() -> ! {
     let transport = SyscallTransport;
     let ep = Endpoint::new(&transport, SESSION_CHAN);
     let mut reactor = Reactor::new(&transport, WAKE_NOTIF);
-    if reactor.register(SESSION_CHAN, Signals::READABLE, SESSION_KEY).is_err() {
+    if reactor
+        .register(SESSION_CHAN, Signals::READABLE, SESSION_KEY)
+        .is_err()
+    {
         fail(b"reactor register");
     }
     let mut msg = Message::new();

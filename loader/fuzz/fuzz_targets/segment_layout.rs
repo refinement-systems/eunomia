@@ -34,7 +34,13 @@ fuzz_target!(|data: &[u8]| {
         .and_then(|e| e.checked_add(elf::PAGE - 1))
         .is_none();
 
-    let seg = elf::Segment { vaddr, offset: 0, filesz: 0, memsz, flags: 0 };
+    let seg = elf::Segment {
+        vaddr,
+        offset: 0,
+        filesz: 0,
+        memsz,
+        flags: 0,
+    };
     match seg.page_layout() {
         Ok(l) => {
             assert!(!overflows, "Ok on an input the oracle says overflows");
@@ -48,7 +54,10 @@ fuzz_target!(|data: &[u8]| {
             // with `memsz == 0`.
             assert!(vaddr <= l.va_end, "va_end below vaddr");
             if memsz > 0 {
-                assert!(vaddr < l.va_end, "non-empty segment does not end past vaddr");
+                assert!(
+                    vaddr < l.va_end,
+                    "non-empty segment does not end past vaddr"
+                );
             }
             assert_eq!(l.page_offset, vaddr - l.va_start, "wrong page offset");
             assert!(l.page_offset < elf::PAGE, "page offset not in-page");
