@@ -8,6 +8,9 @@ edition = "2021"
 [dependencies]
 ipc = { path = "../../ipc" }
 urt = { path = "../../urt" }
+# C1B — the shared startup-block codec (rev1§5.1). `no_std` with default
+# features off; its only transitive dep is `ipc`, which storaged already carries.
+loader = { path = "../../loader", default-features = false }
 cas = { path = "../../cas", default-features = false }
 dma-pool = { path = "../../dma-pool" }
 virtio-blk = { path = "../../virtio-blk", default-features = false }
