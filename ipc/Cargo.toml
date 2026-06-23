@@ -6,7 +6,7 @@ edition.workspace = true
 # no_std by default. "wire" pulls the postcard codec (and, with it, alloc — see
 # lib.rs); minimal binaries (hello/selftest/init) that use only `ipc::sys` build
 # without it and stay no-alloc. "std" is for host testing. "fuzzing" exposes the
-# wire-codec fuzz support (representative body type + oracle) — §5.4 — so it
+# wire-codec fuzz support (representative body type + oracle) — rev2§3.7 — so it
 # implies "wire". (Mirrors storage-server's optional-serde gating.)
 [features]
 # `debug-log` (rev2§7): gates the EL0 debug-print libcalls

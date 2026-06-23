@@ -16,7 +16,7 @@ runner = [
     "-m", "256M",
     "-nographic",
     "-serial", "mon:stdio",
-    # Chosen, not inherited: the PL031 hands init UTC at boot (§2.6).
+    # Chosen, not inherited: the PL031 hands init UTC at boot (rev2§2.6).
     "-rtc", "base=utc,clock=host",
     "-kernel",
 ]

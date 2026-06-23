@@ -636,7 +636,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             // Cap-side bookkeeping (the mapping record + aspace refcount bump) is the verified
             // `cspace::map_frame` (rev2§6.1(c)), symmetric with the delete/unmap path; it
             // drives the page-table write through the `aspace_map` Store seam. The shell keeps
-            // only the access-control validation above (§6.1(d)-style).
+            // only the access-control validation above (rev2§6.1(d)-style).
             match crate::cspace::map_frame(fr_slot, asp, va, perms) {
                 Ok(()) => Some(0),
                 Err(crate::aspace::MapError::NeedMemory) => Some(ERR_NOMEM),

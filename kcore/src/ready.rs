@@ -769,7 +769,7 @@ pub fn ready_dequeue<S: Store>(store: &mut S, level: usize) -> (r: Option<ObjId>
 // core of the teardown `unqueue_ready` seam `destroy_tcb` already leans on. `ready_complete`
 // guarantees a Runnable `t` is charted on `level`'s chain, so the walk finds it (the
 // fall-off-end is unreachable, exactly like `timer::disarm`). The splice is census-free — a
-// ready thread holds no object ref, the §1.1 simplification — so only `t`'s `qnext` (cleared)
+// ready thread holds no object ref, the rev2§1 simplification — so only `t`'s `qnext` (cleared)
 // and its predecessor's `qnext` (re-threaded) move. `t` is left transiently Runnable-and-
 // off-chain, so the op preserves `ready_wf` + `ready_complete_except(t)` (the `destroy_tcb`
 // caller halts `t` to close the completeness gap).

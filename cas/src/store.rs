@@ -1143,7 +1143,7 @@ spec fn run_len(wal: Seq<u8>, off: int, seq: u64) -> nat
 // documented. `mount` drives its applier off the verified skeleton, so the
 // running recovery sequencing is the proved one. What stays trusted is only the
 // *lifetime* join — that the live `wal_records` queue keeps matching the bytes as
-// write/flush/commit mutate it — the §6.1(c)/(e) Store seam; the full
+// write/flush/commit mutate it — the rev2§6.1(c)/(e) Store seam; the full
 // replay-equality invariant remains the `CommitProtocol` model's (rev2§6.1(e)).
 
 verus! {
@@ -1284,11 +1284,11 @@ proof fn lemma_gap_freedom(
 // supports `lemma_run_len_covers` / `lemma_laid_out_mono`) on that rebuilt run,
 // making the whole composition live. `mount` consumes the verified skeleton to
 // drive its applier, so the running recovery sequencing *is* the proved one
-// (the §4.2 glue contract).
+// (the rev2§4.2 glue contract).
 //
 // What stays trusted is the join across the Store's *lifetime* — that the live
 // in-memory `wal_records` queue keeps matching the on-device bytes as
-// write/flush/commit mutate it — the same trusted-Store seam §6.1(c)/(e) already
+// write/flush/commit mutate it — the same trusted-Store seam rev2§6.1(c)/(e) already
 // names; the full replay-equality invariant remains the `CommitProtocol` model's
 // (rev2§6.1(e)). The discharge ties the recovery *decision* to the code; it does
 // not pull the device I/O or the `WalOp` applier into the verified core.
@@ -3168,7 +3168,7 @@ impl<D: BlockDev> Store<D> {
     ///   — the staged clone is discarded, so the live table is untouched.
     /// * **Success**: every edit lands in the one superblock flip (rev2§4.2,
     ///   the system's sole atomicity mechanism — no new machinery), the ref's
-    ///   edit version advances exactly once (the §4.7 dirty-set rule, regardless
+    ///   edit version advances exactly once (the rev2§4.7 dirty-set rule, regardless
     ///   of edit count), and the new version is returned.
     ///
     /// Staging on a clone makes all-or-nothing structural rather than a matter
@@ -6361,7 +6361,7 @@ mod tests {
 
     /// A commit with nothing dirty (a pure flush that moved no head) does not
     /// advance the edit version — a flush that does not mutate the entry-set is
-    /// not a §4.7 mutation, so an outstanding `expected_version` stays valid.
+    /// not a rev2§4.7 mutation, so an outstanding `expected_version` stays valid.
     #[test]
     fn no_op_sync_does_not_advance_edit_version() {
         let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
