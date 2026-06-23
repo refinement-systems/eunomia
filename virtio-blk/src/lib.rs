@@ -106,7 +106,7 @@ pub enum VirtioError {
     TooLarge,
     /// A transfer whose last sector would run past the device's reported
     /// capacity. Distinct from `TooLarge` (exceeds `max_transfer`). Defensive
-    /// local bound (rev2§4.x): the device stays ground truth for its own
+    /// local bound (rev2§4.5): the device stays ground truth for its own
     /// geometry; this turns a device-dependent `DeviceError` into a
     /// deterministic local refusal and is never a correctness dependency.
     OutOfRange,
@@ -387,7 +387,7 @@ impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
         self.pool.write(&dbuf, 0, data);
     }
 
-    /// Defensive LBA bound (rev2§4.x). The device remains ground truth
+    /// Defensive LBA bound (rev2§4.5). The device remains ground truth
     /// for its own geometry; this refuses a transfer whose last sector runs
     /// past the reported `capacity` *before* any device round-trip — a local
     /// hardening, never a correctness dependency. Checked so an adversarial

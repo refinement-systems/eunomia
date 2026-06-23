@@ -719,8 +719,8 @@ pub struct RefEntry {
     /// rev2§4.7 edit version: advances once per committed mutation of this
     /// ref's entries (head moves, snapshot rows, tags). Plain data through
     /// the normal commit path; the guarded-batch CAS compares against
-    /// it. Orthogonal to `generation` (§2.2 revocation) and to the superblock
-    /// generation (§4.2).
+    /// it. Orthogonal to `generation` (rev2§2.2 revocation) and to the superblock
+    /// generation (rev2§4.2).
     pub edit_version: u64,
 }
 
