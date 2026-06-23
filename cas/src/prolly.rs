@@ -30,11 +30,14 @@
 //!
 //! Verification (rev2§6, doc/guidelines/verus.md). The node **decoder**
 //! (`decode_node`) is Verus-total over arbitrary bytes with a leaf canonical
-//! round-trip. The level **partition** — `build_level`'s node-cutting —
-//! is verified to conserve and order its input (no item dropped, duplicated, or
-//! reordered: `lemma_partition_flatten`), cut only at a boundary or the
+//! round-trip. The level **partition** — the *cut-index function*
+//! `split_points`/`boundary_flags` — is verified to conserve and order its
+//! input (no item dropped, duplicated, or reordered: `lemma_partition_flatten`,
+//! a standalone theorem about the cut indices), cut only at a boundary or the
 //! `MAX_NODE_ENTRIES` cap, and emit non-empty ≤ MAX nodes, for *any* split
-//! predicate (`split_points`/`boundary_flags`). The split rule
+//! predicate. `build_level` then applies those proven cuts in plain Rust (it is
+//! trusted, not verified, to drive them faithfully — its per-node `store.put`
+//! I/O is deliberately outside the verified surface). The split rule
 //! `is_boundary` is the one trusted-total BLAKE3 seam, proven *around* (the
 //! partition is correct regardless of *which* items boundary), never *through*.
 //! The *concrete* tree shape — which contents map to which root hash, the
@@ -321,6 +324,13 @@ fn encode_internal_item(key: &[u8], child: &Hash, out: &mut Vec<u8>) {
 /// the verified `boundary_flags` over the `is_boundary` seam), so the running
 /// node boundaries *are* the proven ones (conservation + ≤ MAX_NODE_ENTRIES);
 /// only the node assembly and `store.put` I/O stay plain Rust.
+///
+/// Conservation (`lemma_partition_flatten`) is a standalone theorem about
+/// `split_points`'s cut indices, **not** a verified postcondition of this
+/// function: `build_level` is plain Rust (its `store.put` I/O sits outside the
+/// verified surface, and pulling it in would need a `NodeStore` seam), so it is
+/// *trusted* to apply the proven cuts faithfully — that application is covered
+/// at the rev2§6 baseline tier by the `canonical_form`/`roundtrip` proptests.
 fn build_level(
     store: &mut impl NodeStore,
     level: u8,
@@ -1559,6 +1569,13 @@ proof fn lemma_flatten_covers<T>(items: Seq<T>, ends: Seq<usize>)
 /// by [`split_points`] reproduces its whole input — no item dropped, duplicated,
 /// or reordered. Stated generically over the item type, so it holds whatever the
 /// per-level items are (leaf entries or internal child slots).
+///
+/// This is a **standalone design theorem about the cut indices**, not an exec
+/// postcondition: `build_level` (plain Rust, since its `store.put` I/O is outside
+/// the verified surface — wiring it in would need a `NodeStore` seam, and the
+/// trusted base stays closed) is trusted to apply these proven cuts, so this
+/// lemma has no exec call site. The concrete emission is covered at the rev2§6
+/// baseline tier by the `canonical_form`/`roundtrip` proptests.
 proof fn lemma_partition_flatten<T>(items: Seq<T>, ends: Seq<usize>)
     requires
         ends.len() >= 1,
