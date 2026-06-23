@@ -64,6 +64,10 @@ pub enum StoreError {
     UnsupportedVersion(u32),
     NoSuchRef,
     NoSuchSnapshot,
+    /// An id-addressed op (`write_id`/`read_id`/`close`) named a [`FileId`] that
+    /// is not an open handle (rev1§4.9 / C2C): never opened, already closed, or
+    /// gone after a crash (handles do not survive a remount).
+    NoSuchHandle,
     NotAFile,
     /// A rename named a source path that resolves to nothing (rev1§4.9): no live
     /// overlay file, no committed tree entry. Rejected before the WAL so an
@@ -116,6 +120,7 @@ impl core::fmt::Display for StoreError {
             }
             StoreError::NoSuchRef => write!(f, "no such ref"),
             StoreError::NoSuchSnapshot => write!(f, "no such snapshot"),
+            StoreError::NoSuchHandle => write!(f, "no such open handle"),
             StoreError::NotAFile => write!(f, "not a file"),
             StoreError::NotFound => write!(f, "no such path"),
             StoreError::Corrupt(w) => write!(f, "corrupt store: {w}"),
@@ -1536,6 +1541,12 @@ pub struct Store<D: BlockDev> {
     /// global, never persisted, and re-derived deterministically by WAL replay,
     /// which re-runs the same op stream through `apply_to_overlay`.
     next_file_id: FileId,
+    /// Open file handles (rev1§4.9 / C2C): `FileId → ref_name`, locating which
+    /// ref's overlay an id-addressed `write_id`/`read_id`/`close` acts on. The
+    /// id↔name binding lives in that overlay's `names`; this only routes by ref.
+    /// Like the ids, it is ephemeral — never persisted, empty after a crash (no
+    /// open/close WAL record), so replay restores no handles (Design decision 2).
+    open_files: BTreeMap<FileId, Vec<u8>>,
 }
 
 impl<D: BlockDev> Store<D> {
@@ -1611,6 +1622,7 @@ impl<D: BlockDev> Store<D> {
             wal_seq: 1,
             wal_records: VecDeque::new(),
             next_file_id: 0,
+            open_files: BTreeMap::new(),
         })
     }
 
@@ -1750,6 +1762,7 @@ impl<D: BlockDev> Store<D> {
             wal_seq: sb.wal_next_seq,
             wal_records: VecDeque::new(),
             next_file_id: 0,
+            open_files: BTreeMap::new(),
         };
 
         // WAL replay: contiguous, checksummed, seq-continuous records from the
@@ -2084,6 +2097,111 @@ impl<D: BlockDev> Store<D> {
             mtime,
         };
         self.log_then_apply(op)
+    }
+
+    // ── Id-addressed surface: open handles (rev1§4.9, Design decision 2) ──
+    //
+    // These realize the rev1§4.9 *open handle* at the `Store` API. The file-id
+    // layer stays server-internal (no wire op — that is C2D); the rename/unlink
+    // interleaving proptest drives this surface to hold a file open across an
+    // unlink. A *named* handle routes its writes through the durable path-
+    // addressed `write`, sharing one WAL/replay path; only an *orphaned*
+    // (unlinked-while-open) handle's writes are ephemeral.
+
+    /// Open a handle on `(ref_name, path)`, returning its ephemeral [`FileId`]
+    /// (rev1§4.9). The id resolves any existing binding (a dirty file or another
+    /// open handle on the same name) or is freshly allocated; the handle then
+    /// follows the name across unlinks (and renames, C2B). Errors if the ref is
+    /// unknown. Opening does not create the file — until written, the name still
+    /// reads from the tree (or as absent if tombstoned).
+    pub fn open(&mut self, ref_name: &[u8], path: &Path) -> Result<FileId, StoreError> {
+        if !self.table.refs.contains_key(ref_name) {
+            return Err(StoreError::NoSuchRef);
+        }
+        // Disjoint field borrows: the id allocator and the overlay map are
+        // separate fields (the `apply_to_overlay` pattern).
+        let next_id = &mut self.next_file_id;
+        let id = self
+            .overlays
+            .entry(ref_name.to_vec())
+            .or_default()
+            .open(path, next_id);
+        self.open_files.insert(id, ref_name.to_vec());
+        Ok(id)
+    }
+
+    /// Write through an open handle (rev1§4.9). A *named* handle delegates to the
+    /// durable path-addressed [`Self::write`] (the same id, resolved via the
+    /// overlay's `by_name`), so the write is WAL-logged and replays. An
+    /// *orphaned* handle (its name was unlinked while open) writes ephemerally to
+    /// the overlay: the data has no path, is never logged, and is discarded at
+    /// flush — exactly rev1§4.9's "the open handle keeps working against the
+    /// overlay." Errors if `id` is not an open handle.
+    pub fn write_id(
+        &mut self,
+        id: FileId,
+        offset: u64,
+        data: &[u8],
+        mtime: u64,
+    ) -> Result<(), StoreError> {
+        let ref_name = self
+            .open_files
+            .get(&id)
+            .ok_or(StoreError::NoSuchHandle)?
+            .clone();
+        let name = self.overlays.get(&ref_name).and_then(|o| o.name_of(id));
+        match name {
+            Some(path) => self.write(&ref_name, &path, offset, data, mtime),
+            None => {
+                // Orphaned: keep `write`'s extent-overflow guard (the data never
+                // reaches the chunk region, so the region-capacity check is moot).
+                offset
+                    .checked_add(data.len() as u64)
+                    .ok_or(StoreError::WriteOutOfRange)?;
+                self.overlays
+                    .entry(ref_name)
+                    .or_default()
+                    .write_orphan(id, offset, data, mtime);
+                Ok(())
+            }
+        }
+    }
+
+    /// Read through an open handle (rev1§4.9). A named handle reads like its path
+    /// (overlay over tree); an orphaned handle reads its overlay data against an
+    /// empty base (its tree path is gone). Errors if `id` is not an open handle.
+    pub fn read_id(&self, id: FileId) -> Result<Option<Vec<u8>>, StoreError> {
+        let ref_name = self.open_files.get(&id).ok_or(StoreError::NoSuchHandle)?;
+        match self.overlays.get(ref_name).and_then(|o| o.name_of(id)) {
+            Some(path) => self.read(ref_name, &path),
+            None => Ok(Some(
+                self.overlays
+                    .get(ref_name)
+                    .map(|o| o.read_orphan(id))
+                    .unwrap_or_default(),
+            )),
+        }
+    }
+
+    /// Close an open handle (rev1§4.9). On the last close the overlay reaps by
+    /// state: an orphaned id's data is discarded, an opened-but-never-written
+    /// name reverts to the tree, a dirty named id is kept to flush normally.
+    /// Errors if `id` is not an open handle.
+    pub fn close(&mut self, id: FileId) -> Result<(), StoreError> {
+        let ref_name = self
+            .open_files
+            .get(&id)
+            .ok_or(StoreError::NoSuchHandle)?
+            .clone();
+        let fully = self
+            .overlays
+            .get_mut(&ref_name)
+            .map(|o| o.close(id))
+            .unwrap_or(true);
+        if fully {
+            self.open_files.remove(&id);
+        }
+        Ok(())
     }
 
     /// Move `from` to `to` within one ref (rev1§4.9). Within-subtree only — the
@@ -2683,6 +2801,11 @@ impl<D: BlockDev> Store<D> {
             return Ok(());
         };
         if overlay.is_empty() {
+            // No dirty content to commit — but any open handles must survive the
+            // flush (rev1§4.9), so re-seed their bindings before returning.
+            if let Some(carry) = overlay.carry_open() {
+                self.overlays.insert(ref_name.to_vec(), carry);
+            }
             return Ok(());
         }
         // The pre-flush committed root. File bases are read against this
@@ -2801,6 +2924,14 @@ impl<D: BlockDev> Store<D> {
             if rec.ref_name.as_slice() == ref_name {
                 rec.flushed = true;
             }
+        }
+        // The named data is now tree and any orphaned (unlinked-while-open) data
+        // was dropped above (absent from `files()`); the open handles keep working
+        // across the flush (rev1§4.9), so re-seed their id↔name bindings onto a
+        // fresh, data-free overlay. `None` ⇒ nothing open ⇒ the ref's overlay is
+        // simply gone, the C2A behavior.
+        if let Some(carry) = overlay.carry_open() {
+            self.overlays.insert(ref_name.to_vec(), carry);
         }
         Ok(())
     }
@@ -4457,6 +4588,475 @@ mod tests {
             store.read(b"main", &p(&["f"])).unwrap().unwrap(),
             vec![0, 0, b'x']
         );
+    }
+
+    // ── C2C: unlink-while-open + open handles (rev1§4.9, Design decision 2) ──
+
+    /// rev1§4.9: "the open handle keeps working against the overlay" after its
+    /// name is unlinked — the path reads as absent, but the handle still sees and
+    /// can extend the data.
+    #[test]
+    fn open_handle_survives_unlink() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        let h = store.open(b"main", &p(&["f"])).unwrap();
+        store.write_id(h, 0, b"held bytes", 1).unwrap();
+        // Handle and path agree while named.
+        assert_eq!(
+            store.read(b"main", &p(&["f"])).unwrap().unwrap(),
+            b"held bytes"
+        );
+        assert_eq!(store.read_id(h).unwrap().unwrap(), b"held bytes");
+        // Unlink the name: the path goes absent, the handle keeps working.
+        store.unlink(b"main", &p(&["f"]), 2).unwrap();
+        assert_eq!(store.read(b"main", &p(&["f"])).unwrap(), None);
+        assert_eq!(store.read_id(h).unwrap().unwrap(), b"held bytes");
+        // A further write through the orphaned handle still lands (ephemerally).
+        store.write_id(h, 10, b"!", 3).unwrap();
+        assert_eq!(store.read_id(h).unwrap().unwrap(), b"held bytes!");
+        store.close(h).unwrap();
+    }
+
+    /// rev1§4.9: "if at flush time the ID resolves to no path, the data is
+    /// discarded." The orphaned handle's data never reaches the tree.
+    #[test]
+    fn unlinked_open_data_discarded_at_flush() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        let h = store.open(b"main", &p(&["f"])).unwrap();
+        store.write_id(h, 0, b"ephemeral", 1).unwrap();
+        store.unlink(b"main", &p(&["f"]), 2).unwrap();
+        // Flush: the orphaned id resolves to no name → discarded, not committed.
+        store.flush_ref(b"main").unwrap();
+        assert_eq!(store.read(b"main", &p(&["f"])).unwrap(), None);
+        // The handle keeps working post-flush, but its data is gone (discarded).
+        assert_eq!(store.read_id(h).unwrap().unwrap(), b"");
+        store.close(h).unwrap();
+        // Nothing was ever committed to the tree at `f`.
+        store.sync_ref(b"main").unwrap();
+        assert_eq!(store.read(b"main", &p(&["f"])).unwrap(), None);
+    }
+
+    /// rev1§4.9: closing the last handle on an orphaned id discards its dirty data
+    /// at once — the overlay reclaims the bytes and the id is forgotten.
+    #[test]
+    fn close_reaps_orphaned_handle() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        let h = store.open(b"main", &p(&["f"])).unwrap();
+        store.write_id(h, 0, b"orphan bytes", 1).unwrap();
+        store.unlink(b"main", &p(&["f"]), 2).unwrap();
+        assert!(store.overlays.get(b"main".as_slice()).unwrap().bytes() > 0);
+        store.close(h).unwrap();
+        // The orphan's data is gone, and the handle is no longer known.
+        assert_eq!(store.overlays.get(b"main".as_slice()).unwrap().bytes(), 0);
+        assert!(store.open_files.is_empty());
+        assert!(matches!(
+            store.write_id(h, 0, b"x", 3),
+            Err(StoreError::NoSuchHandle)
+        ));
+    }
+
+    /// rev1§4.9: an open handle keeps working *across* a flush (which auto-flushes
+    /// can trigger mid-write). A named handle's data commits; a later write
+    /// through it re-materializes over the now-committed base.
+    #[test]
+    fn named_handle_survives_flush() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        let h = store.open(b"main", &p(&["f"])).unwrap();
+        store.write_id(h, 0, b"abc", 1).unwrap();
+        store.flush_ref(b"main").unwrap();
+        // Committed to the tree, readable by path and by handle.
+        assert_eq!(store.read(b"main", &p(&["f"])).unwrap().unwrap(), b"abc");
+        assert_eq!(store.read_id(h).unwrap().unwrap(), b"abc");
+        // A post-flush write through the surviving handle appends over the now-
+        // committed base (re-materialized lazily from the tree).
+        store.write_id(h, 3, b"def", 2).unwrap();
+        assert_eq!(store.read_id(h).unwrap().unwrap(), b"abcdef");
+        store.sync_ref(b"main").unwrap();
+        assert_eq!(store.read(b"main", &p(&["f"])).unwrap().unwrap(), b"abcdef");
+        store.close(h).unwrap();
+    }
+
+    /// Opening a name and closing it without writing leaves no trace: no dirty
+    /// state is introduced and the name still reads from the tree.
+    #[test]
+    fn open_unwritten_close_is_inert() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        store
+            .write(b"main", &p(&["f"]), 0, b"committed", 1)
+            .unwrap();
+        store.sync_ref(b"main").unwrap();
+        let h = store.open(b"main", &p(&["f"])).unwrap();
+        assert_eq!(store.read_id(h).unwrap().unwrap(), b"committed");
+        store.close(h).unwrap();
+        assert_eq!(
+            store.read(b"main", &p(&["f"])).unwrap().unwrap(),
+            b"committed"
+        );
+        assert!(store.open_files.is_empty());
+    }
+
+    /// rev1§4.9 / work item 4: an open-then-unlinked id has no client across a
+    /// crash (ids are ephemeral). The acked `Write`+`Unlink` records replay to the
+    /// same path-visible state — `f` absent — with no special replay logic, and
+    /// the orphaned handle's later ephemeral writes (never WAL-logged) are gone.
+    #[test]
+    fn unlink_while_open_survives_crash() {
+        let mut store = Store::format(CrashDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        let h = store.open(b"main", &p(&["f"])).unwrap();
+        store.write_id(h, 0, b"acked then unlinked", 1).unwrap();
+        store.unlink(b"main", &p(&["f"]), 2).unwrap();
+        // A further ephemeral write through the orphaned handle (never logged).
+        store.write_id(h, 100, b"ephemeral", 3).unwrap();
+        assert_eq!(store.read(b"main", &p(&["f"])).unwrap(), None);
+        let mut dev = store.into_dev();
+        dev.crash(0xC2C);
+        let store2 = Store::mount(dev, test_opts()).unwrap();
+        // Replay of Write{f}+Unlink{f} reproduces the absence; no handle survives.
+        assert_eq!(store2.read(b"main", &p(&["f"])).unwrap(), None);
+    }
+
+    // ── C2C negative controls (anti-theater): the interleaving oracle has teeth ──
+
+    /// A model that *kept* an orphaned id's data at flush would predict the path
+    /// still readable; the real store discards it, so the two must disagree.
+    #[test]
+    fn negative_control_flush_keeps_orphan() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        let h = store.open(b"main", &p(&["f"])).unwrap();
+        store.write_id(h, 0, b"data", 1).unwrap();
+        store.unlink(b"main", &p(&["f"]), 2).unwrap();
+        store.flush_ref(b"main").unwrap();
+        let got = store.read_id(h).unwrap().unwrap();
+        assert_eq!(got, b""); // correct: discarded
+        assert_ne!(got, b"data".to_vec()); // a keep-orphan oracle would diverge
+    }
+
+    /// A model that *reaped* (dropped the data) on unlink-while-open would predict
+    /// an empty handle read; the real handle keeps working, so they must disagree.
+    #[test]
+    fn negative_control_unlink_reaps_open() {
+        let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
+        store.create_ref(b"main").unwrap();
+        let h = store.open(b"main", &p(&["f"])).unwrap();
+        store.write_id(h, 0, b"held", 1).unwrap();
+        store.unlink(b"main", &p(&["f"]), 2).unwrap();
+        let got = store.read_id(h).unwrap().unwrap();
+        assert_eq!(got, b"held"); // correct: handle keeps working
+        assert_ne!(got, Vec::<u8>::new()); // a reap-on-unlink oracle would diverge
+    }
+
+    // ── C2C interleaving proptest: real Store vs a path-keyed handle model ──
+    //
+    // The reference model is a path-keyed naive store with explicit open-handle
+    // tracking — the semantics the id indirection optimizes. Files are whole byte
+    // vectors applied fresh each read (no interval maps); the committed tree is a
+    // plain map (no chunk store). A non-fresh file's base is read lazily at read
+    // time from the committed map — so an orphaned id reads against an empty base,
+    // exactly as the real overlay does. `rename` joins the op set when C2B lands;
+    // C2C exercises open/write/write_id/unlink/close/flush.
+
+    #[derive(Default)]
+    struct OpenModel {
+        next_id: u64,
+        committed: BTreeMap<Path, Vec<u8>>,
+        by_name: BTreeMap<Path, u64>,
+        name_of: BTreeMap<u64, Option<Path>>,
+        files: BTreeMap<u64, ModelFile>,
+        tombs: BTreeSet<Path>,
+        open: BTreeMap<u64, u32>,
+    }
+
+    #[derive(Default)]
+    struct ModelFile {
+        writes: Vec<(u64, Vec<u8>)>,
+        fresh: bool,
+    }
+
+    impl OpenModel {
+        fn splice(content: &mut Vec<u8>, offset: u64, data: &[u8]) {
+            let end = offset as usize + data.len();
+            if content.len() < end {
+                content.resize(end, 0);
+            }
+            content[offset as usize..end].copy_from_slice(data);
+        }
+
+        /// Apply an id's writes over its base — committed bytes for a non-fresh
+        /// *named* id, empty for a fresh or *orphaned* (nameless) id.
+        fn applied(&self, id: u64) -> Vec<u8> {
+            let f = &self.files[&id];
+            let mut content = match (f.fresh, self.name_of.get(&id)) {
+                (false, Some(Some(path))) => self.committed.get(path).cloned().unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            for (off, data) in &f.writes {
+                Self::splice(&mut content, *off, data);
+            }
+            content
+        }
+
+        fn bind(&mut self, path: &Path) -> u64 {
+            if let Some(&id) = self.by_name.get(path) {
+                id
+            } else {
+                let id = self.next_id;
+                self.next_id += 1;
+                self.by_name.insert(path.clone(), id);
+                self.name_of.insert(id, Some(path.clone()));
+                id
+            }
+        }
+
+        fn write(&mut self, path: &Path, offset: u64, data: &[u8]) {
+            let fresh = self.tombs.remove(path);
+            let id = self.bind(path);
+            let f = self.files.entry(id).or_insert(ModelFile {
+                writes: Vec::new(),
+                fresh,
+            });
+            f.writes.push((offset, data.to_vec()));
+        }
+
+        fn open(&mut self, path: &Path) -> u64 {
+            let id = self.bind(path);
+            *self.open.entry(id).or_insert(0) += 1;
+            id
+        }
+
+        fn is_open(&self, id: u64) -> bool {
+            self.open.get(&id).copied().unwrap_or(0) > 0
+        }
+
+        fn write_id(&mut self, id: u64, offset: u64, data: &[u8]) {
+            match self.name_of.get(&id).cloned().flatten() {
+                Some(path) => self.write(&path, offset, data),
+                None => {
+                    // Orphaned: empty base, ephemeral.
+                    let f = self.files.entry(id).or_default();
+                    f.writes.push((offset, data.to_vec()));
+                }
+            }
+        }
+
+        fn unlink(&mut self, path: &Path) {
+            if let Some(id) = self.by_name.remove(path) {
+                if self.is_open(id) {
+                    self.name_of.insert(id, None);
+                } else {
+                    self.files.remove(&id);
+                    self.name_of.remove(&id);
+                }
+            }
+            self.tombs.insert(path.clone());
+        }
+
+        fn close(&mut self, id: u64) {
+            match self.open.get_mut(&id) {
+                Some(c) if *c > 1 => *c -= 1,
+                Some(_) => {
+                    self.open.remove(&id);
+                    match self.name_of.get(&id) {
+                        Some(None) => {
+                            self.files.remove(&id);
+                            self.name_of.remove(&id);
+                        }
+                        Some(Some(name)) if !self.files.contains_key(&id) => {
+                            let name = name.clone();
+                            self.by_name.remove(&name);
+                            self.name_of.remove(&id);
+                        }
+                        _ => {}
+                    }
+                }
+                None => {}
+            }
+        }
+
+        fn flush(&mut self) {
+            let named_dirty: Vec<(u64, Path)> = self
+                .name_of
+                .iter()
+                .filter_map(|(id, n)| match n {
+                    Some(p) if self.files.contains_key(id) => Some((*id, p.clone())),
+                    _ => None,
+                })
+                .collect();
+            for (id, path) in named_dirty {
+                let c = self.applied(id);
+                self.committed.insert(path, c);
+            }
+            for t in self.tombs.clone() {
+                self.committed.remove(&t);
+            }
+            // Carry only open handles forward (rev1§4.9); non-open ids vanish.
+            let keep: BTreeSet<u64> = self.open.keys().copied().collect();
+            self.by_name.retain(|_, id| keep.contains(id));
+            self.name_of.retain(|id, _| keep.contains(id));
+            self.files.clear();
+            self.tombs.clear();
+        }
+
+        fn read(&self, path: &Path) -> Option<Vec<u8>> {
+            if self.tombs.contains(path) {
+                None
+            } else if let Some(&id) = self.by_name.get(path) {
+                if self.files.contains_key(&id) {
+                    Some(self.applied(id))
+                } else {
+                    self.committed.get(path).cloned() // open-unwritten → tree
+                }
+            } else {
+                self.committed.get(path).cloned()
+            }
+        }
+
+        fn read_id(&self, id: u64) -> Option<Vec<u8>> {
+            match self.name_of.get(&id) {
+                Some(Some(path)) => self.read(&path.clone()),
+                Some(None) => Some(
+                    self.files
+                        .get(&id)
+                        .map(|_| self.applied(id))
+                        .unwrap_or_default(),
+                ),
+                None => None,
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    enum OpenOp {
+        Write(usize, u64, Vec<u8>),
+        Unlink(usize),
+        Open(usize),
+        WriteId(usize, u64, Vec<u8>),
+        Close(usize),
+        Flush,
+    }
+
+    /// Budgets pinned high so no auto-flush (WAL/byte/op-count backpressure) fires
+    /// — flushes happen only at explicit `Flush` ops, which the model mirrors. The
+    /// open-handle semantics are still proven across flushes (the `Flush` op).
+    fn no_autoflush_opts() -> StoreOptions {
+        StoreOptions {
+            // 64 KiB WAL holds ~50 tiny records without wrapping (so no WAL-
+            // pressure flush); the default watermark is far above it.
+            wal_len: 64 * 1024,
+            global_budget: 1 << 30,
+            per_ref_budget: 1 << 30,
+            size_low_watermark: 1 << 30,
+            op_count_bound: u64::MAX,
+            staleness_ns: u64::MAX,
+            ..test_opts()
+        }
+    }
+
+    fn open_op() -> impl Strategy<Value = OpenOp> {
+        const NPATHS: usize = 3;
+        prop_oneof![
+            (
+                0usize..NPATHS,
+                0u64..64,
+                proptest::collection::vec(any::<u8>(), 1..16)
+            )
+                .prop_map(|(i, o, d)| OpenOp::Write(i, o, d)),
+            (0usize..NPATHS).prop_map(OpenOp::Unlink),
+            (0usize..NPATHS).prop_map(OpenOp::Open),
+            (
+                0usize..8,
+                0u64..64,
+                proptest::collection::vec(any::<u8>(), 1..16)
+            )
+                .prop_map(|(h, o, d)| OpenOp::WriteId(h, o, d)),
+            (0usize..8).prop_map(OpenOp::Close),
+            Just(OpenOp::Flush),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 256 },
+            ..ProptestConfig::default()
+        })]
+        /// The real id-addressed `Store` matches the path-keyed handle model
+        /// op-for-op: path reads, handle reads, and post-flush durable state all
+        /// agree, and the overlay's id indices stay internally consistent.
+        #[test]
+        fn rename_unlink_interleaving(
+            // Cap the op stream under Miri (interpreted blake3 chunks on every
+            // flush/sync — native-scale streams would take hours, CLAUDE.md).
+            ops in proptest::collection::vec(open_op(), 1..if cfg!(miri) { 12 } else { 50 }),
+        ) {
+            // A small fixed name set: two at the root, one under a subdirectory.
+            let names = [p(&["a"]), p(&["b"]), p(&["d", "x"])];
+            let mut store = Store::format(MemDev::new(1 << 20), no_autoflush_opts()).unwrap();
+            store.create_ref(b"main").unwrap();
+            let mut model = OpenModel::default();
+            // Live handles: (real FileId, model id). Ids are not assumed equal —
+            // only the observable reads through them are compared.
+            let mut handles: Vec<(FileId, u64)> = Vec::new();
+
+            for op in &ops {
+                match op {
+                    OpenOp::Write(i, off, data) => {
+                        store.write(b"main", &names[*i], *off, data, 1).unwrap();
+                        model.write(&names[*i], *off, data);
+                    }
+                    OpenOp::Unlink(i) => {
+                        store.unlink(b"main", &names[*i], 1).unwrap();
+                        model.unlink(&names[*i]);
+                    }
+                    OpenOp::Open(i) => {
+                        let h = store.open(b"main", &names[*i]).unwrap();
+                        let mh = model.open(&names[*i]);
+                        handles.push((h, mh));
+                    }
+                    OpenOp::WriteId(hi, off, data) => {
+                        if handles.is_empty() {
+                            continue;
+                        }
+                        let (h, mh) = handles[*hi % handles.len()];
+                        store.write_id(h, *off, data, 1).unwrap();
+                        model.write_id(mh, *off, data);
+                    }
+                    OpenOp::Close(hi) => {
+                        if handles.is_empty() {
+                            continue;
+                        }
+                        let (h, mh) = handles.remove(*hi % handles.len());
+                        store.close(h).unwrap();
+                        model.close(mh);
+                    }
+                    OpenOp::Flush => {
+                        store.flush_ref(b"main").unwrap();
+                        model.flush();
+                    }
+                }
+                // The overlay's id indices stay internally consistent.
+                if let Some(o) = store.overlays.get(b"main".as_slice()) {
+                    o.check_invariants();
+                }
+                // Path reads and handle reads agree with the model.
+                for nm in &names {
+                    prop_assert_eq!(store.read(b"main", nm).unwrap(), model.read(nm));
+                }
+                for (h, mh) in &handles {
+                    prop_assert_eq!(store.read_id(*h).unwrap(), model.read_id(*mh));
+                }
+            }
+            // Durable cross-check: sync to the tree and re-read every path.
+            store.sync_ref(b"main").unwrap();
+            model.flush();
+            for nm in &names {
+                prop_assert_eq!(store.read(b"main", nm).unwrap(), model.read(nm));
+            }
+        }
     }
 
     #[test]
