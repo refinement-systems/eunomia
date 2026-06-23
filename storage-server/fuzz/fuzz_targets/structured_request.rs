@@ -13,8 +13,9 @@ use libfuzzer_sys::fuzz_target;
 use storage_server::{wire, Request};
 
 fuzz_target!(|req: Request| {
-    if let Ok(bytes) = wire::encode_request(&req) {
-        let back = wire::decode_request(&bytes).expect("encoded request failed to decode");
+    if let Ok(bytes) = wire::encode_request(&req, wire::PROTO_VERSION) {
+        let back = wire::decode_request(&bytes, wire::PROTO_VERSION)
+            .expect("encoded request failed to decode");
         assert_eq!(
             back, req,
             "request did not survive encode/decode round-trip"

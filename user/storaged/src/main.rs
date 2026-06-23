@@ -21,7 +21,10 @@
 extern crate alloc;
 
 use dma_pool::{DeviceAddress, DmaBacking, DmaPool};
-use ipc::{sys, Endpoint, Message, Reactor, RecvErr, SendErr, Signals, SyscallTransport};
+use ipc::{
+    admit_connect, sys, Admission, Endpoint, GrantReply, Message, Reactor, RecvErr, SendErr,
+    Signals, SyscallTransport, VersionRange,
+};
 use loader::startup::{self, GrantKind};
 use storage_server::wire;
 use storage_server::Server;
@@ -40,6 +43,12 @@ const WAKE_NOTIF: u32 = 2;
 // add alongside — the reactor returns it from `wait`, so the dispatch below
 // never names a notification bit (rev1§3.6: the API hides the bit shape).
 const SESSION_KEY: ipc::Key = 0;
+/// The session's total bulk-window budget (rev1§3.5), enforced at the single
+/// admission point in `admit_connect`. The inline Read/Write path needs no bulk
+/// window today (the shared-memory bulk path is post-MVP, rev1§3.1), so the
+/// shell requests a zero window and this budget is only exercised as the quota
+/// the admission decision rides on — a token value, ample for the one session.
+const WINDOW_BUDGET: u32 = 64 * 1024;
 
 struct MmioWindow {
     base: usize,
@@ -248,6 +257,63 @@ pub extern "C" fn _start() -> ! {
         fail(b"reactor register");
     }
     let mut msg = Message::new();
+
+    // Connect handshake (rev1§3.5/§3.7, C3C): the session's first message is the
+    // raw `ipc` ConnectReq — a version range + a requested bulk window — over the
+    // pre-wired channel (it rides the never-migrating connect codec, *not* a
+    // storage `Request`, which could not itself be versioned). `admit_connect`
+    // selects the highest common wire version and admits the window at the single
+    // admission point; we record the negotiated version and stamp/validate it on
+    // every subsequent message. The endpoint-cap funding step stays deferred
+    // (`ipc::session` module comment) — this is the version+window step only.
+    let server_versions = VersionRange::new(wire::PROTO_VERSION, wire::PROTO_VERSION);
+    let mut adm = Admission::new(WINDOW_BUDGET);
+    let negotiated: u8 = loop {
+        let _ = reactor.wait();
+        match ep.recv_nb(&mut msg) {
+            Ok(()) => {
+                let reply = admit_connect(&mut adm, server_versions, msg.payload());
+                let (buf, n) = reply.encode();
+                send_response(&ep, &buf[..n]);
+                match reply {
+                    GrantReply::Grant(_, ver) => break ver,
+                    // A disjoint version range or an exhausted window refuses
+                    // cleanly; the shell saw the `Refused` reply and will exit.
+                    GrantReply::Refused => fail(b"connect refused"),
+                }
+            }
+            // A bare wakeup with nothing queued (the register self-signal before
+            // the client has sent): wait again for the real ConnectReq.
+            Err(RecvErr::Empty) => continue,
+            Err(_) => fail(b"peer gone during connect"),
+        }
+    };
+    {
+        use core::fmt::Write;
+        let _ = write!(
+            DebugOut,
+            "[storaged] negotiated wire version {}\n",
+            negotiated
+        );
+    }
+    // Witness (C3C): drive a frame stamped with the *wrong* version through the
+    // live decoder and confirm it is refused cleanly — never `Ok`, never a panic.
+    // The line prints only when the real `wire::decode_request` actually rejects,
+    // so a decoder that stopped checking the version would silence this witness
+    // and fail the smoke grep. (`Sync` is a trivially-encodable request; the
+    // version check fires before the body decode, so any body would do.)
+    let probe = wire::encode_request(
+        &storage_server::Request::Sync { handle: 0 },
+        negotiated.wrapping_add(1),
+    )
+    .unwrap();
+    if matches!(
+        wire::decode_request(&probe, negotiated),
+        Err(wire::WireError::Version)
+    ) {
+        sys::debug_write(b"[storaged] version-mismatch refused cleanly\n");
+    }
+
     loop {
         // Staleness sweep (rev1§4.4 trigger 4, B12D): before parking the reactor,
         // flush any ref quietly dirty past the staleness bound so it eventually
@@ -269,17 +335,19 @@ pub extern "C" fn _start() -> ! {
                 // means the peer is gone — stop draining and re-wait.
                 Err(_) => break,
             }
-            let resp = match wire::decode_request(msg.payload()) {
+            // Decode at the negotiated version (rev1§3.7): a request stamped with
+            // any other version is a `WireError::Version` — refused, never a crash.
+            let resp = match wire::decode_request(msg.payload(), negotiated) {
                 Ok(req) => server.handle(session, req, now_utc()),
                 Err(_) => storage_server::Response::Err(storage_server::ErrorCode::Internal),
             };
-            match wire::encode_response(&resp) {
+            match wire::encode_response(&resp, negotiated) {
                 Ok(bytes) => send_response(&ep, &bytes),
                 Err(_) => {
                     // Response too big for a message — report instead
                     // (the bulk path is post-MVP; requests are bounded).
                     let e = storage_server::Response::Err(storage_server::ErrorCode::Internal);
-                    send_response(&ep, &wire::encode_response(&e).unwrap());
+                    send_response(&ep, &wire::encode_response(&e, negotiated).unwrap());
                 }
             }
             // Drain a pending GC trigger (rev1§4.6: post-rewrite or

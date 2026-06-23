@@ -82,7 +82,7 @@ fn fresh() -> (Server<MemDev>, u64) {
 #[test]
 fn request_dispatch() {
     for data in corpus_files("request_dispatch") {
-        let Ok(req) = wire::decode_request(&data) else {
+        let Ok(req) = wire::decode_request(&data, wire::PROTO_VERSION) else {
             continue;
         };
         if cfg!(miri) {
@@ -102,11 +102,14 @@ fn request_dispatch() {
 #[test]
 #[ignore = "regenerates a committed corpus seed"]
 fn gen_rename_corpus_seed() {
-    let bytes = wire::encode_request(&Request::Rename {
-        handle: 0,
-        from: vec![b"a".to_vec()],
-        to: vec![b"b".to_vec()],
-    })
+    let bytes = wire::encode_request(
+        &Request::Rename {
+            handle: 0,
+            from: vec![b"a".to_vec()],
+            to: vec![b"b".to_vec()],
+        },
+        wire::PROTO_VERSION,
+    )
     .unwrap();
     let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     dir.push("fuzz/corpus/request_dispatch");

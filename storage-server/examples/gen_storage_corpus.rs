@@ -174,7 +174,8 @@ fn main() {
         ),
     ];
     for (name, req) in reqs {
-        let bytes = wire::encode_request(req).expect("seed request must fit the wire envelope");
+        let bytes = wire::encode_request(req, wire::PROTO_VERSION)
+            .expect("seed request must fit the wire envelope");
         write_seed("request_dispatch", name, &bytes);
     }
 
