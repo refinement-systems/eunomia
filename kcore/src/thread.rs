@@ -113,7 +113,7 @@ impl Tcb {
         }
     }
 
-    /// pre:  memory at `this` writable, sized size_of::<Tcb>().
+    /// pre:  memory at `this` writable, sized `size_of::<Tcb>()`.
     /// post: inactive thread, refs = 1 (creator cap).
     pub unsafe fn init(this: *mut Tcb) {
         this.write(Tcb::empty());

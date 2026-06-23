@@ -13,8 +13,8 @@
 //! event delivery never allocates (rev2§3.6).
 //!
 //! The channel is addressed by an opaque
-//! [`ObjId`](crate::id::ObjId) and all of its state is reached through the
-//! [`Store`] seam — ring caps are [`SlotId`](crate::id::SlotId) handles, event
+//! [`ObjId`] and all of its state is reached through the
+//! [`Store`] seam — ring caps are [`SlotId`] handles, event
 //! bindings are [`crate::store::Binding`]s. The construction/layout helpers
 //! (`bytes_for`/`init`/`slot`) remain pointer-based: the kernel shell uses them
 //! to *place* an object before any handle exists.
@@ -57,7 +57,7 @@ pub struct Channel {
     pub end_caps: [u32; 2],
     pub head: [u32; 2],
     pub count: [u32; 2],
-    /// bindings[end][event] — events observed by that end's holder.
+    /// `bindings[end][event]` — events observed by that end's holder.
     pub bindings: [[Binding; 3]; 2],
     // MsgSlot[2 * depth] follows: ring 0 then ring 1.
 }

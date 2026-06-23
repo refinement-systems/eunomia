@@ -18,7 +18,7 @@
 //! **Verified by Verus.** The codecs are total bijections (`[`req_encode`]`/
 //! `[`req_decode`]`, `[`grant_encode`]`/`[`grant_decode`]` as ghost models, the
 //! round-trip lemmas ∀); and [`Admission`] **never over-grants for all
-//! admit/release sequences** — `granted <= budget` ([`Admission::well_formed`])
+//! admit/release sequences** — `granted <= budget` (`Admission::well_formed`)
 //! is a pre/post-condition of every op, proven once and composed over *any*
 //! sequence by Verus's modular reasoning, so `remaining()`'s `budget - granted`
 //! is non-underflowing. As in `header.rs` the exec codecs use explicit
@@ -369,7 +369,7 @@ impl Admission {
 
     /// The single admission decision (rev2§3.5): grant `requested` bytes iff they fit
     /// the remaining quota, accounting for them; otherwise refuse and leave the
-    /// quota untouched. **Never grants past budget** — [`Admission::well_formed`]
+    /// quota untouched. **Never grants past budget** — `Admission::well_formed`
     /// holds after every call, for *any* `requested`, so a flood of connects can
     /// never push `granted` past `budget` (the unbounded never-over-grant theorem).
     pub fn admit(&mut self, requested: u32) -> (res: Result<WindowGrant, ConnectErr>)

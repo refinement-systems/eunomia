@@ -18,8 +18,8 @@
 //! the identity.
 //!
 //! **Verified by Verus.** The exec [`Header::decode`]/[`Header::encode`]
-//! are tied to the ghost [`spec_decode`]/[`spec_encode`] by their `ensures`, and
-//! [`lemma_decode_encode`]/[`lemma_encode_decode`] prove the bijection ∀ — both
+//! are tied to the ghost `spec_decode`/`spec_encode` by their `ensures`, and
+//! `lemma_decode_encode`/`lemma_encode_decode` prove the bijection ∀ — both
 //! directions of `encode`∘`decode` = id, and decode's totality / accept-iff-length.
 //!
 //! The codec is written with explicit mask/shift arithmetic (not

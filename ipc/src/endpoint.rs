@@ -195,7 +195,7 @@ impl<'t, T: Transport> Endpoint<'t, T> {
     /// the still-queued cap (rev2§3.4: "cash in a shredded envelope"); this gate is
     /// what prevents that, in pure userspace (no kernel reverse-path).
     ///
-    /// `Full`/`Closed` from the send propagate (combine with [`send_blocking`]
+    /// `Full`/`Closed` from the send propagate (combine with [`Self::send_blocking`]
     /// when the channel may be full). The cap's *exactly-one-owner* / no-dup
     /// guarantee is the kernel's move semantics (`CapRevocation`), not this
     /// protocol's — this carries only the no-loss obligation.

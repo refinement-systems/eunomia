@@ -23,7 +23,7 @@
 //! precondition** (`!is_free_spec`) a contract-checked impossibility; and
 //! [`SlotAlloc::alloc_range`] hands out a contiguous in-window run that was free
 //! and is now used. The bitmap bit-test `free[i/64] & (1<<(i%64))` is related to
-//! the per-slot [`SlotAlloc::is_free_spec`] predicate by `by (bit_vector)` frame
+//! the per-slot `SlotAlloc::is_free_spec` predicate by `by (bit_vector)` frame
 //! lemmas, and the `.find().map()` combinators are restructured into explicit
 //! invariant-carrying loops (the shape kcore's `aspace` walk-loops already take).
 
@@ -312,7 +312,7 @@ impl<const WORDS: usize> SlotAlloc<WORDS> {
     /// is already empty (revoke/delete ran) and the bookkeeping slot is
     /// currently allocated. A double-free (`!is_free_spec` violated) is a
     /// contract-checked impossibility — it would hand a live slot out twice;
-    /// [`SlotAlloc::debug_check_free`] keeps the runtime (debug) panic witness.
+    /// `SlotAlloc::debug_check_free` keeps the runtime (debug) panic witness.
     pub fn free(&mut self, slot: u32)
         requires
             old(self).wf(),

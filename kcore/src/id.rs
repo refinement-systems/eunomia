@@ -15,8 +15,8 @@
 //! object storage.
 
 /// A handle to a refcounted kernel object (cspace, channel, TCB, notification,
-/// timer, aspace). Tagged with its kind by the carrying [`CapKind`] /
-/// [`ObjRef`]; the raw handle itself is kind-agnostic.
+/// timer, aspace). Tagged with its kind by the carrying [`CapKind`];
+/// the raw handle itself is kind-agnostic.
 ///
 /// [`CapKind`]: crate::cspace::CapKind
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]

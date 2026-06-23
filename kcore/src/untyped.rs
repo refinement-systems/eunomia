@@ -359,7 +359,7 @@ pub fn carve_place(
 /// physical end `pool_end`, validate the contiguous-abutment contract and carve
 /// `pages` zeroed page-tables. `Ok(c)` ⇒ the donor's free pointer abuts the pool
 /// with no gap (`base + watermark == pool_end`) and `c` is the verified placement
-/// ([`carve_place`]); the trusted `kernel/` shell ([`crate::aspace::grow_pool`]
+/// ([`carve_place`]); the trusted `kernel/` shell (`grow_pool`
 /// via the `Sys::AspaceTopUp` handler) then advances the donor watermark to
 /// `c.end - base` and does the raw-memory extension (`ptr::write_bytes`, outside
 /// the verified surface). The abutment guard lives here, in verified host-testable

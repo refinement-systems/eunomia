@@ -15,6 +15,7 @@ use crate::notification;
 use crate::store::Store;
 // `check_expired`/`lemma_signal_ok_after_fire` reference `ThreadState::Runnable` in the
 // `signal` caller-frame (the faithful enqueue re-threads a Runnable old ready-tail).
+#[allow(unused_imports)] // ThreadState: referenced only in spec/proof code
 use crate::thread::ThreadState;
 use vstd::prelude::*;
 // `StoreSpec` (the `external_trait_extension`) must be in scope to resolve

@@ -225,7 +225,7 @@ impl<'t, T: Transport> Reactor<'t, T> {
     /// or an IRQ — anything the kernel signals into this notification at a bit
     /// the caller controls. Each set bit in `mask` dispatches to `key`.
     ///
-    /// Unlike [`register`], this does **no** `bind` (it is not a channel event)
+    /// Unlike [`Self::register`], this does **no** `bind` (it is not a channel event)
     /// and does **no** poll-once self-signal: an edge-triggered source fires
     /// exactly once when the event actually happens, so a fabricated poll-once
     /// would deliver a spurious wakeup (e.g. report a thread dead before it is).

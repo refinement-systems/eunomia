@@ -17,7 +17,7 @@
 //! part of a whole-object copy — so a slot has exactly one access path however it
 //! is homed (cspace resident, channel ring cap, or TCB binding slot).
 //!
-//! The trait also folds in the [`crate::env::Env`] hardware/scheduler seam
+//! The trait also folds in the `Env`/`Hal` hardware/scheduler seam
 //! (`make_runnable`, `aspace_unmap`, the TLB/barrier hooks, the armed-timer
 //! head), keyed on handles: one seam for both object storage and effects.
 

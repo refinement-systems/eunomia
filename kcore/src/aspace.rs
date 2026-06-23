@@ -6,7 +6,7 @@
 //! address to a pointer. The on-hardware descriptor format matches the
 //! aarch64 walker — a table descriptor stores the table's PA in
 //! its output-address field; the walker just converts that PA to a pool index
-//! ([`pool_index`]) to follow it, and back ([`pa_of_table`]) to install it.
+//! (`pool_index`) to follow it, and back (`pa_of_table`) to install it.
 //!
 //! The `kernel` crate keeps a thin shell (`kernel/src/aspace.rs`): it builds
 //! the `&mut [[u64; 512]]` slice views from the `AspaceObj`'s PAs (the one
@@ -49,7 +49,7 @@ pub const USER_VA_END: u64 = 1 << 39;
 pub const PERM_W: u64 = 1 << 0;
 pub const PERM_X: u64 = 1 << 1;
 /// Device-nGnRnE mapping (MMIO windows). Never executable (enforced by
-/// [`pte_encode`]).
+/// `pte_encode`).
 pub const PERM_DEVICE: u64 = 1 << 2;
 
 // ── descriptor bits (the on-hardware format, matching the aarch64
@@ -2242,7 +2242,7 @@ proof fn lemma_unmap_in_step(
 /// or `Some(0)`), every aligned user page **outside** the range keeps its mapping
 /// (the frame), `pt_wf` is preserved (clearing a leaf keeps the tree — no table is
 /// freed), and `store`'s TLBI log grows by **exactly one `(asid, va+i·PAGE)` per
-/// cleared page, in ascending order** ([`unmap_log`]) followed by the trailing
+/// cleared page, in ascending order** (`unmap_log`) followed by the trailing
 /// barrier — "one TLBI per cleared page, in order" as a postcondition.
 pub fn unmap_in<S: Store>(
     l1: &[u64; 512],
@@ -2375,7 +2375,7 @@ verus! {
 ///
 /// Verified to **full functional equivalence** with the page-table model: for an
 /// in-range request the result is exactly "every page in `[va, va+len)` is
-/// present (and, if `write`, writable)" expressed via [`page_ok`]/[`pt_lookup`];
+/// present (and, if `write`, writable)" expressed via `page_ok`/`pt_lookup`;
 /// `len == 0` reduces to the bare `[USER_VA_BASE, USER_VA_END)` membership of
 /// `va`; and any overflow or out-of-range request is rejected (`!r`). The loop
 /// computes the `forall` — the invariant carries "every aligned page below the

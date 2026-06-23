@@ -18,6 +18,7 @@
 use crate::cspace::{self, ObjHeader};
 use crate::id::ObjId;
 use crate::store::Store;
+#[allow(unused_imports)] // NUM_PRIOS: referenced only in spec/proof code
 use crate::sysabi::NUM_PRIOS;
 use crate::thread::ThreadState;
 use vstd::prelude::*;

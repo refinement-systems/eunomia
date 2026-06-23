@@ -172,7 +172,7 @@ pub open spec fn geometry_ok(
 
 /// The rev2§4.5 mount geometry chokepoint, verified ∀. Total over all
 /// field values and `dev_len` (it is all `checked_add`); accepts iff
-/// [`geometry_ok`]; and on `Ok` the committed chunk region provably fits the
+/// `geometry_ok`; and on `Ok` the committed chunk region provably fits the
 /// device.
 pub fn validate_geometry_fields(
     wal_head: u64,

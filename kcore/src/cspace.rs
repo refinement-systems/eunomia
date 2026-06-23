@@ -23,6 +23,7 @@
 
 use crate::id::{ObjId, SlotId};
 use crate::store::{Binding, Store};
+#[allow(unused_imports)] // NUM_PRIOS: referenced only in spec/proof code
 use crate::sysabi::NUM_PRIOS;
 use crate::thread::{Report, ThreadState};
 use vstd::prelude::*;

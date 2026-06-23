@@ -3,9 +3,17 @@ name = "kernel"
 version.workspace = true
 edition.workspace = true
 
+# `doc = false`: the kernel is a bare-metal aarch64-unknown-none-softfloat
+# binary (own `#[panic_handler]`, ELF `#[link_section]`s, build-std). A
+# host `cargo doc` builds workspace members for the host target, where it
+# cannot be compiled at all — vstd pulls std's `panic_impl` (a duplicate lang
+# item) and the ELF section names are invalid Mach-O. The library crates it is
+# built from (kcore, loader, ipc, …) are documented on their own; document the
+# kernel itself with its cross target via kernel/.cargo/config.toml.
 [[bin]]
 name = "kernel"
 path = "src/main.rs"
+doc = false
 
 [features]
 # `debug-log` (rev2§7): the EL0 debug-print scaffold (DebugPutc/DebugWrite)

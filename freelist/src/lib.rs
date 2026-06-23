@@ -8,8 +8,8 @@
 //! trusted hardware/byte-region seam stays out of the proof. The properties hold
 //! ∀ pool length, request size, and alignment: every [`FreeList::alloc`] hands out
 //! an in-pool, aligned offset whose region was free and is now used, with coverage
-//! elsewhere unchanged (the [`FreeList::covers`] frame). **Two live allocations are
-//! therefore disjoint ∀** — the verified [`lemma_two_allocs_disjoint`].
+//! elsewhere unchanged (the `FreeList::covers` frame). **Two live allocations are
+//! therefore disjoint ∀** — the verified `lemma_two_allocs_disjoint`.
 //! [`FreeList::free`] returns a region to the list (the two-sided adjacency merge),
 //! making it allocatable again. The array-splice bookkeeping is factored into the
 //! verified helpers `remove_at`/`insert_at` (explicit shift loops in place of
@@ -30,7 +30,7 @@ verus! {
 /// The verified free-list core: a sorted, pairwise-disjoint list of free
 /// extents `(offset, len)` over a pool `[0, len)`. `N` is the fixed
 /// fragmentation cap (`MAX_FREE_RANGES`). No backing, no pointers — the pure
-/// arithmetic [`DmaPool`] delegates allocation/return to, so the disjointness
+/// arithmetic `DmaPool` delegates allocation/return to, so the disjointness
 /// theorem lives here and the PA seam stays out of the proof.
 pub struct FreeList<const N: usize> {
     /// Total pool length; the upper bound every extent lives under. Only the

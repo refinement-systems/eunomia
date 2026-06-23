@@ -150,7 +150,7 @@ impl Sample {
     ///
     /// **Verified by Verus**: `r == result_spec(cntvct)` — totality (no
     /// overflow/panic ∀ page contents and counter) *and* the functional value,
-    /// from which [`Sample::lemma_utc_ns_at_monotone`] makes monotonicity a
+    /// from which `Sample::lemma_utc_ns_at_monotone` makes monotonicity a
     /// theorem (it turns on two u128 divisions, which the host proptests below
     /// only sample).
     pub fn utc_ns_at(&self, cntvct: u64) -> (r: i64)
