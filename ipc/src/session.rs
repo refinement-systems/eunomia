@@ -38,9 +38,50 @@ pub const TAG_REQ: u8 = 0xC0;
 pub const TAG_GRANT: u8 = 0x01;
 pub const TAG_REFUSED: u8 = 0x00;
 
-pub const REQ_LEN: usize = 5; // tag + u32
-pub const GRANT_LEN: usize = 9; // tag + u32 window + u32 size
+pub const REQ_LEN: usize = 7; // tag + u32 window + u8 min_version + u8 max_version
+pub const GRANT_LEN: usize = 10; // tag + u32 window + u32 size + u8 version
 pub const REFUSED_LEN: usize = 1; // tag
+
+/// The sole wire version this build of the connect layer offers today
+/// (rev1§3.7). C3 negotiates a version even though exactly one is deployed — the
+/// mechanism is real now, so a future second version (and the "old and new
+/// clients coexist per session" case, rev1§8.3) is a value change, not a
+/// re-design. A server holds its own supported [`VersionRange`]; the MVP's is the
+/// single point `[PROTOCOL_VERSION, PROTOCOL_VERSION]`.
+pub const PROTOCOL_VERSION: u8 = 1;
+
+/// A contiguous span of supported wire versions, `[min, max]` inclusive
+/// (rev1§3.7). A client advertises its range in the [`ConnectReq`]; the server
+/// holds its own range and selects the highest common version via [`negotiate`].
+/// A contiguous range matches the monotone "a breaking change is a new version
+/// number" framing (rev1§3.7) and the "old and new clients coexist" case
+/// (rev1§8.3); a non-contiguous version *bitset* is the recorded forward,
+/// append-only generalization, not built now (one version is deployed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VersionRange {
+    pub min: u8,
+    pub max: u8,
+}
+
+impl VersionRange {
+    /// A range spanning `[min, max]`.
+    pub fn new(min: u8, max: u8) -> (r: VersionRange)
+        ensures
+            r.min == min,
+            r.max == max,
+    {
+        VersionRange { min, max }
+    }
+
+    /// The degenerate range offering exactly one version — today's MVP case.
+    pub fn single(v: u8) -> (r: VersionRange)
+        ensures
+            r.min == v,
+            r.max == v,
+    {
+        VersionRange { min: v, max: v }
+    }
+}
 
 /// A granted bulk window (rev1§3.1): which window and how many bytes. The MVP
 /// grants a single window, so `window` is always 0; it exists so the descriptor
@@ -51,35 +92,47 @@ pub struct WindowGrant {
     pub size: u32,
 }
 
-/// A connect request: the client's requested bulk-window size in bytes.
+/// A connect request: the client's requested bulk-window size in bytes, plus the
+/// contiguous range of wire versions it speaks (rev1§3.7). The server selects the
+/// highest common version at the single admission point ([`negotiate`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConnectReq {
     pub requested_window: u32,
+    pub versions: VersionRange,
 }
 
-/// The server's reply to a connect: a granted window, or a refusal when
-/// the request does not fit the remaining quota (the single admission point).
+/// The server's reply to a connect: a granted window **and the negotiated wire
+/// version**, or a refusal (the single admission point). A refusal covers both a
+/// window that does not fit the quota and a version with no overlap — the wire
+/// form does not distinguish them (a refusal is a refusal); the server-internal
+/// [`ConnectErr`] does, for diagnosability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrantReply {
-    Grant(WindowGrant),
+    Grant(WindowGrant, u8),
     Refused,
 }
 
-/// Why a connect failed. Today the only failure is the server refusing under its
-/// window quota (`admit`'s sole error); the client-side connect *mechanism* (the
-/// endpoint-cap handshake, rev1§3.5) is deferred, so its richer errors — a
-/// peer-closed session channel, a reply that does not decode, a transport error
-/// — are not yet constructed. They return when that mechanism lands.
+/// Why a connect failed (server-internal; the wire [`GrantReply`] collapses both
+/// to `Refused`). The client-side connect *mechanism* (the endpoint-cap
+/// handshake, rev1§3.5) is deferred, so its richer errors — a peer-closed session
+/// channel, a reply that does not decode, a transport error — are not yet
+/// constructed. They return when that mechanism lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectErr {
-    /// The server refused under its quota (rev1§3.5).
+    /// The server refused under its window quota (rev1§3.5).
     Refused,
+    /// No wire version is common to the client's offered range and the server's
+    /// supported range (rev1§3.7). Distinguished from `Refused` so a future
+    /// client can know not to retry a version refusal.
+    VersionMismatch,
 }
 
 // ── Ghost models of the codecs (the little-endian byte layout as a `Seq`) ──
 
-/// Ghost model of [`ConnectReq::encode`]: tag byte then the requested-window
-/// `u32` split low-to-high (matching `to_le_bytes`).
+/// Ghost model of [`ConnectReq::encode`]: tag byte, the requested-window `u32`
+/// split low-to-high (matching `to_le_bytes`), then the offered version range as
+/// two raw bytes (`min`, `max`). The version bytes are appended, so the existing
+/// prefix is byte-for-byte the pre-C3 layout.
 pub open spec fn req_encode(r: ConnectReq) -> Seq<u8> {
     seq![
         TAG_REQ,
@@ -87,17 +140,20 @@ pub open spec fn req_encode(r: ConnectReq) -> Seq<u8> {
         ((r.requested_window >> 8) & 0xff) as u8,
         ((r.requested_window >> 16) & 0xff) as u8,
         ((r.requested_window >> 24) & 0xff) as u8,
+        r.versions.min,
+        r.versions.max,
     ]
 }
 
 /// Ghost model of [`ConnectReq::decode`]: `Some` iff exactly `REQ_LEN` bytes
-/// tagged `TAG_REQ`, reassembling the little-endian `u32`; `None` otherwise.
-/// Total over every byte string.
+/// tagged `TAG_REQ`, reassembling the little-endian `u32` and the two raw version
+/// bytes; `None` otherwise. Total over every byte string.
 pub open spec fn req_decode(s: Seq<u8>) -> Option<ConnectReq> {
     if s.len() == REQ_LEN && s[0] == TAG_REQ {
         Some(ConnectReq {
             requested_window: (s[1] as u32) | ((s[2] as u32) << 8) | ((s[3] as u32) << 16)
                 | ((s[4] as u32) << 24),
+            versions: VersionRange { min: s[5], max: s[6] },
         })
     } else {
         None
@@ -105,10 +161,12 @@ pub open spec fn req_decode(s: Seq<u8>) -> Option<ConnectReq> {
 }
 
 /// Ghost model of [`GrantReply::encode`]'s *used prefix*: a `GRANT_LEN` grant
-/// (tag + window + size, each little-endian) or a `REFUSED_LEN` refusal (tag).
+/// (tag + window + size, each little-endian, then the negotiated version byte) or
+/// a `REFUSED_LEN` refusal (tag). The version byte is appended after the pre-C3
+/// window+size layout.
 pub open spec fn grant_encode(g: GrantReply) -> Seq<u8> {
     match g {
-        GrantReply::Grant(w) => seq![
+        GrantReply::Grant(w, ver) => seq![
             TAG_GRANT,
             (w.window & 0xff) as u8,
             ((w.window >> 8) & 0xff) as u8,
@@ -118,21 +176,26 @@ pub open spec fn grant_encode(g: GrantReply) -> Seq<u8> {
             ((w.size >> 8) & 0xff) as u8,
             ((w.size >> 16) & 0xff) as u8,
             ((w.size >> 24) & 0xff) as u8,
+            ver,
         ],
         GrantReply::Refused => seq![TAG_REFUSED],
     }
 }
 
-/// Ghost model of [`GrantReply::decode`]: a `GRANT_LEN` grant (tag `TAG_GRANT`)
-/// or a `REFUSED_LEN` refusal (tag `TAG_REFUSED`); `None` otherwise. Total.
+/// Ghost model of [`GrantReply::decode`]: a `GRANT_LEN` grant (tag `TAG_GRANT`,
+/// window + size + version byte) or a `REFUSED_LEN` refusal (tag `TAG_REFUSED`);
+/// `None` otherwise. Total.
 pub open spec fn grant_decode(s: Seq<u8>) -> Option<GrantReply> {
     if s.len() == GRANT_LEN && s[0] == TAG_GRANT {
-        Some(GrantReply::Grant(WindowGrant {
-            window: (s[1] as u32) | ((s[2] as u32) << 8) | ((s[3] as u32) << 16)
-                | ((s[4] as u32) << 24),
-            size: (s[5] as u32) | ((s[6] as u32) << 8) | ((s[7] as u32) << 16)
-                | ((s[8] as u32) << 24),
-        }))
+        Some(GrantReply::Grant(
+            WindowGrant {
+                window: (s[1] as u32) | ((s[2] as u32) << 8) | ((s[3] as u32) << 16)
+                    | ((s[4] as u32) << 24),
+                size: (s[5] as u32) | ((s[6] as u32) << 8) | ((s[7] as u32) << 16)
+                    | ((s[8] as u32) << 24),
+            },
+            s[9],
+        ))
     } else if s.len() == REFUSED_LEN && s[0] == TAG_REFUSED {
         Some(GrantReply::Refused)
     } else {
@@ -141,11 +204,24 @@ pub open spec fn grant_decode(s: Seq<u8>) -> Option<GrantReply> {
 }
 
 impl ConnectReq {
-    /// A request for a `requested` byte bulk window.
+    /// A request for a `requested` byte bulk window, offering the single wire
+    /// version this build speaks ([`PROTOCOL_VERSION`]) — the MVP client.
     pub fn for_window(requested: u32) -> (r: ConnectReq)
-        ensures r.requested_window == requested,
+        ensures
+            r.requested_window == requested,
+            r.versions.min == PROTOCOL_VERSION,
+            r.versions.max == PROTOCOL_VERSION,
     {
-        ConnectReq { requested_window: requested }
+        ConnectReq { requested_window: requested, versions: VersionRange::single(PROTOCOL_VERSION) }
+    }
+
+    /// A request for a `requested` byte bulk window offering `versions`.
+    pub fn new(requested: u32, versions: VersionRange) -> (r: ConnectReq)
+        ensures
+            r.requested_window == requested,
+            r.versions == versions,
+    {
+        ConnectReq { requested_window: requested, versions }
     }
 
     pub fn encode(&self) -> (b: [u8; REQ_LEN])
@@ -158,6 +234,8 @@ impl ConnectReq {
             ((self.requested_window >> 8) & 0xff) as u8,
             ((self.requested_window >> 16) & 0xff) as u8,
             ((self.requested_window >> 24) & 0xff) as u8,
+            self.versions.min,
+            self.versions.max,
         ];
         assert(b@ =~= req_encode(*self));
         b
@@ -177,6 +255,7 @@ impl ConnectReq {
         Some(ConnectReq {
             requested_window: (buf[1] as u32) | ((buf[2] as u32) << 8) | ((buf[3] as u32) << 16)
                 | ((buf[4] as u32) << 24),
+            versions: VersionRange { min: buf[5], max: buf[6] },
         })
     }
 }
@@ -189,7 +268,7 @@ impl GrantReply {
     {
         broadcast use vstd::array::group_array_axioms;
         match *self {
-            GrantReply::Grant(g) => {
+            GrantReply::Grant(g, ver) => {
                 let b: [u8; GRANT_LEN] = [
                     TAG_GRANT,
                     (g.window & 0xff) as u8,
@@ -200,12 +279,13 @@ impl GrantReply {
                     ((g.size >> 8) & 0xff) as u8,
                     ((g.size >> 16) & 0xff) as u8,
                     ((g.size >> 24) & 0xff) as u8,
+                    ver,
                 ];
                 assert(b@.subrange(0, GRANT_LEN as int) =~= grant_encode(*self));
                 (b, GRANT_LEN)
             }
             GrantReply::Refused => {
-                let b: [u8; GRANT_LEN] = [TAG_REFUSED, 0, 0, 0, 0, 0, 0, 0, 0];
+                let b: [u8; GRANT_LEN] = [TAG_REFUSED, 0, 0, 0, 0, 0, 0, 0, 0, 0];
                 assert(b@.subrange(0, REFUSED_LEN as int) =~= grant_encode(*self));
                 (b, REFUSED_LEN)
             }
@@ -222,12 +302,15 @@ impl GrantReply {
     {
         broadcast use vstd::slice::group_slice_axioms;
         if buf.len() == GRANT_LEN && buf[0] == TAG_GRANT {
-            Some(GrantReply::Grant(WindowGrant {
-                window: (buf[1] as u32) | ((buf[2] as u32) << 8) | ((buf[3] as u32) << 16)
-                    | ((buf[4] as u32) << 24),
-                size: (buf[5] as u32) | ((buf[6] as u32) << 8) | ((buf[7] as u32) << 16)
-                    | ((buf[8] as u32) << 24),
-            }))
+            Some(GrantReply::Grant(
+                WindowGrant {
+                    window: (buf[1] as u32) | ((buf[2] as u32) << 8) | ((buf[3] as u32) << 16)
+                        | ((buf[4] as u32) << 24),
+                    size: (buf[5] as u32) | ((buf[6] as u32) << 8) | ((buf[7] as u32) << 16)
+                        | ((buf[8] as u32) << 24),
+                },
+                buf[9],
+            ))
         } else if buf.len() == REFUSED_LEN && buf[0] == TAG_REFUSED {
             Some(GrantReply::Refused)
         } else {
@@ -328,29 +411,86 @@ impl Admission {
     }
 }
 
+/// `v` is a wire version both `client` and `server` speak — it lies in both
+/// `[min, max]` ranges. The common versions form the intersection; [`negotiate`]
+/// returns the greatest of them (the highest both can speak), or `None` when it
+/// is empty.
+pub open spec fn common(client: VersionRange, server: VersionRange, v: u8) -> bool {
+    client.min <= v <= client.max && server.min <= v <= server.max
+}
+
+/// The version selection (rev1§3.7, *"versions are negotiated once at session
+/// establishment … a server may speak several concurrently"*): the **highest
+/// common** version of the client's offered range and the server's supported
+/// range, or `None` when the ranges are disjoint (a clean refusal, not a crash).
+/// Pure and total over arbitrary `u8` ranges — a malformed client range (`min >
+/// max`, possible from decoded bytes) denotes an empty set and yields `None`.
+pub fn negotiate(client: VersionRange, server: VersionRange) -> (r: Option<u8>)
+    ensures
+        match r {
+            Some(v) => common(client, server, v) && (forall|w: u8|
+                common(client, server, w) ==> w <= v),
+            None => forall|w: u8| !common(client, server, w),
+        },
+{
+    // lo/hi bound the intersection: lo = max of the mins, hi = min of the maxes.
+    // Non-empty iff lo <= hi, and then hi is the highest common version.
+    let lo = if client.min >= server.min { client.min } else { server.min };
+    let hi = if client.max <= server.max { client.max } else { server.max };
+    if lo <= hi {
+        Some(hi)
+    } else {
+        None
+    }
+}
+
+/// Per-message version validation (rev1§2.7/§3.7): a message's stamped header
+/// version must equal the session's negotiated version, else the message is
+/// refused — *never* a crash. This is dispatch-discipline outside the header
+/// codec, so the header layout and its bijection proofs are untouched (rev1§3.7).
+/// Inert until the dispatch site is wired (deferred to C3C).
+pub fn version_ok(header_version: u8, negotiated: u8) -> (ok: bool)
+    ensures ok == (header_version == negotiated),
+{
+    header_version == negotiated
+}
+
 /// The server's connect step, the admission point as a pure function:
-/// decode the request bytes, decide under `adm`, and return the reply to send
-/// back. A request that does not decode is refused (a server cannot grant a
-/// window it cannot size). The caller does the transport round-trip — `recv_nb`
-/// the request, `admit_connect`, `send_nb` the `encode`d reply — inside its
-/// reactor loop, the same shape as serving any other request. Preserves the
-/// quota invariant.
-pub fn admit_connect(adm: &mut Admission, req_bytes: &[u8]) -> (r: GrantReply)
+/// decode the request bytes, **negotiate the wire version** against the server's
+/// supported `server` range, decide the window under `adm`, and return the reply
+/// to send back. A request that does not decode, names no common version, or asks
+/// for a window past the quota is refused (the wire `GrantReply::Refused` covers
+/// all three — the server-internal [`ConnectErr`] distinguishes them). The caller
+/// does the transport round-trip — `recv_nb` the request, `admit_connect`,
+/// `send_nb` the `encode`d reply — inside its reactor loop, the same shape as
+/// serving any other request. Preserves the quota invariant.
+pub fn admit_connect(adm: &mut Admission, server: VersionRange, req_bytes: &[u8]) -> (r: GrantReply)
     requires adm.well_formed(),
     ensures final(adm).well_formed(),
 {
-    match ConnectReq::decode(req_bytes) {
-        Some(req) => match adm.admit(req.requested_window) {
-            Ok(g) => GrantReply::Grant(g),
-            Err(_) => GrantReply::Refused,
+    // Decode → negotiate version → admit window. Each failure is an internal
+    // `ConnectErr` (for diagnosability) collapsed to the single wire refusal.
+    let decided: Result<(WindowGrant, u8), ConnectErr> = match ConnectReq::decode(req_bytes) {
+        Some(req) => match negotiate(req.versions, server) {
+            Some(ver) => match adm.admit(req.requested_window) {
+                Ok(g) => Ok((g, ver)),
+                Err(e) => Err(e),
+            },
+            None => Err(ConnectErr::VersionMismatch),
         },
-        None => GrantReply::Refused,
+        None => Err(ConnectErr::Refused),
+    };
+    match decided {
+        Ok((g, ver)) => GrantReply::Grant(g, ver),
+        Err(_) => GrantReply::Refused,
     }
 }
 
 // ── Codec bijection lemmas (∀; the bit_vector split/reassemble identities) ──
 
 /// `decode`∘`encode` is the identity on `ConnectReq`: every request round-trips.
+/// The `u32` window reassembles by the same `bit_vector` split identity as
+/// before; the two version bytes are carried verbatim, so they need no reasoning.
 pub proof fn lemma_req_decode_encode(r: ConnectReq)
     ensures
         req_decode(req_encode(r)) == Some(r),
@@ -382,16 +522,19 @@ pub proof fn lemma_req_encode_decode(s: Seq<u8>)
         >> 16) & 0xff) as u8 == s3) by (bit_vector);
     assert(((((s1 as u32) | ((s2 as u32) << 8) | ((s3 as u32) << 16) | ((s4 as u32) << 24))
         >> 24) & 0xff) as u8 == s4) by (bit_vector);
+    // s[5], s[6] (the version bytes) are reproduced directly; extensionality closes it.
     assert(req_encode(req_decode(s)->Some_0) =~= s);
 }
 
-/// `decode`∘`encode` is the identity on `GrantReply` (both arms).
+/// `decode`∘`encode` is the identity on `GrantReply` (both arms). The window/size
+/// `u32`s reassemble by the same `bit_vector` identities; the appended version
+/// byte is carried verbatim.
 pub proof fn lemma_grant_decode_encode(g: GrantReply)
     ensures
         grant_decode(grant_encode(g)) == Some(g),
 {
     match g {
-        GrantReply::Grant(w) => {
+        GrantReply::Grant(w, _ver) => {
             let win = w.window; let sz = w.size;
             assert(((win & 0xff) as u8 as u32) | (((win >> 8) & 0xff) as u8 as u32) << 8
                 | (((win >> 16) & 0xff) as u8 as u32) << 16
@@ -449,22 +592,28 @@ mod tests {
     fn connect_req_roundtrip() {
         let r = ConnectReq::for_window(4096);
         assert_eq!(ConnectReq::decode(&r.encode()), Some(r));
+        // A multi-version offer round-trips too (the version bytes are carried).
+        let r2 = ConnectReq::new(8192, VersionRange::new(1, 4));
+        assert_eq!(ConnectReq::decode(&r2.encode()), Some(r2));
     }
 
     #[test]
     fn connect_req_rejects_bad_len_and_tag() {
         assert_eq!(ConnectReq::decode(&[]), None);
-        assert_eq!(ConnectReq::decode(&[TAG_REQ, 0, 0, 0]), None); // short
-        assert_eq!(ConnectReq::decode(&[TAG_REQ, 0, 0, 0, 0, 0]), None); // trailing
-        assert_eq!(ConnectReq::decode(&[0xFF, 0, 0, 0, 0]), None); // wrong tag
+        assert_eq!(ConnectReq::decode(&[TAG_REQ, 0, 0, 0, 0, 0]), None); // short (REQ_LEN-1)
+        assert_eq!(ConnectReq::decode(&[TAG_REQ, 0, 0, 0, 0, 0, 0, 0]), None); // trailing (REQ_LEN+1)
+        assert_eq!(ConnectReq::decode(&[0xFF, 0, 0, 0, 0, 0, 0]), None); // right len, wrong tag
     }
 
     #[test]
     fn grant_reply_roundtrip() {
-        let g = GrantReply::Grant(WindowGrant {
-            window: 0,
-            size: 8192,
-        });
+        let g = GrantReply::Grant(
+            WindowGrant {
+                window: 0,
+                size: 8192,
+            },
+            3,
+        );
         let (b, n) = g.encode();
         assert_eq!(GrantReply::decode(&b[..n]), Some(g));
 
@@ -479,6 +628,72 @@ mod tests {
         assert_eq!(GrantReply::decode(&[TAG_GRANT, 0, 0]), None); // short grant
         assert_eq!(GrantReply::decode(&[TAG_REFUSED, 0]), None); // refusal w/ trailing
         assert_eq!(GrantReply::decode(&[0x55]), None); // unknown tag
+    }
+
+    #[test]
+    fn negotiate_single_version() {
+        // The deployed MVP case: one version offered on both sides.
+        assert_eq!(
+            negotiate(VersionRange::single(1), VersionRange::single(1)),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn negotiate_disjoint_refuses() {
+        assert_eq!(
+            negotiate(VersionRange::single(1), VersionRange::single(2)),
+            None
+        );
+        assert_eq!(
+            negotiate(VersionRange::new(5, 9), VersionRange::new(1, 3)),
+            None
+        );
+        // Adjacent but non-overlapping ([1,2] and [3,4]) share no version.
+        assert_eq!(
+            negotiate(VersionRange::new(1, 2), VersionRange::new(3, 4)),
+            None
+        );
+    }
+
+    #[test]
+    fn negotiate_picks_highest_common() {
+        // Overlap: highest common is min(client.max, server.max).
+        assert_eq!(
+            negotiate(VersionRange::new(1, 4), VersionRange::new(3, 6)),
+            Some(4)
+        );
+        // Nested — client inside server.
+        assert_eq!(
+            negotiate(VersionRange::new(3, 3), VersionRange::new(1, 9)),
+            Some(3)
+        );
+        // Nested — server inside client.
+        assert_eq!(
+            negotiate(VersionRange::new(1, 5), VersionRange::new(2, 3)),
+            Some(3)
+        );
+        // Touching at exactly one version.
+        assert_eq!(
+            negotiate(VersionRange::new(1, 3), VersionRange::new(3, 5)),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn negotiate_malformed_range_refuses() {
+        // A client range with min > max denotes an empty set → no common version.
+        assert_eq!(
+            negotiate(VersionRange::new(5, 2), VersionRange::new(1, 9)),
+            None
+        );
+    }
+
+    #[test]
+    fn version_ok_matches_exactly() {
+        assert!(version_ok(2, 2));
+        assert!(!version_ok(1, 2));
+        assert!(!version_ok(2, 1));
     }
 
     #[test]
@@ -519,15 +734,51 @@ mod tests {
     }
 
     #[test]
-    fn admit_connect_decodes_admits_and_refuses() {
+    fn admit_connect_negotiates_admits_and_refuses() {
+        let server = VersionRange::single(PROTOCOL_VERSION);
         let mut adm = Admission::new(4);
-        let ok = admit_connect(&mut adm, &ConnectReq::for_window(4).encode());
-        assert_eq!(ok, GrantReply::Grant(WindowGrant { window: 0, size: 4 }));
-        // Quota now exhausted: a second connect is refused.
-        let no = admit_connect(&mut adm, &ConnectReq::for_window(1).encode());
+        // A matching version + a window that fits → granted at the negotiated version.
+        let ok = admit_connect(&mut adm, server, &ConnectReq::for_window(4).encode());
+        assert_eq!(
+            ok,
+            GrantReply::Grant(WindowGrant { window: 0, size: 4 }, PROTOCOL_VERSION)
+        );
+        // Quota now exhausted: a second (version-matching) connect is refused.
+        let no = admit_connect(&mut adm, server, &ConnectReq::for_window(1).encode());
         assert_eq!(no, GrantReply::Refused);
         // A malformed request is refused, not granted.
-        let bad = admit_connect(&mut adm, &[0xFF, 0xFF]);
+        let bad = admit_connect(&mut adm, server, &[0xFF, 0xFF]);
         assert_eq!(bad, GrantReply::Refused);
+    }
+
+    #[test]
+    fn admit_connect_refuses_version_mismatch_without_touching_quota() {
+        let server = VersionRange::single(PROTOCOL_VERSION);
+        let mut adm = Admission::new(64);
+        // A version with no overlap is refused even though the window would fit,
+        // and the quota is left untouched (admit is never reached).
+        let mismatch = admit_connect(
+            &mut adm,
+            server,
+            &ConnectReq::new(4, VersionRange::single(PROTOCOL_VERSION.wrapping_add(9))).encode(),
+        );
+        assert_eq!(mismatch, GrantReply::Refused);
+        assert_eq!(adm.remaining(), 64);
+    }
+
+    #[test]
+    fn admit_connect_selects_highest_common_version() {
+        // Server speaks [1,3]; a client offering [2,5] is granted at version 3.
+        let mut adm = Admission::new(8);
+        let server = VersionRange::new(1, 3);
+        let reply = admit_connect(
+            &mut adm,
+            server,
+            &ConnectReq::new(8, VersionRange::new(2, 5)).encode(),
+        );
+        assert_eq!(
+            reply,
+            GrantReply::Grant(WindowGrant { window: 0, size: 8 }, 3)
+        );
     }
 }
