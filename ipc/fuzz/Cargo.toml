@@ -30,3 +30,13 @@ path = "fuzz_targets/wire_decode.rs"
 test = false
 doc = false
 bench = false
+
+# The session connect codecs (ConnectReq/GrantReply) — a distinct decoder family
+# from the postcard wire body above; uses the default no_std API (no `fuzzing`
+# feature needed for the codecs themselves).
+[[bin]]
+name = "connect_decode"
+path = "fuzz_targets/connect_decode.rs"
+test = false
+doc = false
+bench = false

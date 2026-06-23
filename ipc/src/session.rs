@@ -782,3 +782,154 @@ mod tests {
         );
     }
 }
+
+// The negotiation/admission property tier (rev1§6, *"everything gets
+// Miri+proptest"*). Pure, sequential decision logic — no concurrency — so plain
+// proptest is the tool; the `not(loom)/not(shuttle)` gate mirrors `reactor.rs`
+// (those harnesses drive the concurrent shape, not this).
+#[cfg(all(test, not(loom), not(shuttle)))]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    // ── Independent exec oracles ──
+    // The Verus `ensures` on `negotiate` is stated against the *ghost* `common`
+    // spec fn, which is not callable from exec/test code. These plain-Rust
+    // oracles re-derive the same notion by brute force over the whole u8 domain,
+    // independent of `negotiate`'s lo/hi arithmetic — so checking agreement is a
+    // real test, not a tautology (the project's independent-oracle posture, cf.
+    // `loader/tests/layout_props.rs`).
+
+    /// Does `v` lie in both ranges? (the exec twin of the ghost `common`.)
+    fn is_common(client: VersionRange, server: VersionRange, v: u8) -> bool {
+        client.min <= v && v <= client.max && server.min <= v && v <= server.max
+    }
+
+    /// The highest version both ranges contain, by a brute-force scan from the
+    /// top — `None` when the intersection is empty. Independent of `negotiate`.
+    fn highest_common(client: VersionRange, server: VersionRange) -> Option<u8> {
+        (0u8..=u8::MAX)
+            .rev()
+            .find(|&v| is_common(client, server, v))
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 4 } else { 256 },
+            failure_persistence: if cfg!(miri) { None } else { ProptestConfig::default().failure_persistence },
+            .. ProptestConfig::default()
+        })]
+
+        /// `negotiate` returns **exactly** the highest common version of the two
+        /// ranges, for *every* pair — overlapping, nested, touching, disjoint, and
+        /// malformed (`min > max`, reachable from decoded bytes). Equality against
+        /// the independent oracle pins the *selection*, not merely "a common
+        /// version." The selection is also symmetric in the two ranges (it is a
+        /// property of the intersection, not of argument order).
+        #[test]
+        fn negotiate_is_highest_common(
+            c_min in any::<u8>(),
+            c_max in any::<u8>(),
+            s_min in any::<u8>(),
+            s_max in any::<u8>(),
+        ) {
+            let client = VersionRange::new(c_min, c_max);
+            let server = VersionRange::new(s_min, s_max);
+            prop_assert_eq!(negotiate(client, server), highest_common(client, server));
+            prop_assert_eq!(negotiate(client, server), negotiate(server, client));
+        }
+
+        /// Over an arbitrary sequence of connects against one server range and one
+        /// quota: `admit_connect` grants **at the negotiated version** iff a common
+        /// version exists *and* the window fits the remaining quota, else refuses;
+        /// and it **never over-grants** — `remaining()` tracks `budget − Σgranted`
+        /// exactly and never exceeds the budget. The runtime witness, over whole
+        /// sequences, for the Verus `Admission` never-over-grant invariant.
+        #[test]
+        fn admit_connect_sequence_grants_and_never_over_grants(
+            steps in prop::collection::vec((0u32..=300, any::<u8>(), any::<u8>()), 0..40),
+        ) {
+            const BUDGET: u32 = 1000;
+            let server = VersionRange::new(2, 4);
+            let mut adm = Admission::new(BUDGET);
+            let mut remaining: u32 = BUDGET; // the oracle
+
+            for (window, c_min, c_max) in steps {
+                let vrange = VersionRange::new(c_min, c_max);
+                let reply = admit_connect(&mut adm, server, &ConnectReq::new(window, vrange).encode());
+
+                match (highest_common(vrange, server), window <= remaining) {
+                    (Some(ver), true) => {
+                        // Common version + fitting window: granted at that version.
+                        prop_assert_eq!(
+                            reply,
+                            GrantReply::Grant(WindowGrant { window: 0, size: window }, ver)
+                        );
+                        remaining -= window;
+                    }
+                    _ => {
+                        // No common version, or the window does not fit: refused,
+                        // and the quota is left untouched.
+                        prop_assert_eq!(reply, GrantReply::Refused);
+                    }
+                }
+                // Never over-grant: the accounting matches the oracle and stays in [0, BUDGET].
+                prop_assert_eq!(adm.remaining(), remaining);
+                prop_assert!(remaining <= BUDGET);
+            }
+        }
+    }
+
+    // ── Negative control (the anti-theater check) ──
+
+    /// A deliberately-wrong selector: returns the client's max while ignoring
+    /// whether the *server* can speak it — exactly the bug `negotiate` exists to
+    /// prevent (a client forcing a version the server does not support). Used
+    /// only by the control below to show the proptest above has teeth.
+    fn bad_negotiate(client: VersionRange, _server: VersionRange) -> Option<u8> {
+        Some(client.max)
+    }
+
+    /// Negative control (same posture as `loader`'s
+    /// `old_unchecked_formula_would_wrap_on_i5_witness`): on inputs where the
+    /// server cannot speak the client's max, `bad_negotiate` disagrees with the
+    /// brute-force oracle and selects a **non-common** version — so substituting
+    /// it for `negotiate` would make `negotiate_is_highest_common` fail. This
+    /// proves the property is not vacuously satisfiable.
+    #[test]
+    fn negotiate_negative_control_has_teeth() {
+        // Disjoint ranges: no common version at all, yet the wrong oracle still
+        // returns the client's max.
+        let client = VersionRange::new(4, 5);
+        let server = VersionRange::new(1, 2);
+        assert_eq!(negotiate(client, server), None);
+        assert_eq!(negotiate(client, server), highest_common(client, server)); // real: agree
+        let bad = bad_negotiate(client, server).unwrap();
+        assert_ne!(
+            bad_negotiate(client, server),
+            highest_common(client, server),
+            "wrong oracle must violate the proptest property"
+        );
+        assert!(
+            !is_common(client, server, bad),
+            "wrong oracle picked a non-common version"
+        );
+
+        // Overlapping, but the wrong oracle still overshoots: the server caps at 3
+        // while the client's max is 5.
+        let client = VersionRange::new(1, 5);
+        let server = VersionRange::new(1, 3);
+        assert_eq!(negotiate(client, server), Some(3)); // real: highest common
+        let bad = bad_negotiate(client, server).unwrap();
+        assert_eq!(bad, 5);
+        assert_ne!(
+            bad_negotiate(client, server),
+            highest_common(client, server),
+            "wrong oracle must violate the proptest property"
+        );
+        assert!(
+            !is_common(client, server, bad),
+            "the server cannot speak version 5"
+        );
+    }
+}
