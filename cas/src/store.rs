@@ -180,8 +180,8 @@ pub struct StoreOptions {
     /// Per-ref soft byte bound (rev1§4.4 containment): a single ref's overlay
     /// flushes once it exceeds this size, so one ref cannot consume the whole
     /// `global_budget` (the per-ref soft quota under the global budget). The
-    /// recommended default (8 MiB) is shipped by B12F; this struct only carries
-    /// it as a tunable number — the mechanism, not the figure, is mandatory.
+    /// recommended default (8 MiB) is a tunable number — the mechanism, not the
+    /// figure, is mandatory.
     pub per_ref_budget: usize,
     /// Per-ref operation-count secondary bound (rev1§4.4): a ref also flushes
     /// once it has accumulated this many unflushed mutating ops, so a metadata
@@ -189,24 +189,22 @@ pub struct StoreOptions {
     pub op_count_bound: u64,
     /// Size-pressure low watermark (rev1§4.4): flushing the biggest offenders
     /// starts here, below the high watermark (`global_budget`), so writers
-    /// rarely hit the high one. Consumed by B12B; carried here as the substrate
-    /// (stubbed equal to `global_budget` until then).
+    /// rarely hit the high one.
     pub size_low_watermark: usize,
     /// WAL-usage watermark that triggers flush-the-pinner (rev1§4.4, the
-    /// recommended 50% of `wal_len`). Consumed by B12C's circular ring; carried
-    /// here as the substrate (stubbed equal to `wal_len` until then).
+    /// recommended 50% of `wal_len`): the circular WAL ring flushes the ref
+    /// pinning the tail once usage crosses it.
     pub wal_watermark: u64,
     /// Staleness bound in nanoseconds (rev1§4.4 timer trigger): a quietly dirty
     /// ref eventually becomes committed tree once its oldest-dirty age exceeds
-    /// this. Consumed by B12D; carried here as the substrate (stubbed to no
-    /// staleness flush until then).
+    /// this.
     pub staleness_ns: u64,
 }
 
 impl Default for StoreOptions {
     fn default() -> Self {
         // The rev1§4.4 recommended defaults (S-9, spec line 266): the *triggers
-        // and bounds* are mandatory mechanisms (shipped by B12A–B12D); these
+        // and bounds* are mandatory mechanisms; these
         // *numbers* are the recommended figures a store may tune. The storage
         // server (`storaged`) mounts with this `default()`, so it *is* "the
         // storage server's shipped configuration" the spec says matches the
@@ -224,7 +222,7 @@ impl Default for StoreOptions {
             // under `per_ref_budget`. Tunable like the rest.
             op_count_bound: 8192,
             // Flush-the-biggest-offenders starts here, below the high watermark
-            // (`global_budget`), so writers rarely hit it — B12B's 3/4 fraction.
+            // (`global_budget`), so writers rarely hit it.
             size_low_watermark: global_budget / 4 * 3,
             wal_watermark: wal_len / 2, // flush-the-pinner at 50% (M-5)
             staleness_ns: 30 * 1_000_000_000, // 30 s staleness bound (M-6 timer)
@@ -551,7 +549,7 @@ struct HeadAdvance {
 ///
 /// Out of scope here (a Store-level concern, not a property of this pure
 /// function): nothing this function does assumes WAL offsets are monotonic.
-/// Under the B12C circular ring they are *not* — `wal_tail` wraps, so a later
+/// Under the circular WAL ring they are *not* — `wal_tail` wraps, so a later
 /// record can sit at a lower physical offset than an earlier one, and the head
 /// this returns can move "backwards" in raw-offset terms when it crosses the
 /// wrap. That is sound because this function only **selects** a record's `off`
@@ -1494,8 +1492,8 @@ fn recover_records(wal: &[u8], wal_head: u64, wal_next_seq: u64) -> (r: Recovere
 
 /// Per-ref flush-scheduler accounting (rev1§4.4), riding alongside `overlays`.
 /// Every field is *derived* from the ref's currently-unflushed records, so it
-/// is reconstructed at mount during WAL replay and never persisted — B12 is
-/// format-stable (no `SB_VERSION` bump, no corpus regen). Reset when the ref
+/// is reconstructed at mount during WAL replay and never persisted (no
+/// `SB_VERSION` bump, no corpus regen). Reset when the ref
 /// flushes (its overlay becomes immutable tree). The dirty *byte* count is not
 /// duplicated here — it already lives in `Overlay::bytes()`.
 #[derive(Debug, Default)]
@@ -1505,14 +1503,14 @@ struct RefAcct {
     op_count: u64,
     /// Physical WAL offset of this ref's oldest unflushed record (rev1§4.4). Set
     /// by the first op after a flush, untouched after; `None` while clean. For
-    /// the tail-pinner this equals the live `wal_head`. B12C does **not** pick
-    /// the pinner by sorting on this field — that is wrong across the ring wrap
+    /// the tail-pinner this equals the live `wal_head`. The pinner is **not**
+    /// picked by sorting on this field — that is wrong across the ring wrap
     /// (a newer ref can sit at a lower offset than the tail-pinner). The runtime
     /// pinner is the front of `wal_records` (the record at `wal_head`); this
     /// field stays as the per-ref position datum the tests assert against.
     oldest_wal_pos: Option<u64>,
     /// UTC-nanos timestamp at which this ref first became dirty: the staleness
-    /// trigger's age key (rev1§4.4). `None` while clean. Consumed by B12D.
+    /// trigger's age key (rev1§4.4). `None` while clean.
     oldest_dirty_ns: Option<u64>,
 }
 
@@ -1532,7 +1530,7 @@ pub struct Store<D: BlockDev> {
     dirty_refs: BTreeSet<Vec<u8>>,
     overlays: BTreeMap<Vec<u8>, Overlay>,
     /// Per-ref flush-scheduler accounting (rev1§4.4), keyed like `overlays`.
-    /// Derived runtime state, reconstructed on WAL replay (B12 is format-stable).
+    /// Derived runtime state, reconstructed on WAL replay (not persisted).
     acct: BTreeMap<Vec<u8>, RefAcct>,
     wal_tail: u64,
     wal_seq: u64,
@@ -1776,7 +1774,7 @@ impl<D: BlockDev> Store<D> {
         // skeleton — the content layer (`WalOp` decode) and the extent gate stay
         // plain Rust (rev1§6.1(e)).
         //
-        // Circular WAL (B12C, rev1§4.4, M-5): the live window runs from the
+        // Circular WAL (rev1§4.4, M-5): the live window runs from the
         // committed `wal_head` around the ring to the tail and may straddle the
         // buffer end. Rotate the buffer so the head sits at offset 0, linearizing
         // the ring into the contiguous run `recover_records` walks — so the
@@ -1826,9 +1824,9 @@ impl<D: BlockDev> Store<D> {
             store.apply_to_overlay(&op)?;
             // Reconstruct per-ref flush accounting from the replayed records
             // (rev1§4.4): nothing of it is persisted, so the live state is
-            // recomputed here exactly as the write path built it (B12 is
-            // format-stable). The accounted position is the record's *physical*
-            // ring offset, so `oldest_wal_pos` matches the live write path.
+            // recomputed here exactly as the write path built it. The accounted
+            // position is the record's *physical* ring offset, so
+            // `oldest_wal_pos` matches the live write path.
             let phys = to_phys(rec.off);
             store.account_op(&op, phys);
             store.wal_records.push_back(RecMeta {
@@ -2387,7 +2385,7 @@ impl<D: BlockDev> Store<D> {
         // blocking flush (no eviction, no `FULL` return): the write proceeds
         // once the overlay has become tree. The flush + commit rides the
         // existing partial-head-advance (`advance_head` pops the contiguous
-        // flushed prefix); B12C's ring reclaims the rest of the WAL span.
+        // flushed prefix); the circular ring reclaims the rest of the WAL span.
         let over_bytes = self.overlays.get(&r).map_or(0, |o| o.bytes()) > self.opts.per_ref_budget;
         let over_ops = self.acct.get(&r).map_or(0, |a| a.op_count) > self.opts.op_count_bound;
         if over_bytes || over_ops {
@@ -2406,7 +2404,8 @@ impl<D: BlockDev> Store<D> {
         // WAL/size pressure relieved. The incoming op's mtime is the clock — a
         // write whose timestamp leaves an *older* quiet ref past the bound flushes
         // that ref, so the write path itself bounds staleness without a timer.
-        // Disabled by default (staleness_ns == u64::MAX); B12F ships the 30 s figure.
+        // The disabled sentinel staleness_ns == u64::MAX (set by test fixtures,
+        // not the production default) makes this a no-op.
         self.relieve_staleness(op.mtime())?;
         Ok(())
     }
@@ -2429,8 +2428,9 @@ impl<D: BlockDev> Store<D> {
     /// separate enforcement here.
     ///
     /// The flush + commit rides `commit`'s partial-head-advance (the verified
-    /// `advance_head` pops the contiguous flushed prefix), exactly as B12A's
-    /// per-ref soft-bound flush does; B12C's ring reclaims the rest of the span.
+    /// `advance_head` pops the contiguous flushed prefix), exactly as the
+    /// per-ref soft-bound flush does; the circular ring reclaims the rest of
+    /// the span.
     fn relieve_size_pressure(&mut self) -> Result<(), StoreError> {
         let total = |s: &Self| -> usize { s.overlays.values().map(|o| o.bytes()).sum() };
         if total(self) <= self.opts.size_low_watermark {
@@ -2530,9 +2530,10 @@ impl<D: BlockDev> Store<D> {
     /// and a single `commit` folds in the whole sweep, riding the verified
     /// `advance_head` exactly as the other relievers do.
     fn relieve_staleness(&mut self, now: u64) -> Result<(), StoreError> {
-        // Disabled stub (the default until B12F ships the 30 s figure): skip the
-        // scan entirely. `staleness_ns == u64::MAX` can never be exceeded anyway,
-        // but the early return keeps the hot write path free of the acct walk.
+        // The disabled sentinel staleness_ns == u64::MAX (set by test fixtures,
+        // not the production default) skips the scan entirely. It can never be
+        // exceeded anyway, but the early return keeps the hot write path free of
+        // the acct walk.
         if self.opts.staleness_ns == u64::MAX {
             return Ok(());
         }
@@ -2563,7 +2564,7 @@ impl<D: BlockDev> Store<D> {
     /// request boundaries and at reactor idle (Design decision 5), the points a
     /// single-threaded request-driven server already runs — so a quietly dirty
     /// ref eventually becomes committed tree even with no further writes. A no-op
-    /// at the default-stubbed `staleness_ns == u64::MAX` until B12F ships 30 s.
+    /// at the disabled sentinel `staleness_ns == u64::MAX` (set by test fixtures).
     pub fn flush_stale(&mut self, now: u64) -> Result<(), StoreError> {
         self.relieve_staleness(now)
     }
@@ -2571,8 +2572,9 @@ impl<D: BlockDev> Store<D> {
     /// Update a ref's flush-scheduler accounting after one mutating op lands in
     /// its overlay (rev1§4.4). `wal_pos` is the op's byte offset in the WAL.
     /// Pure derived state: called on the live write path and again, identically,
-    /// during mount WAL replay, so a remounted store recomputes it (B12 is
-    /// format-stable). Reset in `flush_ref` when the ref's overlay becomes tree.
+    /// during mount WAL replay, so a remounted store recomputes it (not
+    /// persisted in the on-disk format). Reset in `flush_ref` when the ref's
+    /// overlay becomes tree.
     fn account_op(&mut self, op: &WalOp, wal_pos: u64) {
         let a = self.acct.entry(op.ref_name().to_vec()).or_default();
         a.op_count += 1;
@@ -3317,22 +3319,22 @@ mod tests {
             // Keep the low watermark consistent with this fixture's tightened
             // global_budget (rev1§4.4 invariant: size_low_watermark <= the high
             // watermark). Default would leave it at 96 MiB, above this 32 KiB
-            // high watermark; pinning it equal preserves the pre-B12 size
-            // trigger threshold, now realized as flush-the-biggest-offenders.
+            // high watermark; pin it equal so size pressure (flush-the-biggest-
+            // offenders) triggers at this fixture's scale.
             size_low_watermark: 32 * 1024,
-            // B12F ships triggering op-count and staleness *defaults* (8192 ops,
-            // 30 s); pin them off here so this shared fixture keeps preserving
-            // the pre-B12 flush behavior. The wal watermark inherits the default
-            // (>> this fixture's 8 KiB wal_len), so flush-the-pinner stays inert
-            // too. Tests that exercise a specific bound pass their own tight opts
-            // (`crash_opts`, `wal_opts`, `stale_opts`, and the inline builders).
+            // Pin the op-count and staleness triggers off so this shared fixture
+            // does not flush on them (the production defaults are 8192 ops / 30 s).
+            // The wal watermark inherits the default (>> this fixture's 8 KiB
+            // wal_len), so flush-the-pinner stays inert too. Tests that exercise
+            // a specific bound pass their own tight opts (`crash_opts`,
+            // `wal_opts`, `stale_opts`, and the inline builders).
             op_count_bound: u64::MAX,
             staleness_ns: u64::MAX,
             ..StoreOptions::default()
         }
     }
 
-    /// `test_opts` with a tight per-ref op-count bound so the B12A per-ref
+    /// `test_opts` with a tight per-ref op-count bound so the per-ref
     /// soft-bound auto-flush (rev1§4.4) fires mid-stream — used by the
     /// crash-injection proptest to re-witness all-acked-survives across the new
     /// selective-flush path (flush_ref + commit inside a write).
@@ -3361,7 +3363,7 @@ mod tests {
         rec
     }
 
-    // ── B12F: refuse-not-panic format contract (rev1§4.5, S-10) ──
+    // ── refuse-not-panic format contract (rev1§4.5, S-10) ──
 
     /// rev1§4.5: `format` is total over device *geometry* — an undersized or
     /// un-layoutable device is refused with `StoreError::DeviceTooSmall`, never
@@ -3394,7 +3396,7 @@ mod tests {
         }
     }
 
-    // ── B12A: per-ref accounting + per-ref soft bound (rev1§4.4, M-3/M-6) ──
+    // ── per-ref accounting + per-ref soft bound (rev1§4.4, M-3/M-6) ──
     //
     // `mod tests` is a child module of `store`, so these read the private
     // `Store::overlays` / `Store::acct` directly — no accessors needed.
@@ -3552,8 +3554,8 @@ mod tests {
     }
 
     /// rev1§4.4 / Design decision 1: all per-ref accounting is derived runtime
-    /// state, reconstructed at mount from WAL replay — B12 is format-stable. A
-    /// remount must recompute bytes / op-count / oldest-WAL-position /
+    /// state, reconstructed at mount from WAL replay; not part of the on-disk
+    /// format. A remount must recompute bytes / op-count / oldest-WAL-position /
     /// oldest-dirty-timestamp identical to the pre-remount live state.
     #[test]
     fn per_ref_accounting_is_reconstructed_on_remount() {
@@ -3616,14 +3618,14 @@ mod tests {
         );
     }
 
-    // ── B12B: size-pressure low/high watermarks + flush-the-biggest-offenders ──
+    // ── size-pressure low/high watermarks + flush-the-biggest-offenders ──
     //         (rev1§4.4 trigger 3, M-4)
 
     /// rev1§4.4 M-4 headline: crossing the size low watermark flushes the
     /// *biggest offenders*, not everything. Three refs of unequal size cross the
     /// low watermark; the largest flushes (overlay → committed tree, read-backable)
-    /// while the smaller two stay dirty — versus the pre-B12 `sync_all` that
-    /// emptied all of them. Size pressure is the only trigger here (ample WAL,
+    /// while the smaller two stay dirty — not a `sync_all` that empties all of
+    /// them. Size pressure is the only trigger here (ample WAL,
     /// loose per-ref/op-count bounds).
     #[test]
     fn size_pressure_flushes_biggest_offenders_keeps_small_dirty() {
@@ -3720,7 +3722,7 @@ mod tests {
         assert!(total <= LOW);
     }
 
-    // ── B12C: circular WAL ring + flush-the-pinner (rev1§4.4 trigger 2, M-5) ──
+    // ── circular WAL ring + flush-the-pinner (rev1§4.4 trigger 2, M-5) ──
 
     /// Options that isolate the WAL-pressure trigger: a small ring with the given
     /// watermark, every *other* flush trigger disabled (huge byte budgets, no
@@ -3742,8 +3744,8 @@ mod tests {
     /// (the oldest record, at `wal_head`), not everything. A pinner sits at the
     /// head while a newer ref fills the ring; crossing the watermark flushes the
     /// pinner — its overlay becomes committed tree and `wal_head` advances past
-    /// it, reclaiming its WAL span — while the newer ref stays dirty (versus the
-    /// pre-B12 flush-everything-and-reset).
+    /// it, reclaiming its WAL span — while the newer ref stays dirty (not a
+    /// flush-everything-and-reset).
     #[test]
     fn wal_pressure_flushes_pinner_keeps_newer_dirty() {
         let wal_len = 8 * 1024u64;
@@ -5640,7 +5642,7 @@ mod tests {
             fail_at in 4u64..600,
             crash_seed in any::<u64>(),
         ) {
-            // B12A: tight op-count bound so the per-ref soft-bound auto-flush
+            // Tight op-count bound so the per-ref soft-bound auto-flush
             // (flush_ref + commit) fires mid-stream; the crash point can then
             // land inside a selective flush, re-witnessing all-acked-survives.
             let mut store = Store::format(CrashDev::new(1 << 20), crash_opts()).unwrap();
@@ -6597,7 +6599,7 @@ mod tests {
         assert_eq!(rows, vec![(a, 1000), (b, 1001), (c, 1002)]);
     }
 
-    // ── B12D: staleness-timer trigger (rev1§4.4 trigger 4, M-6 timer half) ──
+    // ── staleness-timer trigger (rev1§4.4 trigger 4, M-6 timer half) ──
     //
     // Time is the caller-injected `now`/`mtime` (UTC-nanos, the same source op
     // mtimes carry) — there is no internal store clock — so these drive it with
@@ -6713,12 +6715,12 @@ mod tests {
         );
     }
 
-    /// With the default-stubbed `staleness_ns == u64::MAX` (what `test_opts` and
-    /// every shipped/B12A-C fixture inherit until B12F), the staleness sweep never
-    /// fires — a dirty ref stays dirty no matter how far the clock advances. Guards
-    /// that B12D installs the mechanism without changing default behavior.
+    /// With the disabled sentinel `staleness_ns == u64::MAX` that `test_opts`
+    /// sets, the staleness sweep never fires — a dirty ref stays dirty no matter
+    /// how far the clock advances. Guards that the mechanism stays inert when its
+    /// bound is the disabled sentinel.
     #[test]
-    fn staleness_disabled_by_default_never_flushes() {
+    fn staleness_disabled_under_test_opts_never_flushes() {
         let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
         store.create_ref(b"r").unwrap();
         store.write(b"r", &p(&["x"]), 0, &[1u8; 64], 1).unwrap();
@@ -6726,7 +6728,7 @@ mod tests {
         store.flush_stale(u64::MAX).unwrap();
         assert!(
             !store.overlays.get(b"r".as_slice()).unwrap().is_empty(),
-            "no staleness flush when the bound is the disabled stub"
+            "no staleness flush when the bound is the disabled sentinel"
         );
     }
 
@@ -6757,7 +6759,7 @@ mod tests {
                 clock += dt;
                 let name = [b'a' + ref_idx as u8];
                 // Heavy flush-without-GC can fill the chunk region (the limit is
-                // chunk capacity, not staleness — B12C finding 5); a NoSpace ends
+                // chunk capacity, not staleness); a NoSpace ends
                 // the run early and the invariant still holds on the state reached.
                 if store.write(&name, &p(&["f"]), 0, &[1u8; 32], clock).is_err() {
                     break;

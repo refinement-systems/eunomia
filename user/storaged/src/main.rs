@@ -315,13 +315,13 @@ pub extern "C" fn _start() -> ! {
     }
 
     loop {
-        // Staleness sweep (rev1§4.4 trigger 4, B12D): before parking the reactor,
+        // Staleness sweep (rev1§4.4 trigger 4): before parking the reactor,
         // flush any ref quietly dirty past the staleness bound so it eventually
         // becomes committed tree even with no further writes (Design decision 5 —
         // opportunistic, no armed kernel timer). This is the reactor-idle point:
         // the request ring has just drained (the inner loop broke on Empty), so we
         // are about to block. Best-effort — a flush failure is non-fatal (the next
-        // write still logs durably). A no-op until B12F ships the 30 s default.
+        // write still logs durably).
         let _ = server.store().flush_stale(now_utc());
         let (key, _signals) = reactor.wait();
         debug_assert_eq!(key, SESSION_KEY);
