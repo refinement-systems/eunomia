@@ -56,11 +56,11 @@ pub unsafe fn retype(
         ObjType::Thread => {
             let p = c.start as *mut Tcb;
             Tcb::init(p);
-            // rev1§5.4 maximum-controlled-priority ceiling: a fresh thread cap is
+            // rev2§5.4 maximum-controlled-priority ceiling: a fresh thread cap is
             // born capped at the retyper's own priority, so a descendant can
             // never be started above its creator. The ceiling is a
             // cap-carried value that `kcore::cspace::derive` attenuates
-            // monotonically (rev1§2.3).
+            // monotonically (rev2§2.3).
             CapKind::Thread(ObjId(p as u64), (*crate::thread::current()).priority)
         }
         ObjType::Channel => {
@@ -105,11 +105,11 @@ pub unsafe fn retype(
 }
 
 /// Top-up an aspace's intermediate-page-table pool from a donated untyped
-/// (rev1§2.5 "accepts top-ups", B10B). Carve `pages` zeroed 4 KiB tables that
+/// (rev2§2.5 "accepts top-ups"). Carve `pages` zeroed 4 KiB tables that
 /// physically abut the pool's current end out of `ut_slot`, advance the
 /// untyped's watermark — so the bytes are debited from the caller's untyped and
 /// reclaimed by the same `revoke + UntypedReset` that frees the aspace (no new
-/// cap, Design decision 2) — then grow the pool. The abutment check is the
+/// cap) — then grow the pool. The abutment check is the
 /// trusted-shell discharge of [`crate::aspace::grow_pool`]'s "fresh tables
 /// contiguous at `pool_base + old_len*PAGE`" premise; soundness of the growth
 /// itself is the verified [`kcore::aspace::lemma_grow_pool`].
@@ -139,7 +139,7 @@ pub unsafe fn aspace_topup(
         Some(b) => b,
         None => return Err(RetypeError::BadArg),
     };
-    // The pool's current physical end. The abutment contract (Design decision 1):
+    // The pool's current physical end. The abutment contract:
     // the untyped's free pointer must equal it, so the carved tables extend the
     // pool with no gap and `pool_index_spec`'s single affine base stays valid.
     // Equality also forces the free pointer page-aligned, so `carve_place` rounds
@@ -152,7 +152,7 @@ pub unsafe fn aspace_topup(
     // untyped). `c.end == pool_end + bytes`.
     let c = carve_place(base, size, watermark, PAGE, bytes)?;
     // Advance the watermark exactly as `retype_install` would, but install no
-    // cap: the pool is internal to the aspace (rev1§2.5 gives up per-table caps).
+    // cap: the pool is internal to the aspace (rev2§2.5 gives up per-table caps).
     // Only the watermark value changes — no verified cspace invariant constrains
     // it — so this direct write is the trusted int→ptr posture (`KernelStore::
     // set_slot` is literally `*slot_ptr = v`).

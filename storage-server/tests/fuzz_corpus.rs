@@ -93,7 +93,7 @@ fn request_dispatch() {
     }
 }
 
-/// Generator for the C2D `Request::Rename` corpus seed
+/// Generator for the `Request::Rename` corpus seed
 /// (`corpus/request_dispatch/rename`): a single encoded `Rename` request so the
 /// `request_dispatch` fuzzer — and the Miri replay above — exercise the new
 /// rename decode+dispatch path. `#[ignore]`d because it rewrites a committed

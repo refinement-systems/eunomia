@@ -55,7 +55,7 @@ jobs:
           bash tools/tla/tla-model-check.sh tla/cap_revocation/CapRevocation.tla CapRevocation_Teardown.cfg
           bash tools/tla/tla-model-check.sh tla/commit_protocol/CommitProtocol.tla
           # The §3.6 IPC reactor lost-wakeup + backpressure spec — the §5.1
-          # gate checked before the reactor impl (plan doc/plans/2_ipc.md).
+          # gate checked before the reactor impl.
           # Safety invariants + the EventuallyDelivered liveness property.
           bash tools/tla/tla-model-check.sh tla/ipc_reactor/IpcReactor.tla
 
@@ -81,16 +81,14 @@ jobs:
       - name: Spawn/reclaim burn loop + fault / panic / time demo
         run: bash scripts/spawn-test.sh
 
-  # (The `kani` job is retired as of phase 7f — plan doc/plans/3_verus-rewrite.md
-  # §7f, doc/results/62. Kani was the interim bounded mechanized tier; every
-  # target it covered — the kcore kernel core (migrated to the `verus` job in
-  # phase 2) and the §4.7 host chokepoints `ipc`/`urt`/`dma-pool`/`cas` (phases
-  # 7a–7f) — is now proven unbounded in Verus. cas was the last holdout; its
-  # superblock harnesses ported cleanly (no Vec), so it is not a holdout and the
+  # There is no `kani` job. Kani was the interim bounded mechanized tier; every
+  # target it covered — the kcore kernel core (proven in the `verus` job) and
+  # the §4.7 host chokepoints `ipc`/`urt`/`dma-pool`/`cas` — is now proven
+  # unbounded in Verus. The superblock harnesses ported cleanly (no Vec), so the
   # whole job, its pinned-cargo-kani install dance, and the cover-vacuity guard
-  # are gone. The historical findings stay recorded in doc/results/2…8.)
+  # are gone.
 
-  # The concurrency tier (plan 1_loom-shuttle-rewrite.md §6): the time-page
+  # The concurrency tier: the time-page
   # seqlock under both schedulers. Loom (RUSTFLAGS="--cfg loom") is the
   # certifying proof — urt::time::loom_tests (§4.1), every C11-permitted
   # interleaving + reordering of one writer's seqlock update and one reader's
@@ -120,7 +118,7 @@ jobs:
       - name: Shuttle smoke (RUSTFLAGS=--cfg shuttle cargo test -p urt -p ipc --lib)
         run: RUSTFLAGS="--cfg shuttle" cargo test -p urt -p ipc --lib
 
-  # The kcore layering rules (plan §2.2): the verified core must contain no
+  # The kcore layering rules: the verified core must contain no
   # inline asm, no MMIO, and no integer->pointer casts — CBMC cannot model
   # any of them soundly. Grep-enforced, same spirit as the
   # no-unsafe-without-comment convention.
@@ -145,19 +143,18 @@ jobs:
             kcore/src --include='*.rs' \
             | grep -vE ':[0-9]+:[[:space:]]*(//|\*)' || true)
           if [ -n "$violations" ]; then
-            echo "::error::kcore layering violation (plan §2.2):"
+            echo "::error::kcore layering violation:"
             echo "$violations"
             exit 1
           fi
           echo "kcore layering clean."
 
-  # Deductive verification with Verus (plan doc/plans/3_verus-rewrite.md). PINNED
+  # Deductive verification with Verus. PINNED
   # to 0.2026.06.07.cd03505 (the `vstd` companion is pinned in kcore/Cargo.toml +
   # ipc/urt/dma-pool/cas Cargo.toml); an upgrade is a deliberate PR that re-runs the
-  # proofs. Covers `kcore` (the kernel object core, phases 0–6) and the §4.7 host
-  # chokepoints, which finished porting off Kani in phase 7 — `ipc` (7a/7b),
-  # `urt` (7c/7d), `dma-pool` (7e), and `cas` (7f). With 7f, every §4.7 chokepoint
-  # is on Verus and the `kani` job is retired (above). No per-proof filter, so a new
+  # proofs. Covers `kcore` (the kernel object core) and the §4.7 host
+  # chokepoints — `ipc`, `urt`, `dma-pool`, and `cas`. Every §4.7 chokepoint
+  # is on Verus. No per-proof filter, so a new
   # verus!{} obligation auto-gates (the property the concurrency job also prizes).
   # Verus ships no crates.io binary — the release zip (verus + cargo-verus + z3 +
   # prebuilt vstd) is fetched and cached, keyed on the version so a bump busts the
@@ -199,12 +196,11 @@ jobs:
           if [ -z "$bindir" ]; then echo "::error::cargo-verus not found in the Verus release"; exit 1; fi
           export PATH="$bindir:$PATH"
           cargo verus verify -p kcore
-          # §4.7 host chokepoints, one -p per landing PR (phase 7a: ipc::header;
-          # phase 7b: ipc::session codecs + the Admission never-over-grant quota;
-          # phase 7c: urt::slots — the bitmap free-list ∀ cap/WORDS; phase 7d:
-          # urt::time — the tick→ns conversion's totality + monotonicity ∀; phase 7e:
-          # dma-pool — the free-list allocator's two-buffer disjointness + alignment ∀,
-          # the DN-10 trophy Kani OOM'd on).
+          # §4.7 host chokepoints, one -p per crate: ipc::header; ipc::session
+          # codecs + the Admission never-over-grant quota; urt::slots — the bitmap
+          # free-list ∀ cap/WORDS; urt::time — the tick→ns conversion's totality +
+          # monotonicity ∀; dma-pool — the free-list allocator's two-buffer
+          # disjointness + alignment ∀.
           cargo verus verify -p ipc
           cargo verus verify -p urt
           # freelist — the free-list allocator core. The two-buffer-disjointness +
@@ -213,11 +209,9 @@ jobs:
           # cleanly (it carries 0 obligations of its own — the proof lives here).
           cargo verus verify -p freelist
           cargo verus verify -p dma-pool
-          # phase 7f: cas::disk superblock chokepoint — validate_geometry
+          # cas::disk superblock chokepoint — validate_geometry
           # (totality + region-within-device ∀) and decode_checked (totality ∀,
           # blake3 the assumed-total seam). cas is std-on-host / Vec-heavy, so the
           # feature-agnostic superblock fns are verified in the no_std+alloc
-          # variant (--no-default-features). cas was the last Kani target, so the
-          # `kani` job is retired in this PR (plan §7f holdout decision: not a
-          # holdout).
+          # variant (--no-default-features).
           cargo verus verify -p cas --no-default-features

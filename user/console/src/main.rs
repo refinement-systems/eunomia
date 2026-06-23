@@ -1,20 +1,20 @@
-//! console — the userspace PL011 UART console driver on Eunomia (spec rev1§7).
-//! It holds the PL011 IRQ-handler cap (B-IRQ) and the MMIO frame cap, delivers
+//! console — the userspace PL011 UART console driver on Eunomia (spec rev2§7).
+//! It holds the PL011 IRQ-handler cap and the MMIO frame cap, delivers
 //! RX keystrokes to the shell and writes the shell's output bytes to the UART,
 //! all over one bidirectional channel granted to the shell under the
-//! `stdin`/`stdout` standard names (rev1§5.1) — the "console cap" of rev1§7.
+//! `stdin`/`stdout` standard names (rev2§5.1) — the "console cap" of rev2§7.
 //!
-//! World (built by init in C-M9-B; fixed here so the driver and init agree):
+//! World (built by init; fixed here so the driver and init agree):
 //! slot 0 = bootstrap channel whose first message is the unified startup block
-//! (`b"EUS1"`, the rev1§5.1 named-grant table); slot 1 = the shell's console
-//! channel (bidirectional — RX bytes out to the shell, TX bytes in from it,
-//! Design decision 1); slot 2 = the wake notification the reactor waits on;
+//! (`b"EUS1"`, the rev2§5.1 named-grant table); slot 1 = the shell's console
+//! channel (bidirectional — RX bytes out to the shell, TX bytes in from it);
+//! slot 2 = the wake notification the reactor waits on;
 //! slot 3 = the PL011 IRQ-handler cap. The PL011 MMIO window is pre-mapped by
 //! init and arrives in the block as a `REGION` grant (`NAME_PL011_MMIO`).
 //!
 //! The driver is interrupt-driven on RX (the kernel masks the line on delivery;
-//! the driver drains the FIFO in EL0 then `IrqAck`s to unmask) and polled on TX
-//! (Design decision 2). The register layer + byte forwarding live in
+//! the driver drains the FIFO in EL0 then `IrqAck`s to unmask) and polled on TX.
+//! The register layer + byte forwarding live in
 //! [`pl011`], host-tested against a fake; this `_start` glue is QEMU-only.
 
 #![cfg_attr(not(test), no_std)]
@@ -35,7 +35,7 @@ const SHELL_CHAN: u32 = 1;
 const WAKE_NOTIF: u32 = 2;
 const IRQ_CAP: u32 = 3;
 
-/// Reactor dispatch keys — opaque tokens, never notification bits (rev1§3.6:
+/// Reactor dispatch keys — opaque tokens, never notification bits (rev2§3.6:
 /// the reactor hides the bit shape, returning a key from `wait`).
 const IRQ_KEY: ipc::Key = 0;
 const CHAN_KEY: ipc::Key = 1;
@@ -68,18 +68,18 @@ pub extern "C" fn _start() -> ! {
 
     // 3. Bind the IRQ cap to the wake notification *first* — before enabling the
     //    line — so an early keystroke cannot reach a still-unbound INTID and be
-    //    EOI-and-dropped (C-M9 Design decision 2 step 1).
+    //    EOI-and-dropped.
     if sys::irq_bind(IRQ_CAP, WAKE_NOTIF, RX_BIT) < 0 {
         fail(b"irq_bind failed");
     }
-    // 4. Then enable PL011 RX + RX-timeout interrupts (the kernel UART never did
-    //    — it was poll-only; the driver owns RX interrupt enablement).
+    // 4. Then enable PL011 RX + RX-timeout interrupts: the driver owns RX
+    //    interrupt enablement (the kernel UART is poll-only).
     enable_rx_interrupts(&mut regs);
 
     // 5. Multiplex the IRQ notification and the shell channel in one reactor.
     //    register_bound (the IRQ, externally bound by the kernel) claims bit 0;
     //    register (the channel, bound + self-signalled by the IPC crate) then
-    //    auto-allocates bit 1 — collision-free by ordering (Design decision 2).
+    //    auto-allocates bit 1 — collision-free by ordering.
     let transport = SyscallTransport;
     let mut reactor = Reactor::new(&transport, WAKE_NOTIF);
     if reactor.register_bound(RX_BIT, IRQ_KEY).is_err() {

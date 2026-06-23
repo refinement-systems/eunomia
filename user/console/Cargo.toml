@@ -10,12 +10,12 @@ edition = "2021"
 
 [dependencies]
 ipc = { path = "../../ipc" }
-# C-M9-A — the unified startup-block codec (loader::startup), to read the PL011
+# The unified startup-block codec (loader::startup), to read the PL011
 # MMIO REGION grant. no_std, host-buildable; default-features off keeps it to
 # elf + startup with no alloc (the hello precedent — the console needs no heap).
 loader = { path = "../../loader", default-features = false }
 
-# C-M9-A — host tests for the PL011 register layer (rev1§6 Baseline tier).
+# Host tests for the PL011 register layer (rev2§6 Baseline tier).
 # Dev-only, so the aarch64 cross-build never pulls it.
 [dev-dependencies]
 proptest = "1"

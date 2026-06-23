@@ -1,5 +1,5 @@
 #![no_main]
-//! ELF64 parse on arbitrary bytes (rev1§5). Program images are data in the
+//! ELF64 parse on arbitrary bytes (rev2§5). Program images are data in the
 //! versioned store, so any holder of write access to a path feeds bytes to
 //! this parser — it is untrusted input. Property set: never panic; every
 //! segment range the parser reports is bounds-checked against the input
@@ -43,7 +43,7 @@ fuzz_target!(|data: &[u8]| {
         );
         assert!(seg.memsz > 0, "zero-size segment retained");
 
-        // Parse↔layout agreement (the B3A producer/consumer tightening): every
+        // Parse↔layout agreement: every
         // segment `parse` accepts, `prepare` must be able to page-lay-out. A
         // future loosening of `parse` that re-permits an unlayout-able segment
         // fails here. (`memsz > 0` always — `parse` drops zero-size segments,

@@ -1,4 +1,4 @@
-//! Session/handle semantics tests (spec rev1§2.2-2.4): handle relativity,
+//! Session/handle semantics tests (spec rev2§2.2-2.4): handle relativity,
 //! subtree confinement, monotone attenuation, generation revocation,
 //! one-shot tickets, audit.
 
@@ -38,7 +38,7 @@ fn handles_are_session_relative() {
     let s2 = srv.open_session(vec![]);
 
     // Same integer, different sessions: handle 0 means something in s1,
-    // nothing in s2 — the integers carry no authority (rev1§2.4).
+    // nothing in s2 — the integers carry no authority (rev2§2.4).
     assert_eq!(
         srv.handle(
             s1,
@@ -99,7 +99,7 @@ fn subtree_confinement_by_unreachability() {
         ),
         Response::Data(b"public info".to_vec())
     );
-    // The sibling simply has no name from here (rev1§2.3): the same path that
+    // The sibling simply has no name from here (rev2§2.3): the same path that
     // works on the root handle resolves under pub/ and finds nothing.
     assert_eq!(
         srv.handle(
@@ -114,7 +114,7 @@ fn subtree_confinement_by_unreachability() {
         ),
         Response::NotFound
     );
-    // ".." is path syntax, never stored — rejected outright (rev1§4.9).
+    // ".." is path syntax, never stored — rejected outright (rev2§4.9).
     assert_eq!(
         srv.handle(
             s,
@@ -163,7 +163,7 @@ fn rename_moves_a_file_and_denies_what_it_should() {
     let root = srv.root_grant(b"main").unwrap();
     let s = srv.open_session(vec![root]);
 
-    // Happy path (rev1§4.9): write a, rename a -> b, b reads back, a is gone.
+    // Happy path (rev2§4.9): write a, rename a -> b, b reads back, a is gone.
     assert_eq!(
         srv.handle(
             s,
@@ -231,7 +231,7 @@ fn rename_moves_a_file_and_denies_what_it_should() {
     );
 
     // A subtree handle can never name a target outside its subtree: both ends
-    // are resolved under the subtree, and ".." is rejected up front (rev1§4.9).
+    // are resolved under the subtree, and ".." is rejected up front (rev2§4.9).
     let Response::Handle(sub) = srv.handle(
         s,
         Request::OpenChild {
@@ -398,7 +398,7 @@ fn generation_bump_revokes_all_handles_lazily() {
         panic!()
     };
 
-    // Mass revocation from s1: O(1), no enumeration of holders (rev1§2.2).
+    // Mass revocation from s1: O(1), no enumeration of holders (rev2§2.2).
     assert_eq!(
         srv.handle(s1, Request::RevokeRef { handle: 0 }, 11),
         Response::Ok
@@ -550,7 +550,7 @@ fn snapshots_are_immutable_and_survive_rollback() {
     assert!(rows[0].provenance.starts_with(b"session="));
 }
 
-/// rev1§4.7 (B5A): `ListSnapshots` returns the ref's current edit version
+/// rev2§4.7: `ListSnapshots` returns the ref's current edit version
 /// alongside the rows, read in one call — so a retention daemon's enumerate and
 /// its later guarded-batch `expected_version` come from one atomic snapshot of
 /// the ref, and a concurrent mutation is detectable.
@@ -666,7 +666,7 @@ fn tickets_are_one_shot_with_ttl() {
         Response::Err(ErrorCode::BadTicket)
     );
 
-    // rev1§2.4: the caller requests the TTL but the server clamps it to
+    // rev2§2.4: the caller requests the TTL but the server clamps it to
     // MAX_TICKET_TTL_NANOS, so an unbounded request does not yield an unbounded
     // ticket. A failed (expired) redeem still consumes the one-shot ticket
     // (RedeemTicket removes before checking expiry), so each boundary point
@@ -790,7 +790,7 @@ fn history_rewriting_needs_the_right_and_triggers_gc() {
     );
 
     // Deletion is a small ref-table edit that arms the GC trigger
-    // (rev1§4.6); the reclamation itself happens in the drained cycle.
+    // (rev2§4.6); the reclamation itself happens in the drained cycle.
     assert!(!srv.gc_requested());
     assert_eq!(
         srv.handle(
@@ -867,7 +867,7 @@ fn manual_gc_and_statfs() {
 
 #[test]
 fn statfs_gated_by_stat_store() {
-    // statfs observes store-global space, so it needs `stat-store` (rev1§2.3),
+    // statfs observes store-global space, so it needs `stat-store` (rev2§2.3),
     // deny-by-default. Only the privileged root_grant originates the bit.
     let mut srv = new_server();
     let root = srv.root_grant(b"main").unwrap();
@@ -920,7 +920,7 @@ fn statfs_gated_by_stat_store() {
 
     // Explicitly carrying the bit onto a deep subtree handle keeps it; its
     // statfs observes the *whole* store — the right's scope ignores the
-    // subtree its handle denotes (rev1§2.3).
+    // subtree its handle denotes (rev2§2.3).
     let Response::Handle(carried) = srv.handle(
         s,
         Request::OpenChild {
@@ -1054,7 +1054,7 @@ fn session_cleanup_and_audit() {
         Response::Err(ErrorCode::Denied)
     );
 
-    // Peer-closed → whole table dropped (rev1§2.4 cleanup).
+    // Peer-closed → whole table dropped (rev2§2.4 cleanup).
     srv.close_session(s);
     assert_eq!(
         srv.handle(
@@ -1071,12 +1071,12 @@ fn session_cleanup_and_audit() {
     );
 }
 
-/// rev1§4.7 / I-2 (S-1): the guarded batch closes the retention read-then-act
+/// rev2§4.7: the guarded batch closes the retention read-then-act
 /// race over a session. X enumerates (getting the edit version); Y snapshots,
 /// advancing it; X's `Apply` at the stale version is refused carrying the
 /// current version (no edit applied); X re-reads and re-applies at the current
-/// version, which now lands. This is the documented remedy demonstrably
-/// closing the window the audit names.
+/// version, which then lands. This demonstrates the remedy closing the
+/// read-then-act window.
 #[test]
 fn apply_batch_closes_read_then_act_race() {
     let mut srv = new_server();
@@ -1174,7 +1174,7 @@ fn apply_batch_closes_read_then_act_race() {
     );
 }
 
-/// rev1§4.7: a guarded batch is history rewriting, gated by
+/// rev2§4.7: a guarded batch is history rewriting, gated by
 /// `may-rewrite-history` (the `DeleteSnapshot`/`Gc` right), deny-by-default.
 #[test]
 fn apply_batch_requires_rewrite_history_right() {
@@ -1237,7 +1237,7 @@ fn apply_batch_requires_rewrite_history_right() {
     );
 }
 
-/// rev1§4.7: a guarded batch is all-or-nothing over the wire. A batch that
+/// rev2§4.7: a guarded batch is all-or-nothing over the wire. A batch that
 /// creates a tag and then deletes the snapshot it just pinned is rejected with
 /// `Pinned` (the staged tag pins the staged snapshot) — and *nothing* persists:
 /// no class edit, no version bump, and not even the tag (so a later
@@ -1338,7 +1338,7 @@ fn apply_batch_all_or_nothing_over_wire() {
     );
 }
 
-/// rev1§4.7 "Tags" over the wire (M-8): create, list, and delete a tag across
+/// rev2§4.7 "Tags" over the wire: create, list, and delete a tag across
 /// a session. `ListTags` is scoped to the handle's ref and reports each tag as
 /// `(name, ref_name, snap_id)`.
 #[test]
@@ -1400,7 +1400,7 @@ fn tags_round_trip_over_a_session() {
     );
 }
 
-/// rev1§4.7: a tag is a `keep`-strength pin over the wire — a tagged snapshot
+/// rev2§4.7: a tag is a `keep`-strength pin over the wire — a tagged snapshot
 /// can't be deleted out from under its tag, and because the tag names the
 /// snapshot *id* (not a hash) a metadata edit leaves it in place. The remedy
 /// is to delete the tag first.
@@ -1433,7 +1433,7 @@ fn tag_pins_snapshot_over_the_wire_and_survives_metadata_edits() {
         ),
         Response::Ok
     );
-    // A metadata edit must not unpin it (the tag points at the id, rev1§4.7).
+    // A metadata edit must not unpin it (the tag points at the id, rev2§4.7).
     assert_eq!(
         srv.handle(
             s,
@@ -1489,7 +1489,7 @@ fn tag_pins_snapshot_over_the_wire_and_survives_metadata_edits() {
     );
 }
 
-/// rev1§4.7: tag/untag are row surgery — they need `may-rewrite-history` (and
+/// rev2§4.7: tag/untag are row surgery — they need `may-rewrite-history` (and
 /// validate the snapshot), while `ListTags` is a read needing `R_READ`.
 #[test]
 fn tag_ops_need_rewrite_history_and_validate_the_snapshot() {
@@ -1570,7 +1570,7 @@ fn tag_ops_need_rewrite_history_and_validate_the_snapshot() {
     );
 }
 
-/// rev1§4.7: tags are entry-set mutations, so creating or removing one advances
+/// rev2§4.7: tags are entry-set mutations, so creating or removing one advances
 /// the ref's edit version — exactly what a concurrent guarded batch checks.
 #[test]
 fn tag_and_untag_advance_the_ref_edit_version() {

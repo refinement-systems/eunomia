@@ -70,14 +70,14 @@ fn main() {
     one.extend_from_slice(b"codecode");
     write_seed("one_segment", &one);
 
-    // Two PT_LOADs: R+X text then R+W data, each page-aligned per rev1§5.
+    // Two PT_LOADs: R+X text then R+W data, each page-aligned per rev2§5.
     let mut two = header(2);
     two.extend_from_slice(&phdr(PF_R | PF_X, 0x1000, 0x8000_0000, 0x20, 0x20));
     two.extend_from_slice(&phdr(PF_R | PF_W, 0x2000, 0x8001_0000, 0x10, 0x40));
     two.resize(0x2010, 0);
     write_seed("two_segments", &two);
 
-    // segment_layout corpus: 16-byte (vaddr, memsz) LE pairs bracketing the I-5
+    // segment_layout corpus: 16-byte (vaddr, memsz) LE pairs bracketing the
     // page-rounding overflow boundary, so the fuzzer starts adjacent to it.
     write_layout_seed("page_aligned", 0x8000_0000, 0x1000); // aligned, one page
     write_layout_seed("unaligned", 0x8000_0123, 0x2000); // unaligned, multi-page

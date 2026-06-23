@@ -1,4 +1,4 @@
-//! Syscall ABI decode + validation (rev1§3.7). The pure half of
+//! Syscall ABI decode + validation (rev2§3.7). The pure half of
 //! `kernel/src/syscall.rs`: turn the raw register file `(nr, a[0..6])` into a
 //! typed [`Sys`] value, performing every check that needs **no** capability or
 //! thread state — `ObjType` totality, the message-length cap before
@@ -9,7 +9,7 @@
 //!
 //! `decode` is **total**: for any `(nr, a) : u64⁷` it returns `Ok(Sys)` or
 //! `Err(SysError)`, never panics, never overflows, never UB — an unknown
-//! `nr` is an error, never a crash (rev1§3.7). This makes "no
+//! `nr` is an error, never a crash (rev2§3.7). This makes "no
 //! user-controlled value reaches kernel arithmetic unvalidated" a checked
 //! property (`kcore::proofs::sysabi`) rather than a review convention.
 //!
@@ -28,7 +28,7 @@ verus! {
 /// so the `kernel::thread` re-export and the aarch64 build are unchanged.
 pub const NUM_PRIOS: usize = 32;
 
-/// `cap_copy`'s "no priority-ceiling reduction" sentinel (rev1§2.3/rev1§5.4):
+/// `cap_copy`'s "no priority-ceiling reduction" sentinel (rev2§2.3/rev2§5.4):
 /// a thread-cap copy passing this leaves the parent's ceiling unchanged. Any value
 /// `>= NUM_PRIOS - 1` would do (priorities are `< NUM_PRIOS = 32`); `0xFF` is the
 /// canonical one. A lower `prio_ceiling` strictly attenuates (`derived_kind`).
@@ -96,11 +96,11 @@ fn decode_prio(raw: u64) -> (result: Result<u8, SysError>)
     Ok(prio)
 }
 
-/// Decode the register file into a typed syscall (rev1§3.7). `nr` is x7;
+/// Decode the register file into a typed syscall (rev2§3.7). `nr` is x7;
 /// `a` is x0..x5 (the kernel's trap-frame read — six argument registers).
 ///
 /// Verified **total**: for any `(nr, a) : (u64, [u64;6])` it returns
-/// `Ok`/`Err`, never panics, overflows, or UBs (the rev1§3.7 "unknown `nr` is
+/// `Ok`/`Err`, never panics, overflows, or UBs (the rev2§3.7 "unknown `nr` is
 /// an error, never a crash" as a theorem, not a review convention). The
 /// `ensures` pin the shape-validation: the `ChanSend` length cap that precedes
 /// `channel::send`'s
@@ -111,12 +111,12 @@ fn decode_prio(raw: u64) -> (result: Result<u8, SysError>)
 /// in the verified fragment.
 pub fn decode(nr: u64, a: [u64; 6]) -> (result: Result<Sys, SysError>)
     ensures
-        // rev1§3.7: every `nr` outside the defined 0..=26 range is `UnknownCall`.
+        // rev2§3.7: every `nr` outside the defined 0..=26 range is `UnknownCall`.
         nr >= 27 ==> result matches Err(SysError::UnknownCall),
         // Retype with an out-of-range `ObjType` discriminant is `BadObjType`
         // (via `ObjType::from_u64`'s `None`-iff-`v >= 8` characterization).
         (nr == 3 && a@[1] >= 8) ==> result matches Err(SysError::BadObjType),
-        // The load-bearing rev1§3.1 cap: a decoded send length never exceeds the
+        // The load-bearing rev2§3.1 cap: a decoded send length never exceeds the
         // payload bound, so the downstream `as u16` truncation is lossless and
         // `channel::send`'s `data.len() <= MSG_PAYLOAD` precondition holds.
         result matches Ok(Sys::ChanSend { len, .. }) ==> len <= MSG_PAYLOAD as u64,
@@ -138,7 +138,7 @@ pub fn decode(nr: u64, a: [u64; 6]) -> (result: Result<Sys, SysError>)
                 None => return Err(SysError::BadObjType),
             }
         }
-        // a[3] is the rev1§5.4 priority-ceiling cap on a thread-cap copy (rev1§2.3
+        // a[3] is the rev2§5.4 priority-ceiling cap on a thread-cap copy (rev2§2.3
         // supervision grant); `NO_PRIO_CEILING` (0xFF) means "no reduction". Carried
         // raw (it only ever *shrinks* an existing ceiling in `derive`, so no decode
         // validation is needed — see `derived_kind`).
@@ -179,9 +179,9 @@ pub fn decode(nr: u64, a: [u64; 6]) -> (result: Result<Sys, SysError>)
             }
         }
         19 => Sys::FramePaddr { slot: a[0] },
-        // 20 (DebugGetc) retired in C-M9-C: the userspace console driver owns the
-        // PL011 RX line, so no ambient input syscall remains — opcode 20 now
-        // falls through to `UnknownCall` (rev1§7 carve-out exit condition met).
+        // 20 is unassigned: the userspace console driver owns the PL011 RX line, so
+        // there is no ambient input syscall — opcode 20 falls through to
+        // `UnknownCall` (rev2§7 carve-out exit condition met).
         21 => {
             if a[1] > 1 {
                 return Err(SysError::BadWhich);
@@ -190,11 +190,11 @@ pub fn decode(nr: u64, a: [u64; 6]) -> (result: Result<Sys, SysError>)
         }
         22 => Sys::ReadReport { tcb: a[0] },
         23 => Sys::UntypedReset { slot: a[0] },
-        // B10B: grow an aspace's page-table pool from a donated untyped (rev1§2.5
+        // Grow an aspace's page-table pool from a donated untyped (rev2§2.5
         // "accepts top-ups"). Three raw `u64`s, all validated downstream by the
         // abutment carve + `grow_pool`, so no decode-time range `ensures`.
         24 => Sys::AspaceTopUp { aspace: a[0], ut: a[1], pages: a[2] },
-        // B-IRQ-B: bind/ack an IRQ-handler cap (rev1§1, rev1§3.6). Raw `u64`s,
+        // Bind/ack an IRQ-handler cap (rev2§1, rev2§3.6). Raw `u64`s,
         // all validated downstream by the cap lookup + the verified `irq_bind`,
         // so no decode-time range `ensures` (the `TimerArm`/`AspaceTopUp` precedent).
         25 => Sys::IrqBind { irq: a[0], notif: a[1], bits: a[2] },
@@ -225,7 +225,7 @@ mod tests {
                 caps: 0
             })
         );
-        // B10B: the new top-up opcode packs three raw u64s.
+        // The top-up opcode packs three raw u64s.
         assert_eq!(
             decode(24, [3, 5, 8, 0, 0, 0]),
             Ok(Sys::AspaceTopUp {
@@ -234,7 +234,7 @@ mod tests {
                 pages: 8
             })
         );
-        // B-IRQ-B: the two IRQ opcodes pack raw u64s.
+        // The two IRQ opcodes pack raw u64s.
         assert_eq!(
             decode(25, [2, 4, 0xF, 0, 0, 0]),
             Ok(Sys::IrqBind {
@@ -249,10 +249,10 @@ mod tests {
     #[test]
     fn validation_rejects() {
         assert_eq!(decode(99, [0; 6]), Err(SysError::UnknownCall));
-        // B-IRQ-B moved the defined range to 0..=26, so 27 is the new first unknown.
+        // The defined range is 0..=26, so 27 is the first unknown opcode.
         assert_eq!(decode(27, [0; 6]), Err(SysError::UnknownCall));
-        // C-M9-C retired DebugGetc (opcode 20): the ambient input syscall is gone,
-        // so 20 is now an interior gap that decodes to UnknownCall.
+        // Opcode 20 is unassigned (no ambient input syscall), so it is an interior
+        // gap that decodes to UnknownCall.
         assert_eq!(decode(20, [0; 6]), Err(SysError::UnknownCall));
         assert_eq!(decode(3, [0, 99, 0, 0, 0, 0]), Err(SysError::BadObjType)); // bad ObjType
         assert_eq!(

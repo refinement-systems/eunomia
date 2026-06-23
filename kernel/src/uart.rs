@@ -1,11 +1,10 @@
-// PL011 UART — the kernel-internal diagnostic path only (rev1§7).
+// PL011 UART — the kernel-internal diagnostic path only (rev2§7).
 //
-// As of C-M9 the user-facing console is the userspace `user/console` driver,
-// which owns the PL011 RX line; the kernel no longer reads the UART (the
-// ambient `debug_getc` input syscall is retired). What remains here is
-// write-only: QEMU pre-initialises the UART, so we only poll FR.TXFF before
-// writing to DR. The sole callers are the kernel's own panic/fault/boot
-// reporting (`main.rs`, `exceptions.rs`) — never EL0.
+// The user-facing console is the userspace `user/console` driver, which owns the
+// PL011 RX line; the kernel does not read the UART. This path is write-only:
+// QEMU pre-initialises the UART, so we only poll FR.TXFF before writing to DR.
+// The sole callers are the kernel's own panic/fault/boot reporting (`main.rs`,
+// `exceptions.rs`) — never EL0.
 
 const UART_BASE: usize = 0x0900_0000;
 

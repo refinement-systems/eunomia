@@ -1,8 +1,8 @@
 #!/bin/bash
-# QEMU boot test — the rev1§2.6 proof: wall-clock time observable end to end.
+# QEMU boot test — the rev2§2.6 proof: wall-clock time observable end to end.
 # Boots the full system, takes two snapshots, and asserts that their
 # UTC timestamps land in a sane window around the host clock, are
-# strictly ordered (the rev1§4.7 per-ref clamp), and print as ISO-8601; the
+# strictly ordered (the rev2§4.7 per-ref clamp), and print as ISO-8601; the
 # shell's `date` (zero syscalls on the read path) must agree.
 set -euo pipefail
 

@@ -7,14 +7,14 @@
 //!
 //!   1. Thread 1 retypes untyped into notifications, a channel pair, a
 //!      second cspace, and a TCB; wires channel events to notification
-//!      bits; builds thread 2's cspace explicitly (rev1§5.1) and starts it.
+//!      bits; builds thread 2's cspace explicitly (rev2§5.1) and starts it.
 //!   2. T1 sends a message carrying a derived (signal-only) cap; T2 is
 //!      woken by the readable→notification binding, receives, and proves
 //!      the cap works by signaling through it.
 //!   3. T1 queues a second message with another derived cap in flight,
 //!      then revokes the parent: the revoke must destroy T2's received
 //!      cap AND the queued in-flight cap AND the on-exit binding cap
-//!      bound into T2's TCB before start (rev1§2.2, rev1§5.1).
+//!      bound into T2's TCB before start (rev2§2.2, rev2§5.1).
 //!   4. T2 verifies both deaths (signal fails; the queued message arrives
 //!      with no caps) and reports the verdict over the channel.
 //!   5. T1 checks attenuation held, exercises a timer object, then reaps
@@ -24,7 +24,7 @@
 //!      both ends' peer-closed events to a separately-funded
 //!      notification, and revokes the sub-untyped: whole-object teardown
 //!      fires every peer-closed binding before reclamation and the
-//!      notification survives (rev1§3.3). Prints "M1 PASS".
+//!      notification survives (rev2§3.3). Prints "M1 PASS".
 //!
 //! Constraints: everything reachable from EL0 must live in `.user_text`
 //! (helpers force-inlined, no panicking ops, no core::fmt, no implicit
@@ -45,7 +45,7 @@ const RIGHT_WRITE: u64 = 2;
 // path; the scaffold's own allocations start above them.
 const UNTYPED: u64 = 0;
 const SELF_TCB: u64 = 1;
-// Boot slot 2 is a second untyped (DRAM above the EL0 window). The rev1§3.3
+// Boot slot 2 is a second untyped (DRAM above the EL0 window). The rev2§3.3
 // teardown test funds its notification here so the notification's funder
 // is distinct from the channel's — revoking the channel must not reach it.
 const UNTYPED2: u64 = 2;
@@ -62,13 +62,13 @@ const TIMER: u64 = 15;
 const EXIT_BIND1: u64 = 16;
 const EXIT_BIND2: u64 = 17;
 const TCB2_WEAK: u64 = 18;
-// rev1§3.3 channel whole-object teardown — a self-contained scenario on
+// rev2§3.3 channel whole-object teardown — a self-contained scenario on
 // fresh slots, independent of the channel above.
 const UA: u64 = 19; // sub-untyped funding the channel ("untyped A")
 const PC_NOTIF: u64 = 20; // peer-closed notification, funded from UNTYPED2
 const PC_CHAN_A: u64 = 21;
 const PC_CHAN_B: u64 = 22;
-// B-IRQ-C: the PL011 IRQ-handler cap, a kernel-bestowed boot cap (main.rs
+// The PL011 IRQ-handler cap, a kernel-bestowed boot cap (main.rs
 // slot 24, beside its MMIO frame at 23 — above the scaffold's own slots so
 // the retypes never collide). N_IRQ is the notification the device IRQ
 // signals; carved fresh so its bits don't alias N1's.
@@ -92,11 +92,11 @@ const T2_EXIT_STATUS: u64 = 42;
 // N2 bits.
 const BIT_B_READABLE: u64 = 1 << 0;
 const BIT_GO: u64 = 1 << 2;
-// PC_NOTIF bits (rev1§3.3 teardown test) — a separate object, so low bits
+// PC_NOTIF bits (rev2§3.3 teardown test) — a separate object, so low bits
 // are free again. One bit per endpoint's peer-closed binding.
 const BIT_PC_A: u64 = 1 << 0;
 const BIT_PC_B: u64 = 1 << 1;
-// N_IRQ bit (B-IRQ-C) — a dedicated notification, so the low bit is free.
+// N_IRQ bit — a dedicated notification, so the low bit is free.
 const BIT_IRQ: u64 = 1 << 0;
 
 #[inline(always)]
@@ -149,7 +149,7 @@ unsafe fn retype(ut: u64, ty: u64, param: u64, dst: u64, dst2: u64) -> i64 {
 
 #[inline(always)]
 unsafe fn cap_copy(src: u64, dst: u64, rights: u64) -> i64 {
-    // a[3] = 0xFF: no rev1§5.4 priority-ceiling reduction (kcore `NO_PRIO_CEILING`).
+    // a[3] = 0xFF: no rev2§5.4 priority-ceiling reduction (kcore `NO_PRIO_CEILING`).
     sys(4, src, dst, rights, 0xFF, 0, 0)
 }
 
@@ -160,8 +160,8 @@ unsafe fn cap_copy_prio(src: u64, dst: u64, rights: u64, prio_ceiling: u64) -> i
 
 #[inline(always)]
 unsafe fn cap_revoke(slot: u64) -> i64 {
-    // B9: CapRevoke runs one bounded quantum and returns ERR_AGAIN (-12) while
-    // descendants remain (rev1§2.2 preemptible/restartable). Loop until the
+    // CapRevoke runs one bounded quantum and returns ERR_AGAIN (-12) while
+    // descendants remain (rev2§2.2 preemptible/restartable). Loop until the
     // subtree is empty so the `check`-ing call sites see only a terminal status.
     // (No yield needed: T2 is parked; the loop terminates as the subtree shrinks.)
     loop {
@@ -310,7 +310,7 @@ const OBJ_NOTIF: u64 = 3;
 const OBJ_TIMER: u64 = 4;
 const OBJ_UNTYPED: u64 = 7;
 
-// chan_bind event index for the peer-closed signal (rev1§3.3).
+// chan_bind event index for the peer-closed signal (rev2§3.3).
 const EV_PEER_CLOSED: u64 = 2;
 
 pub const USER_STACK_TOP: u64 = crate::mmu::USER_BASE + crate::mmu::USER_SIZE;
@@ -331,12 +331,12 @@ pub extern "C" fn user_main(_arg: u64) -> ! {
         check(chan_bind(CHAN_A, 0, N1, BIT_A_READABLE), b'f');
         check(chan_bind(CHAN_B, 0, N2, BIT_B_READABLE), b'g');
 
-        // Build thread 2's world explicitly (rev1§5.1): its channel end and a
+        // Build thread 2's world explicitly (rev2§5.1): its channel end and a
         // wait-only notification cap, moved into its private cspace.
         check(cap_copy(N2, N2_COPY, RIGHT_READ), b'h');
         check(cap_install(CSPACE2, CHAN_B, T2_CHAN), b'i');
         check(cap_install(CSPACE2, N2_COPY, T2_NOTIF), b'j');
-        // The canonical parent move (rev1§5.1): bind on-exit before start.
+        // The canonical parent move (rev2§5.1): bind on-exit before start.
         // This first binding is derived from N1, so the step-3 revoke
         // must reach through the TCB slot and clear it.
         check(cap_copy(N1, EXIT_BIND1, RIGHT_WRITE), b'h');
@@ -353,7 +353,7 @@ pub extern "C" fn user_main(_arg: u64) -> ! {
             b'k',
         );
 
-        // Send a signal-only derivation of N1 (attenuation, rev1§2.3).
+        // Send a signal-only derivation of N1 (attenuation, rev2§2.3).
         let caps1: [u32; 4] = [SEND1 as u32, SLOT_NONE, SLOT_NONE, SLOT_NONE];
         check(cap_copy(N1, SEND1, RIGHT_WRITE), b'l');
         check(chan_send(CHAN_A, &PING, &caps1), b'm');
@@ -363,7 +363,7 @@ pub extern "C" fn user_main(_arg: u64) -> ! {
         putc(b'2'); // marker: cap arrived and was used
 
         // Queue a second derived cap in flight, then revoke the parent:
-        // the revoke must reach into the queue (rev1§2.2).
+        // the revoke must reach into the queue (rev2§2.2).
         let caps2: [u32; 4] = [SEND2 as u32, SLOT_NONE, SLOT_NONE, SLOT_NONE];
         check(cap_copy(N1, SEND2, RIGHT_WRITE), b'o');
         check(chan_send(CHAN_A, &MORE, &caps2), b'p');
@@ -397,13 +397,13 @@ pub extern "C" fn user_main(_arg: u64) -> ! {
         check(notif_signal(N1, BIT_SELF_TEST), b'u');
         seen |= wait_for(N1, BIT_SELF_TEST, b'v');
 
-        // Timer object: deadline signals a bound notification (rev1§2.6).
+        // Timer object: deadline signals a bound notification (rev2§2.6).
         check(retype(UNTYPED, OBJ_TIMER, 0, TIMER, 0), b'w');
         check(timer_arm(TIMER, N1, BIT_TIMER, 1_250_000), b'x'); // ~20ms @62.5MHz
         seen |= wait_for(N1, BIT_TIMER, b'y');
         putc(b'4'); // marker: timer fired
 
-        // Reap T2 (rev1§5.1): the rebound on-exit binding delivers the death
+        // Reap T2 (rev2§5.1): the rebound on-exit binding delivers the death
         // notice, and the report — recorded by the kernel, not claimed
         // by the child — must read exited(42).
         if seen & BIT_CHILD_EXIT == 0 {
@@ -414,10 +414,10 @@ pub extern "C" fn user_main(_arg: u64) -> ! {
             debug_write(&MSG_FAIL);
             exit();
         }
-        // Attenuation gates the report surface (rev1§2.3): a thread cap
+        // Attenuation gates the report surface (rev2§2.3): a thread cap
         // copy without bind-reports/read-report can neither configure
         // the slots nor read the record. The copy also strictly lowers the
-        // rev1§5.4 priority ceiling (`prio_ceiling = 3`, the rev1§2.3 supervision
+        // rev2§5.4 priority ceiling (`prio_ceiling = 3`, the rev2§2.3 supervision
         // grant) — the witness that the reducing `derive` ABI
         // (`cap_copy_prio`) runs end-to-end; the ceiling is
         // orthogonal to the rights gating checked just below.
@@ -433,15 +433,15 @@ pub extern "C" fn user_main(_arg: u64) -> ! {
         }
         putc(b'5'); // marker: exit report delivered, read, and gated
 
-        // ── Channel whole-object teardown (rev1§3.3) ──────────────────
+        // ── Channel whole-object teardown (rev2§3.3) ──────────────────
         // Build a channel from a freshly carved sub-untyped UA and bind
         // BOTH endpoints' peer-closed events to one notification funded
         // from a SEPARATE untyped (UNTYPED2). Revoking UA tears the whole
-        // channel down at once — the rev1§3.5 case where a session's funder
+        // channel down at once — the rev2§3.5 case where a session's funder
         // dies — so every endpoint's peer-closed binding must fire before
         // the channel's memory is reclaimed, and the separately-funded
         // notification must outlive the channel to receive both signals
-        // ("teardown always signals", rev1§3.3). This is the runtime witness
+        // ("teardown always signals", rev2§3.3). This is the runtime witness
         // for the CapRevocation TSpec's ChannelFireSafe property.
         check(retype(UNTYPED, OBJ_UNTYPED, 0x10000, UA, 0), b'H');
         check(retype(UNTYPED2, OBJ_NOTIF, 0, PC_NOTIF, 0), b'I');
@@ -459,7 +459,7 @@ pub extern "C" fn user_main(_arg: u64) -> ! {
         // accumulate and the first wait returns the whole word.
         let pc = wait_for(PC_NOTIF, BIT_PC_A | BIT_PC_B, b'N');
         // The torn-down endpoint caps are now dead — a send errors out
-        // (rev1§3.3 "afterward a dead endpoint cap yields error returns").
+        // (rev2§3.3 "afterward a dead endpoint cap yields error returns").
         let no_caps: [u32; 4] = [SLOT_NONE; 4];
         if pc & (BIT_PC_A | BIT_PC_B) != (BIT_PC_A | BIT_PC_B)
             || chan_send(PC_CHAN_A, &PING, &no_caps) >= 0
@@ -469,7 +469,7 @@ pub extern "C" fn user_main(_arg: u64) -> ! {
         }
         putc(b'6'); // marker: whole-object teardown fired every peer-closed
 
-        // ── Device IRQ → notification (rev1§1, rev1§3.6) ──────────────
+        // ── Device IRQ → notification (rev2§1, rev2§3.6) ──────────────
         // init holds the PL011 IRQ-handler cap (boot grant, slot 24).
         // Bind it to a fresh notification and let the line fire: the
         // kernel signals that notification from `handle_el0_irq` — the
@@ -479,7 +479,7 @@ pub extern "C" fn user_main(_arg: u64) -> ! {
         // the m1-test path the kernel software-pends INTID 33 on bind and
         // on ack: two clean deliveries arrive through the real GIC +
         // exception path. The first proves bind → deliver → signal; the
-        // second proves `irq_ack` re-enabled the masked line (the rev1§3.6
+        // second proves `irq_ack` re-enabled the masked line (the rev2§3.6
         // mask-on-deliver / unmask-on-ack cycle). Lost-wakeup-safe either
         // way: if the kick lands before the wait it is a poll-once, if
         // after, a genuine block-then-wake (the timer segment already

@@ -1,7 +1,7 @@
 # Verus
 
 Verus is the kernel core's **deductive-verification tier**: it proves the `kcore`
-object model and the rev1§4.7/rev1§4.8 host chokepoints meet functional `ensures`,
+object model and the rev2§4.7/rev2§4.8 host chokepoints meet functional `ensures`,
 **terminate**, and preserve their `wf` invariants **for all inputs**, with no
 bound to pick — the proofs hold over the unbounded input space. The enumerated
 trusted base is the ledger `doc/guidelines/verus_trusted-base.md`. (The
@@ -143,7 +143,7 @@ reason and a test is a finding, not a boundary.
 
 ## When Verus is not the tool
 
-The best-tool routing (rev1§6's verification tiering) is authoritative; the short
+The best-tool routing (rev2§6's verification tiering) is authoritative; the short
 form:
 
 - **Concurrency interleavings** (lost-wakeup, seqlock torn reads) → Loom/Shuttle +

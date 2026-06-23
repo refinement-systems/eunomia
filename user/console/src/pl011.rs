@@ -1,13 +1,13 @@
-//! The PL011 register layer over an injectable MMIO seam (C-M9 Design
-//! decision 3). The pure functions — RX-FIFO drain, polled TX write, RX
-//! interrupt enable — are host-tested against a fake (rev1§6 Baseline tier);
+//! The PL011 register layer over an injectable MMIO seam. The pure functions —
+//! RX-FIFO drain, polled TX write, RX
+//! interrupt enable — are host-tested against a fake (rev2§6 Baseline tier);
 //! the real [`MmioWindow`] does volatile MMIO on the granted device VA and is
 //! exercised only in QEMU.
 //!
-//! Register offsets are the PL011 layout the kernel already pokes for polled
+//! Register offsets are the PL011 layout the kernel pokes for polled
 //! I/O (`kernel/src/uart.rs`: `DR`/`FR`) plus the interrupt registers the
-//! kernel never wrote — the kernel UART was pure-polling, so the userspace
-//! driver owns RX interrupt enablement on its own MMIO frame (C-M9 note 3).
+//! kernel leaves alone — the kernel UART is pure-polling, so the userspace
+//! driver owns RX interrupt enablement on its own MMIO frame (note 3).
 
 /// Data register (read pops the RX FIFO; write pushes the TX FIFO).
 pub const DR: usize = 0x00;
@@ -25,7 +25,7 @@ pub const FR_RXFE: u32 = 1 << 4;
 /// `UARTIMSC` bit: RX interrupt — fires when the FIFO crosses its trigger level.
 pub const RXIM: u32 = 1 << 4;
 /// `UARTIMSC` bit: RX-timeout interrupt — fires for a partial FIFO that stops
-/// filling, so a lone keystroke still delivers (C-M9 Design decision 2 step 2).
+/// filling, so a lone keystroke still delivers.
 pub const RTIM: u32 = 1 << 6;
 /// Write to `UARTICR` to clear every interrupt source (all 11 PL011 bits).
 pub const ICR_ALL: u32 = 0x7FF;
@@ -68,7 +68,7 @@ impl Pl011 for MmioWindow {
 
 /// Enable RX + RX-timeout interrupts: clear any stale pending interrupt
 /// (`UARTICR`), then unmask `RXIM | RTIM` (`UARTIMSC`). Bind the IRQ cap to the
-/// wake notification *before* calling this (C-M9 Design decision 2 step 1) so
+/// wake notification *before* calling this so
 /// an early keystroke cannot reach a not-yet-bound INTID.
 pub fn enable_rx_interrupts<R: Pl011>(regs: &mut R) {
     regs.write(UARTICR, ICR_ALL);
@@ -79,7 +79,7 @@ pub fn enable_rx_interrupts<R: Pl011>(regs: &mut R) {
 /// or when `out` is full. Returns the count read (`<= out.len()`). Never reads
 /// past empty and never overruns `out`; a still-non-empty FIFO (buffer smaller
 /// than the FIFO) is re-drained on the next delivery — the line stays asserted
-/// until the FIFO empties (C-M9 Design decision 2 step 4).
+/// until the FIFO empties.
 pub fn drain_rx<R: Pl011>(regs: &mut R, out: &mut [u8]) -> usize {
     let mut n = 0;
     while n < out.len() && (regs.read(FR) & FR_RXFE) == 0 {
@@ -90,8 +90,8 @@ pub fn drain_rx<R: Pl011>(regs: &mut R, out: &mut [u8]) -> usize {
 }
 
 /// Write every byte of `bytes` to `DR`, spinning on `!FR.TXFF` before each
-/// write — the `uart::putc` discipline, no TX interrupt (C-M9 Design decision 2
-/// step 5: a console's TX is low-volume, so a brief full-FIFO spin is fine).
+/// write — the `uart::putc` discipline, no TX interrupt (a console's TX is
+/// low-volume, so a brief full-FIFO spin is fine).
 pub fn write_tx<R: Pl011>(regs: &mut R, bytes: &[u8]) {
     for &b in bytes {
         while (regs.read(FR) & FR_TXFF) != 0 {}
@@ -101,11 +101,11 @@ pub fn write_tx<R: Pl011>(regs: &mut R, bytes: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    //! C-M9-A — host tests for the PL011 register layer (rev1§6 Baseline tier).
+    //! Host tests for the PL011 register layer (rev2§6 Baseline tier).
     //! The pure functions run against `FakePl011`, an in-memory model with an
     //! injectable RX FIFO, a TX capture, and a TXFF countdown (so a spin-on-full
     //! test makes progress and cannot hang). The real `MmioWindow` is never
-    //! touched here — its volatile MMIO is the QEMU path (C-M9-B/C).
+    //! touched here — its volatile MMIO is the QEMU path.
     use super::*;
     use proptest::prelude::*;
     use std::collections::VecDeque;

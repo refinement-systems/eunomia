@@ -1,8 +1,8 @@
 ---- MODULE CommitProtocol ----
-\* Storage commit / crash-recovery protocol for Eunomia OS (spec rev1§4.2–4.5, rev1§6).
+\* Storage commit / crash-recovery protocol for Eunomia OS (spec rev2§4.2–4.5, rev2§6).
 \*
 \* Abstraction: writes to a ref are numbered 1,2,3,… per ref ("versions").
-\* Content is last-write-wins (rev1§4.4), so the tree flushed at version v
+\* Content is last-write-wins (rev2§4.4), so the tree flushed at version v
 \* contains the effects of every write ≤ v of that ref. "Record <<r, u>>
 \* is covered by a committed root" therefore means u ≤ refRoots[r].
 \*
@@ -14,7 +14,7 @@
 \* A crash erases all volatile state.
 \*
 \* Modeling decisions:
-\*   - Write collapses memtable-write + WAL-append + WAL-fsync (rev1§4.3
+\*   - Write collapses memtable-write + WAL-append + WAL-fsync (rev2§4.3
 \*     step 2): only acknowledged writes are modeled. A torn WAL tail
 \*     holds only unacknowledged records and is discarded at recovery —
 \*     no invariant concerns it.
@@ -22,16 +22,16 @@
 \*     building the new superblock; CommitFinish = superblock write +
 \*     fsync barrier 2. A crash between them resolves the slot being
 \*     written nondeterministically to {unchanged, fully written, torn};
-\*     torn = checksum-invalid, discarded by recovery (rev1§4.5).
+\*     torn = checksum-invalid, discarded by recovery (rev2§4.5).
 \*   - Crash without barrier 1 may leave some chunkBuf writes durable
 \*     (page-cache leakage). Not modeled: such chunks are referenced by
-\*     no superblock, invisible to recovery, reclaimed by GC (rev1§4.5) —
+\*     no superblock, invisible to recovery, reclaimed by GC (rev2§4.5) —
 \*     they cannot affect any invariant below.
 \*   - Flush picks the newest overlay version (last-write-wins). Flush
 \*     and commit are mutually exclusive (one storage thread owns the
 \*     commit critical section); writes proceed concurrently.
 \*
-\* Headline invariant (spec rev1§6): after any crash, recovered state =
+\* Headline invariant (spec rev2§6): after any crash, recovered state =
 \* committed roots + replay of all WAL records not covered by the
 \* committed head — checked as AckedWritesRecoverable over durable state
 \* at every step, partial flushes included (Refs ≥ 2 in the model).
@@ -43,14 +43,14 @@ CONSTANTS
     MaxWrites,  \* writes per ref — bounds the state space
     NULL        \* sentinel (model value)
 
-\* rev1§4.8 — THE single trusted storage-layer axiom, named (not derived).
+\* rev2§4.8 — THE single trusted storage-layer axiom, named (not derived).
 \* "fsync means fsync": a completed fsync barrier makes the preceding writes
 \* durable, and a crash never loses durable state. The model ENCODES this in
 \* CommitPrepare (chunkBuf -> durableRoots at barrier 1) and Crash (UNCHANGED
 \* durableRoots); this ASSUME makes the assumption an explicit, grep-able
 \* top-level axiom rather than an implicit consequence of the crash semantics.
 \* It rests on the QEMU/virtio-blk cache=writeback + FLUSH config under our
-\* control (rev1§4.8), NOT on any proof — the irreducible trusted base of the
+\* control (rev2§4.8), NOT on any proof — the irreducible trusted base of the
 \* storage recovery argument, recorded as an axiom in the trusted-base ledger.
 ASSUME FsyncMeansFsync == TRUE
 
@@ -81,7 +81,7 @@ TornSlot  == Superblock(0, ZeroRoots, 0, FALSE)
 
 Max(S) == CHOOSE x \in S : \A y \in S : y <= x
 
-\* The live superblock: valid slot with the higher generation (rev1§4.5).
+\* The live superblock: valid slot with the higher generation (rev2§4.5).
 LiveSlot ==
     IF slotA.valid /\ slotB.valid
     THEN IF slotA.generation >= slotB.generation THEN slotA ELSE slotB
@@ -119,7 +119,7 @@ Write(r) ==
                    pendingSB, commitPhase, crashed>>
 
 \* Flush a ref's frozen overlay into (not yet durable) tree + chunks.
-\* Nothing on disk references the result yet (rev1§4.3 step 3).
+\* Nothing on disk references the result yet (rev2§4.3 step 3).
 Flush(r) ==
     /\ ~crashed
     /\ commitPhase = "idle"
@@ -134,7 +134,7 @@ Flush(r) ==
 \* Barrier 1: fsync chunk store, then build the new superblock.
 \* The new walHead is the longest contiguous prefix of records whose
 \* effects are flushed — the tail stays pinned by the oldest unflushed
-\* record (rev1§4.3 step 4, rev1§4.4). A commit may carry any subset of refs
+\* record (rev2§4.3 step 4, rev2§4.4). A commit may carry any subset of refs
 \* (partial flush): unflushed refs keep their previous committed roots.
 CommitPrepare ==
     /\ ~crashed
@@ -156,7 +156,7 @@ CommitPrepare ==
                    writeCtr>>
 
 \* Write the new superblock to the OLDER slot, then barrier 2 (fsync).
-\* Only after this is the commit real (rev1§4.3 step 4).
+\* Only after this is the commit real (rev2§4.3 step 4).
 CommitFinish ==
     /\ ~crashed
     /\ commitPhase = "prepared"
@@ -173,7 +173,7 @@ CommitFinish ==
 \* window was open, the older slot lands in one of three states: the
 \* write never reached disk, fully reached disk (then barrier 2 was
 \* merely redundant), or tore — a torn write can only damage the slot
-\* being written, never the other one (rev1§4.5).
+\* being written, never the other one (rev2§4.5).
 Crash ==
     /\ ~crashed
     /\ crashed' = TRUE
@@ -196,7 +196,7 @@ Crash ==
     /\ commitPhase' = "idle"
     /\ UNCHANGED <<walLog, durableRoots, writeCtr>>
 
-\* Recovery (rev1§4.5): the live slot defines reality; rebuild each ref's
+\* Recovery (rev2§4.5): the live slot defines reality; rebuild each ref's
 \* overlay by replaying WAL records past the committed head. Records past
 \* the head already covered by the committed root replay idempotently —
 \* the version filter models that.
@@ -239,7 +239,7 @@ TypeOK ==
     /\ commitPhase \in {"idle", "prepared"}
     /\ (commitPhase = "prepared") <=> (pendingSB /= NULL)
 
-\* rev1§4.5: a torn superblock write can only damage the slot being written;
+\* rev2§4.5: a torn superblock write can only damage the slot being written;
 \* a complete older commit always survives.
 AtLeastOneValidSlot == slotA.valid \/ slotB.valid
 
@@ -247,14 +247,14 @@ AtLeastOneValidSlot == slotA.valid \/ slotB.valid
 GenerationsDistinct ==
     (slotA.valid /\ slotB.valid) => slotA.generation /= slotB.generation
 
-\* Barrier 1 (rev1§4.3): no superblock — not even a stale-but-valid one —
+\* Barrier 1 (rev2§4.3): no superblock — not even a stale-but-valid one —
 \* may reference chunks that are not durable.
 CommittedRootsDurable ==
     \A s \in {slotA, slotB} :
         s.valid => \A r \in Refs :
             s.refRoots[r] /= 0 => <<r, s.refRoots[r]>> \in durableRoots
 
-\* The headline recovery invariant (rev1§6): every acknowledged write is
+\* The headline recovery invariant (rev2§6): every acknowledged write is
 \* recoverable from durable state alone — its effects are in the live
 \* slot's committed root, or its WAL record lies past the committed head
 \* and will be replayed. Holds at every step, so it holds after any crash.
@@ -266,7 +266,7 @@ AckedWritesRecoverable ==
 
 \* --- Action property: replay-equality ----------------------------------
 
-\* rev1§6/§4.5: replay-EQUALITY. After any Recover step, the rebuilt overlay
+\* rev2§6/§4.5: replay-EQUALITY. After any Recover step, the rebuilt overlay
 \* is EXACTLY the acked writes past the committed head not already covered by
 \* the committed root — characterized semantically (over writeCtr + walLog),
 \* independently of how Recover computes the set. The earlier suite (the five
@@ -288,7 +288,7 @@ RecoverReconstructs ==
 
 \* --- Negative control --------------------------------------------------
 
-\* NEGATIVE CONTROL (rev1§6 discipline): a Recover that rebuilds nothing.
+\* NEGATIVE CONTROL (rev2§6 discipline): a Recover that rebuilds nothing.
 \* Under SpecNeg, RecoverReconstructs MUST be violated — the runnable proof
 \* that the property has teeth. Checked by CommitProtocol_NegControl.cfg,
 \* which reports a short counterexample (write -> crash -> recover-to-empty

@@ -1,7 +1,7 @@
 //! Adapter: the byte-addressed `cas::dev::BlockDev` over sector-addressed
 //! virtio-blk. Partial-sector writes are read-modify-write at sector
 //! granularity; `flush` maps to VIRTIO_BLK_T_FLUSH — the fsync axiom
-//! (rev1§4.8) rides on QEMU honoring FLUSH under cache=writeback.
+//! (rev2§4.8) rides on QEMU honoring FLUSH under cache=writeback.
 
 use crate::{Mmio, VirtioBlk, VirtioError, SECTOR};
 use alloc::vec;

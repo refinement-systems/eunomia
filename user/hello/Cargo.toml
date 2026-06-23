@@ -9,7 +9,7 @@ edition = "2021"
 
 [dependencies]
 ipc = { path = "../../ipc" }
-# C1D — the unified startup-block codec (loader::startup), shared with the shell
+# The unified startup-block codec (loader::startup), shared with the shell
 # producer. no_std, host-buildable; default-features off keeps it to elf + startup.
 loader = { path = "../../loader", default-features = false }
 

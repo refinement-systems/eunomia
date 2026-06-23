@@ -1,5 +1,5 @@
-//! Capability spaces and the capability derivation tree (rev1§2.1–2.3,
-//! rev1§3.4).
+//! Capability spaces and the capability derivation tree (rev2§2.1–2.3,
+//! rev2§3.4).
 //!
 //! Every kernel object is reached through a `Cap` living in a `CapSlot`.
 //! Slots form the CDT: parent/first-child/sibling links threaded through
@@ -27,7 +27,7 @@ use crate::sysabi::NUM_PRIOS;
 use crate::thread::{Report, ThreadState};
 use vstd::prelude::*;
 
-/// Rights bits — monotone under derivation (rev1§2.3): `derive` may only clear
+/// Rights bits — monotone under derivation (rev2§2.3): `derive` may only clear
 /// bits, never set them.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Rights(pub u8);
@@ -41,19 +41,19 @@ verus! {
 impl Rights {
     pub const READ: u8 = 1 << 0; // recv / wait
     pub const WRITE: u8 = 1 << 1; // send / signal
-    /// phys-read (rev1§2.5): gates frame_paddr and device mappings. Granted
+    /// phys-read (rev2§2.5): gates frame_paddr and device mappings. Granted
     /// only on boot-created device/DMA caps — ALL deliberately excludes
     /// it so ordinary derivation chains can never reach a PA.
     pub const PHYS: u8 = 1 << 2;
-    /// bind-reports (rev1§2.3): configure a thread's on-exit/on-fault
-    /// binding slots (rev1§5.1).
+    /// bind-reports (rev2§2.3): configure a thread's on-exit/on-fault
+    /// binding slots (rev2§5.1).
     pub const BIND_REPORTS: u8 = 1 << 3;
-    /// read-report (rev1§2.3): read a thread's terminal report record;
-    /// later also the debugger's register access (deferred, rev1§8).
+    /// read-report (rev2§2.3): read a thread's terminal report record;
+    /// later also the debugger's register access (deferred, rev2§8).
     pub const READ_REPORT: u8 = 1 << 4;
     pub const ALL: Rights = Rights(0b11);
-    /// The creator's thread cap (rev1§2.3 thread bits; kill is deliberately
-    /// not on the list — destruction is resource ancestry, rev1§2.2).
+    /// The creator's thread cap (rev2§2.3 thread bits; kill is deliberately
+    /// not on the list — destruction is resource ancestry, rev2§2.2).
     pub const THREAD_ALL: Rights =
         Rights(Rights::READ | Rights::WRITE | Rights::BIND_REPORTS | Rights::READ_REPORT);
 
@@ -91,7 +91,7 @@ pub enum ChanEnd {
 /// The object a cap designates. Untyped carries its region inline: untyped
 /// caps are never copied (the watermark must have one owner), so the state
 /// needs no shared object. Frames carry their mapping inline too — one
-/// mapping per cap copy, and deleting the cap unmaps it (rev1§2.5). Object
+/// mapping per cap copy, and deleting the cap unmaps it (rev2§2.5). Object
 /// designations are opaque [`ObjId`] handles (was a `*mut Obj`).
 #[derive(Clone, Copy)]
 pub enum CapKind {
@@ -108,14 +108,14 @@ pub enum CapKind {
     },
     Aspace(crate::id::ObjId),
     CSpace(crate::id::ObjId),
-    // The `u8` is the rev1§5.4 maximum-controlled-priority ceiling — a value on the
-    // cap (rev1§2.3), attenuated monotonically by `derive` like rights. spawn gates a
+    // The `u8` is the rev2§5.4 maximum-controlled-priority ceiling — a value on the
+    // cap (rev2§2.3), attenuated monotonically by `derive` like rights. spawn gates a
     // thread's priority on it (`prio <= max_prio`).
     Thread(crate::id::ObjId, u8),
     Channel(crate::id::ObjId, ChanEnd),
     Notification(crate::id::ObjId),
     Timer(crate::id::ObjId),
-    // The rev1§1 IRQ-handler cap (B-IRQ): a plain designating handle to an `IrqObj`, the
+    // The rev2§1 IRQ-handler cap: a plain designating handle to an `IrqObj`, the
     // timer's twin. The `intid` rides the object, not the discriminant, so this is uniform
     // with `Notification`/`Timer` — `derived_kind`'s `_ => k` fallthrough makes it a faithful
     // designating copy with no new arm, and `cap_max_prio` returns `None` (it carries no ceiling).
@@ -140,10 +140,9 @@ impl Cap {
 }
 
 /// A capability slot, CDT links included. Slots live inside cspace objects
-/// and inside channel message slots — both are CDT-visible (rev1§3.4). The
-/// links are [`SlotId`] handles ([`crate::id`]) that span containers exactly
-/// as the old `*mut CapSlot` links did, with no special case in the revoke
-/// walk.
+/// and inside channel message slots — both are CDT-visible (rev2§3.4). The
+/// links are [`SlotId`] handles ([`crate::id`]) that span containers, with no
+/// special case in the revoke walk.
 #[derive(Clone, Copy)]
 pub struct CapSlot {
     pub cap: Cap,
@@ -151,11 +150,11 @@ pub struct CapSlot {
     pub first_child: Option<crate::id::SlotId>,
     pub next_sib: Option<crate::id::SlotId>,
     pub prev_sib: Option<crate::id::SlotId>,
-    /// Revoke-in-progress marker (B9). Set on the *root* of an in-flight,
+    /// Revoke-in-progress marker. Set on the *root* of an in-flight,
     /// preemptible `revoke_step` walk and cleared when the subtree is empty;
     /// `derive` refuses any derivation whose source's ancestor chain reaches a
     /// `revoking` root, so the multi-call walk terminates under concurrent
-    /// derivation (rev1§2.2 "preemptible and restartable"). It is *not* a CDT
+    /// derivation (rev2§2.2 "preemptible and restartable"). It is *not* a CDT
     /// link nor part of the cap: no structural (`cdt_wf`/`acyclic`) or census
     /// (`count_nonempty`/`refcount_sound`) predicate reads it — they key off
     /// `.cap` and the four links — so flipping it frames every invariant
@@ -339,7 +338,7 @@ pub struct ExReport(Report);
 #[verifier::ext_equal]
 pub struct ChanView {
     pub depth: nat,
-    // Per-end live-endpoint-cap counts (peer-closed, rev1§3.3) and per-ring FIFO
+    // Per-end live-endpoint-cap counts (peer-closed, rev2§3.3) and per-ring FIFO
     // cursors. Seqs of length 2 (ring/end ∈ {0,1}).
     pub end_caps: Seq<nat>,
     pub head: Seq<nat>,
@@ -382,7 +381,7 @@ pub struct TcbView {
     pub retval: u64,
     pub cspace: Option<ObjId>,
     pub aspace: Option<ObjId>,
-    // rev1§5.4 run priority. Bounded by the spawner's cap ceiling (`cap_max_prio`) and
+    // rev2§5.4 run priority. Bounded by the spawner's cap ceiling (`cap_max_prio`) and
     // written only through the verified `thread::set_priority`: surfacing it in the
     // view is what lets `set_priority` carry a machine-checked
     // `priority == prio (≤ ceiling)`.
@@ -400,13 +399,13 @@ pub struct TimerView {
     pub next: Option<ObjId>,
 }
 
-// The IRQ-handler object (rev1§1, rev1§3.6): the timer's **census twin**, minus the
+// The IRQ-handler object (rev2§1, rev2§3.6): the timer's **census twin**, minus the
 // armed list. An IRQ cap binds a (notification, bits) pair exactly as a timer does
 // (`bound` for `armed`, `notif`/`bits` shared), and a hardware interrupt signals that
-// notification — but delivery is by direct INTID→object lookup (B-IRQ-B), not by sweeping
+// notification — but delivery is by direct INTID→object lookup, not by sweeping
 // a chain, so there is **no `next` field** and no armed-list analog. `intid` rides the
 // object (the cap is a plain designating handle, uniform with `Notification`/`Timer`);
-// `masked` is the line-state bit the GIC shell toggles on deliver/ack (B-IRQ-B) — bind/
+// `masked` is the line-state bit the GIC shell toggles on deliver/ack — bind/
 // unbind/teardown never touch it. The binding holds a ref on `notif` (the
 // `irq_binding_refs` census term), so revoking the notif cap cannot free it under a bound
 // IRQ — the exact hazard `armed_timer_refs` guards for timers.
@@ -419,7 +418,7 @@ pub struct IrqView {
     pub masked: bool,
 }
 
-// The 32-level ready queue (rev1§5.4): one intrusive `Tcb.qnext` list per priority
+// The 32-level ready queue (rev2§5.4): one intrusive `Tcb.qnext` list per priority
 // level + a `u32` presence bitmap. Per-level head/tail (the waiter-queue shape, ×32)
 // plus the `timer_head_view`-style global-scalar bitmap. A thread is on the
 // `heads[level]`..`tails[level]` chain iff it is `Runnable` at `priority == level`
@@ -483,16 +482,16 @@ pub trait ExStore {
     spec fn tcb_view(&self) -> Map<ObjId, TcbView>;
     spec fn timer_view(&self) -> Map<ObjId, TimerView>;
     // The armed-timer list head — a `Store`-seam scalar (the kernel static,
-    // store.rs:130); the list *logic* is in `crate::timer` (phase 4e).
+    // store.rs:130); the list *logic* is in `crate::timer`.
     spec fn timer_head_view(&self) -> Option<ObjId>;
-    // The IRQ-handler arena (B-IRQ): handle → ghost view, the `timer_view` twin minus the
+    // The IRQ-handler arena: handle → ghost view, the `timer_view` twin minus the
     // armed-list scalar (delivery is by direct INTID lookup, not a chain). Framed unchanged
     // by every object setter exactly as `timer_view` is; changed only by the verified
     // `crate::irq` bind/unbind/destroy ops. The `irq_binding_refs` census term reads it.
     spec fn irq_view(&self) -> Map<ObjId, IrqView>;
     // The 32-level ready queue (per-level head/tail + presence bitmap) — `Store`-seam
     // state (the `READY`/`READY_BITMAP` kernel statics); the list *logic* is the
-    // verified `crate::ready` ops (B8C). Framed unchanged by every object setter
+    // verified `crate::ready` ops. Framed unchanged by every object setter
     // exactly as `timer_head_view` is; changed only by the enqueue/dequeue/unqueue ops.
     spec fn ready_view(&self) -> ReadyView;
     // The TLBI effect log: the ordered sequence of `(asid, va)` TLB
@@ -1103,7 +1102,7 @@ pub trait ExStore {
             final(self).cspace_view() == old(self).cspace_view(),
             final(self).irq_view() == old(self).irq_view();
 
-    // ── IRQ-handler object (B-IRQ) ──────────────────────────────────────────
+    // ── IRQ-handler object ──────────────────────────────────────────────────
     //
     // The timer accessors' twin, minus the armed-list (`next`/head) seam: by-handle
     // getters/setters over `irq_view`, each setter `insert`ing one IRQ and framing every
@@ -1190,7 +1189,7 @@ pub trait ExStore {
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view();
 
-    // ── ready queue (B8C) ──────────────────────────────────────────────────
+    // ── ready queue ────────────────────────────────────────────────────────
     //
     // The 32-level ready queue's per-level head/tail + presence bitmap, the
     // `timer_armed_head` precedent generalized: getters project `ready_view`, setters
@@ -1256,12 +1255,12 @@ pub trait ExStore {
             final(self).cspace_view() == old(self).cspace_view(),
             final(self).irq_view() == old(self).irq_view();
 
-    // ── scheduler seam (B8C: faithful ready-queue ops) ─────────────────────
+    // ── scheduler seam (faithful ready-queue ops) ──────────────────────────
     //
     // `make_runnable` is the seam lift of the verified `ready::ready_enqueue` (ready.rs): it
     // appends `t` to the tail of `t`'s priority level (writing the old level-tail's `qnext`)
     // and sets the presence bit. The contract mirrors `ready_enqueue`'s ensures term-for-term so
-    // the verified op discharges it (the KernelStore realization routes through it in B8C-3;
+    // the verified op discharges it (the KernelStore realization routes through it;
     // ArrayStore is host-checked via `signal_frame`). `signal` supplies the `priority < NUM_PRIOS`
     // precondition from the strengthened `waiter_chain` (via `notif_wf`) and `wait_notif is None`
     // by clearing it before the call.
@@ -1349,14 +1348,14 @@ pub trait ExStore {
                 &&& final(self).tcb_view()[t].cspace == old(self).tcb_view()[t].cspace
                 &&& final(self).tcb_view()[t].aspace == old(self).tcb_view()[t].aspace
                 &&& final(self).tcb_view()[t].bind_slots == old(self).tcb_view()[t].bind_slots
-                // B8C (Step F): `t`'s report survives the splice (only `qnext` is written) —
-                // `destroy_tcb` reads it off to preserve the halted subject's report (rev1§5.1).
+                // `t`'s report survives the splice (only `qnext` is written) —
+                // `destroy_tcb` reads it off to preserve the halted subject's report (rev2§5.1).
                 &&& final(self).tcb_view()[t].report == old(self).tcb_view()[t].report
                 // signal-shaped frame: only level's chain nodes (t + predecessor) moved, each
                 // Runnable (off every waiter chain), and each preserves the home fields
                 // `destroy_tcb`'s census/caps reasoning needs — `wait_notif` (waiter census),
                 // `cspace`/`aspace` (`thread_hold_refs`), `bind_slots` (`caps_consistent`).
-                // B8C (Step F): extends the part-2 frame with `cspace`/`aspace`.
+                // Extends the part-2 frame with `cspace`/`aspace`.
                 &&& forall|x: ObjId| #![trigger final(self).tcb_view()[x]]
                         final(self).tcb_view()[x] != old(self).tcb_view()[x]
                         ==> old(self).tcb_view()[x].state == ThreadState::Runnable
@@ -1456,7 +1455,7 @@ pub trait ExStore {
             final(self).cspace_view() == old(self).cspace_view(),
             final(self).irq_view() == old(self).irq_view();
 
-    // The map-time twin of `aspace_unmap` (B8A, rev1§6.1(c)). Like the unmap, it is page-table
+    // The map-time twin of `aspace_unmap` (rev2§6.1(c)). Like the unmap, it is page-table
     // maintenance — no object state — so it frames every object view + `refs_view` +
     // `cspace_view` in **both** result arms (the TLBI log it may touch is left unconstrained,
     // like the other hardware effects). It is *fallible* (the unmap is not): the table pool may
@@ -1508,9 +1507,9 @@ pub open spec fn cap_obj(c: Cap) -> Option<ObjId> {
 }
 
 // True iff `c` is a thread cap designating `t`, *ignoring* the priority ceiling —
-// the field-shape-stable form of the old `c.kind == CapKind::Thread(t)`. The
+// the field-shape-stable test for "is this a thread cap for `t`?". The
 // dead-object lemmas (`lemma_no_live_thread_cap_from_dead` et al.) reason about
-// "is this a thread cap for `t`?" independent of the ceiling `Thread` now carries.
+// that question independent of the ceiling `Thread` carries.
 //
 // `closed` (cross-platform headroom): the body unfolds inside `cspace`
 // (where the two dead-object lemmas prove/consume it), but stays opaque to
@@ -1524,9 +1523,9 @@ pub closed spec fn is_thread_cap_for(c: Cap, t: ObjId) -> bool {
     c.kind matches CapKind::Thread(o, _) && o == t
 }
 
-// The rev1§5.4 maximum-controlled-priority ceiling a cap carries, if it is a thread
+// The rev2§5.4 maximum-controlled-priority ceiling a cap carries, if it is a thread
 // cap (else `None`). Priority attenuates monotonically through `derive` exactly
-// like rights (rev1§2.3) — see `derive`'s ceiling `ensures`.
+// like rights (rev2§2.3) — see `derive`'s ceiling `ensures`.
 pub open spec fn cap_max_prio(c: Cap) -> Option<u8> {
     match c.kind {
         CapKind::Thread(_, mp) => Some(mp),
@@ -1539,7 +1538,7 @@ pub open spec fn is_empty_cap(c: Cap) -> bool {
 }
 
 // The (channel, end-index) a cap designates, if it is a channel cap (else `None`).
-// Narrower than `cap_obj` (which drops the end): the rev1§3.3 per-endpoint census
+// Narrower than `cap_obj` (which drops the end): the rev2§3.3 per-endpoint census
 // `end_cap_count` filters on *which end* a `Channel(o, end)` cap names, since
 // `end_caps[end]` is tracked per end for peer-closed firing.
 pub open spec fn cap_chan_end(c: Cap) -> Option<(ObjId, int)> {
@@ -1572,12 +1571,12 @@ pub fn cap_is_empty(c: Cap) -> (r: bool)
 
 // The kind a derivation produces from `k` under a requested priority ceiling:
 // identical (same object, same channel end), except a Frame copy starts unmapped
-// (rev1§2.5, one mapping per cap copy) and a Thread copy's rev1§5.4 ceiling is reduced to
+// (rev2§2.5, one mapping per cap copy) and a Thread copy's rev2§5.4 ceiling is reduced to
 // `min(parent, prio_ceiling)`. This is the "copy" half of monotone derivation —
 // derivation cannot change the designated object or amplify via the kind, and the
-// priority ceiling can only shrink (rev1§2.3). `prio_ceiling = 0xFF` (the `cap_copy`
+// priority ceiling can only shrink (rev2§2.3). `prio_ceiling = 0xFF` (the `cap_copy`
 // no-reduction sentinel; priorities are `< NUM_PRIOS = 32`) preserves the parent
-// ceiling exactly; a lower value is the rev1§2.3 supervision grant.
+// ceiling exactly; a lower value is the rev2§2.3 supervision grant.
 pub open spec fn derived_kind(k: CapKind, prio_ceiling: u8) -> CapKind {
     match k {
         CapKind::Frame { base, pages, mapping: _ } => CapKind::Frame { base, pages, mapping: None },
@@ -1678,10 +1677,10 @@ pub open spec fn empty_slots_detached(m: Map<SlotId, CapSlot>) -> bool {
     })
 }
 
-// ── CDT descendant reachability (the rev1§3.4 "sees through queues" obligation) ────
+// ── CDT descendant reachability (the rev2§3.4 "sees through queues" obligation) ────
 //
 // `revoke` deletes the *whole subtree* of its target, in-flight queue caps included
-// (rev1§3.4: queue slots are ordinary `CapSlot`s carrying the parent edge, so a cap queued
+// (rev2§3.4: queue slots are ordinary `CapSlot`s carrying the parent edge, so a cap queued
 // in a message is a genuine CDT descendant — `slot_move`, what `send` uses, inherits the
 // edge into the ring slot). The structural predicates above pin only the *direct* child
 // relation; these add the transitive closure so `revoke` can export "the subtree is gone"
@@ -1895,7 +1894,7 @@ pub proof fn lemma_chan_wf_frame(
 // (not necessarily its cap content). The only slot facts `chan_wf` reads are the arena
 // domain and the emptiness of out-of-window ring slots, so an edit that keeps every slot's
 // emptiness — e.g. a frame cap's `mapping: None → Some` (a Frame stays non-empty) — carries
-// it. The `lemma_chan_wf_frame` companion for B8A's `map_frame`, which records (not empties).
+// it. The `lemma_chan_wf_frame` companion for `map_frame`, which records (not empties).
 pub proof fn lemma_chan_wf_emptiness_frame(
     cv0: Map<ObjId, ChanView>,
     cv1: Map<ObjId, ChanView>,
@@ -1955,12 +1954,12 @@ pub open spec fn ring_fifo(cv: ChanView, sv: Map<SlotId, CapSlot>, ring: int)
 
 // A generic singly-linked-list acyclicity rank over an abstract successor map — the
 // `valid_srank`/`sib_acyclic` analog, shared by the waiter queue (`succ` = `qnext`)
-// and, in phase 4e, the armed-timer list (`succ` = `timer_next`): a strict decrease
+// and the armed-timer list (`succ` = `timer_next`): a strict decrease
 // along `succ` makes the relation well-founded, so an unlink loop walking `succ`
 // terminates. GHOST-only (the rank is an existential witness, no `Store` home). Over
 // the `qnext` projection it is implied by `waiter_chain`'s `no_duplicates` (rank =
 // position in the chain), so `notif_wf` need not assert it separately; it is the
-// decreases mechanism phase 4c/4e instantiate.
+// decreases mechanism instantiated here.
 pub open spec fn valid_list_rank(succ: Map<ObjId, Option<ObjId>>, r: Map<ObjId, nat>) -> bool {
     &&& r.dom() == succ.dom()
     &&& forall|k: ObjId| #[trigger] succ.dom().contains(k) ==>
@@ -1991,7 +1990,7 @@ pub open spec fn waiter_chain(
             tv[ws[i]].qnext == (if i + 1 < ws.len() { Some(ws[i + 1]) } else { None })
     &&& forall|i: int| #![trigger ws[i]] 0 <= i < ws.len() ==>
             tv[ws[i]].wait_notif == Some(n) && tv[ws[i]].state == ThreadState::BlockedNotif
-    // B8C: a queued waiter's priority is a valid ready-queue level. This rides `notif_wf`
+    // A queued waiter's priority is a valid ready-queue level. This rides `notif_wf`
     // (already threaded everywhere), so `signal` can discharge the woken head's
     // `priority < NUM_PRIOS` precondition for the faithful `make_runnable`/`ready_enqueue`
     // without a separate global `prio_bounded` invariant. Only `wait` (the sole appender)
@@ -2081,7 +2080,7 @@ proof fn lemma_chain_not_strict_prefix(
     }
 }
 
-// The uniqueness theorem (the central new lemma of phase 4b).
+// The uniqueness theorem (the central lemma).
 pub proof fn lemma_waiter_chain_unique(
     nv: Map<ObjId, NotifView>,
     tv: Map<ObjId, TcbView>,
@@ -2167,7 +2166,7 @@ pub proof fn lemma_notif_wf_frame(
         nv2.dom().contains(m),
         nv2[m] == nv[m],
         tv2.dom() == tv.dom(),
-        // B8C: dom-guarded — the lemma only consumes the in-domain waiters of `m` (the chain
+        // Dom-guarded — the lemma only consumes the in-domain waiters of `m` (the chain
         // `m`'s head/tail thread, all in `tv.dom()`), so a caller need not reason about phantom
         // out-of-domain keys. A weakening of the precondition; every existing caller, which
         // supplied the un-guarded `forall`, satisfies it unchanged.
@@ -2208,7 +2207,7 @@ pub proof fn lemma_drop_first_chain(
         tv0[t].qnext is None ==> nvf[n].wait_tail is None,
         tv0[t].qnext is Some ==> nvf[n].wait_tail == nv0[n].wait_tail,
         tvf.dom() == tv0.dom(),
-        // B8C: only `n`'s waiters need to be unchanged (the chain `ws0.drop_first` is all
+        // Only `n`'s waiters need to be unchanged (the chain `ws0.drop_first` is all
         // waiters of `n`). Weakened from `k != t ==> unchanged` so `signal`'s faithful enqueue —
         // which also re-threads the Runnable old ready-tail `p` (`wait_notif None`, not a
         // waiter of `n`) — can still discharge it.
@@ -2497,7 +2496,7 @@ pub proof fn lemma_waiter_refs_frame_fields(
         forall|k: ObjId| #[trigger] tvf[k].qnext == tv0[k].qnext,
         forall|k: ObjId| #[trigger] tvf[k].wait_notif == tv0[k].wait_notif,
         forall|k: ObjId| #[trigger] tvf[k].state == tv0[k].state,
-        // B8C: `waiter_chain` now carries a priority bound, so its frame transfer needs
+        // `waiter_chain` carries a priority bound, so its frame transfer needs
         // priority preserved too (the callers — `bind_bits`, etc. — never write priority).
         forall|k: ObjId| #[trigger] tvf[k].priority == tv0[k].priority,
     ensures
@@ -2859,7 +2858,7 @@ pub proof fn lemma_remove_chain(
         k > 0 ==> tvf[ws0[k - 1]].qnext == tv0[t].qnext,
         k > 0 ==> tvf[ws0[k - 1]].wait_notif == tv0[ws0[k - 1]].wait_notif,
         k > 0 ==> tvf[ws0[k - 1]].state == tv0[ws0[k - 1]].state,
-        // B8C: `waiter_chain`'s priority covenant — the re-threaded predecessor keeps its
+        // `waiter_chain`'s priority covenant — the re-threaded predecessor keeps its
         // priority (the splice writes only its `qnext`), so the result chain stays bounded.
         k > 0 ==> tvf[ws0[k - 1]].priority == tv0[ws0[k - 1]].priority,
         // every other TCB unchanged.
@@ -2953,7 +2952,7 @@ pub proof fn lemma_remove_chain(
     }
 }
 
-// ── ready-queue list model (B8C) ─────────────────────────────────────────
+// ── ready-queue list model ───────────────────────────────────────────────
 // The 32-level ready queue is, per level, a head+tail intrusive list over `Tcb.qnext`
 // — the waiter-queue shape (`waiter_chain`/`waiter_seq`/`lemma_remove_chain`) with the
 // notification `n` replaced by a priority `level`, `wait_head`/`wait_tail` by
@@ -3209,7 +3208,7 @@ pub proof fn lemma_ready_chain_frame(
 {
 }
 
-// B8C: the *field-based* chain frame — `ready_chain` reads only each member's `qnext`/`state`/
+// The *field-based* chain frame — `ready_chain` reads only each member's `qnext`/`state`/
 // `priority` (plus `rv`'s heads/tails and `tv`'s domain), so an edit preserving exactly those
 // three fields at the chain members carries the chain even if it rewrites other fields (e.g.
 // `report_terminal`'s `report`, `bind`'s `cspace`/`aspace`/`bind_*`).
@@ -3273,7 +3272,7 @@ pub open spec fn ready_complete(rv: ReadyView, tv: Map<ObjId, TcbView>) -> bool 
     forall|t: ObjId| #[trigger] tv.dom().contains(t) && tv[t].state == ThreadState::Runnable
         ==> (tv[t].priority as int) < NUM_PRIOS
             && ready_seq(rv, tv, tv[t].priority as int).contains(t)
-            // B8C: a Runnable thread is not waiting on any notification. Folded in (rather
+            // A Runnable thread is not waiting on any notification. Folded in (rather
             // than threaded as a global `runnable_not_waiting` invariant) so `signal`'s census
             // frame can discharge `wait_notif != Some(o)` for the *old level-tail* `p` that a
             // faithful `make_runnable` re-threads — `p` is Runnable, hence charted here. The
@@ -3284,7 +3283,7 @@ pub open spec fn ready_complete(rv: ReadyView, tv: Map<ObjId, TcbView>) -> bool 
 
 // `ready_complete` with one Runnable thread `t` excepted — the liveness `ready_unqueue`
 // preserves. The splice leaves `t` transiently Runnable-and-off-chain, so completeness
-// holds for every *other* Runnable thread; `destroy_tcb` (B8C-4) closes the gap by halting
+// holds for every *other* Runnable thread; `destroy_tcb` closes the gap by halting
 // `t`. Kept a separate predicate (not a `ready_wf` conjunct) per the off-chain-`t` carve-out.
 pub open spec fn ready_complete_except(rv: ReadyView, tv: Map<ObjId, TcbView>, t: ObjId) -> bool {
     forall|x: ObjId| #[trigger] tv.dom().contains(x) && tv[x].state == ThreadState::Runnable
@@ -3481,7 +3480,7 @@ pub proof fn lemma_seq_remove_no_dup<A>(s: Seq<A>, k: int)
     }
 }
 
-// B8C (Step F): removing the unique occurrence of an element from a `no_duplicates` sequence
+// Removing the unique occurrence of an element from a `no_duplicates` sequence
 // leaves a sequence that no longer contains it — `destroy_tcb` uses this to prove the unqueued
 // `t` is off its (post-splice) level chain, hence (with `ready_wf`) off every ready chain.
 pub proof fn lemma_seq_remove_drops<A>(s: Seq<A>, k: int)
@@ -3865,14 +3864,14 @@ pub proof fn lemma_only_empties_trans(
 // ── Refcount census: the stored refcount equals the count of designating slots
 // (cspace residents; channel-queue and TCB-bind homes ride the same arena),
 // plus the non-slot references (bindings/waiters/armed timers) the later
-// phases add. For phase 2 the census is the slot count; the cross-home and
+// phases add. The census is the slot count; the cross-home and
 // non-slot terms land with channel/notification/thread. ──
 
 pub open spec fn slot_refs(m: Map<SlotId, CapSlot>, obj: ObjId) -> nat {
     m.dom().filter(|k: SlotId| cap_obj(m[k].cap) == Some(obj)).len()
 }
 
-// The rev1§3.3 per-endpoint cap census: the number of live `Channel(ch, e)` caps in
+// The rev2§3.3 per-endpoint cap census: the number of live `Channel(ch, e)` caps in
 // the slot arena. The kernel keeps `chan_view[ch].end_caps[e]` exactly equal to
 // this (maintained by `endpoint_cap_added`/`_dropped`), so peer-closed fires when
 // the *last* endpoint cap is gone. `end_caps_sound` (below) makes that equality a
@@ -4153,7 +4152,7 @@ pub open spec fn cap_frame_aspace(c: Cap) -> Option<ObjId> {
 
 // Channel bindings naming `o`: the `(ch, end, ev)` triples whose binding's notif is
 // `Some(o)` (end ∈ {0,1}, ev ∈ {0,1,2}). A subset of `cv.dom() × {0,1} × {0,1,2}`,
-// finite when `cv.dom()` is. The rev1§3.6 binding term (the `binding_refs_ok` companion).
+// finite when `cv.dom()` is. The rev2§3.6 binding term (the `binding_refs_ok` companion).
 pub open spec fn binding_refs(cv: Map<ObjId, ChanView>, o: ObjId) -> nat {
     Set::new(
         |t: (ObjId, int, int)|
@@ -4295,7 +4294,7 @@ pub proof fn lemma_armed_timer_refs_pos(tmv: Map<ObjId, TimerView>, t: ObjId, o:
     }
 }
 
-// IRQ-object well-formedness (B-IRQ): a bound IRQ names a notification — the per-object
+// IRQ-object well-formedness: a bound IRQ names a notification — the per-object
 // invariant the `irq_binding_refs` term and `destroy_irq`'s release rest on (the
 // `armed ⇒ notif is Some` timer fact, minus the chain). No list, so no head/`timer_wf`
 // existential — a pure pointwise predicate.
@@ -4468,7 +4467,7 @@ pub open spec fn census_off_by_one<S: Store>(store: &S, z: ObjId) -> bool {
 // The per-object kernel of `dead_tcb_frozen` (a clean predicate so the system quantifier triggers
 // on `dead_tcb_frozen_at(s0, s1, x)`, not the fragile `s1.tcb_view[x]` map index).
 pub open spec fn dead_tcb_frozen_at<S: Store>(s0: &S, s1: &S, x: ObjId) -> bool {
-    // B8C: a *Runnable* thread is not "dead" for freezing purposes — the faithful
+    // A *Runnable* thread is not "dead" for freezing purposes — the faithful
     // `make_runnable`/`ready_unqueue` re-thread a Runnable node's `qnext` (the old ready-tail /
     // the spliced predecessor), which may be refs-0 yet legitimately on the ready queue (ready
     // membership carries no refcount). The teardown consumers only ever freeze Halted/Blocked
@@ -4504,7 +4503,7 @@ pub proof fn lemma_dead_tcb_frozen_trans<S: Store>(s0: &S, s1: &S, s2: &S)
         if s0.tcb_view().dom().contains(x) && s0.refs_view().dom().contains(x)
             && s0.refs_view()[x] == 0 && s0.tcb_view()[x].wait_notif is None
             && s0.tcb_view()[x].state != ThreadState::Runnable {
-            // B8C: the antecedent now matches the weakened `dead_tcb_frozen_at` (Runnable
+            // The antecedent matches the weakened `dead_tcb_frozen_at` (Runnable
             // excluded), so frame 1 fires and pins `s1.tcb[x] == s0.tcb[x]`; that carries
             // `wait_notif is None` *and* `state != Runnable` into s1, firing frame 2 to s2.
             assert(s1.tcb_view()[x] == s0.tcb_view()[x]);
@@ -4526,7 +4525,7 @@ pub proof fn lemma_dead_tcb_frozen_signal_shaped<S: Store>(s0: &S, s1: &S, n: Ob
         s1.tcb_view().dom() == s0.tcb_view().dom(),
         forall|x: ObjId| s0.refs_view().dom().contains(x) && s0.refs_view()[x] == 0
             ==> #[trigger] s1.refs_view()[x] == 0,
-        // B8C: a changed TCB is either an `n`-waiter (the woken/spliced head) OR a Runnable
+        // A changed TCB is either an `n`-waiter (the woken/spliced head) OR a Runnable
         // node (the enqueue's re-threaded old ready-tail). A *dead* `x` (refs 0, detached,
         // non-Runnable per the weakened `dead_tcb_frozen_at`) is neither, so it is frozen.
         forall|k: ObjId| #[trigger] s1.tcb_view()[k] == s0.tcb_view()[k]
@@ -5202,7 +5201,7 @@ pub proof fn lemma_sysinv_frame_equal_views<S: Store>(s0: &S, s1: &S)
     assert(end_caps_sound(s1));
 }
 
-// B8C: the ready-queue invariants (`ready_wf` + `ready_complete`) ride an edit that frames both
+// The ready-queue invariants (`ready_wf` + `ready_complete`) ride an edit that frames both
 // `ready_view` and `tcb_view` — the `lemma_sysinv_frame_equal_views` analogue for the ready pair.
 // The cascade carriers (`delete`/`obj_unref`/`destroy_cspace`/`unref_cspace`/`destroy_channel`/
 // `revoke`/`bind`, and the `endpoint_cap_dropped`/`signal` non-wake segments) discharge their
@@ -5221,7 +5220,7 @@ pub proof fn lemma_ready_inv_frame<S: Store>(s0: &S, s1: &S)
 {
 }
 
-// B8C: the generalised ready frame — the invariants ride an edit that frames `ready_view` and
+// The generalised ready frame — the invariants ride an edit that frames `ready_view` and
 // changes `tcb_view` only at threads that are non-Runnable in BOTH states. A blocked/halted
 // thread is on no ready chain (every chain member is Runnable by the `ready_chain` covenant), so
 // the per-level chains — hence `ready_wf` — and the Runnable set with its `wait_notif`/charting —
@@ -5273,7 +5272,7 @@ pub proof fn lemma_ready_inv_frame_offchain<S: Store>(s0: &S, s1: &S)
     }
 }
 
-// B8C: the *field-based* ready frame — the invariants ride an edit that frames `ready_view` and
+// The *field-based* ready frame — the invariants ride an edit that frames `ready_view` and
 // preserves the four ready-relevant fields (`state`/`priority`/`qnext`/`wait_notif`) of EVERY
 // thread, even if it rewrites other fields. Used by `report_terminal` (sets `report`) and `bind`
 // (sets `cspace`/`aspace`/`bind_*`) — neither touches a field `ready_wf`/`ready_complete` reads.
@@ -5320,7 +5319,7 @@ pub proof fn lemma_ready_inv_frame_fields<S: Store>(s0: &S, s1: &S)
     }
 }
 
-// B8C (Step F): a thread is off **every** ready chain when it is either non-Runnable or off its
+// A thread is off **every** ready chain when it is either non-Runnable or off its
 // own priority level's chain — `ready_wf`'s per-level covenant (`state == Runnable && priority ==
 // level`) forces any chain member to be a Runnable thread sitting at exactly that level, so a
 // non-Runnable `t`, or a `t` absent from its own level's chain, cannot appear on any level's chain.
@@ -5354,7 +5353,7 @@ pub proof fn lemma_thread_off_all_ready_chains<S: Store>(s: &S, t: ObjId)
     }
 }
 
-// B8C (Step F): the `destroy_tcb` halt promotes `ready_complete_except(t)` back to full
+// The `destroy_tcb` halt promotes `ready_complete_except(t)` back to full
 // `ready_complete`. The detach left `t` off every ready chain (the splice removed it; a
 // non-Runnable `t` was never on one), and the halt is the only tcb edit (`t` → Halted, `ready_view`
 // framed). So every Runnable `x != t` is unchanged (still charted), and `t` is no longer Runnable —
@@ -5550,7 +5549,7 @@ pub open spec fn caps_consistent<S: Store>(store: &S) -> bool {
     // structural like the slot/chan companions; every mutator frames `tcb_view` or `insert`s
     // one TCB, both finiteness-preserving.
     &&& store.tcb_view().dom().finite()
-    // The IRQ arena is finite too (B-IRQ): the `irq_binding_refs` recount is a
+    // The IRQ arena is finite too: the `irq_binding_refs` recount is a
     // `dom().filter().len()`, so the lockstep census delta the bind/unbind/destroy ops export
     // needs it. Refs-free and structural like the slot/chan/tcb companions; every mutator
     // frames `irq_view` or `insert`s one IRQ, both finiteness-preserving.
@@ -5580,9 +5579,9 @@ pub proof fn lemma_caps_consistent_frame<S: Store>(s0: &S, s1: &S, n: ObjId)
         s1.notif_view() == s0.notif_view().insert(n, s1.notif_view()[n]),
         s1.tcb_view().dom() == s0.tcb_view().dom(),
         notif_wf(s1.notif_view(), s1.tcb_view(), n),
-        // B8C: weakened from "non-`n`-waiter ⇒ unchanged" to "**other waiter** (`wait_notif`
-        // some, ≠ `n`) ⇒ unchanged". The old form was too strong for the faithful enqueue, which
-        // re-threads the Runnable old ready-tail `p` (`wait_notif None`) — now excluded. The body
+        // Frames an "**other waiter** (`wait_notif` some, ≠ `n`) ⇒ unchanged" claim. It excludes
+        // the Runnable old ready-tail `p` (`wait_notif None`) that the faithful enqueue
+        // re-threads, which a "non-`n`-waiter ⇒ unchanged" claim would wrongly cover. The body
         // needs only that *other notifications' waiters* are unchanged (to carry their `notif_wf`
         // via `lemma_notif_wf_frame`); a caller supplies it from `signal`'s contrapositive frame +
         // `ready_complete` (an `m`-waiter is `BlockedNotif`, non-Runnable, so not in the changed set).
@@ -5675,7 +5674,7 @@ pub proof fn lemma_caps_consistent_frame<S: Store>(s0: &S, s1: &S, n: ObjId)
     }
 }
 
-// The rev1§3.3 per-endpoint cap census as a system invariant (the `caps_consistent`
+// The rev2§3.3 per-endpoint cap census as a system invariant (the `caps_consistent`
 // analog for channel endpoint counts; the body-removal census gate):
 // every live channel's `end_caps[e]` equals the count of `Channel(ch, e)` caps in
 // the arena. Refs-free (reads only `chan_view`/`slot_view`), so a `dec_ref` `-1`
@@ -6066,7 +6065,7 @@ pub proof fn lemma_set_slot_obj_census<S: Store>(
     // The four view terms read framed views (equal args).
 }
 
-// ── B8A: the map-time mirror of the clear-slot census drop. Recording a frame mapping
+// ── The map-time mirror of the clear-slot census drop. Recording a frame mapping
 // (`mapping: None → Some((asp, va))`) raises `frame_map_refs(asp)` — hence `obj_census(asp)`
 // — by one, the inverse of `delete_prepare` clearing it. `lemma_set_slot_census` keyed its
 // rise off `is_empty_cap(old)`; here the old cap is a (non-empty) unmapped Frame, so the
@@ -6253,7 +6252,7 @@ pub proof fn lemma_map_frame_caps_consistent<S: Store>(
     }
 }
 
-// rev1§3.3 endpoint-cap census drop: clearing a `Channel(ch, e)` slot to a non-channel
+// rev2§3.3 endpoint-cap census drop: clearing a `Channel(ch, e)` slot to a non-channel
 // cap lowers `end_cap_count(ch, e)` by one and leaves every other `(ch2, e2)` fixed.
 // The `lemma_designation_drop` shape over the `cap_chan_end` filter; `delete`'s body
 // (PR2) consumes it when it empties a deleted channel cap's slot.
@@ -6516,7 +6515,7 @@ pub proof fn lemma_armed_timer_retarget(
     }
 }
 
-// IRQ-binding **retarget**, the general single-IRQ transition (B-IRQ; the
+// IRQ-binding **retarget**, the general single-IRQ transition (the
 // `lemma_armed_timer_retarget` twin). `i`'s `(bound, notif)` may change arbitrarily (bind,
 // unbind, or rebind) while every other IRQ keeps both fields. The IRQ ops are single-key
 // edits at `i` (no list splice), so this one lemma covers `irq_bind` (post bound), `irq_unbind`
@@ -9114,7 +9113,7 @@ pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
     }
 }
 
-/// B9 derive guard: walk up `start`'s `parent` chain and report whether `start`
+/// Derive guard: walk up `start`'s `parent` chain and report whether `start`
 /// itself or any ancestor carries the revoke-in-progress marker. `derive` refuses
 /// (returns `Err`) on a hit, so no derivation grows the subtree of an in-flight
 /// `revoke_step` — which is what keeps the multi-call walk terminating under
@@ -9168,18 +9167,18 @@ pub fn ancestor_or_self_revoking<S: Store>(store: &S, start: SlotId) -> (res: bo
     }
 }
 
-/// Derive a child cap (rev1§2.3): copy with rights intersected — the only
+/// Derive a child cap (rev2§2.3): copy with rights intersected — the only
 /// derivation; there is no amplification path.
 ///
 /// pre: the cspace is well-formed; `src`/`dst` are live; if `src` designates an
 /// object, that object is live (in the refcount table).
 /// post: on `Ok`, `dst` holds a faithful copy of `src`'s cap — same kind and
-/// designated object (a fresh Frame copy starts unmapped, rev1§2.5) — with
+/// designated object (a fresh Frame copy starts unmapped, rev2§2.5) — with
 /// rights ∩ `mask`, so its rights are a **subset** of `src`'s for every
 /// `mask` (the load-bearing monotone-derivation theorem, proven ∀ rather
-/// than sampled). For a thread cap the rev1§5.4 maximum-controlled-priority
+/// than sampled). For a thread cap the rev2§5.4 maximum-controlled-priority
 /// ceiling rides along and so attenuates monotonically too (`child.max_prio
-/// <= parent.max_prio`, rev1§2.3) — the priority axis of the lattice, here
+/// <= parent.max_prio`, rev2§2.3) — the priority axis of the lattice, here
 /// realized as ceiling-preservation. `dst` is `src`'s first child; the object's refcount and
 /// slot census both rise by exactly one; the cspace stays well-formed
 /// **and acyclic** (`cspace_wf` — `dst` is seated as a fresh leaf).
@@ -9209,11 +9208,11 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_
             &&& (final(store).slot_view()[dst].cap.rights.0
                   & old(store).slot_view()[src].cap.rights.0)
                   == final(store).slot_view()[dst].cap.rights.0
-            // rev1§5.4/rev1§2.3 monotone priority ceiling, now *reducing*: a derived thread
+            // rev2§5.4/rev2§2.3 monotone priority ceiling, now *reducing*: a derived thread
             // cap's maximum-controlled-priority ceiling is exactly `min(parent,
             // prio_ceiling)` — never above the parent's (the priority axis of the
             // derivation lattice, ∀) and never above the requested `prio_ceiling`
-            // (the rev1§2.3 supervision grant). Discharged from the
+            // (the rev2§2.3 supervision grant). Discharged from the
             // `derived_kind` equality above (the ceiling rides the kind). With the
             // `cap_copy` sentinel `prio_ceiling = 0xFF` this collapses to exact
             // preservation.
@@ -9248,7 +9247,7 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_
         refcount_sound(old(store)) ==> refcount_sound(final(store)),
 {
     let ghost m0 = old(store).slot_view();
-    // B9 guard: refuse derivation into the subtree of an in-flight revoke. The walk
+    // Guard: refuse derivation into the subtree of an in-flight revoke. The walk
     // is read-only, so this `Err` is a no-op (the `res is Err` frame holds).
     if ancestor_or_self_revoking(store, src) {
         return Err(());
@@ -9268,8 +9267,8 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_
     assert(m0[dst].parent is None && m0[dst].first_child is None
         && m0[dst].next_sib is None && m0[dst].prev_sib is None);
 
-    // One mapping per cap copy (rev1§2.5): a fresh frame copy starts unmapped. A thread
-    // copy's rev1§5.4 ceiling is attenuated to `min(parent, prio_ceiling)` (rev1§2.3).
+    // One mapping per cap copy (rev2§2.5): a fresh frame copy starts unmapped. A thread
+    // copy's rev2§5.4 ceiling is attenuated to `min(parent, prio_ceiling)` (rev2§2.3).
     let kind = match s.cap.kind {
         CapKind::Frame { base, pages, mapping: _ } => CapKind::Frame { base, pages, mapping: None },
         CapKind::Thread(o, mp) => CapKind::Thread(o, if mp <= prio_ceiling { mp } else { prio_ceiling }),
@@ -9405,7 +9404,7 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_
     Ok(())
 }
 
-/// Unlink `slot` from the CDT, re-parenting its children one level up (rev1§2.3).
+/// Unlink `slot` from the CDT, re-parenting its children one level up (rev2§2.3).
 ///
 /// **Verified** (full body proof). Unlike `slot_move` (a
 /// transposition), this is a sibling-list *merge*: a `first_child→next_sib`
@@ -9419,7 +9418,7 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_
 /// (`lemma_child_on_chain` completeness; `next_reach` for per-iteration progress
 /// and termination); `last` is the chain tail (`lemma_unique_tail`). The contract
 /// is also host-test-checked (test_store). `pub(crate)`: no callers outside `kcore`.
-// B9: adding the (CDT-inert) `revoking` field to `CapSlot` widens every slot
+// The (CDT-inert) `revoking` field on `CapSlot` widens every slot
 // equality the merge proof carries, nudging this body over the default rlimit on
 // macOS. Isolate it in its own solver (`spinoff_prover`) with headroom — the same
 // treatment the other heavy cspace bodies already use.
@@ -9738,7 +9737,7 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
     }
 }
 
-/// Move a cap between slots, preserving its CDT position (rev1§3.4: send and receive
+/// Move a cap between slots, preserving its CDT position (rev2§3.4: send and receive
 /// move caps; a move is the same cap relocating, not a derivation).
 ///
 /// **Verified** (full body proof). The body's whole effect is
@@ -9776,7 +9775,7 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
         final(store).tcb_view() == old(store).tcb_view(),
         final(store).timer_view() == old(store).timer_view(),
         final(store).timer_head_view() == old(store).timer_head_view(),
-        // B-IRQ: `set_slot` frames `irq_view` too, so a queued-cap move preserves it (and
+        // `set_slot` frames `irq_view` too, so a queued-cap move preserves it (and
         // hence the `irq_binding_refs` census term — `thread::bind`'s relocation reads it off).
         final(store).irq_view() == old(store).irq_view(),
             final(store).ready_view() == old(store).ready_view(),
@@ -9823,7 +9822,7 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
     d.first_child = s.first_child;
     d.next_sib = s.next_sib;
     d.prev_sib = s.prev_sib;
-    // B9: the transposition copies the whole slot (incl. the revoke marker), so
+    // The transposition copies the whole slot (incl. the revoke marker), so
     // `d == m0[src]` holds for all six fields. A queued/moved cap is never a
     // revoke root, so this only ever moves `revoking: false`, but the proof needs
     // the exact-slot equality.
@@ -10119,7 +10118,7 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
         lemma_move_count(m0, mfin, src, dst);
         // dst inherits src's cap (rl[dst] == m0[src]).
         assert(mfin[dst] == m0[src]);
-        // B-IRQ: every mutation is `set_slot`, which frames `irq_view`, so the IRQ arena is
+        // Every mutation is `set_slot`, which frames `irq_view`, so the IRQ arena is
         // untouched end to end (the `timer_view` frame's twin).
         assert(store.irq_view() == old(store).irq_view());
     }
@@ -10155,7 +10154,7 @@ pub(crate) fn dec_ref<S: Store>(store: &mut S, o: ObjId)
         // The cap→object invariant rides through unchanged — it reads only object views, all
         // framed by `set_obj_refs`.
         caps_consistent(old(store)),
-        // The rev1§3.3 endpoint-cap census is likewise refs-free (chan_view + slot_view, both
+        // The rev2§3.3 endpoint-cap census is likewise refs-free (chan_view + slot_view, both
         // framed by `set_obj_refs`), so it rides through too.
         end_caps_sound(old(store)),
         // Refs-domain completeness rides through: the census is framed and `set_obj_refs`
@@ -10226,7 +10225,7 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
         end_caps_sound(old(store)),
         census_dom_complete(old(store)),
         cspace_resident_wf(old(store), cs),
-        // B8C: the resident `delete`s can fire / tear down threads, touching the ready queue.
+        // The resident `delete`s can fire / tear down threads, touching the ready queue.
         ready_wf(old(store).ready_view(), old(store).tcb_view()),
         ready_complete(old(store).ready_view(), old(store).tcb_view()),
     ensures
@@ -10284,11 +10283,11 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
             // `delete` preserves the cap→object invariant, so the resident-walk
             // maintains it for the next iteration's `delete`.
             caps_consistent(store),
-            // …and the rev1§3.3 endpoint-cap census.
+            // …and the rev2§3.3 endpoint-cap census.
             end_caps_sound(store),
             // …and refs-domain completeness (each `delete` requires + re-establishes it).
             census_dom_complete(store),
-            // B8C: the ready pair carries across the resident loop — each `delete` ensures it.
+            // The ready pair carries across the resident loop — each `delete` ensures it.
             ready_wf(store.ready_view(), store.tcb_view()),
             ready_complete(store.ready_view(), store.tcb_view()),
             // Teardown only empties slots — composes across the resident deletes.
@@ -10435,14 +10434,14 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
         // The system cap→object invariant: needed for the `destroy_channel`/
         // `destroy_tcb` arms (which delete arbitrary caps) and preserved through the `-1`.
         caps_consistent(old(store)),
-        // The rev1§3.3 endpoint-cap census: the recursive
+        // The rev2§3.3 endpoint-cap census: the recursive
         // destructors delete arbitrary channel caps, so it threads through here too.
         end_caps_sound(old(store)),
         // Refs-domain completeness: threaded so the destructors keep
         // it for their recursive `delete`s; the at-zero teardown only ever removes an object
         // whose census is already 0, so coverage carries.
         census_dom_complete(old(store)),
-        // B8C: the Thread/Channel arms reach the ready queue (`destroy_tcb`'s `unqueue_ready`,
+        // The Thread/Channel arms reach the ready queue (`destroy_tcb`'s `unqueue_ready`,
         // `destroy_channel`'s peer-closed `fire`), so `obj_unref` carries the ready pair. `delete`
         // (its sole caller) supplies them.
         ready_wf(old(store).ready_view(), old(store).tcb_view()),
@@ -10526,7 +10525,7 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             let ghost st1 = *store;
             proof {
                 lemma_dead_tcb_frozen_dec_ref(&st0, store, o);
-                // B8C: `dec_ref` frames `ready_view` + `tcb_view`, so the ready pair carries to `st1`.
+                // `dec_ref` frames `ready_view` + `tcb_view`, so the ready pair carries to `st1`.
                 lemma_ready_inv_frame(&st0, store);
                 // Home frame: `dec_ref` frames `slot_view` + every object view (so the home maps are
                 // framed and no slot is emptied) — the base the at-zero destructor composes onto.
@@ -10555,7 +10554,7 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             let ghost st1 = *store;
             proof {
                 lemma_dead_tcb_frozen_dec_ref(&st0, store, o);
-                // B8C: `dec_ref` frames `ready_view` + `tcb_view`, so the ready pair carries to `st1`.
+                // `dec_ref` frames `ready_view` + `tcb_view`, so the ready pair carries to `st1`.
                 lemma_ready_inv_frame(&st0, store);
                 // Home frame: `dec_ref` frames `slot_view` + every object view (so the home maps are
                 // framed and no slot is emptied) — the base the at-zero destructor composes onto.
@@ -10597,7 +10596,7 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             let ghost st1 = *store;
             proof {
                 lemma_dead_tcb_frozen_dec_ref(&st0, store, o);
-                // B8C: `dec_ref` frames `ready_view` + `tcb_view`, so the ready pair carries to `st1`.
+                // `dec_ref` frames `ready_view` + `tcb_view`, so the ready pair carries to `st1`.
                 lemma_ready_inv_frame(&st0, store);
                 // Home frame: `dec_ref` frames `slot_view` + every object view (so the home maps are
                 // framed and no slot is emptied) — the base the at-zero destructor composes onto.
@@ -10628,7 +10627,7 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             let ghost st1 = *store;
             proof {
                 lemma_dead_tcb_frozen_dec_ref(&st0, store, o);
-                // B8C: `dec_ref` frames `ready_view` + `tcb_view`, so the ready pair carries to `st1`.
+                // `dec_ref` frames `ready_view` + `tcb_view`, so the ready pair carries to `st1`.
                 lemma_ready_inv_frame(&st0, store);
                 // Home frame: `dec_ref` frames `slot_view` + every object view (so the home maps are
                 // framed and no slot is emptied) — the base the at-zero destructor composes onto.
@@ -10651,7 +10650,7 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                 proof {
                     // `destroy_notif` frames every view (a model no-op), so `store == st1`.
                     lemma_dead_tcb_frozen_refl(&st1, store);
-                    // B8C: the model no-op frames `ready_view` + `tcb_view`; carry the pair from `st1`.
+                    // The model no-op frames `ready_view` + `tcb_view`; carry the pair from `st1`.
                     lemma_ready_inv_frame(&st1, store);
                     lemma_dead_tcb_frozen_trans(&st0, &st1, store);
                     // Home frame: model no-op — free + home refl, composed onto `dec_ref`.
@@ -10673,7 +10672,7 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             let ghost st1 = *store;
             proof {
                 lemma_dead_tcb_frozen_dec_ref(&st0, store, o);
-                // B8C: `dec_ref` frames `ready_view` + `tcb_view`, so the ready pair carries to `st1`.
+                // `dec_ref` frames `ready_view` + `tcb_view`, so the ready pair carries to `st1`.
                 lemma_ready_inv_frame(&st0, store);
                 // Home frame: `dec_ref` frames `slot_view` + every object view (so the home maps are
                 // framed and no slot is emptied) — the base the at-zero destructor composes onto.
@@ -10705,7 +10704,7 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                 crate::timer::destroy_timer(store, o);
                 proof {
                     lemma_dead_tcb_frozen_trans(&st0, &st1, store);
-                    // B8C: `destroy_timer` frames `ready_view` + `tcb_view`; carry the pair from `st1`.
+                    // `destroy_timer` frames `ready_view` + `tcb_view`; carry the pair from `st1`.
                     lemma_ready_inv_frame(&st1, store);
                     // Home frame: `destroy_timer` frames `slot_view` + every object view — free + home refl.
                     lemma_unhomed_frozen_free_from_slot_eq(&st1, store);
@@ -10770,7 +10769,7 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             // Decrement-then-maybe-`aspace_destroy` — exactly `unref_aspace`'s body, reused.
             unref_aspace(store, o);
             proof {
-                // B8C: `unref_aspace` frames `ready_view` + `tcb_view` (aspace teardown never
+                // `unref_aspace` frames `ready_view` + `tcb_view` (aspace teardown never
                 // touches the ready queue); carry the pair across it.
                 lemma_ready_inv_frame(&st0, store);
                 // `unref_aspace` frames `tcb` whole and drops `refs` only at `o` (`refs[o] > 0` at
@@ -10792,7 +10791,7 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
         CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => {
             proof {
                 lemma_dead_tcb_frozen_refl(&st0, store);
-                // B8C: a no-op (store untouched) — the ready pair carries.
+                // A no-op (store untouched) — the ready pair carries.
                 lemma_ready_inv_frame(&st0, store);
                 // Home frame: a no-op (store untouched) — free + home refl.
                 lemma_unhomed_frozen_free_from_slot_eq(&st0, store);
@@ -10822,7 +10821,7 @@ pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId)
         end_caps_sound(old(store)),
         census_dom_complete(old(store)),
         cspace_resident_wf(old(store), cs),
-        // B8C: the at-zero `destroy_cspace` runs resident `delete`s that can touch the ready queue.
+        // The at-zero `destroy_cspace` runs resident `delete`s that can touch the ready queue.
         ready_wf(old(store).ready_view(), old(store).tcb_view()),
         ready_complete(old(store).ready_view(), old(store).tcb_view()),
     ensures
@@ -10872,7 +10871,7 @@ pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId)
     proof {
         // `dec_ref` froze `tcb` whole and only dropped `refs[cs]` (cs ∉ dead set: `refs[cs] > 0`).
         lemma_dead_tcb_frozen_dec_ref(&st0, store, cs);
-        // B8C: `dec_ref` frames `ready_view` + `tcb_view`, so the ready pair carries to `st1`
+        // `dec_ref` frames `ready_view` + `tcb_view`, so the ready pair carries to `st1`
         // (and onward — `destroy_cspace` ensures it when the at-zero teardown runs).
         lemma_ready_inv_frame(&st0, store);
         // Home-frame base: `dec_ref` frames `slot_view` + every object view (free + home refl).
@@ -11001,7 +11000,7 @@ pub fn unref_aspace<S: Store>(store: &mut S, a: ObjId)
     }
 }
 
-/// **Map-time refcount increment** — the increment twin of [`unref_aspace`] (B8A, rev1§6.1(c)).
+/// **Map-time refcount increment** — the increment twin of [`unref_aspace`] (rev2§6.1(c)).
 ///
 /// **Under-by-one census precondition.** The caller ([`map_frame`]) records the mapping that
 /// names `a` *before* calling, so at entry `a`'s census has already risen by one while
@@ -11076,7 +11075,7 @@ pub fn ref_aspace<S: Store>(store: &mut S, a: ObjId)
     }
 }
 
-/// **Map-time cap-side record** (B8A, rev1§6.1(c)) — [`delete`]'s frame-unmap branch run
+/// **Map-time cap-side record** (rev2§6.1(c)) — [`delete`]'s frame-unmap branch run
 /// backwards. Records the mapping on a previously-unmapped frame cap and bumps the target
 /// aspace's refcount, driving the page-table write through the [`Store::aspace_map`] seam
 /// exactly as `delete` drives the unmap through `aspace_unmap`. This makes the cap-side mapping
@@ -11443,7 +11442,7 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         // system invariant supplies (discharged by the now-proven body). The verified callers
         // (`bind`, `revoke`, `destroy_cspace`) carry it like 6a's `refcount_sound`.
         caps_consistent(old(store)),
-        // The rev1§3.3 endpoint-cap census (the body-removal census gate): the body's
+        // The rev2§3.3 endpoint-cap census (the body-removal census gate): the body's
         // Channel branch deletes one of possibly several `(co, end)` caps; this equality is
         // what lets it re-prove `caps_consistent`'s `end_caps[end] > 0` for the surviving
         // siblings. The verified callers carry it like `refcount_sound`.
@@ -11452,7 +11451,7 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         // object into `refs.dom()` from the census via it (`delete_prepare` + `obj_unref`).
         // The verified callers carry it.
         census_dom_complete(old(store)),
-        // B8C: the teardown can fire a peer-closed notification (Channel branch →
+        // The teardown can fire a peer-closed notification (Channel branch →
         // `endpoint_cap_dropped` → `fire`) or tear down a thread (→ `destroy_tcb` → `unqueue_ready`),
         // both of which touch the ready queue, so `delete` carries the ready-queue invariants.
         // The verified callers (`bind`/`revoke`/`destroy_cspace`/`destroy_channel`) supply them.
@@ -11547,11 +11546,11 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
     // — the base the teardown branches + `obj_unref` compose onto.
     proof {
         lemma_dead_tcb_frozen_refl(&st0, store);
-        // B8C: `delete_prepare` frames `ready_view` + `tcb_view`, so the ready pair carries.
+        // `delete_prepare` frames `ready_view` + `tcb_view`, so the ready pair carries.
         lemma_ready_inv_frame(&st0, store);
     }
     let ghost st_prep = *store;
-    // Channel endpoint liveness is tracked per end for peer-closed (rev1§3.3).
+    // Channel endpoint liveness is tracked per end for peer-closed (rev2§3.3).
     if let CapKind::Channel(ch, end) = cap.kind {
         proof {
             assert(cap_consistent(old(store), cap));
@@ -11573,18 +11572,18 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         }
         crate::channel::endpoint_cap_dropped(store, ch, end);
         // `endpoint_cap_dropped` is dead-tcb-frozen + death-preserving (st_prep → here).
-        // B8C: it also re-establishes the ready pair (its own ensures).
+        // It also re-establishes the ready pair (its own ensures).
     } else {
         proof {
             lemma_dead_tcb_frozen_refl(&st_prep, store);
             lemma_refs_death_persist_from_refs_eq(&st_prep, store);
-            // B8C: the non-Channel branch is object-only; the ready pair carries.
+            // The non-Channel branch is object-only; the ready pair carries.
             lemma_ready_inv_frame(&st_prep, store);
         }
     }
     let ghost st_chan = *store;
     // Deleting a mapped frame cap unmaps it — the one revocation story
-    // for shared memory (rev1§2.5).
+    // for shared memory (rev2§2.5).
     if let CapKind::Frame { pages, mapping: Some((asp, va)), .. } = cap.kind {
         let ghost s_pre = *store;
         store.aspace_unmap(asp, va, pages);
@@ -11616,14 +11615,14 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
             // exports `refs_death_persist`; compose `st_chan → st_unmap → final`.
             lemma_refs_death_persist_from_refs_eq(&st_chan, &st_unmap);
             lemma_refs_death_persist_trans(&st_chan, &st_unmap, store);
-            // B8C: `aspace_unmap` + `unref_aspace` frame `ready_view` + `tcb_view`, so the pair carries.
+            // `aspace_unmap` + `unref_aspace` frame `ready_view` + `tcb_view`, so the pair carries.
             lemma_ready_inv_frame(&st_chan, store);
         }
     } else {
         proof {
             lemma_dead_tcb_frozen_refl(&st_chan, store);
             lemma_refs_death_persist_from_refs_eq(&st_chan, store);
-            // B8C: the non-mapped-Frame branch is object-only; the ready pair carries.
+            // The non-mapped-Frame branch is object-only; the ready pair carries.
             lemma_ready_inv_frame(&st_chan, store);
         }
     }
@@ -11796,7 +11795,7 @@ pub fn descend_to_leaf<S: Store>(store: &S, start: SlotId) -> (leaf: SlotId)
 }
 
 /// Revoke: delete every CDT descendant of `slot` — cspace residents and
-/// in-flight queue slots alike, unconditionally (rev1§2.2).
+/// in-flight queue slots alike, unconditionally (rev2§2.2).
 ///
 /// **Terminates** (`decreases count_nonempty`): each iteration descends to a
 /// leaf and deletes it, and `delete` strictly lowers the live-slot count — the
@@ -11807,7 +11806,7 @@ pub fn descend_to_leaf<S: Store>(store: &S, start: SlotId) -> (leaf: SlotId)
 /// `ensures` `first_child is None` + `cspace_wf` hold for *any* live `slot`, with **no homing
 /// precondition**: they ride `delete`'s unconditional teardown contract and the loop
 /// `decreases`, independent of whether `slot` is some object's home handle. This is the
-/// rev1§2.2 spec guarantee ("deletes all descendants … unconditional"), provable for the
+/// rev2§2.2 spec guarantee ("deletes all descendants … unconditional"), provable for the
 /// `homed_in_cspace` target every `Sys::CapRevoke` actually supplies (`cur_slot` is a cell of
 /// the caller's cspace) — not only for un-homed inputs the kernel never sends.
 ///
@@ -11831,7 +11830,7 @@ pub fn descend_to_leaf<S: Store>(store: &S, start: SlotId) -> (leaf: SlotId)
 /// survives, but proving *that* needs the stronger "emptied ⟹ a homing object was destroyed"
 /// frame (refs-monotone, the refcount cascade). `unhomed_frozen` is its foundation.
 ///
-/// **Sees through queues — a named obligation.** rev1§3.4 / the M1 exit criterion demand that
+/// **Sees through queues — a named obligation.** rev2§3.4 / the M1 exit criterion demand that
 /// `revoke` destroy descendants *including a cap queued in an in-flight message* "like any
 /// other descendant, no special case." It is exported: `ensures no_live_descendant(final, slot)`
 /// (no live slot — resident or in-flight ring cap — is a CDT descendant of `slot` afterward),
@@ -11858,13 +11857,13 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
         caps_consistent(old(store)),
         end_caps_sound(old(store)),
         census_dom_complete(old(store)),
-        // B8C: the subtree `delete`s can fire / tear down threads, touching the ready queue.
+        // The subtree `delete`s can fire / tear down threads, touching the ready queue.
         ready_wf(old(store).ready_view(), old(store).tcb_view()),
         ready_complete(old(store).ready_view(), old(store).tcb_view()),
     ensures
         // Descendant-deletion and well-formedness are **unconditional**: they
         // hold for *any* target, including the `homed_in_cspace` slot every `Sys::CapRevoke`
-        // supplies — so the spec-mandated guarantee (rev1§2.2) is reachable from the real call path.
+        // supplies — so the spec-mandated guarantee (rev2§2.2) is reachable from the real call path.
         cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom().contains(slot),
         final(store).slot_view()[slot].first_child is None,
@@ -11888,7 +11887,7 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
         // subtree predicate, by design); the witness is the initial-state home + its destruction.
         is_empty_cap(final(store).slot_view()[slot].cap)
             ==> exists|o: ObjId| homes(old(store), o, slot) && dead_obj(final(store), o),
-        // **Sees through queues — the rev1§3.4 / M1 subtree-deletion obligation, named.** After
+        // **Sees through queues — the rev2§3.4 / M1 subtree-deletion obligation, named.** After
         // `revoke`, no live slot anywhere — cspace resident *or* in-flight
         // channel ring cap — is a CDT descendant of `slot`. The transitive closure (not just the
         // `first_child is None` direct-child clause above) is what makes "revoke finds and deletes
@@ -11914,13 +11913,13 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
             // The slot domain is fixed across the walk (`delete` frames it) — the equality
             // `only_empties`'s transitivity reads off to compose the per-step frame.
             store.slot_view().dom() == old(store).slot_view().dom(),
-            // Teardown monotonicity so far: every slot empty at entry is still empty (rev1§3.4).
+            // Teardown monotonicity so far: every slot empty at entry is still empty (rev2§3.4).
             only_empties(old(store).slot_view(), store.slot_view()),
             refcount_sound(store),
             caps_consistent(store),
             end_caps_sound(store),
             census_dom_complete(store),
-            // B8C: the ready pair carries across the subtree loop — each `delete` ensures it.
+            // The ready pair carries across the subtree loop — each `delete` ensures it.
             ready_wf(store.ready_view(), store.tcb_view()),
             ready_complete(store.ready_view(), store.tcb_view()),
             // `slot`'s home status is immutable across teardown (`home_views_frozen`, via
@@ -11994,24 +11993,24 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
         }
     }
     // The loop exited with `slot` childless; `cspace_wf` (hence `parent_has_first_child`) holds,
-    // so the whole subtree — in-flight queued caps included — is provably gone (rev1§3.4).
+    // so the whole subtree — in-flight queued caps included — is provably gone (rev2§3.4).
     proof {
         lemma_childless_no_descendant(store.slot_view(), slot);
     }
 }
 
-/// The status of one bounded `revoke_step` quantum (B9, rev1§2.2 "preemptible and
+/// The status of one bounded `revoke_step` quantum (rev2§2.2 "preemptible and
 /// restartable"): `Done` when `slot`'s subtree is empty (the walk is complete),
 /// `More` when the budget was spent with descendants still attached (re-issue from
 /// the same root to continue). The kernel shell maps `More` to the `EAGAIN` retry
-/// code and loops (B9B); the verified core only reports which it is.
+/// code and loops; the verified core only reports which it is.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RevokeStatus {
     Done,
     More,
 }
 
-/// B9 marker frame: a single-slot edit that flips only the `revoking` bit — keeping
+/// Marker frame: a single-slot edit that flips only the `revoking` bit — keeping
 /// the slot's cap and all four CDT links, and framing every non-slot view — is
 /// invisible to every cspace invariant. No structural (`cdt_wf`/`acyclic`) or census
 /// (`obj_census`/`end_cap_count`/`cap_consistent`) predicate reads `revoking`; they
@@ -12114,7 +12113,7 @@ pub proof fn lemma_set_revoking_frames<S: Store>(s0: &S, s1: &S, slot: SlotId, v
     }
 }
 
-/// B9 death-provenance carry across the marker write: the final `set_slot` keeps
+/// Death-provenance carry across the marker write: the final `set_slot` keeps
 /// `slot`'s cap and frames `refs_view`, so the loop invariant's witness (a homing
 /// object dead at `s_pre`) is still a homing object dead at `s_new` — `dead_obj` reads
 /// only `refs_view`. Lets `revoke_step`'s always-`ensures` carry the death-provenance
@@ -12135,7 +12134,7 @@ pub proof fn lemma_revoke_step_death_provenance<S: Store>(s_old: &S, s_pre: &S, 
     }
 }
 
-/// Revoke a **bounded quantum** of `slot`'s subtree, restartably (B9, rev1§2.2). Does
+/// Revoke a **bounded quantum** of `slot`'s subtree, restartably (rev2§2.2). Does
 /// at most `budget` leaf-deletions of the unbounded `revoke` walk, returning `Done`
 /// when the subtree is empty and `More` when the budget runs out with descendants
 /// still attached. A `More` return leaves the **revoke-in-progress marker** set on the
@@ -12214,7 +12213,7 @@ pub fn revoke_step<S: Store>(store: &mut S, slot: SlotId, budget: usize) -> (res
             refs_death_persist(old(store), store),
             is_empty_cap(store.slot_view()[slot].cap)
                 ==> exists|o: ObjId| homes(old(store), o, slot) && dead_obj(store, o),
-            // B9: the bounded-quantum bookkeeping.
+            // The bounded-quantum bookkeeping.
             n <= budget,
             count_nonempty(store.slot_view()) + n <= count_nonempty(old(store).slot_view()),
         decreases budget - n,
@@ -12251,7 +12250,7 @@ pub fn revoke_step<S: Store>(store: &mut S, slot: SlotId, budget: usize) -> (res
                     assert(homes(old(store), o, slot) && dead_obj(store, o));
                 }
             }
-            // B9 progress: `delete` strictly dropped the live count, so the accumulator
+            // Progress: `delete` strictly dropped the live count, so the accumulator
             // carries with `n + 1`.
             assert(count_nonempty(store.slot_view()) < count_nonempty(pre.slot_view()));
         }

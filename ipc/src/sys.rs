@@ -1,6 +1,6 @@
 //! Raw syscall wrappers for Eunomia userspace (aarch64-none only).
 //!
-//! ABI (scaffold, not stable — rev1§3.7): SVC #0, number in x7, args
+//! ABI (scaffold, not stable — rev2§3.7): SVC #0, number in x7, args
 //! x0..x5, result in x0 (negative = error), secondary result in x1.
 
 pub const ERR_BADSLOT: i64 = -1;
@@ -14,7 +14,7 @@ pub const ERR_NOMEM: i64 = -8;
 pub const ERR_ARG: i64 = -9;
 pub const ERR_CLOSED: i64 = -10;
 pub const ERR_STATE: i64 = -11;
-/// Retry-later (B9): `cap_revoke` returns this when a bounded quantum ends with
+/// Retry-later: `cap_revoke` returns this when a bounded quantum ends with
 /// descendants remaining, and `cap_copy` when the source is under an in-flight
 /// revoke. Kept in lockstep with the kernel block (`kernel/src/syscall.rs`).
 pub const ERR_AGAIN: i64 = -12;
@@ -28,8 +28,8 @@ pub const OBJ_NOTIF: u64 = 3;
 pub const OBJ_TIMER: u64 = 4;
 pub const OBJ_FRAME: u64 = 5;
 pub const OBJ_ASPACE: u64 = 6;
-/// A carved sub-range untyped (rev1§2.3); retype param is bytes. The per-spawn
-/// donation a parent funds for one child (rev1§5.1).
+/// A carved sub-range untyped (rev2§2.3); retype param is bytes. The per-spawn
+/// donation a parent funds for one child (rev2§5.1).
 pub const OBJ_UNTYPED: u64 = 7;
 
 pub const RIGHT_READ: u64 = 1;
@@ -41,16 +41,16 @@ pub const PERM_X: u64 = 2;
 pub const PERM_DEVICE: u64 = 4;
 
 pub const RIGHT_PHYS: u64 = 4;
-/// Thread rights (rev1§2.3): configure on-exit/on-fault binding slots.
+/// Thread rights (rev2§2.3): configure on-exit/on-fault binding slots.
 pub const RIGHT_BIND_REPORTS: u64 = 8;
-/// Thread rights (rev1§2.3): read the terminal report record.
+/// Thread rights (rev2§2.3): read the terminal report record.
 pub const RIGHT_READ_REPORT: u64 = 16;
 
 pub const EV_READABLE: u64 = 0;
 pub const EV_WRITABLE: u64 = 1;
 pub const EV_PEER_CLOSED: u64 = 2;
 
-/// TCB binding slots (rev1§5.1).
+/// TCB binding slots (rev2§5.1).
 pub const BIND_EXIT: u64 = 0;
 pub const BIND_FAULT: u64 = 1;
 
@@ -125,7 +125,7 @@ mod imp {
 
 use imp::{syscall, syscall2, syscall3};
 
-// The EL0 debug-print scaffold (rev1§7), re-scoped in C-M9-C to a disclosed
+// The EL0 debug-print scaffold (rev2§7) is a disclosed
 // kernel-diagnostic path behind the `debug-log` feature (default-on). Used by
 // pre-console server diagnostics and panic reporting — never user-facing
 // terminal I/O (that crosses the console channel). With the feature off these
@@ -149,14 +149,14 @@ pub fn retype(ut: u32, ty: u64, param: u64, dst: u32, dst2: u32) -> i64 {
 }
 
 pub fn cap_copy(src: u32, dst: u32, rights: u64) -> i64 {
-    // a[3] = 0xFF is the rev1§5.4 "no ceiling reduction" sentinel (kcore `NO_PRIO_CEILING`);
+    // a[3] = 0xFF is the rev2§5.4 "no ceiling reduction" sentinel (kcore `NO_PRIO_CEILING`);
     // a plain copy never lowers a thread cap's priority ceiling. Use `cap_copy_prio`
-    // to attenuate it (the rev1§2.3 supervision grant).
+    // to attenuate it (the rev2§2.3 supervision grant).
     unsafe { syscall(4, src as u64, dst as u64, rights, 0xFF, 0, 0) }
 }
 
-/// Like [`cap_copy`], but caps the copied thread cap's rev1§5.4 priority ceiling at
-/// `min(parent, prio_ceiling)` (rev1§2.3 supervision grant; ignored for non-thread caps).
+/// Like [`cap_copy`], but caps the copied thread cap's rev2§5.4 priority ceiling at
+/// `min(parent, prio_ceiling)` (rev2§2.3 supervision grant; ignored for non-thread caps).
 pub fn cap_copy_prio(src: u32, dst: u32, rights: u64, prio_ceiling: u8) -> i64 {
     unsafe { syscall(4, src as u64, dst as u64, rights, prio_ceiling as u64, 0, 0) }
 }
@@ -169,7 +169,7 @@ pub fn cap_revoke(slot: u32) -> i64 {
     unsafe { syscall(6, slot as u64, 0, 0, 0, 0, 0) }
 }
 
-/// Fully revoke `slot`'s subtree (rev1§2.2). `cap_revoke` runs one bounded quantum
+/// Fully revoke `slot`'s subtree (rev2§2.2). `cap_revoke` runs one bounded quantum
 /// per call and returns [`ERR_AGAIN`] while descendants remain (the walk is
 /// preemptible/restartable); loop, yielding the CPU between tries, until it returns
 /// a terminal status. Returns the final `cap_revoke` result (`0` on success, or a
@@ -225,7 +225,7 @@ pub fn timer_arm(timer: u32, notif: u32, bits: u64, delta: u64) -> i64 {
     unsafe { syscall(14, timer as u64, notif as u64, bits, delta, 0, 0) }
 }
 
-/// Bind an IRQ-handler cap to a notification (B-IRQ-B, rev1§1/rev1§3.6): a
+/// Bind an IRQ-handler cap to a notification (rev2§1/rev2§3.6): a
 /// hardware interrupt on the line signals `notif` with `bits` (the `timer_arm`
 /// twin for device interrupts). `notif` must carry WRITE. The kernel masks the
 /// line on delivery; call [`irq_ack`] once the device has been serviced.
@@ -233,13 +233,13 @@ pub fn irq_bind(irq: u32, notif: u32, bits: u64) -> i64 {
     unsafe { syscall(25, irq as u64, notif as u64, bits, 0, 0, 0) }
 }
 
-/// Acknowledge an IRQ (B-IRQ-B): re-enable the line so the next interrupt is
-/// delivered — the "acknowledge" half of rev1§1's IRQ-handler cap.
+/// Acknowledge an IRQ: re-enable the line so the next interrupt is
+/// delivered — the "acknowledge" half of rev2§1's IRQ-handler cap.
 pub fn irq_ack(irq: u32) -> i64 {
     unsafe { syscall(26, irq as u64, 0, 0, 0, 0, 0) }
 }
 
-/// The only voluntary stop (rev1§5.1): the kernel records the status — a
+/// The only voluntary stop (rev2§5.1): the kernel records the status — a
 /// child can neither lie about nor forget its own death.
 pub fn thread_exit(status: u64) -> ! {
     unsafe {
@@ -258,8 +258,8 @@ pub fn map(aspace: u32, frame: u32, va: u64, perms: u64) -> i64 {
     unsafe { syscall(16, aspace as u64, frame as u64, va, perms, 0, 0) }
 }
 
-/// Grow `aspace`'s page-table pool by `pages` tables, carved from `ut` (B10B,
-/// rev1§2.5 "accepts top-ups"). `ut` must be the untyped whose free region
+/// Grow `aspace`'s page-table pool by `pages` tables, carved from `ut`
+/// (rev2§2.5 "accepts top-ups"). `ut` must be the untyped whose free region
 /// abuts the pool's current end (`ERR_ARG` otherwise; `ERR_NOMEM` if it has no
 /// room). Answers the recoverable `ERR_NOMEM` a full pool returns from `map`.
 pub fn aspace_topup(aspace: u32, ut: u32, pages: u64) -> i64 {
@@ -268,7 +268,7 @@ pub fn aspace_topup(aspace: u32, ut: u32, pages: u64) -> i64 {
 
 /// Map `frame` at `va`, topping up `aspace`'s pool from `ut` and retrying once
 /// if `map` fails for lack of pool memory — the userspace shape of the
-/// recoverable `NEED_MEMORY` story (B10B). `ut` must abut the pool (see
+/// recoverable `NEED_MEMORY` story. `ut` must abut the pool (see
 /// [`aspace_topup`]); `step` is how many tables to add per top-up. The retry is
 /// safe: a `map` that fails with `ERR_NOMEM` leaves the frame cap unmapped.
 pub fn map_grow(aspace: u32, ut: u32, frame: u32, va: u64, perms: u64, step: u64) -> i64 {
@@ -311,39 +311,39 @@ pub fn thread_start_as(tcb: u32, cspace: u32, aspace: u32, entry: u64, sp: u64, 
     }
 }
 
-/// Physical address of a frame — phys-read right required (rev1§2.5); the
+/// Physical address of a frame — phys-read right required (rev2§2.5); the
 /// DmaPool is the only legitimate caller.
 pub fn frame_paddr(frame: u32) -> i64 {
     unsafe { syscall(19, frame as u64, 0, 0, 0, 0, 0) }
 }
 
 /// Reset a carved untyped's watermark to 0 so its range can be reused
-/// (rev1§2.5). Pairs with `cap_revoke`: revoke deletes every object carved
+/// (rev2§2.5). Pairs with `cap_revoke`: revoke deletes every object carved
 /// from the untyped, then reset reclaims the bytes. Fails with ERR_STATE
 /// if the untyped still has live children (revoke first).
 pub fn untyped_reset(ut: u32) -> i64 {
     unsafe { syscall(23, ut as u64, 0, 0, 0, 0, 0) }
 }
 
-// debug_getc (opcode 20) retired in C-M9-C: the userspace console driver owns
-// the PL011 RX line, so there is no ambient console-input libcall — the shell
+// The userspace console driver owns the PL011 RX line, so there is no
+// debug_getc opcode and no ambient console-input libcall — the shell
 // reads keystrokes from its `stdin` channel.
 
-/// Configure a thread's on-exit / on-fault binding slot (rev1§5.1). The
+/// Configure a thread's on-exit / on-fault binding slot (rev2§5.1). The
 /// notification cap MOVES into the TCB (duplicate first to keep access);
 /// `notif` = SLOT_NONE unbinds.
 pub fn thread_bind(tcb: u32, which: u64, notif: u32, bits: u64) -> i64 {
     unsafe { syscall(21, tcb as u64, which, notif as u64, bits, 0, 0) }
 }
 
-/// Terminal report states returned by `read_report` (rev1§5.1).
+/// Terminal report states returned by `read_report` (rev2§5.1).
 pub const REPORT_RUNNING: i64 = 0;
 pub const REPORT_EXITED: i64 = 1;
 pub const REPORT_FAULTED: i64 = 2;
 
 /// Reserved terminal exit status: the process stopped through its panic
 /// handler rather than an orderly `thread_exit(status)` (urt convention,
-/// rev1§5.1). A faulting thread is `REPORT_FAULTED`, but a Rust `panic!`
+/// rev2§5.1). A faulting thread is `REPORT_FAULTED`, but a Rust `panic!`
 /// unwinds to the handler and exits normally — without a reserved status
 /// it would be indistinguishable from `thread_exit(0)`, and a child could
 /// disguise a crash as clean success. The kernel records whatever status
@@ -353,7 +353,7 @@ pub const REPORT_FAULTED: i64 = 2;
 /// statuses real programs use).
 pub const STATUS_PANIC: u64 = u64::MAX;
 
-/// Read a thread's terminal report record (rev1§5.1). Returns
+/// Read a thread's terminal report record (rev2§5.1). Returns
 /// (state, status-or-cause, faulting-address); negative state = error.
 pub fn read_report(tcb: u32) -> (i64, u64, u64) {
     unsafe { syscall3(22, tcb as u64) }

@@ -91,7 +91,7 @@ struct TimerState {
     next: Option<ObjId>,
 }
 
-// The IRQ-handler object's executable backing (B-IRQ): the `TimerState` twin, minus the
+// The IRQ-handler object's executable backing: the `TimerState` twin, minus the
 // armed-list `next`. `intid` rides the object; `masked` is the GIC line-state bit.
 #[derive(Clone, PartialEq)]
 struct IrqState {
@@ -355,7 +355,7 @@ impl Store for ArrayStore {
     fn set_timer_next(&mut self, t: ObjId, n: Option<ObjId>) {
         self.timers.get_mut(&t.0).unwrap().next = n;
     }
-    // ── IRQ-handler object (B-IRQ): the timer accessors' twin over `irqs` ──
+    // ── IRQ-handler object: the timer accessors' twin over `irqs` ──
     fn irq_intid(&self, i: ObjId) -> u32 {
         self.irqs[&i.0].intid
     }
@@ -383,11 +383,11 @@ impl Store for ArrayStore {
     fn set_irq_masked(&mut self, i: ObjId, v: bool) {
         self.irqs.get_mut(&i.0).unwrap().masked = v;
     }
-    // B8C: `make_runnable`/`unqueue_ready` are now **faithful** — they route through the verified
+    // `make_runnable`/`unqueue_ready` are **faithful** — they route through the verified
     // `ready_enqueue`/`ready_unqueue` ops so the host model realizes the seam contracts Verus
-    // assumes (the ready-queue linkage now lives in `ready_view`, not below the abstract view).
+    // assumes (the ready-queue linkage lives in `ready_view`, not below the abstract view).
     // `make_runnable` flips the thread Runnable then enqueues it to its priority level's tail;
-    // `unqueue_ready` splices it back out. (The kernel's real realizations are B8C-3.)
+    // `unqueue_ready` splices it back out.
     fn make_runnable(&mut self, t: ObjId) {
         self.tcbs.get_mut(&t.0).unwrap().state = ThreadState::Runnable;
         crate::ready::ready_enqueue(self, t);
@@ -608,7 +608,7 @@ fn obj_census_exec(st: &ArrayStore, o: ObjId) -> u32 {
             total += 1;
         }
     }
-    // irq_binding_refs (B-IRQ): each bound IRQ naming `o` holds one ref.
+    // irq_binding_refs: each bound IRQ naming `o` holds one ref.
     for ir in st.irqs.values() {
         if ir.bound && ir.notif == Some(o) {
             total += 1;
@@ -769,14 +769,14 @@ fn timer_wf_exec(st: &ArrayStore) -> bool {
     true
 }
 
-// The exec mirror of `irq_wf` (B-IRQ): a bound IRQ names a notification. No list, so no
+// The exec mirror of `irq_wf`: a bound IRQ names a notification. No list, so no
 // chain/completeness sweep — a pure pointwise check (the `irq_view` twin of the timer's
 // `armed ⇒ notif is Some`, minus the armed-list reachability the timer needs).
 fn irq_wf_exec(st: &ArrayStore) -> bool {
     st.irqs.values().all(|ir| !ir.bound || ir.notif.is_some())
 }
 
-// ── The ready-queue mirrors (B8C) ───────────────────────────────────────────
+// ── The ready-queue mirrors ─────────────────────────────────────────────────
 //
 // Executable counterparts of `cspace::ready_seq`/`ready_wf`/`ready_complete` (ghost, so
 // erased and uncallable from test code). The verified `ready_enqueue`/`ready_dequeue`/
@@ -935,7 +935,7 @@ fn caps_consistent_exec(st: &ArrayStore) -> bool {
 }
 
 // Exec mirror of `cspace::end_caps_sound`: every live channel's `end_caps[e]` equals the
-// count of `Channel(ch, e)` caps in the arena (the rev1§3.3 per-endpoint census). Host-checks
+// count of `Channel(ch, e)` caps in the arena (the rev2§3.3 per-endpoint census). Host-checks
 // that clause against the real `ArrayStore` bodies (`end_caps_sound_exec_has_teeth` proves
 // it is not vacuous).
 fn end_caps_sound_exec(st: &ArrayStore) -> bool {
@@ -1392,7 +1392,7 @@ fn cap_kind_eq(a: CapKind, b: CapKind) -> bool {
 }
 
 // Assert `retype_install`'s contract against the real body: the watermark bump,
-// the rev1§2.5 rights-inheritance table (incl. PHYS cleared for a sub-Untyped), the new
+// the rev2§2.5 rights-inheritance table (incl. PHYS cleared for a sub-Untyped), the new
 // cap as a CDT child of `ut`, `cspace_wf` preserved, and the refcount/end_caps
 // deltas (non-channel: refs/chan untouched — the object's `init` pre-counts `dst`;
 // channel: refs 2, both ends accounted, `dst2` = endpoint B, other channels intact).
@@ -1431,7 +1431,7 @@ fn check_retype_install(
     );
     // SlotId is not Debug (see `fingerprint`), so compare with `assert!(==)`.
     assert!(st.at(dst).parent == Some(ut), "dst is a CDT child of ut");
-    // rev1§2.5 rights-inheritance table.
+    // rev2§2.5 rights-inheritance table.
     let expect_rights = match ty {
         ObjType::Frame => ut_rights,
         ObjType::Thread => Rights::THREAD_ALL.0,
@@ -1566,7 +1566,7 @@ fn check_signal_frame(st: &mut ArrayStore, n: ObjId, bits: u64) {
     assert!(fingerprint(st) == fp, "signal post: slot_view unchanged");
     assert!(st.chans == chans, "signal post: chan_view unchanged");
     assert!(notif_wf_exec(st, n), "signal post: notif_wf preserved");
-    // B8C-4: signal's wake path enqueues the woken waiter via `make_runnable`
+    // Signal's wake path enqueues the woken waiter via `make_runnable`
     // (→ `ready_enqueue`), so the ready queue stays well-formed (incl. bitmap coherence).
     assert!(ready_wf_exec(st), "signal post: ready_wf preserved");
 }
@@ -1994,7 +1994,7 @@ fn check_destroy_timer(st: &mut ArrayStore, t: ObjId) {
     assert!(!st.timers[&t.0].armed, "destroy_timer: disarmed");
 }
 
-// ── IRQ object check harnesses (B-IRQ): the timer harnesses' twin ───────────
+// ── IRQ object check harnesses: the timer harnesses' twin ───────────────────
 
 // `irq_bind`'s ensures against the real body: `irq_wf` preserved; slot/chan/notif/tcb/timer
 // views framed; `i` ends bound to `notif` with the programmed bits; and the net ref delta is
@@ -2107,7 +2107,7 @@ fn check_check_expired(st: &mut ArrayStore, now: u64) {
 
 // `destroy_tcb`'s structural contract against the real body: `t` ends Halted with its
 // queue link and both binding slots cleared, its report UNCHANGED (destruction fires no
-// report, rev1§5.1), and `cspace_wf` preserved.
+// report, rev2§5.1), and `cspace_wf` preserved.
 fn check_destroy_tcb(st: &mut ArrayStore, t: ObjId) {
     assert!(cspace_wf_exec(st), "destroy_tcb pre: cspace_wf");
     let n = st.n();
@@ -2148,7 +2148,7 @@ fn check_destroy_tcb(st: &mut ArrayStore, t: ObjId) {
         st.tcbs[&t.0].qnext.is_none(),
         "destroy_tcb: queue link cleared"
     );
-    // B8C-4: the faithful detach. A Runnable `t` was spliced out of its ready chain
+    // The faithful detach. A Runnable `t` is spliced out of its ready chain
     // (`unqueue_ready` → `ready_unqueue`) and then halted, so the ready queue is well-formed
     // and `t` sits on no chain at any level — `ready_complete` is restored for the survivors.
     assert!(ready_wf_exec(st), "destroy_tcb post: ready_wf preserved");
@@ -2484,7 +2484,7 @@ fn cdt_unlink_middle_sibling() {
 
 #[test]
 fn derive_preserves_thread_priority_ceiling() {
-    // rev1§5.4/rev1§2.3 monotone priority axis: with the no-reduction sentinel
+    // rev2§5.4/rev2§2.3 monotone priority axis: with the no-reduction sentinel
     // (`prio_ceiling = 0xFF`), a derived thread cap carries the same — hence `<=` —
     // max-controlled-priority ceiling as its parent. This is the executable witness
     // of `derive`'s ceiling `ensures` on the real body for the default `cap_copy`,
@@ -2502,7 +2502,7 @@ fn derive_preserves_thread_priority_ceiling() {
             );
             assert!(
                 cmp <= pmp,
-                "rev1§5.4 ceiling attenuates monotonically (child <= parent)"
+                "rev2§5.4 ceiling attenuates monotonically (child <= parent)"
             );
         }
         _ => panic!("derived cap is not a thread cap"),
@@ -2511,7 +2511,7 @@ fn derive_preserves_thread_priority_ceiling() {
 
 #[test]
 fn derive_attenuates_thread_priority_ceiling() {
-    // rev1§2.3 supervision grant: a thread-cap copy can carry a *strictly lower*
+    // rev2§2.3 supervision grant: a thread-cap copy can carry a *strictly lower*
     // ceiling — `min(parent, prio_ceiling)`. Executable witness of
     // `derived_kind`'s reducing `Thread` arm + `derive`'s strengthened ceiling
     // `ensures` on the real body.
@@ -2527,7 +2527,7 @@ fn derive_attenuates_thread_priority_ceiling() {
             assert_eq!(cmp, 5, "child ceiling = min(parent, prio_ceiling) = 5");
             assert!(
                 cmp <= pmp,
-                "rev1§5.4 ceiling still monotone (child <= parent)"
+                "rev2§5.4 ceiling still monotone (child <= parent)"
             );
         }
         _ => panic!("derived cap is not a thread cap"),
@@ -2567,7 +2567,7 @@ fn set_priority_writes_within_ceiling() {
 
 #[test]
 fn set_priority_refuses_over_ceiling() {
-    // The rev1§6.1(d) gate: `thread::set_priority` *refuses* an over-ceiling
+    // The rev2§6.1(d) gate: `thread::set_priority` *refuses* an over-ceiling
     // request — returns `Err` and leaves the TCB's priority untouched, no shell
     // `if` involved. A subsequent in-ceiling request still succeeds.
     let mut st = ArrayStore::new(1);
@@ -3002,7 +3002,7 @@ fn signal_frame() {
         ThreadState::Runnable,
         "woken waiter made Runnable"
     );
-    // B8C-4: and enqueued at the tail of its priority level (0) — the sole node there, with
+    // And enqueued at the tail of its priority level (0) — the sole node there, with
     // the presence bit set and its qnext cleared (the precise `ready_enqueue` placement).
     assert_eq!(
         ready_ids(&st, 0),
@@ -3516,7 +3516,7 @@ fn delete_mapped_frame_drops_aspace_ref() {
     );
 }
 
-// ── B8A: `map_frame` — the verified cap-side map record (the inverse of delete's branch) ──
+// ── `map_frame` — the verified cap-side map record (the inverse of delete's branch) ──
 
 // Records `Some((asp, va))` on an unmapped frame cap and bumps the aspace refcount (the
 // `frame_map_refs` census term rises with `ref_aspace`'s `+1`), leaving the store sound. The
@@ -3568,7 +3568,7 @@ fn map_frame_records_and_bumps() {
 }
 
 // `map_frame` then `delete` is the identity on the aspace refcount: map records + bumps,
-// delete's frame-unmap branch clears + drops. The symmetry B8A delivers (derive proves
+// delete's frame-unmap branch clears + drops. The symmetry (derive proves
 // unmapped-on-copy, `map_frame` record-on-map, `delete` clear-on-unmap).
 #[test]
 fn map_then_delete_roundtrip() {
@@ -4426,7 +4426,7 @@ fn check_revoke_root_survives_homed_external_ref() {
 
 #[test]
 fn revoke_sees_through_queued_descendant() {
-    // **Sees through queues (rev1§3.4).** A cap *queued in an in-flight message* is an
+    // **Sees through queues (rev2§3.4).** A cap *queued in an in-flight message* is an
     // ordinary CDT descendant — its ring slot carries the parent edge that `slot_move` (the op
     // `send` uses) inherited from the source — so the real `revoke` walk finds and empties it
     // like any other descendant, with no special case. This drives the **real** `revoke` through
@@ -4437,7 +4437,7 @@ fn revoke_sees_through_queued_descendant() {
     //
     // The arena holds the channel's 8 ring-cap slots (1..=8); the queued cap lives at slot 1, the
     // other 7 ring slots are empty (a one-cap message; ring 1 idle). revoke(slot 0) descends to
-    // the queued ring cap and deletes it: the ring slot is left empty — the rev1§3.4 "receivers
+    // the queued ring cap and deletes it: the ring slot is left empty — the rev2§3.4 "receivers
     // must tolerate null cap slots" outcome — while the un-homed target survives.
     let mut st = ArrayStore::new(9);
     st.slots[0] = CapSlot {
@@ -4518,7 +4518,7 @@ fn revoke_sees_through_queued_descendant() {
         st.at(SlotId(1)).cap.is_empty(),
         "revoke sees through the queue: the queued cap is destroyed"
     );
-    // The ring_cap handle still points at the now-empty slot — the rev1§3.4 null-cap-slot a receiver tolerates.
+    // The ring_cap handle still points at the now-empty slot — the rev2§3.4 null-cap-slot a receiver tolerates.
     assert!(
         st.chan_ring_cap(ObjId(7), 0, 0, 0) == SlotId(1),
         "the ring handle is unchanged (now null)"
@@ -4530,13 +4530,13 @@ fn revoke_sees_through_queued_descendant() {
     );
 }
 
-// ── B9: the bounded, restartable revoke step + the revoke-in-progress marker ───
+// ── The bounded, restartable revoke step + the revoke-in-progress marker ──────
 //
 // `revoke_step`/`ancestor_or_self_revoking` carry full Verus contracts (bounded
 // per-call termination, the same descendant-deletion completeness as `revoke` on
 // `Done`, partial progress on `More`, and the no-op-on-refusal guard). These run the
 // real bodies on `ArrayStore` and assert the *observable* multi-call behaviour the
-// `EAGAIN` syscall surface (B9B) and the `CapRevocation` TLA liveness model (B9C)
+// `EAGAIN` syscall surface and the `CapRevocation` TLA liveness model
 // build on: a deep subtree empties in ⌈descendants/budget⌉ quanta, the marker is set
 // across a `More` and cleared on `Done`, and a `derive` into a revoking subtree is
 // refused without touching the store.
@@ -4856,7 +4856,7 @@ fn recv_nocapslot_atomic() {
 #[test]
 fn recv_null_slot_tolerance() {
     // A sends a cap; revocation empties the queued ring cap in flight; B's recv
-    // delivers it as absent (mask bit clear) — never a panic (rev1§3.4 null slots).
+    // delivers it as absent (mask bit clear) — never a panic (rev2§3.4 null slots).
     let (mut st, ch, scratch0) = chan_fixture(1, 2);
     let send_cap = SlotId(scratch0 as u64);
     st.slots[scratch0] = detached(frame_cap(7));
@@ -5264,7 +5264,7 @@ fn arm_disarm_lifecycle() {
     assert_eq!(st.refs[&101], 1, "a second disarm touches no ref");
 }
 
-// B-IRQ: the IRQ object's bind/rebind/unbind lifecycle — the `arm_disarm_lifecycle` twin.
+// The IRQ object's bind/rebind/unbind lifecycle — the `arm_disarm_lifecycle` twin.
 // Exercises bind (+1 on the notif ref AND irq_binding_refs), a same-notif rebind (net-zero),
 // a different-notif rebind (release old, acquire new), and unbind (release), checking
 // `refcount_sound_exec` (the census round-trip) holds end to end.
@@ -5323,7 +5323,7 @@ fn irq_bind_unbind_lifecycle() {
     );
 }
 
-// B-IRQ: `destroy_irq` of a bound IRQ (its last cap gone): `irq_unbind`, releasing the
+// `destroy_irq` of a bound IRQ (its last cap gone): `irq_unbind`, releasing the
 // notif ref. The `destroy_timer_disarms` twin; closes the accounting (refs return to 0).
 #[test]
 fn destroy_irq_unbinds() {
@@ -5356,7 +5356,7 @@ fn destroy_irq_unbinds() {
     );
 }
 
-// B-IRQ: `refcount_sound_exec` has teeth on the `irq_binding_refs` term — a bound IRQ
+// `refcount_sound_exec` has teeth on the `irq_binding_refs` term — a bound IRQ
 // naming N without the matching ref on N is caught (the term is genuinely summed).
 #[test]
 fn refcount_sound_exec_irq_teeth() {
@@ -5381,10 +5381,10 @@ fn refcount_sound_exec_irq_teeth() {
     assert!(!refcount_sound_exec(&st), "teeth: irq_binding_refs term");
 }
 
-// B-IRQ-C: the cspace-level teardown — deleting the last IRQ cap runs the real
+// The cspace-level teardown — deleting the last IRQ cap runs the real
 // `delete` → `obj_unref`'s Irq arm → `destroy_irq`, releasing the bound notification's
 // ref. `destroy_irq_unbinds` proves the object op in isolation; this drives it through
-// the actual cap-deletion dispatch off an `Irq` cap — the rev1§2.2 "revoke deletes
+// the actual cap-deletion dispatch off an `Irq` cap — the rev2§2.2 "revoke deletes
 // descendants" path the boot-granted PL011 cap (main.rs slot 24) takes when init's grant
 // is revoked. The notification's own cap survives the IRQ object's destruction.
 #[test]
@@ -5591,7 +5591,7 @@ fn destroy_tcb_structural() {
 // but `t` (200) sits between two siblings at a shared level, so the teardown exercises the
 // faithful `unqueue_ready` splice (predecessor re-thread; the level stays non-empty so its
 // presence bit survives) before the halt promotes `ready_complete_except(t)` back to
-// `ready_complete`. The B8C-4 ready-queue half of `check_destroy_tcb`.
+// `ready_complete`. The ready-queue half of `check_destroy_tcb`.
 #[test]
 fn destroy_tcb_splices_out_of_ready_queue() {
     let mut st = ArrayStore::new(2);
@@ -5638,7 +5638,7 @@ fn destroy_tcb_splices_out_of_ready_queue() {
         "fixture is a well-formed, complete ready queue"
     );
 
-    check_destroy_tcb(&mut st, t); // asserts ready_wf + t off every chain (B8C-4 extension)
+    check_destroy_tcb(&mut st, t); // asserts ready_wf + t off every chain
 
     // the splice re-threaded a→b; the level stays non-empty with the bit set.
     assert_eq!(
@@ -5664,7 +5664,7 @@ fn destroy_tcb_splices_out_of_ready_queue() {
     assert_eq!(st.refs[&51], 1, "FAULT bind cap deleted");
 }
 
-// ── Ready queue (B8C): the verified ops over the ArrayStore backing ──────────────
+// ── Ready queue: the verified ops over the ArrayStore backing ────────────────────
 
 // enqueue spreads threads across two levels; `top_ready` picks the highest non-empty level;
 // `ready_dequeue` is FIFO within a level (round-robin) and clears the presence bit as each
@@ -6252,7 +6252,7 @@ fn randomized_map_sweep() {
     );
 }
 
-// ── aspace pool top-up: `grow_pool` (B10) continues mapping past exhaustion ──
+// ── aspace pool top-up: `grow_pool` continues mapping past exhaustion ────────
 //
 // The verified core is `kcore::aspace::lemma_grow_pool` (a monotone-widening +
 // lookup-stability proof); these host checks are its runtime witness. They model
@@ -6265,7 +6265,7 @@ fn map_in_grow_pool_continues() {
     // A 2-table pool: exactly enough for one 1-page map (L2 + L3). A second map
     // into a different 1 GiB region needs a fresh L2 + L3, so it hits NeedMemory on
     // the full pool. Growing the pool (the shell's contiguous extension, here a Vec
-    // extend) lets the same map succeed — the M-2 acceptance, exercised functionally.
+    // extend) lets the same map succeed — the top-up acceptance, exercised functionally.
     let (mut l1, mut pool, mut used, base) = map_fixture(2);
     let mut store = ArrayStore::new(0);
     let va1 = USER_VA_BASE;

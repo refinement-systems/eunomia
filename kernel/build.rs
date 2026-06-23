@@ -71,9 +71,8 @@ fn main() {
         &[
             ("STORAGED_ELF_PATH", storaged.display().to_string()),
             ("SHELL_ELF_PATH", shell.display().to_string()),
-            // C-M9-A: the console ELF is built and its path passed to init; init
-            // consumes it (include_bytes!) only in C-M9-B when it spawns the
-            // console, so in A this is an unread env var — boot stays unchanged.
+            // The console ELF is built and its path passed to init; init
+            // consumes it (include_bytes!) when it spawns the console.
             ("CONSOLE_ELF_PATH", console.display().to_string()),
         ],
     );

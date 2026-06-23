@@ -1,9 +1,9 @@
-//! The QEMU-gated shell runtime (rev1§5.1): the spawn/reap loop, the storage
+//! The QEMU-gated shell runtime (rev2§5.1): the spawn/reap loop, the storage
 //! IPC, the REPL, and the bare-metal entry / allocator / panic handler.
 //!
 //! Every item here is syscall- or spawn-bound, so it is validated by the QEMU
-//! boot smoke (`scripts/run-demo.sh`), *not* host-tested (rev1§6 Baseline
-//! split, B15 Design decision 3). It is excluded from the host test build
+//! boot smoke (`scripts/run-demo.sh`), *not* host-tested (rev2§6 Baseline
+//! split). It is excluded from the host test build
 //! (`#[cfg(not(test))] mod runtime;` in `main.rs`) because the shell's spawn
 //! and clock paths depend on `urt::spawn` and `urt::time::cntvct`, which are
 //! aarch64-bare-metal only (no host stub). The pure formatting/parsing/policy
@@ -24,7 +24,7 @@ use urt::spawn::{Exit, SpawnRec};
 #[global_allocator]
 static HEAP: urt::Heap<{ 1024 * 1024 }> = urt::Heap::new();
 
-// Shell cspace (built by init, rev1§5.1): slot 0 = bootstrap channel, slot 1 =
+// Shell cspace (built by init, rev2§5.1): slot 0 = bootstrap channel, slot 1 =
 // storage session, slot 2 = the untyped pool for spawning, slot 5 = a
 // read-only time cap re-granted per child. The shell carves two persistent
 // objects from the pool at startup and keeps slots 8.. as a recyclable
@@ -33,13 +33,13 @@ const BOOT_CHAN: u32 = 0;
 const STORE_CHAN: u32 = 1;
 const POOL: u32 = 2;
 /// Persistent event notification: the shell's wait point and the target of
-/// every child's on-exit/on-fault bindings (rev1§3.6). Carved once; survives
+/// every child's on-exit/on-fault bindings (rev2§3.6). Carved once; survives
 /// each child's revoke (it descends from the pool, not the donation).
 const EVENT_NOTIF: u32 = 3;
-/// The reusable per-child donation untyped (rev1§5.1). One child's worth of
-/// memory; `revoke` + `reset` reclaims it between spawns (rev1§2.5).
+/// The reusable per-child donation untyped (rev2§5.1). One child's worth of
+/// memory; `revoke` + `reset` reclaims it between spawns (rev2§2.5).
 const DONATION: u32 = 4;
-/// Read-only time-frame cap (granted by init, rev1§2.6). The shell maps a
+/// Read-only time-frame cap (granted by init, rev2§2.6). The shell maps a
 /// fresh copy into each child's aspace so children can read the clock —
 /// the init→shell time grant, one hop further. Lives in pool memory the
 /// per-child reclaim never touches.
@@ -53,16 +53,16 @@ const SPAWN_CAP: usize = 56; // slots 8..64
 const DONATION_BYTES: u64 = 4 * 1024 * 1024;
 const CHILD_CSPACE_SLOTS: u64 = 8;
 /// Children run below the shell so a blocked-shell, running-child handoff is
-/// the common case, and the rev1§5.4 ceiling keeps a child from outranking us.
+/// the common case, and the rev2§5.4 ceiling keeps a child from outranking us.
 const CHILD_PRIO: u64 = 3;
 /// Where the time page lands in each child's aspace (init's convention,
-/// rev1§2.6). Above the ELF (0x8000_0000) and stack (~0x9000_0000); the VA
+/// rev2§2.6). Above the ELF (0x8000_0000) and stack (~0x9000_0000); the VA
 /// still travels in the startup block's TIME region grant — never assumed.
 const CHILD_TIME_VA: u64 = 0xA300_0000;
 
-/// Notification bits the kernel raises for this child (rev1§5.1). Distinct so the
+/// Notification bits the kernel raises for this child (rev2§5.1). Distinct so the
 /// notification *word* tells exit from fault — two sources multiplexed on one
-/// notification, the rev1§3.6 bit-group scan. The shell registers each as a source
+/// notification, the rev2§3.6 bit-group scan. The shell registers each as a source
 /// with the IPC reactor (`register_bound`), which owns the scan; the shell is
 /// the reactor's first multi-source production consumer. A console-readable
 /// source would slot in as a third bit once the console is a channel.
@@ -75,7 +75,7 @@ const EXIT_KEY: ipc::Key = 0;
 const FAULT_KEY: ipc::Key = 1;
 
 /// The shell's storage authority, resolved from the init→shell `b"EUS1"`
-/// named-grant table once in `_start` (rev1§5.1, C1C): `storage` → the session
+/// named-grant table once in `_start` (rev2§5.1): `storage` → the session
 /// channel slot, `root` → the handle on that session. Defaults match init's
 /// convention (`STORE_CHAN`, handle 0) so an absent grant degrades to today's
 /// behaviour. The shell is single-threaded (cooperative `yield_now`) and these
@@ -83,14 +83,14 @@ const FAULT_KEY: ipc::Key = 1;
 static STORE_SLOT: AtomicU32 = AtomicU32::new(STORE_CHAN);
 static ROOT_HANDLE: AtomicU32 = AtomicU32::new(0);
 
-/// The storage wire version negotiated with storaged in `_start` (rev1§3.7,
-/// C3C), stamped into every request header and validated on every response.
+/// The storage wire version negotiated with storaged in `_start` (rev2§3.7),
+/// stamped into every request header and validated on every response.
 /// Defaults to `wire::PROTO_VERSION` so the value is well-defined before the
 /// one-shot connect runs; the handshake overwrites it with the server's choice.
 static NEGOTIATED_VERSION: AtomicU8 = AtomicU8::new(wire::PROTO_VERSION);
 
-/// The cspace slot of the shell's `stdout` console-channel endpoint (rev1§5.1,
-/// C-M9-C). No default: `_start` resolves it from the startup table and refuses
+/// The cspace slot of the shell's `stdout` console-channel endpoint (rev2§5.1).
+/// No default: `_start` resolves it from the startup table and refuses
 /// to run without it, so `out()` never runs before this is set (the sentinel
 /// would make any stray early write fail loudly on a bad slot rather than leak
 /// to a wrong channel).
@@ -100,23 +100,23 @@ static STDOUT_SLOT: AtomicU32 = AtomicU32::new(u32::MAX);
 /// chunks at this so any length streams in order.
 const STDOUT_CHUNK: usize = 256;
 
-/// The cspace slot of the storage-session channel (`storage`, rev1§5.1).
+/// The cspace slot of the storage-session channel (`storage`, rev2§5.1).
 fn store_slot() -> u32 {
     STORE_SLOT.load(Ordering::Relaxed)
 }
 
-/// The storage handle for the ref root (`root`, rev1§5.1).
+/// The storage handle for the ref root (`root`, rev2§5.1).
 fn root_handle() -> u32 {
     ROOT_HANDLE.load(Ordering::Relaxed)
 }
 
-/// The wire version negotiated at session establishment (rev1§3.7, C3C).
+/// The wire version negotiated at session establishment (rev2§3.7).
 fn negotiated_version() -> u8 {
     NEGOTIATED_VERSION.load(Ordering::Relaxed)
 }
 
 /// All terminal output (banner, prompt, command results, echo) crosses the
-/// `stdout` console channel (rev1§5.1, C-M9-C) — the shell does *no* ambient
+/// `stdout` console channel (rev2§5.1) — the shell does *no* ambient
 /// debug-UART output. Chunk at the message payload bound and yield on a full
 /// channel (the console driver runs at a higher priority and drains promptly).
 fn out(s: &[u8]) {
@@ -129,7 +129,7 @@ fn out(s: &[u8]) {
 }
 
 /// Pre-console / panic diagnostics: the build-gated kernel-diagnostic path
-/// (rev1§7 "kept, if at all, only for kernel-internal panic reporting"). The
+/// (rev2§7 "kept, if at all, only for kernel-internal panic reporting"). The
 /// shell's *only* use of a debug syscall — for failures that fire before the
 /// console channel is usable, or during a panic when it may be the cause. All
 /// user-facing I/O uses `out()` (the channel).
@@ -145,8 +145,8 @@ fn out_num(n: u64) {
 
 /// UTC nanoseconds → ISO-8601 with nanosecond precision
 /// (`2026-06-11T12:34:56.123456789Z`). All stored time is UTC; timezones
-/// are presentation and this shell presents UTC only (rev1§2.6). Full
-/// precision so per-ref strict ordering (rev1§4.7) is visible, not rounded
+/// are presentation and this shell presents UTC only (rev2§2.6). Full
+/// precision so per-ref strict ordering (rev2§4.7) is visible, not rounded
 /// away — the RTC's whole-second base makes sub-second digits relative,
 /// not absolute.
 fn out_utc(ns: u64) {
@@ -297,7 +297,7 @@ fn cmd_snaps() {
 }
 
 /// Wall-clock time end to end: two register reads and the time page,
-/// zero syscalls, zero IPC on the read path (rev1§2.6).
+/// zero syscalls, zero IPC on the read path (rev2§2.6).
 fn cmd_date() {
     match urt::time::page() {
         Some(p) => {
@@ -346,7 +346,7 @@ fn cmd_df() {
     }
 }
 
-/// Retention policy is shell-side (rev1§4.7: the server stores fields, it does
+/// Retention policy is shell-side (rev2§4.7: the server stores fields, it does
 /// not interpret policy). [`prune_victims`] selects the ids to delete; this
 /// keeps the IPC loop over them. `keep`-class and tagged rows survive.
 fn cmd_prune(n: u64) {
@@ -387,7 +387,7 @@ fn out_hex(n: u64) {
 fn print_exit(e: Exit) {
     match e {
         // A panic surfaces as a normal exit carrying the reserved status
-        // (rev1§5.1); name it rather than print exited(18446744073709551615).
+        // (rev2§5.1); name it rather than print exited(18446744073709551615).
         Exit::Exited(sys::STATUS_PANIC) => out(b"panicked\n"),
         Exit::Exited(status) => {
             out(b"exited(");
@@ -422,11 +422,11 @@ enum RunErr {
     Carve,
     Start,
     /// The startup block could not be encoded (too many argv entries, or the
-    /// block would exceed `MAX_BLOCK`) — refused cleanly (rev1§2.7), not a panic.
+    /// block would exceed `MAX_BLOCK`) — refused cleanly (rev2§2.7), not a panic.
     Startup,
 }
 
-/// Owns the recyclable slot window and drives the rev1§5.1 spawn/reap loop. One
+/// Owns the recyclable slot window and drives the rev2§5.1 spawn/reap loop. One
 /// child outstanding at a time (the shell is single-threaded), so a single
 /// donation untyped, reused, is the whole resource story.
 struct Spawner {
@@ -484,21 +484,21 @@ impl Spawner {
                 return Err(RunErr::BadElf);
             }
         };
-        // The "time" grant (rev1§5.1, rev1§2.6): a fresh read-only copy of our time
+        // The "time" grant (rev2§5.1, rev2§2.6): a fresh read-only copy of our time
         // cap, mapped read-only into the child's aspace at CHILD_TIME_VA. The
         // copy lives OUTSIDE the donation, so `scrub`/`reap` must delete it
         // first — the unmap has to precede the revoke that frees the aspace
-        // it points into (rev1§2.5 one-mapping-per-cap).
+        // it points into (rev2§2.5 one-mapping-per-cap).
         if sys::cap_copy(SH_TIME, s.time_copy, sys::RIGHT_READ) < 0
             || sys::map(prepared.aspace_slot, s.time_copy, CHILD_TIME_VA, 0) < 0
         {
             self.scrub(s.time_copy);
             return Err(RunErr::Carve);
         }
-        // Explicit child world (rev1§5.1): bootstrap endpoint in slot 0, the
+        // Explicit child world (rev2§5.1): bootstrap endpoint in slot 0, the
         // unified "EUS1" startup block (a TIME region grant for the time page +
-        // the command-line argv, C1D) queued before the child runs. An over-budget
-        // block is a clean spawn failure, never a panic (rev1§2.7).
+        // the command-line argv) queued before the child runs. An over-budget
+        // block is a clean spawn failure, never a panic (rev2§2.7).
         sys::cap_install(prepared.cspace_slot, s.chan_b, 0);
         let mut block = [0u8; loader::startup::MAX_BLOCK];
         let n = match crate::build_child_block(&mut block, CHILD_TIME_VA, argv) {
@@ -517,12 +517,12 @@ impl Spawner {
             fault_bit: FAULT_BIT,
         };
         // Bind before start, so a child that exits immediately still raises
-        // the bit — the lost-wakeup discipline (rev1§3.6).
+        // the bit — the lost-wakeup discipline (rev2§3.6).
         if rec.arm(EVENT_NOTIF, s.scratch) < 0 {
             self.scrub(s.time_copy);
             return Err(RunErr::Carve);
         }
-        // Multiplex this child's termination through the IPC reactor (rev1§3.6):
+        // Multiplex this child's termination through the IPC reactor (rev2§3.6):
         // the exit and fault bits were bound to the TCB by `rec.arm` (a
         // `thread_bind`, above, before start), so register them as two
         // externally-bound, edge-triggered sources — `register_bound` records
@@ -543,8 +543,8 @@ impl Spawner {
         }
 
         // Block until this child terminates. `wait` returns when a registered
-        // source (exit or fault) fires, ignoring any unregistered bit — it
-        // absorbs the by-hand bit-group scan the loop here used to do. Both keys
+        // source (exit or fault) fires, ignoring any unregistered bit — it owns
+        // the bit-group scan, so the loop here does none by hand. Both keys
         // mean "go reap"; reap reads back which (exit vs fault) from the report.
         let (key, _signals) = reactor.wait();
         debug_assert!(
@@ -552,18 +552,18 @@ impl Spawner {
             "unexpected reactor key"
         );
         // Unmap the time grant before reap's revoke frees the child aspace
-        // (rev1§2.5), then read_report strictly before revoke (enforced in reap).
+        // (rev2§2.5), then read_report strictly before revoke (enforced in reap).
         let _ = sys::cap_delete(s.time_copy);
         Ok(rec.reap())
     }
 
     /// Collapse a partially-built child and reset the donation (the abort
     /// counterpart of reap). Drops the time grant first (its mapping points
-    /// into the aspace the revoke frees, rev1§2.5); harmless if never granted.
+    /// into the aspace the revoke frees, rev2§2.5); harmless if never granted.
     /// Safe with nothing carved: revoke of a childless untyped is a no-op.
     fn scrub(&self, time_copy: u32) {
         let _ = sys::cap_delete(time_copy);
-        // B9: revoke is now a bounded per-call quantum returning ERR_AGAIN until
+        // Revoke is a bounded per-call quantum returning ERR_AGAIN until
         // the subtree is empty; loop to completion (childless donation → one call).
         sys::cap_revoke_all(DONATION);
         let _ = sys::untyped_reset(DONATION);
@@ -593,7 +593,7 @@ fn run_err(e: RunErr) {
 }
 
 fn cmd_run(sp: &mut Spawner, arg: &[u8]) {
-    // argv from the command line (rev1§5.1, C1D): whitespace-split tokens,
+    // argv from the command line (rev2§5.1): whitespace-split tokens,
     // empties dropped. argv[0] is the program path; the rest are arguments the
     // child reads from the startup block (e.g. selftest's mode in argv[1]).
     let argv: Vec<&[u8]> = arg
@@ -732,10 +732,10 @@ fn dispatch(sp: &mut Spawner, line: &[u8]) {
     }
 }
 
-/// The shell's stdin (rev1§5.1, C-M9-B): keystrokes arrive from the userspace
+/// The shell's stdin (rev2§5.1): keystrokes arrive from the userspace
 /// console driver as channel messages on the `stdin` endpoint, not the ambient
-/// `debug_getc` syscall (the driver now owns the PL011 RX line, so there is no
-/// ambient input path left to poll). Buffer one message and hand the REPL one
+/// `debug_getc` syscall (the driver owns the PL011 RX line, so there is no
+/// ambient input path to poll). Buffer one message and hand the REPL one
 /// byte at a time — the exact `debug_getc` shape the loop already consumes
 /// (negative = nothing queued, the caller yields).
 struct Stdin {
@@ -774,18 +774,18 @@ impl Stdin {
 #[no_mangle]
 #[link_section = ".text._start"]
 pub extern "C" fn _start() -> ! {
-    // The rev1§5.1 startup block, queued by init before this thread started: the
-    // unified `b"EUS1"` named-grant table (`loader::startup`, C1C). Resolve the
+    // The rev2§5.1 startup block, queued by init before this thread started: the
+    // unified `b"EUS1"` named-grant table (`loader::startup`). Resolve the
     // standard names `storage`/`root`/`time` once here. A malformed block is
-    // refused, not a crash (decode is total, rev1§2.7); an absent name keeps the
+    // refused, not a crash (decode is total, rev2§2.7); an absent name keeps the
     // default — no `time` grant means no clock (`date` degrades), `storage`/`root`
     // default to init's convention.
     let mut boot = [0u8; 256];
     let (blen, _) = sys::chan_recv(BOOT_CHAN, boot.as_mut_ptr(), None);
-    // `stdin`/`stdout` (C-M9-B/C): the console-channel endpoint the REPL reads
+    // `stdin`/`stdout`: the console-channel endpoint the REPL reads
     // keystrokes from and writes output to (one channel under both names,
-    // rev1§5.1). Unlike the other names they have no graceful default — once the
-    // console driver owns the PL011 line there is no ambient I/O path — so an
+    // rev2§5.1). Unlike the other names they have no graceful default — the
+    // console driver owns the PL011 line, so there is no ambient I/O path — so an
     // absent grant is fatal below.
     let mut stdin_slot: Option<u32> = None;
     let mut stdout_slot: Option<u32> = None;
@@ -810,7 +810,7 @@ pub extern "C" fn _start() -> ! {
 
     // Carve the two persistent spawn objects from the pool (slot 2): the
     // event notification every child's death will signal, and one reusable
-    // child-sized donation untyped (rev1§5.1). Both sit in pool memory the
+    // child-sized donation untyped (rev2§5.1). Both sit in pool memory the
     // per-child reclaim never touches.
     if sys::retype(POOL, sys::OBJ_NOTIF, 0, EVENT_NOTIF, 0) < 0
         || sys::retype(POOL, sys::OBJ_UNTYPED, DONATION_BYTES, DONATION, 0) < 0
@@ -820,11 +820,11 @@ pub extern "C" fn _start() -> ! {
     }
     let mut spawner = Spawner::new();
 
-    // The console must be wired (C-M9-B/C): with the userspace driver owning the
+    // The console must be wired: with the userspace driver owning the
     // PL011 line, an unbound `stdin`/`stdout` means no I/O path at all — fail
-    // cleanly and visibly on the kernel-diagnostic path rather than silently fall
-    // back to the now-removed ambient debug syscalls (Design decision 6's
-    // no-console negative control). `stdout` is stored in `STDOUT_SLOT` above;
+    // cleanly and visibly on the kernel-diagnostic path (the no-console
+    // negative control); there is no ambient debug-syscall fallback.
+    // `stdout` is stored in `STDOUT_SLOT` above;
     // both must be present before the banner.
     let Some(stdin_slot) = stdin_slot else {
         diag(b"[shell] FATAL: stdin unbound (console not wired)\n");
@@ -836,7 +836,7 @@ pub extern "C" fn _start() -> ! {
     }
     let mut stdin = Stdin::new(stdin_slot);
 
-    // Connect handshake (rev1§3.5/§3.7, C3C): negotiate the storage wire version
+    // Connect handshake (rev2§3.5/§3.7): negotiate the storage wire version
     // with storaged once, before the REPL. We offer `[PROTO_VERSION,
     // PROTO_VERSION]` in the *storage* version namespace (`wire::PROTO_VERSION`,
     // not `ipc::PROTOCOL_VERSION` — the connect codec's own version) and a zero
@@ -844,7 +844,7 @@ pub extern "C" fn _start() -> ! {
     // `ipc` connect codec over the pre-wired storage channel — not a storage
     // `Request` (which could not itself be versioned). Record the selected
     // version to stamp on every request; a refusal means no shared version,
-    // fatal for a single-version build (rev1§3.7: refuse cleanly, never crash).
+    // fatal for a single-version build (rev2§3.7: refuse cleanly, never crash).
     {
         let store = store_slot();
         let req = ipc::ConnectReq::new(
@@ -908,7 +908,7 @@ pub extern "C" fn _start() -> ! {
 #[panic_handler]
 fn on_panic(_: &core::panic::PanicInfo) -> ! {
     // A panic must not depend on the console channel (it may be the cause), so
-    // report on the kernel-diagnostic path (rev1§7), not `out()`.
+    // report on the kernel-diagnostic path (rev2§7), not `out()`.
     diag(b"[shell] PANIC\n");
     sys::thread_exit(sys::STATUS_PANIC)
 }

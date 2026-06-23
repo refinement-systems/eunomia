@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build everything, assemble the demo disk image with mkfs, boot the full
-# system in QEMU (MVP demo script, spec rev1§1). Interactive by default;
+# system in QEMU (MVP demo script, spec rev2§1). Interactive by default;
 # pipe commands on stdin for scripted runs.
 set -euo pipefail
 
@@ -16,7 +16,7 @@ mkdir -p "$DEMO_ROOT/docs" "$DEMO_ROOT/bin"
 printf 'Hello from the versioned store!\n' > "$DEMO_ROOT/hello.txt"
 printf 'Eunomia: capability-based OS with versioned storage.\n' > "$DEMO_ROOT/docs/readme"
 cp "$ROOT/target/user/aarch64-unknown-none-softfloat/release/hello" "$DEMO_ROOT/bin/hello"
-# selftest exercises the rev1§5.1 spawn/reclaim loop interactively:
+# selftest exercises the rev2§5.1 spawn/reclaim loop interactively:
 #   run bin/selftest 42      → exited(42)
 #   run bin/selftest 255     → faulted(translation, 0xdead0000)
 #   runloop bin/selftest 100 → 100 spawn/wait/reclaim cycles, slots 56/56

@@ -1,8 +1,8 @@
 #!/bin/bash
-# QEMU boot test — the M1 exit criterion (rev1§1), the kernel's cap-mechanism
+# QEMU boot test — the M1 exit criterion (rev2§1), the kernel's cap-mechanism
 # regression. Builds the embedded EL0 test program (`cargo build --features
 # m1-test`, kernel/src/user.rs) and boots it. The program walks the whole
-# M1/rev1§5.1 surface and prints a marker per stage:
+# M1/rev2§5.1 surface and prints a marker per stage:
 #
 #   1  thread 1 alive at EL0
 #   2  a derived (signal-only) cap arrived over a channel and was used
@@ -10,10 +10,10 @@
 #   4  a timer object signalled a bound notification
 #   5  the child's on-exit report fired, read exited(42), and the report
 #      surface is gated by the bind-reports / read-report rights bits
-#   6  channel whole-object teardown (rev1§3.3): revoking a channel's backing
+#   6  channel whole-object teardown (rev2§3.3): revoking a channel's backing
 #      sub-untyped fired every endpoint's peer-closed binding before
 #      reclamation, into a separately-funded notification that survived
-#   7  device IRQ → notification (rev1§1, rev1§3.6): a bound PL011 IRQ-handler
+#   7  device IRQ → notification (rev2§1, rev2§3.6): a bound PL011 IRQ-handler
 #      cap signalled its notification through the real GIC + exception path,
 #      was acked, and a second interrupt was delivered (the mask-on-deliver /
 #      unmask-on-ack cycle). The line is software-pended from EL1 on the
@@ -72,5 +72,5 @@ fi
 
 echo "M1 TEST PASS:"
 echo "  1234567M1 PASS — caps/CDT, revoke-through-queue + cspace, timer,"
-echo "  thread reports (exit(42), rights gating), rev1§3.3 channel"
-echo "  whole-object teardown, and the rev1§3.6 device-IRQ → notification path"
+echo "  thread reports (exit(42), rights gating), rev2§3.3 channel"
+echo "  whole-object teardown, and the rev2§3.6 device-IRQ → notification path"

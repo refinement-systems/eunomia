@@ -1,4 +1,4 @@
-//! The rev1§5.1 canonical parent loop, factored out of any one parent.
+//! The rev2§5.1 canonical parent loop, factored out of any one parent.
 //!
 //! A spawned child is a CDT subtree under one cap: the **donation**, a
 //! child-sized untyped (`OBJ_UNTYPED`) the parent carved from its pool and
@@ -13,7 +13,7 @@
 //! — a retention-daemon supervisor, eventually init's service restarts —
 //! inherits them:
 //!
-//!   * **bind before start, wait, then reap** (rev1§5.1). The on-exit/on-fault
+//!   * **bind before start, wait, then reap** (rev2§5.1). The on-exit/on-fault
 //!     bindings are configured by the *holder* of the thread cap; a child
 //!     holds no cap to its own threads, so it can neither silence nor forge
 //!     its death notice.
@@ -29,17 +29,17 @@
 //! the whole subtree; the parent decides when the process is over, not any
 //! one thread. A main thread that panics rather than exiting cleanly stops
 //! through the runtime panic handler, which exits with `sys::STATUS_PANIC`
-//! (the runtime exit path, rev1§5.1) — so `Exit::Exited(STATUS_PANIC)` is a
+//! (the runtime exit path, rev2§5.1) — so `Exit::Exited(STATUS_PANIC)` is a
 //! crash, distinct from any status a child passes deliberately.
 
 use ipc::sys;
 
-/// Why a child stopped, read out of its terminal report record (rev1§5.1).
+/// Why a child stopped, read out of its terminal report record (rev2§5.1).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Exit {
     /// Voluntary `thread_exit(status)`.
     Exited(u64),
-    /// Unhandled fault — suspended, not destroyed (rev1§5.3). `esr` is the raw
+    /// Unhandled fault — suspended, not destroyed (rev2§5.3). `esr` is the raw
     /// ESR_EL1 (decode the class/fault-status to taste); `far` the faulting
     /// address.
     Faulted { esr: u64, far: u64 },
@@ -60,7 +60,7 @@ pub struct SpawnRec {
     pub exit_bit: u64,
     /// Notification bit raised on fault. Distinct from `exit_bit` so the
     /// parent's notification word distinguishes the two terminations
-    /// before it even reads the report — the rev1§3.6 bit-group scan in
+    /// before it even reads the report — the rev2§3.6 bit-group scan in
     /// miniature.
     pub fault_bit: u64,
 }
@@ -75,7 +75,7 @@ impl SpawnRec {
     /// Bind on-exit and on-fault to `event_notif`, the notification the
     /// parent retains a read cap to and waits on. The kernel *moves* a cap
     /// into each TCB slot, so we stage a duplicate through `scratch` (left
-    /// empty on return). Call before starting the thread (rev1§5.1).
+    /// empty on return). Call before starting the thread (rev2§5.1).
     ///
     /// Returns 0, or the first syscall error encountered.
     pub fn arm(&self, event_notif: u32, scratch: u32) -> i64 {
@@ -83,7 +83,7 @@ impl SpawnRec {
             (sys::BIND_EXIT, self.exit_bit),
             (sys::BIND_FAULT, self.fault_bit),
         ] {
-            // Duplicate first (rev1§3.4): the bind below moves the cap out of
+            // Duplicate first (rev2§3.4): the bind below moves the cap out of
             // `scratch` into the TCB, so the parent keeps `event_notif`.
             let r = sys::cap_copy(event_notif, scratch, sys::RIGHTS_ALL);
             if r < 0 {
@@ -104,7 +104,7 @@ impl SpawnRec {
     ///
     /// The order is the invariant, not a preference: `read_report` after
     /// `revoke` finds the thread cap gone and cannot recover the status
-    /// (rev1§5.1). Doing both here, in this order, is exactly so a parent can't
+    /// (rev2§5.1). Doing both here, in this order, is exactly so a parent can't
     /// lose exit statuses by swapping two lines.
     pub fn reap(&self) -> Exit {
         let (state, v1, v2) = sys::read_report(self.main_thread);

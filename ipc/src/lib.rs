@@ -1,4 +1,4 @@
-//! Userspace IPC crate — shared by every server (spec rev1§3.5, rev1§3.7).
+//! Userspace IPC crate — shared by every server (spec rev2§3.5, rev2§3.7).
 //!
 //! Responsibilities:
 //!   - Non-blocking send/recv over kernel channels
@@ -9,11 +9,11 @@
 //!   - Postcard message (de)serialisation (module-private, behind the `wire`
 //!     feature so alloc-free binaries stay minimal)
 //!   - Session admission quota
-//!   - Lost-wakeup discipline around the notification object (rev1§3.6)
+//!   - Lost-wakeup discipline around the notification object (rev2§3.6)
 //!
 //! The reactor API is epoll-shaped — `register(source, signals, key)` —
 //! implemented over notification bit-groups, and can be upgraded to the
-//! kernel wait-set object when that lands (spec rev1§3.6).
+//! kernel wait-set object when that lands (spec rev2§3.6).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 // Clippy is not a CI gate: this fires in `verus!{}` verified exec
@@ -29,7 +29,7 @@
 #[allow(unused_imports)]
 use vstd::prelude::*;
 
-// alloc rides with the `wire` feature: the wire codec (rev1§3.7) (de)serializes
+// alloc rides with the `wire` feature: the wire codec (rev2§3.7) (de)serializes
 // owned, variable-length bodies, so it needs the heap (urt provides it on the
 // OS), exactly like storage-server. Minimal binaries that use only `ipc::sys`
 // (hello/selftest/init) build without `wire` and stay no-alloc. The model + its

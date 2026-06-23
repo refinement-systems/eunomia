@@ -6,9 +6,8 @@ fn main() {
     // applied — they would break the libtest harness link with `cc`. Gate on
     // the bare-metal `*-none` target, and scope to bin targets so a host test
     // harness never receives them. (Without this the console links at the
-    // default 0x200000 instead of the rev1§5 process base 0x80000000, so
-    // `spawn::prepare` maps it at the wrong VA — the C-M9-A omission C-M9-B
-    // surfaced when it first spawned the driver.)
+    // default 0x200000 instead of the rev2§5 process base 0x80000000, so
+    // `spawn::prepare` maps it at the wrong VA.)
     let target = std::env::var("TARGET").unwrap_or_default();
     if target.contains("-none") {
         println!("cargo:rustc-link-arg-bins=-T{dir}/link.ld");

@@ -54,7 +54,7 @@ fn built_image_mounts_and_matches_source() {
 
 #[test]
 fn refuses_undersized_image_cleanly() {
-    // rev1§4.5 (S-10): an undersized device is refused on the clean
+    // rev2§4.5: an undersized device is refused on the clean
     // `run() -> Err -> main() -> ExitCode::FAILURE` path (exit code 1), never a
     // panic/abort (which would surface as 101 or a terminating signal).
     let base = std::env::temp_dir().join(format!("eunomia-mkfs-small-{}", std::process::id()));

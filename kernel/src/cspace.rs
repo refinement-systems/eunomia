@@ -16,7 +16,7 @@ pub unsafe fn delete(slot: *mut CapSlot) {
     kcore::cspace::delete(&mut KernelStore, SlotId(slot as u64));
 }
 
-/// See [`kcore::cspace::map_frame`] — the verified cap-side map record (B8A). Records the
+/// See [`kcore::cspace::map_frame`] — the verified cap-side map record. Records the
 /// `(asp, va)` mapping on the unmapped frame cap at `slot` and bumps the aspace refcount,
 /// driving the page-table write through `KernelStore::aspace_map`.
 pub unsafe fn map_frame(
@@ -28,12 +28,12 @@ pub unsafe fn map_frame(
     kcore::cspace::map_frame(&mut KernelStore, SlotId(slot as u64), asp, va, perms)
 }
 
-/// See [`kcore::cspace::revoke_step`] (B9). Does at most `budget` leaf-deletions of
+/// See [`kcore::cspace::revoke_step`]. Does at most `budget` leaf-deletions of
 /// the revoke walk and returns [`RevokeStatus::Done`] when the subtree is empty or
 /// [`RevokeStatus::More`] when the budget is exhausted with descendants remaining —
 /// the bounded quantum the `CapRevoke` handler maps to `0` / `ERR_AGAIN`. The
-/// unbounded [`kcore::cspace::revoke`] is left in kcore but no longer driven from the
-/// kernel: the revoke surface is preemptible (rev1§2.2, rev1§5.4).
+/// kernel drives only this bounded form, not the unbounded
+/// [`kcore::cspace::revoke`]: the revoke surface is preemptible (rev2§2.2, rev2§5.4).
 pub unsafe fn revoke_step(slot: *mut CapSlot, budget: usize) -> RevokeStatus {
     kcore::cspace::revoke_step(&mut KernelStore, SlotId(slot as u64), budget)
 }

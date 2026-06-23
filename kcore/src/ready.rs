@@ -1,9 +1,9 @@
-//! The 32-level ready queue (rev1§5.4): strict fixed-priority, round-robin within a
+//! The 32-level ready queue (rev2§5.4): strict fixed-priority, round-robin within a
 //! level. kcore owns the list *logic* — enqueue (append-to-tail), dequeue (pop-head),
 //! unqueue (arbitrary-position splice), and the `top_ready` bit-scan — operating on the
 //! per-level head/tail and the `u32` presence bitmap through the [`Store`] seam; the
 //! backing (`READY`/`READY_BITMAP`) is a kernel static and the context switch
-//! (`maybe_switch`) stays in the `kernel` crate (rev1§6.1(d): the scheduler *policy* and
+//! (`maybe_switch`) stays in the `kernel` crate (rev2§6.1(d): the scheduler *policy* and
 //! the asm switch are trusted; this module is the *data structure*).
 //!
 //! The list is the waiter-queue shape per level (`cspace::ready_chain`/`ready_seq`), with
@@ -255,7 +255,7 @@ pub proof fn lemma_ready_push_wf(
         rvf.bitmap == rv0.bitmap | (1u32 << (level as u32)),
         forall|x: ObjId| x != t && rv0.tails[level] != Some(x) ==> #[trigger] tvf[x] == tv0[x],
         rv0.tails[level] matches Some(y) ==> tv0[y].priority as int == level,
-        // B8C: the enqueued `t` and the re-threaded old tail keep `wait_notif is None` (the op
+        // The enqueued `t` and the re-threaded old tail keep `wait_notif is None` (the op
         // preserves `wait_notif` on both), so the strengthened `ready_complete` re-establishes.
         tvf[t].wait_notif is None,
         rv0.tails[level] matches Some(y) ==> tvf[y].wait_notif is None,
@@ -495,7 +495,7 @@ pub fn ready_enqueue<S: Store>(store: &mut S, t: ObjId)
         old(store).tcb_view().dom().contains(t),
         (old(store).tcb_view()[t].priority as int) < NUM_PRIOS,
         old(store).tcb_view()[t].state != ThreadState::Runnable,
-        // B8C: a thread joining the ready chain is not waiting (the strengthened
+        // A thread joining the ready chain is not waiting (the strengthened
         // `ready_complete` requires it of every Runnable thread). `signal` clears `wait_notif`
         // before the enqueue; `maybe_switch`'s callers likewise hand off a non-waiting thread.
         old(store).tcb_view()[t].wait_notif is None,
@@ -523,7 +523,7 @@ pub fn ready_enqueue<S: Store>(store: &mut S, t: ObjId)
         forall|x: ObjId| #![trigger final(store).tcb_view()[x]]
             x != t && old(store).ready_view().tails[old(store).tcb_view()[t].priority as int] != Some(x)
             ==> final(store).tcb_view()[x] == old(store).tcb_view()[x],
-        // B8C-2: the enqueue writes only `state` (on the woken `t`, specified above) and `qnext`
+        // The enqueue writes only `state` (on the woken `t`, specified above) and `qnext`
         // (on `t` + the old tail). Every thread *but* `t` changes **only its `qnext`** — its
         // `state`/`wait_notif`/`cspace`/`aspace`/`bind_*`/`priority`/`retval` are preserved, so the
         // old ready-tail stays Runnable with `wait_notif None`. `signal`'s census/caps proofs read
@@ -772,7 +772,7 @@ pub fn ready_dequeue<S: Store>(store: &mut S, level: usize) -> (r: Option<ObjId>
 // ready thread holds no object ref, the §1.1 simplification — so only `t`'s `qnext` (cleared)
 // and its predecessor's `qnext` (re-threaded) move. `t` is left transiently Runnable-and-
 // off-chain, so the op preserves `ready_wf` + `ready_complete_except(t)` (the `destroy_tcb`
-// caller halts `t` to close the completeness gap — B8C-4).
+// caller halts `t` to close the completeness gap).
 #[verifier::spinoff_prover]
 #[verifier::rlimit(100)]
 pub fn ready_unqueue<S: Store>(store: &mut S, t: ObjId)
@@ -806,14 +806,14 @@ pub fn ready_unqueue<S: Store>(store: &mut S, t: ObjId)
             &&& final(store).tcb_view()[t].cspace == old(store).tcb_view()[t].cspace
             &&& final(store).tcb_view()[t].aspace == old(store).tcb_view()[t].aspace
             &&& final(store).tcb_view()[t].bind_slots == old(store).tcb_view()[t].bind_slots
-            // B8C (Step F): `t`'s report survives the splice (only `qnext` is written) —
-            // `destroy_tcb` reads it off to preserve the halted subject's report (rev1§5.1).
+            // `t`'s report survives the splice (only `qnext` is written) —
+            // `destroy_tcb` reads it off to preserve the halted subject's report (rev2§5.1).
             &&& final(store).tcb_view()[t].report == old(store).tcb_view()[t].report
             // the "signal-shaped" frame: only level's chain nodes (t + its predecessor) moved,
             // each Runnable (so off every waiter chain), and each preserves the home fields
             // `destroy_tcb`'s census/caps reasoning needs — `wait_notif` (waiter census),
             // `cspace`/`aspace` (`thread_hold_refs`), `bind_slots` (`caps_consistent`'s Thread arm).
-            // B8C (Step F): extends the part-2 frame with `cspace`/`aspace`.
+            // Extends the part-2 frame with `cspace`/`aspace`.
             &&& forall|x: ObjId| #![trigger final(store).tcb_view()[x]]
                     final(store).tcb_view()[x] != old(store).tcb_view()[x]
                     ==> old(store).tcb_view()[x].state == ThreadState::Runnable

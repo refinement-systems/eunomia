@@ -1,10 +1,10 @@
-//! Sessions and connect (spec rev1§3.5) — the **admission** layer. A client
-//! funds the channel (retypes it from its own untyped, rev1§3.2) and sends a
+//! Sessions and connect (spec rev2§3.5) — the **admission** layer. A client
+//! funds the channel (retypes it from its own untyped, rev2§3.2) and sends a
 //! `ConnectReq` naming a requested **bulk-window size**; the server grants or
 //! refuses at a **single admission point**, bounded by its per-server window
 //! quota. Queue memory is the connector's; window memory is the server's, capped
 //! by the quota it enforces here — so an anonymous connect cannot drain the
-//! server (rev1§3.5, "fund by failure mode").
+//! server (rev2§3.5, "fund by failure mode").
 //!
 //! The genuinely-new, safety-bearing logic is [`Admission`]: it never grants
 //! past its budget (the quota invariant) and returns the quota on session
@@ -43,19 +43,19 @@ pub const GRANT_LEN: usize = 10; // tag + u32 window + u32 size + u8 version
 pub const REFUSED_LEN: usize = 1; // tag
 
 /// The sole wire version this build of the connect layer offers today
-/// (rev1§3.7). C3 negotiates a version even though exactly one is deployed — the
-/// mechanism is real now, so a future second version (and the "old and new
-/// clients coexist per session" case, rev1§8.3) is a value change, not a
-/// re-design. A server holds its own supported [`VersionRange`]; the MVP's is the
-/// single point `[PROTOCOL_VERSION, PROTOCOL_VERSION]`.
+/// (rev2§3.7). The connect layer negotiates a version even though exactly one is
+/// deployed — the mechanism is fully present, so a future second version (and the
+/// "old and new clients coexist per session" case, rev2§8.3) is a value change,
+/// not a re-design. A server holds its own supported [`VersionRange`]; the MVP's
+/// is the single point `[PROTOCOL_VERSION, PROTOCOL_VERSION]`.
 pub const PROTOCOL_VERSION: u8 = 1;
 
 /// A contiguous span of supported wire versions, `[min, max]` inclusive
-/// (rev1§3.7). A client advertises its range in the [`ConnectReq`]; the server
+/// (rev2§3.7). A client advertises its range in the [`ConnectReq`]; the server
 /// holds its own range and selects the highest common version via [`negotiate`].
 /// A contiguous range matches the monotone "a breaking change is a new version
-/// number" framing (rev1§3.7) and the "old and new clients coexist" case
-/// (rev1§8.3); a non-contiguous version *bitset* is the recorded forward,
+/// number" framing (rev2§3.7) and the "old and new clients coexist" case
+/// (rev2§8.3); a non-contiguous version *bitset* is the recorded forward,
 /// append-only generalization, not built now (one version is deployed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VersionRange {
@@ -83,7 +83,7 @@ impl VersionRange {
     }
 }
 
-/// A granted bulk window (rev1§3.1): which window and how many bytes. The MVP
+/// A granted bulk window (rev2§3.1): which window and how many bytes. The MVP
 /// grants a single window, so `window` is always 0; it exists so the descriptor
 /// ABI is grow-only when multi-window lands (out of scope).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,7 +93,7 @@ pub struct WindowGrant {
 }
 
 /// A connect request: the client's requested bulk-window size in bytes, plus the
-/// contiguous range of wire versions it speaks (rev1§3.7). The server selects the
+/// contiguous range of wire versions it speaks (rev2§3.7). The server selects the
 /// highest common version at the single admission point ([`negotiate`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConnectReq {
@@ -114,15 +114,15 @@ pub enum GrantReply {
 
 /// Why a connect failed (server-internal; the wire [`GrantReply`] collapses both
 /// to `Refused`). The client-side connect *mechanism* (the endpoint-cap
-/// handshake, rev1§3.5) is deferred, so its richer errors — a peer-closed session
+/// handshake, rev2§3.5) is deferred, so its richer errors — a peer-closed session
 /// channel, a reply that does not decode, a transport error — are not yet
 /// constructed. They return when that mechanism lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectErr {
-    /// The server refused under its window quota (rev1§3.5).
+    /// The server refused under its window quota (rev2§3.5).
     Refused,
     /// No wire version is common to the client's offered range and the server's
-    /// supported range (rev1§3.7). Distinguished from `Refused` so a future
+    /// supported range (rev2§3.7). Distinguished from `Refused` so a future
     /// client can know not to retry a version refusal.
     VersionMismatch,
 }
@@ -131,8 +131,8 @@ pub enum ConnectErr {
 
 /// Ghost model of [`ConnectReq::encode`]: tag byte, the requested-window `u32`
 /// split low-to-high (matching `to_le_bytes`), then the offered version range as
-/// two raw bytes (`min`, `max`). The version bytes are appended, so the existing
-/// prefix is byte-for-byte the pre-C3 layout.
+/// two raw bytes (`min`, `max`). The version bytes sit at the end, so the
+/// tag + requested-window prefix is independent of the version range.
 pub open spec fn req_encode(r: ConnectReq) -> Seq<u8> {
     seq![
         TAG_REQ,
@@ -162,8 +162,8 @@ pub open spec fn req_decode(s: Seq<u8>) -> Option<ConnectReq> {
 
 /// Ghost model of [`GrantReply::encode`]'s *used prefix*: a `GRANT_LEN` grant
 /// (tag + window + size, each little-endian, then the negotiated version byte) or
-/// a `REFUSED_LEN` refusal (tag). The version byte is appended after the pre-C3
-/// window+size layout.
+/// a `REFUSED_LEN` refusal (tag). The version byte sits at the end, after the
+/// window+size fields.
 pub open spec fn grant_encode(g: GrantReply) -> Seq<u8> {
     match g {
         GrantReply::Grant(w, ver) => seq![
@@ -319,7 +319,7 @@ impl GrantReply {
     }
 }
 
-/// The per-server bulk-window quota (rev1§3.5): the **single admission point**.
+/// The per-server bulk-window quota (rev2§3.5): the **single admission point**.
 /// Tracks a fixed `budget` of window bytes and how much is currently `granted`;
 /// `admit` hands out a window iff it fits the remainder (it **never** over-grants
 /// — the quota invariant a malicious flood of connects cannot break), and
@@ -367,7 +367,7 @@ impl Admission {
         self.budget - self.granted
     }
 
-    /// The single admission decision (rev1§3.5): grant `requested` bytes iff they fit
+    /// The single admission decision (rev2§3.5): grant `requested` bytes iff they fit
     /// the remaining quota, accounting for them; otherwise refuse and leave the
     /// quota untouched. **Never grants past budget** — [`Admission::well_formed`]
     /// holds after every call, for *any* `requested`, so a flood of connects can
@@ -419,7 +419,7 @@ pub open spec fn common(client: VersionRange, server: VersionRange, v: u8) -> bo
     client.min <= v <= client.max && server.min <= v <= server.max
 }
 
-/// The version selection (rev1§3.7, *"versions are negotiated once at session
+/// The version selection (rev2§3.7, *"versions are negotiated once at session
 /// establishment … a server may speak several concurrently"*): the **highest
 /// common** version of the client's offered range and the server's supported
 /// range, or `None` when the ranges are disjoint (a clean refusal, not a crash).
@@ -444,11 +444,11 @@ pub fn negotiate(client: VersionRange, server: VersionRange) -> (r: Option<u8>)
     }
 }
 
-/// Per-message version validation (rev1§2.7/§3.7): a message's stamped header
+/// Per-message version validation (rev2§2.7/§3.7): a message's stamped header
 /// version must equal the session's negotiated version, else the message is
 /// refused — *never* a crash. This is dispatch-discipline outside the header
-/// codec, so the header layout and its bijection proofs are untouched (rev1§3.7).
-/// Inert until the dispatch site is wired (deferred to C3C).
+/// codec, so the header layout and its bijection proofs are untouched (rev2§3.7).
+/// Inert until the dispatch site is wired.
 pub fn version_ok(header_version: u8, negotiated: u8) -> (ok: bool)
     ensures ok == (header_version == negotiated),
 {
@@ -783,7 +783,7 @@ mod tests {
     }
 }
 
-// The negotiation/admission property tier (rev1§6, *"everything gets
+// The negotiation/admission property tier (rev2§6, *"everything gets
 // Miri+proptest"*). Pure, sequential decision logic — no concurrency — so plain
 // proptest is the tool; the `not(loom)/not(shuttle)` gate mirrors `reactor.rs`
 // (those harnesses drive the concurrent shape, not this).

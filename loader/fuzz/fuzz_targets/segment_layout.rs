@@ -1,13 +1,13 @@
 #![no_main]
-//! Page-layout arithmetic on arbitrary `(vaddr, memsz)` (rev1§5, the I-5 site).
-//! `spawn::prepare` page-rounds each segment of an untrusted image; B3A pulled
-//! that math into `Segment::page_layout` so it is host-fuzzable. This target
+//! Page-layout arithmetic on arbitrary `(vaddr, memsz)` (rev2§5).
+//! `spawn::prepare` page-rounds each segment of an untrusted image; that math
+//! lives in `Segment::page_layout` so it is host-fuzzable. This target
 //! draws the two words directly from the input (first 16 bytes LE, short inputs
 //! zero-padded) so the fuzzer reaches the `vaddr + memsz` within `PAGE-1` of
 //! `u64::MAX` overflow edge in two drawn words, instead of having to build a
 //! near-`u64::MAX` vaddr through a whole well-formed ELF. The fuzz profile
 //! forces overflow-checks + debug-assertions, so any unchecked wrap that slips
-//! back in aborts the run — the differential that would have caught I-5.
+//! in aborts the run.
 //!
 //! Run: `cargo +nightly fuzz run segment_layout`.
 use libfuzzer_sys::fuzz_target;

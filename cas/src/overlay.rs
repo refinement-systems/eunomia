@@ -1,21 +1,21 @@
-//! Per-ref in-memory overlay — the memtable (spec rev1§4.3–4.4).
+//! Per-ref in-memory overlay — the memtable (spec rev2§4.3–4.4).
 //!
 //! Writes land here first, keyed by path with per-file interval maps;
 //! reads consult the overlay and fall through to the immutable tree — an
 //! LSM read path whose bottom level is the prolly tree. Bounds are
-//! denominated in bytes of dirty overlay (rev1§4.4); the store enforces the
+//! denominated in bytes of dirty overlay (rev2§4.4); the store enforces the
 //! budget with backpressure-by-flush, never eviction.
 //!
 //! The overlay keys its per-file interval maps on an ephemeral, server-runtime
-//! [`FileId`] (rev1§4.3/§4.9), not on the path: a name-ordered `by_name` index
+//! [`FileId`] (rev2§4.3/§4.9), not on the path: a name-ordered `by_name` index
 //! resolves a path to its id, and an `id → name` map (`names`) is what a
 //! [`rename`](Overlay::rename) swaps in O(1) regardless of how much dirty state
 //! the file holds. IDs are runtime-only and never touch disk — they are
 //! re-derived by replaying the path-keyed WAL on mount. A file rename moves the
 //! name only (the interval map never moves); a directory rename is recorded in
-//! `dir_renames` and applied at flush as a tree detach/reattach (rev1§4.9).
+//! `dir_renames` and applied at flush as a tree detach/reattach (rev2§4.9).
 //!
-//! An id can also be held *open* across an unlink (the rev1§4.9 open handle):
+//! An id can also be held *open* across an unlink (the rev2§4.9 open handle):
 //! `open` refcounts the live handles per id; unlinking an *open* id orphans it
 //! (`names[id] = None`) instead of reaping it, so the handle keeps working
 //! against the overlay, and at flush an orphaned id (resolving to no name) is
@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 
 pub type Path = Vec<Vec<u8>>;
 
-/// Ephemeral, server-runtime file identity (rev1§4.9): assigned per file when it
+/// Ephemeral, server-runtime file identity (rev2§4.9): assigned per file when it
 /// first enters the overlay, opaque, store-global, and **never persisted** — it
 /// is re-derived by replaying the path-keyed WAL on mount. The interval maps key
 /// on it so a rename is an O(1) name-pointer swap, not a re-key of dirty state.
@@ -40,16 +40,16 @@ pub struct FileOverlay {
     /// overlay window (e.g. write after unlink).
     pub fresh: bool,
     pub mtime: u64,
-    /// Committed-tree path to read pre-edit bytes from at flush (rev1§4.9 base
+    /// Committed-tree path to read pre-edit bytes from at flush (rev2§4.9 base
     /// origin), fixed at first write and distinct from the current name once a
     /// rename moves the name; `None` for a `fresh` file (no base to read). Read
-    /// by `Store::read`/`flush_ref` (C2B): a renamed dirty file applies its
+    /// by `Store::read`/`flush_ref`: a renamed dirty file applies its
     /// interval map over the committed bytes at the *original* name.
     origin: Option<Path>,
 }
 
 impl FileOverlay {
-    /// The committed-tree path to read pre-edit bytes from (rev1§4.9 base
+    /// The committed-tree path to read pre-edit bytes from (rev2§4.9 base
     /// origin). `None` for a `fresh` file. Differs from the current name after a
     /// rename; the store reads the base here and writes at the current name.
     pub fn origin(&self) -> Option<&Path> {
@@ -66,7 +66,7 @@ impl FileOverlay {
     }
 
     /// Offset of the first byte this overlay changed (`None` only if nothing
-    /// was written). rev1§4.3 neighborhood re-chunk bounds the re-chunked
+    /// was written). rev2§4.3 neighborhood re-chunk bounds the re-chunked
     /// region from here.
     pub fn first_write_offset(&self) -> Option<u64> {
         self.writes.keys().next().copied()
@@ -74,7 +74,7 @@ impl FileOverlay {
 
     /// Apply the intervals over base content (zero-fill gaps). Borrows `base`
     /// so the caller can keep the pre-edit bytes alive alongside the result
-    /// (the rev1§4.3 neighborhood re-chunk diffs new against old).
+    /// (the rev2§4.3 neighborhood re-chunk diffs new against old).
     pub fn apply(&self, base: &[u8]) -> Vec<u8> {
         let mut content = if self.fresh {
             Vec::new()
@@ -93,7 +93,7 @@ impl FileOverlay {
     }
 
     /// Insert an interval, trimming whatever it overlaps (last-write-wins,
-    /// rev1§4.4). Returns the change in dirty bytes.
+    /// rev2§4.4). Returns the change in dirty bytes.
     fn insert(&mut self, off: u64, data: Vec<u8>) -> isize {
         let end = off + data.len() as u64;
         let mut delta = data.len() as isize;
@@ -141,25 +141,25 @@ pub struct Overlay {
     /// Live name → id. The name-ordered index: it resolves a path to its id and
     /// range-scans for directory listings, replacing the old direct path-keying.
     by_name: BTreeMap<Path, FileId>,
-    /// id → current name (rev1§4.9 "ID → current-path map"): the inverse of
+    /// id → current name (rev2§4.9 "ID → current-path map"): the inverse of
     /// `by_name` for every live file. `None` marks an id whose name was unlinked
-    /// while still open (rev1§4.9 unlink-while-open — the orphaned open handle).
+    /// while still open (rev2§4.9 unlink-while-open — the orphaned open handle).
     names: BTreeMap<FileId, Option<Path>>,
     /// Tombstones: names that read as absent until flush removes them from the
     /// tree (the old `unlinks` set, unchanged in role). A file rename adds its
     /// source name here.
     tombs: BTreeSet<Path>,
-    /// Open-handle refcount per id (rev1§4.9). `open[id] > 0` means a live handle
+    /// Open-handle refcount per id (rev2§4.9). `open[id] > 0` means a live handle
     /// holds the id, which changes two things: unlinking the id *orphans* it
     /// (`names[id] = None`, data kept) rather than reaping it, and the handle's
     /// id↔name binding is carried across a flush so it keeps working. Empty until
     /// an id is `open`ed; ephemeral, like the ids themselves (never persisted, no
     /// open/close WAL record — a crash leaves no open handles, see [`Self::carry_open`]).
     open: BTreeMap<FileId, u32>,
-    /// Pending directory moves `from → to` (rev1§4.9 detach/reattach). A
+    /// Pending directory moves `from → to` (rev2§4.9 detach/reattach). A
     /// directory has no dirty bytes to re-key, so its move is recorded here and
     /// executed at flush as a `tree::remove`+`tree::put` of its `DirRoot` entry.
-    /// `Store::rename` drains dirty descendants (flush-first, DD4) before
+    /// `Store::rename` drains dirty descendants (flush-first) before
     /// recording the move, so no file overlay hides under `from`.
     dir_renames: BTreeMap<Path, Path>,
     bytes: usize,
@@ -186,8 +186,8 @@ impl Overlay {
         let fresh = self.tombs.remove(path);
         let id = if let Some(&id) = self.by_name.get(path) {
             // An existing live name keeps its id. It may be a dirty file or an
-            // opened-but-unwritten handle (a `by_name` entry with no `by_id` yet,
-            // C2C); either way the id is reused.
+            // opened-but-unwritten handle (a `by_name` entry with no `by_id`
+            // yet); either way the id is reused.
             id
         } else {
             // First touch of this name in the window: allocate an id and bind it.
@@ -215,14 +215,14 @@ impl Overlay {
     pub fn unlink(&mut self, path: &Path, _mtime: u64) {
         if let Some(id) = self.by_name.remove(path) {
             if self.is_open(id) {
-                // rev1§4.9 unlink-while-open: the id is held by a live handle, so
+                // rev2§4.9 unlink-while-open: the id is held by a live handle, so
                 // keep its dirty data and mark it nameless (`None`). The handle
                 // keeps working against the overlay; at flush the now-orphaned id
                 // resolves to no name and `files()` skips it, so the data is
                 // discarded. `bytes` is unchanged — the data is still held.
                 self.names.insert(id, None);
             } else {
-                // No open handle: reap the id outright (the C2A behavior).
+                // No open handle: reap the id outright.
                 if let Some(fo) = self.by_id.remove(&id) {
                     let drop_bytes: usize = fo.writes.values().map(|v| v.len()).sum();
                     self.bytes = self.bytes.saturating_sub(drop_bytes);
@@ -233,13 +233,13 @@ impl Overlay {
         self.tombs.insert(path.clone());
     }
 
-    /// Whether a live handle holds `id` (rev1§4.9). Drives the orphan-vs-reap
+    /// Whether a live handle holds `id` (rev2§4.9). Drives the orphan-vs-reap
     /// choice in [`Self::unlink`] and the carry in [`Self::carry_open`].
     fn is_open(&self, id: FileId) -> bool {
         self.open.get(&id).copied().unwrap_or(0) > 0
     }
 
-    /// Open a handle on `path`, returning its ephemeral [`FileId`] (rev1§4.9
+    /// Open a handle on `path`, returning its ephemeral [`FileId`] (rev2§4.9
     /// "assigned per open file"). Resolves an existing binding — a dirty file or
     /// an already-open handle — or allocates a fresh id bound to the name with no
     /// `by_id` entry yet (an open file holds no dirty data until first written).
@@ -261,7 +261,7 @@ impl Overlay {
     }
 
     /// Close one handle on `id`, returning whether it was the last (so the store
-    /// can drop its id→ref entry). On the last close, reap by state (rev1§4.9):
+    /// can drop its id→ref entry). On the last close, reap by state (rev2§4.9):
     /// an orphaned id (`names[id] == None`) discards its dirty data; an opened-
     /// but-never-written name drops its binding (it represented nothing — back to
     /// `Clean`); a dirty, still-named id is kept (it flushes normally, just no
@@ -298,7 +298,7 @@ impl Overlay {
         }
     }
 
-    /// The current name an open id resolves to (rev1§4.9 "ID → current-path
+    /// The current name an open id resolves to (rev2§4.9 "ID → current-path
     /// map"): `Some(path)` while named, `None` once unlinked-while-open. The store
     /// routes `write_id`/`read_id` on this — a named handle through the durable
     /// path-addressed write, an orphaned one through [`Self::write_orphan`].
@@ -306,7 +306,7 @@ impl Overlay {
         self.names.get(&id).cloned().flatten()
     }
 
-    /// Write to an *orphaned* (nameless) open id (rev1§4.9): the handle keeps
+    /// Write to an *orphaned* (nameless) open id (rev2§4.9): the handle keeps
     /// working against the overlay after its name was unlinked. The data has no
     /// path, so it is never WAL-logged and is discarded at flush — purely
     /// ephemeral. Returns nothing; `bytes` tracks it until close/flush drops it.
@@ -321,7 +321,7 @@ impl Overlay {
         self.bytes = (self.bytes as isize + delta).max(0) as usize;
     }
 
-    /// Read an *orphaned* open id's content against an empty base (rev1§4.9): the
+    /// Read an *orphaned* open id's content against an empty base (rev2§4.9): the
     /// name is gone, so there is no tree base to fall through to. Empty if the
     /// handle was orphaned before any write.
     pub fn read_orphan(&self, id: FileId) -> Vec<u8> {
@@ -332,11 +332,11 @@ impl Overlay {
     }
 
     /// Consume the overlay at flush, returning a fresh one that carries only the
-    /// open handles forward (rev1§4.9 "the open handle keeps working") — their
+    /// open handles forward (rev2§4.9 "the open handle keeps working") — their
     /// refcounts and id↔name bindings, with **no** dirty data (`by_id`/`tombs`
     /// empty, `bytes == 0`): the named data was just committed to the tree and the
     /// orphaned data discarded. `None` when nothing is open, so the store removes
-    /// the overlay entirely (the C2A flush behavior). Re-deriving the bindings
+    /// the overlay entirely. Re-deriving the bindings
     /// here is why an open handle survives the auto-flushes that WAL/byte pressure
     /// can trigger mid-write.
     pub fn carry_open(self) -> Option<Overlay> {
@@ -359,8 +359,8 @@ impl Overlay {
         if self.tombs.contains(path) {
             FileState::Unlinked
         } else if let Some(id) = self.by_name.get(path) {
-            // An opened-but-unwritten name has a `by_name` entry but no `by_id`
-            // (C2C): no overlay opinion yet, so fall through to the tree.
+            // An opened-but-unwritten name has a `by_name` entry but no `by_id`:
+            // no overlay opinion yet, so fall through to the tree.
             match self.by_id.get(id) {
                 Some(fo) => FileState::Dirty(fo),
                 None => FileState::Clean,
@@ -384,7 +384,7 @@ impl Overlay {
     pub fn files(&self) -> impl Iterator<Item = (&Path, &FileOverlay)> {
         // Resolve name → id → interval map. `by_name` order matches the old
         // path-keyed iteration, so flush walks the same names in the same order.
-        // An opened-but-unwritten name (a `by_name` entry with no `by_id`, C2C)
+        // An opened-but-unwritten name (a `by_name` entry with no `by_id`)
         // holds no dirty data and is skipped — flush has nothing to write for it.
         self.by_name
             .iter()
@@ -417,7 +417,7 @@ impl Overlay {
     }
 
     /// Bring a clean, committed *file* into the overlay so a rename can move it
-    /// (rev1§4.9). It carries no dirty writes; its `origin` is its current name,
+    /// (rev2§4.9). It carries no dirty writes; its `origin` is its current name,
     /// so flush reads the unchanged committed bytes there and writes them at the
     /// renamed name. The caller (`Store::rename`) has verified `name` is a file
     /// absent from the overlay.
@@ -437,11 +437,11 @@ impl Overlay {
     }
 
     /// Move a live overlay *file* `from → to` in O(1): the id keeps its interval
-    /// map (it never moves), only the name pointers swap (rev1§4.9). The source
+    /// map (it never moves), only the name pointers swap (rev2§4.9). The source
     /// name is tombstoned (reads absent, flush removes its committed entry); the
     /// `origin` is untouched, so flush still reads the pre-edit base at the
     /// original name. A pre-existing destination is overwritten last-write-wins
-    /// (rev1§4.4). The caller guarantees `from` is live in `by_name`.
+    /// (rev2§4.4). The caller guarantees `from` is live in `by_name`.
     pub fn rename(&mut self, from: &Path, to: &Path, mtime: u64) {
         let id = *self.by_name.get(from).expect("rename source must be live");
         // Destination last-write-wins: the target name becomes live again; reap
@@ -463,7 +463,7 @@ impl Overlay {
     }
 
     /// Record a directory move `from → to` for flush to apply as a tree
-    /// detach/reattach (rev1§4.9). The caller has drained dirty descendants.
+    /// detach/reattach (rev2§4.9). The caller has drained dirty descendants.
     pub fn rename_dir(&mut self, from: &Path, to: &Path) {
         self.dir_renames.insert(from.clone(), to.clone());
     }
@@ -584,7 +584,7 @@ mod tests {
         o.check_invariants();
     }
 
-    /// DD3 base origin (consumed by flush in C2B): fixed at first write to the
+    /// Base origin (consumed by flush): fixed at first write to the
     /// name for a file with a committed base, `None` for a fresh/resurrected one.
     #[test]
     fn origin_fixed_at_first_write() {
@@ -630,7 +630,7 @@ mod tests {
 
     /// A file rename moves the name only: the id, its interval map, and its
     /// `origin` are untouched, the source reads absent, the destination reads
-    /// the moved dirty content (rev1§4.9).
+    /// the moved dirty content (rev2§4.9).
     #[test]
     fn rename_moves_name_keeps_id_and_origin() {
         let mut o = Overlay::default();
@@ -652,7 +652,7 @@ mod tests {
         o.check_invariants();
     }
 
-    /// O(1) witness (DD1): renaming a file with a large dirty interval map does
+    /// O(1) witness: renaming a file with a large dirty interval map does
     /// not move or rebuild the interval map — only the name pointers swap. We
     /// witness this structurally: the per-id `writes` map is byte-identical
     /// before and after the rename.
@@ -776,7 +776,7 @@ mod tests {
         ]
     }
 
-    /// A verbatim copy of the pre-C2A path-keyed overlay: the oracle the re-keyed
+    /// A verbatim copy of the path-keyed overlay: the oracle the re-keyed
     /// `Overlay` must match operation-for-operation. (`FileOverlay::insert` and
     /// its `writes` field are reachable from this child module.)
     #[derive(Default)]

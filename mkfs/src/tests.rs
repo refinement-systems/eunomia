@@ -1,15 +1,15 @@
-//! B15A — host tests for the mkfs directory walk (rev1§6 Baseline tier).
+//! Host tests for the mkfs directory walk (rev2§6 Baseline tier).
 //!
 //! The walk (`populate`) and the name rule (`name_acceptable`) are driven
 //! in-process against an in-memory `MemDev` store (no per-case disk file).
 //! Two tiers:
 //!
 //! * `name_acceptable` — golden boundary units + a Miri-able proptest over
-//!   arbitrary bytes (the rev1§4.9 printable-ASCII rule, including the `'/'`
+//!   arbitrary bytes (the rev2§4.9 printable-ASCII rule, including the `'/'`
 //!   and non-UTF-8 rejections, which the FS cannot materialize as a name).
 //! * `populate` — proptests over generated temp-dir trees against a
 //!   mount-equality / skip / count / total oracle, plus a creation-order
-//!   determinism property (rev1§6 canonical-form prose) and a negative
+//!   determinism property (rev2§6 canonical-form prose) and a negative
 //!   control proving the oracle has teeth.
 //!
 //! Platform note (the walk tier): the dev host is macOS (APFS) — a `'/'`/NUL
@@ -38,7 +38,7 @@ fn osb(bytes: &[u8]) -> &OsStr {
 }
 
 // ---------------------------------------------------------------------------
-// name_acceptable — golden boundary units + the rev1§4.9 rule proptest
+// name_acceptable — golden boundary units + the rev2§4.9 rule proptest
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -80,7 +80,7 @@ proptest! {
     })]
 
     /// `name_acceptable` accepts a byte string iff it is valid UTF-8, every
-    /// byte is in `0x20..0x7F`, and it contains no `'/'` (rev1§4.9).
+    /// byte is in `0x20..0x7F`, and it contains no `'/'` (rev2§4.9).
     #[test]
     fn name_acceptable_matches_rule(bytes in proptest::collection::vec(any::<u8>(), 0..16)) {
         let got = name_acceptable(osb(&bytes)).is_some();
@@ -104,7 +104,7 @@ enum Node {
 }
 
 /// A name acceptable to both the FS (lowercase ASCII + digits) and the
-/// rev1§4.9 rule; case-collision-free for APFS.
+/// rev2§4.9 rule; case-collision-free for APFS.
 fn accepted_name() -> impl Strategy<Value = Vec<u8>> {
     proptest::collection::vec(prop_oneof![0x61u8..0x7B, 0x30u8..0x3A], 1..4)
 }
@@ -311,9 +311,9 @@ proptest! {
         prop_assert!(report.is_ok(), "{}", report.unwrap_err());
     }
 
-    /// rev1§6 canonical-form: the same logical tree, materialized in opposite
+    /// rev2§6 canonical-form: the same logical tree, materialized in opposite
     /// creation orders, mounts to identical logical contents (mkfs's half of
-    /// the history-independence property; the prolly half is B13).
+    /// the history-independence property; the prolly tree covers the other half).
     #[test]
     fn walk_is_creation_order_independent(tree in tree_strategy()) {
         let (_da, sa, ca) = build(&tree, false, "det-a");

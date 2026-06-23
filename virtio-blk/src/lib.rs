@@ -1,4 +1,4 @@
-//! Userspace virtio-blk driver (rev1§2.5): virtio-mmio (modern,
+//! Userspace virtio-blk driver (rev2§2.5): virtio-mmio (modern,
 //! version 2) split virtqueue, written exclusively against DmaPool —
 //! the driver never sees a physical address, only opaque
 //! `DeviceAddress`es.
@@ -10,7 +10,7 @@
 //!
 //! MVP shape: one queue, one synchronous in-flight request, completion
 //! by polling the used ring. On the OS the device interrupt binds to a
-//! notification (rev1§3.6) and the poll loop becomes a wait; the driver
+//! notification (rev2§3.6) and the poll loop becomes a wait; the driver
 //! exposes `complete()` so the caller owns the waiting strategy.
 //! QEMU note: modern MMIO needs `-global virtio-mmio.force-legacy=false`.
 
@@ -81,7 +81,7 @@ const DESC_F_NEXT: u16 = 1;
 const DESC_F_WRITE: u16 = 2;
 
 // Request types (virtio-blk). `pub` so the split-phase `submit` is callable
-// from the host tests and the future OS IRQ path (rev1§3.6).
+// from the host tests and the future OS IRQ path (rev2§3.6).
 pub const REQ_IN: u32 = 0; // device → driver (read)
 pub const REQ_OUT: u32 = 1; // driver → device (write)
 pub const REQ_FLUSH: u32 = 4;
@@ -106,7 +106,7 @@ pub enum VirtioError {
     TooLarge,
     /// A transfer whose last sector would run past the device's reported
     /// capacity. Distinct from `TooLarge` (exceeds `max_transfer`). Defensive
-    /// local bound (rev1§4.x, S-11): the device stays ground truth for its own
+    /// local bound (rev2§4.x): the device stays ground truth for its own
     /// geometry; this turns a device-dependent `DeviceError` into a
     /// deterministic local refusal and is never a correctness dependency.
     OutOfRange,
@@ -266,7 +266,7 @@ impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
     /// Publish one request and ring the doorbell, without waiting: build the
     /// header / data / status descriptor chain, push the head onto the avail
     /// ring, `QUEUE_NOTIFY`. Pairs with `try_complete`/`complete`. This is the
-    /// rev1§3.6 "submit, then poll once" primitive the OS IRQ path reuses (it
+    /// rev2§3.6 "submit, then poll once" primitive the OS IRQ path reuses (it
     /// waits on the device notification between `submit` and `try_complete`).
     pub fn submit(&mut self, req_type: u32, sector: u64, data_len: usize, device_writes: bool) {
         let mut hdr = [0u8; 16];
@@ -307,8 +307,8 @@ impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
     ///
     /// The used-index is device-written, so it is read **volatile**: a plain
     /// `pool.read` is a non-volatile load the optimizer may hoist out of the
-    /// spin loop, which could never then observe the device's update (audit
-    /// I-4). On observing an advance, issue an `Acquire` fence so the device's
+    /// spin loop, which could never then observe the device's update. On
+    /// observing an advance, issue an `Acquire` fence so the device's
     /// pre-index writes (status byte, payload) are not reordered after the
     /// index observation — `finish()` reads them only after this returns true.
     fn poll_used(&mut self) -> bool {
@@ -343,7 +343,7 @@ impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
     /// Poll the in-flight request once: `Some(status)` if the device has
     /// completed it, `None` if still pending. The non-blocking half of
     /// `complete` — the OS IRQ path calls this once per notification instead
-    /// of busy-spinning (rev1§3.6).
+    /// of busy-spinning (rev2§3.6).
     pub fn try_complete(&mut self) -> Option<Result<(), VirtioError>> {
         if self.poll_used() {
             Some(self.finish())
@@ -354,7 +354,7 @@ impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
 
     /// Wait for the in-flight request. Polling MVP; the OS binds the
     /// device IRQ to a notification and waits between polls instead
-    /// (rev1§3.6 "poll once, then wait").
+    /// (rev2§3.6 "poll once, then wait").
     fn complete(&mut self) -> Result<(), VirtioError> {
         while !self.poll_used() {
             core::hint::spin_loop();
@@ -387,7 +387,7 @@ impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
         self.pool.write(&dbuf, 0, data);
     }
 
-    /// Defensive LBA bound (rev1§4.x, S-11). The device remains ground truth
+    /// Defensive LBA bound (rev2§4.x). The device remains ground truth
     /// for its own geometry; this refuses a transfer whose last sector runs
     /// past the reported `capacity` *before* any device round-trip — a local
     /// hardening, never a correctness dependency. Checked so an adversarial
@@ -428,7 +428,7 @@ impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
     }
 
     /// VIRTIO_BLK_T_FLUSH — the fsync barrier the storage stack trusts
-    /// (rev1§4.8: stated axiom; QEMU honors FLUSH with cache=writeback).
+    /// (rev2§4.8: stated axiom; QEMU honors FLUSH with cache=writeback).
     pub fn flush(&mut self) -> Result<(), VirtioError> {
         self.request(REQ_FLUSH, 0, 0, false)
     }

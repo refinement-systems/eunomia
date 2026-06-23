@@ -1,5 +1,5 @@
 #![no_main]
-//! The session connect codecs on arbitrary bytes (spec rev1§3.5/§3.7).
+//! The session connect codecs on arbitrary bytes (spec rev2§3.5/§3.7).
 //! `ConnectReq`/`GrantReply::decode` are fixed-width, hand-written little-endian
 //! codecs; Verus proves them total bijections (`ipc/src/session.rs`,
 //! `lemma_req_encode_decode`/`lemma_grant_encode_decode`). This target is the

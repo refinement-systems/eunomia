@@ -1,4 +1,4 @@
-//! Rights-lattice property tests (spec rev1§2.3, audit §4.2). The example
+//! Rights-lattice property tests (spec rev2§2.3). The example
 //! tests in `sessions.rs` pin individual derivations; these pin the *laws*:
 //!
 //!  1. attenuation across arbitrary `OpenChild` chains is monotone — every
@@ -81,8 +81,7 @@ proptest! {
                 }
             };
             // Oracle written as a literal `&`, independent of the lib's
-            // `attenuate` — flipping that to `|` makes this fail (the §4.2
-            // sanity check the audit asks for).
+            // `attenuate` — flipping that to `|` makes this fail.
             let expected = parent_rights & mask;
             prop_assert_eq!(srv.handle_rights(session, child), Some(expected));
             // No chain ever gains a right: child ⊆ parent.
@@ -186,7 +185,7 @@ proptest! {
 
 /// Property 3 — `stat-store`'s scope ignores the subtree. A deep subtree handle
 /// that explicitly carries the bit observes the *same* whole-store space as the
-/// root handle (rev1§2.3). Deterministic, so a plain `#[test]`.
+/// root handle (rev2§2.3). Deterministic, so a plain `#[test]`.
 #[test]
 fn stat_store_scope_ignores_subtree() {
     let mut srv = new_server();

@@ -1,4 +1,4 @@
-//! File content storage (spec rev1§4.1, rev1§4.9): content ≤ INLINE_MAX lives
+//! File content storage (spec rev2§4.1, rev2§4.9): content ≤ INLINE_MAX lives
 //! inline in the directory entry; larger content is FastCDC-chunked and
 //! referenced through a chunk-list object. The inline rule is a pure
 //! function of content, preserving canonical form.
@@ -66,7 +66,7 @@ pub fn read_file(
 }
 
 /// Parse a chunk-list object into (chunk hash, chunk length) pairs.
-/// Shared by the read path and the GC mark walk (rev1§4.6).
+/// Shared by the read path and the GC mark walk (rev2§4.6).
 pub fn chunk_list_entries(list: &[u8]) -> Result<Vec<(Hash, u32)>, FormatError> {
     if list.len() < 5 || list[0] != CHUNK_LIST_MAGIC {
         return Err(FormatError::BadNode("not a chunk list"));
@@ -104,11 +104,11 @@ pub fn make_file_entry(
     }
 }
 
-/// Re-chunk only the neighborhood an edit disturbed (rev1§4.3 step 3), reusing
+/// Re-chunk only the neighborhood an edit disturbed (rev2§4.3 step 3), reusing
 /// the untouched prefix/suffix chunks of `old`'s chunk list verbatim. The
 /// returned `Content` is byte-for-byte the canonical chunking of `new` — equal
 /// to `store_file(store, params, new)` (history-independent canonical form,
-/// rev1§4.1) — but only the few chunks the edit touched are hashed and stored,
+/// rev2§4.1) — but only the few chunks the edit touched are hashed and stored,
 /// not the whole file (so a 200-byte edit in a 1 GiB file yields ~2–4 new
 /// chunks). Falls back to whole-file `store_file` whenever there is nothing to
 /// reuse: the new content inlines, or `old` was not itself a chunk list.
@@ -160,7 +160,7 @@ pub fn store_file_neighborhood(
     let delta = new_len as i64 - old_len as i64;
 
     // Prefix: keep every chunk before the one holding `first_dirty`, then back
-    // up one more chunk (rev1§4.3) and resume the chunker there.
+    // up one more chunk (rev2§4.3) and resume the chunker there.
     let containing = old_cut
         .partition_point(|&c| c <= first_dirty)
         .saturating_sub(1);
@@ -252,8 +252,8 @@ mod tests {
             prop_assert_eq!(back, data);
         }
 
-        /// Canonical-form symmetry, the chunker side (rev1§4.1; B13 Design
-        /// decision 4): the cut set is a pure function of the content, and
+        /// Canonical-form symmetry, the chunker side (rev2§4.1): the cut set is
+        /// a pure function of the content, and
         /// `store_file`'s inline-vs-chunk selection is content-determined (the
         /// INLINE_MAX rule) — same content ⇒ same chunks ⇒ same `Content`,
         /// regardless of edit history, mirroring the prolly canonical-form sweep.
@@ -290,11 +290,11 @@ mod tests {
             prop_assert_eq!(store.len(), objects);
         }
 
-        /// Neighborhood re-chunk is behavior-preserving (M-7, the load-bearing
+        /// Neighborhood re-chunk is behavior-preserving (the load-bearing
         /// guard): for an arbitrary edit to a multi-chunk file, the spliced
         /// result equals the canonical whole-file chunking byte-for-byte (same
         /// `Content` ⇒ same chunk-list hash ⇒ history-independent canonical
-        /// form, rev1§4.1) and reads back as the new content.
+        /// form, rev2§4.1) and reads back as the new content.
         #[test]
         fn neighborhood_matches_whole_file(
             // Miri interprets blake3 per chunk, so cap the base file (still
@@ -370,7 +370,7 @@ mod tests {
         }
     }
 
-    /// Write-amplification (M-7): a one-byte edit in a many-chunk file re-hashes
+    /// Write-amplification: a one-byte edit in a many-chunk file re-hashes
     /// only the disturbed neighborhood — O(edit), not O(file). Deterministic
     /// (fixed seed) so the realignment count is stable. A perf-metric test over
     /// a large file; the splice arithmetic itself is the proptest's Miri
@@ -409,7 +409,7 @@ mod tests {
 
         // Only a handful of chunks re-hashed (here 3: two fresh chunks around
         // the edit + the chunk-list object), bounded and independent of file
-        // size — the rev1§4.3 "~2–4 new chunks" behavior, vs `total_chunks` for
+        // size — the rev2§4.3 "~2–4 new chunks" behavior, vs `total_chunks` for
         // a whole-file re-chunk.
         assert!(
             nb_puts <= 8,

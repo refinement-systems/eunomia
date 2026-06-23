@@ -1,5 +1,5 @@
-//! `freelist` — the verified free-list core, shared by `dma-pool` (rev1§2.5) and
-//! the `urt` heap allocator (rev1§6).
+//! `freelist` — the verified free-list core, shared by `dma-pool` (rev2§2.5) and
+//! the `urt` heap allocator (rev2§6).
 //!
 //! [`FreeList<N>`] is a sorted, pairwise-disjoint list of free extents
 //! `(offset, len)` over a pool `[0, len)`, where `N` is the fixed fragmentation
@@ -1131,9 +1131,9 @@ impl<const N: usize> FreeList<N> {
     pub fn free(&mut self, off: usize, n: usize)
         requires
             old(self).wf(),
-            // The list is not full — the original's `assert!(nfree < MAX_FREE_RANGES)`
-            // overflow guard, now a static precondition. Only the no-merge case grows
-            // the list; the merge cases keep or shrink it.
+            // The list is not full — the `nfree < MAX_FREE_RANGES` overflow guard as a
+            // static precondition. Only the no-merge case grows the list; the merge
+            // cases keep or shrink it.
             old(self).spec_nfree() < N as int,
             n > 0,
             off as int + n as int <= old(self).spec_len(),

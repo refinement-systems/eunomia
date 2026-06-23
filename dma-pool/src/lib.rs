@@ -1,5 +1,5 @@
 //! DmaPool — the single place in the system where physical addresses are
-//! visible (rev1§2.5).
+//! visible (rev2§2.5).
 //!
 //! Drivers are written against this crate and never see a PA: buffers are
 //! labeled with opaque `DeviceAddress`es (what the device dereferences)
@@ -8,7 +8,7 @@
 //! the `phys-read` rights bit (init grants that bit only to the pool's
 //! holder); on the host it is plain memory with a fake device base.
 //!
-//! When the IO-space object lands (rev1§2.5 committed upgrade), the backing
+//! When the IO-space object lands (rev2§2.5 committed upgrade), the backing
 //! swaps to IOVA-labeled mappings and no driver changes.
 //!
 //! MVP allocator: first-fit free list with merge-on-free. The pool is
@@ -36,8 +36,8 @@
 // with prose contracts rather than a `# Safety` heading. Suppressed, not applied.
 #![allow(clippy::len_without_is_empty, clippy::missing_safety_doc)]
 
-// The verified free-list core, extracted to the shared `freelist` crate in B11A
-// (Design decision 2). `DmaPool` wraps it; the algorithm proof lives there now.
+// The verified free-list core lives in the shared `freelist` crate. `DmaPool`
+// wraps it; the algorithm proof lives there.
 use freelist::FreeList;
 
 /// Opaque device-visible address — never dereference on the CPU side.
@@ -113,9 +113,9 @@ impl<B: DmaBacking> DmaPool<B> {
         // The wrapper is erased plain Rust, so `FreeList::free`'s verified
         // preconditions are not checked statically here — discharge each at runtime.
         // A bad `DmaBuf` (wrong pool, out of extent, double-freed) is a trusted-driver
-        // bug (rev1§2.5 isolation TCB), so the backstop is a defined panic; this
-        // restores the original `assert!(nfree < MAX_FREE_RANGES)` the audit found
-        // demoted to a no-op Verus precondition.
+        // bug (rev2§2.5 isolation TCB), so the backstop is a defined panic that
+        // checks `nfree < MAX_FREE_RANGES` at runtime, since Verus treats it as a
+        // precondition rather than a checked assert.
         assert!(buf.len > 0, "dma-pool: zero-length buffer"); // n > 0
                                                               // nfree < N: `!is_full()` plus the always-held `wf` invariant (`nfree <= N`).
         assert!(
@@ -142,13 +142,13 @@ impl<B: DmaBacking> DmaPool<B> {
 
     /// The CPU pointer at `buf.offset + offset`, after proving the `len`-byte
     /// access lies wholly inside this pool's backing. This is the one place a raw
-    /// pointer into DMA memory is formed (rev1§2.5: the single place PAs are
+    /// pointer into DMA memory is formed (rev2§2.5: the single place PAs are
     /// visible), so the soundness obligation of every `from_raw_parts`/
     /// `read_volatile` below is discharged here, ONCE, for any `DmaBuf` — foreign
     /// or not. `DmaBuf` is `Copy` with private fields, so a buffer carved from a
     /// *different* pool can reach this method; the checked bounds make that a
-    /// defined panic (a driver bug inside the isolation TCB, rev1§2.5), never the
-    /// out-of-bounds read/write the audit flagged.
+    /// defined panic (a driver bug inside the isolation TCB, rev2§2.5), never an
+    /// out-of-bounds read/write.
     fn range_ptr(&self, buf: &DmaBuf, offset: usize, len: usize) -> *mut u8 {
         // (a) The sub-range must lie within the buffer's own extent. `read`/
         //     `write` get this bound for free from slice indexing on `bytes`/
@@ -182,7 +182,7 @@ impl<B: DmaBacking> DmaPool<B> {
     /// CPU access; drivers never hold raw pointers into DMA memory.
     pub fn bytes(&self, buf: &DmaBuf) -> &[u8] {
         // Volatile-correctness note: QEMU DMA is host memcpy and
-        // cache-coherent (rev1§2.5 real-hardware debt: cache maintenance owed
+        // cache-coherent (rev2§2.5 real-hardware debt: cache maintenance owed
         // with real hardware, alongside barriers tighter than these).
         let p = self.range_ptr(buf, 0, buf.len);
         unsafe { core::slice::from_raw_parts(p, buf.len) }
@@ -210,7 +210,7 @@ impl<B: DmaBacking> DmaPool<B> {
     /// optimizer may hoist out of a spin loop (it cannot see the device's
     /// concurrent write), so a poll on them can never observe completion; this
     /// re-reads memory every call. Order the payload the field gates with an
-    /// `Acquire` fence on the caller side. (rev1§2.5: the real-hardware
+    /// `Acquire` fence on the caller side. (rev2§2.5: the real-hardware
     /// cache-maintenance/barrier debt is separate and tracked there; on the
     /// QEMU target memory is coherent and only the compiler hazard is live.)
     pub fn read_volatile(&self, buf: &DmaBuf, offset: usize, out: &mut [u8]) {
@@ -331,11 +331,11 @@ mod tests {
         assert_eq!(&back, b"dma works fine!!");
     }
 
-    // --- B4A: extent-guarded CPU access (rev1§2.5) ---
+    // --- extent-guarded CPU access (rev2§2.5) ---
 
     /// A 64-byte buffer allocated from an 8192-byte pool at an offset past 256,
-    /// so its range lies entirely outside a 256-byte pool — the audit's
-    /// cross-pool UB witness ("a `DmaBuf` from a larger pool used against a
+    /// so its range lies entirely outside a 256-byte pool — a cross-pool UB
+    /// witness ("a `DmaBuf` from a larger pool used against a
     /// smaller pool"). `DmaBuf` is `Copy` and outlives its pool, exactly as the
     /// escaped buffer would.
     fn foreign_buf() -> DmaBuf {
@@ -409,7 +409,7 @@ mod tests {
         p.write(&buf, 12, b"00000000"); // 12 + 8 > 16: slice-index panic via bytes_mut()
     }
 
-    // --- B4B: MAX_FREE_RANGES backstop + discharged FreeList preconditions ---
+    // --- MAX_FREE_RANGES backstop + discharged FreeList preconditions ---
 
     #[test]
     #[should_panic(expected = "fragmentation cap")]
@@ -426,8 +426,7 @@ mod tests {
             }
         }
         // Offset 128 has allocated neighbours (127, 129), so freeing it cannot merge:
-        // it would be the 65th extent. Pre-B4B this was a raw self.free[N]
-        // index-out-of-bounds; the restored backstop must panic here instead.
+        // it would be the 65th extent, so the backstop must panic here.
         let victim = *bufs.iter().find(|b| b.offset == 128).unwrap();
         p.free(victim);
     }
@@ -474,10 +473,7 @@ mod tests {
         let _ = p.alloc(16, 0);
     }
 
-    // (`accessor_sanity` — the lone FreeList-only test — moved to the `freelist`
-    // crate with the proof in B11A.)
-
-    // --- wrapper proptest tier + Miri UB oracle (rev1§6) ---
+    // --- wrapper proptest tier + Miri UB oracle (rev2§6) ---
     //
     // The verified `FreeList` proves the arithmetic; these properties prove the
     // wrapper drivers actually use — alloc -> bytes/read/write/read_volatile ->
@@ -604,8 +600,8 @@ mod tests {
         /// in-bounds-foreign path: reverting `range_ptr`'s `abs_end <=
         /// backing.len()` bound would make `b.bytes(&buf)` form a slice past B's
         /// backing — an immediate Miri error right here. So this guards a real
-        /// hole, not a tautology (the B4 plan's oracle-sanity, documented rather
-        /// than committed as an unsound variant that would break the Miri sweep).
+        /// hole, not a tautology — the oracle-sanity argument is documented here
+        /// rather than committed as an unsound variant that would break the Miri sweep.
         #[test]
         fn cross_pool_never_ub(
             a_len in 64usize..=4096,
@@ -649,7 +645,7 @@ mod tests {
 
         /// Property 3 — fragmentation backstop never UB. Fragment a small pool by
         /// freeing a chosen subset of 1-byte buffers; each `free` either succeeds
-        /// or panics cleanly. Under Miri this confirms the restored
+        /// or panics cleanly. Under Miri this confirms the
         /// `assert!(!is_full())` fires before any `self.free[N]` out-of-bounds
         /// index (the randomized companion to `full_list_backstop_panics`).
         #[test]

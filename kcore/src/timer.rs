@@ -1,4 +1,4 @@
-//! Timer objects (spec rev1§1, rev1§3.6): a cap to program a deadline that signals
+//! Timer objects (spec rev2§1, rev2§3.6): a cap to program a deadline that signals
 //! a bound notification. kcore owns the armed-timer *list* — insert, unlink,
 //! and the expiry sweep — operating on the list head through the [`Store`]
 //! seam; the head itself (`ARMED_HEAD`) is a kernel static, and the
@@ -13,8 +13,8 @@ use crate::cspace::{self, ObjHeader};
 use crate::id::ObjId;
 use crate::notification;
 use crate::store::Store;
-// B8C: `check_expired`/`lemma_signal_ok_after_fire` reference `ThreadState::Runnable` in the
-// reworked `signal` caller-frame (the faithful enqueue re-threads a Runnable old ready-tail).
+// `check_expired`/`lemma_signal_ok_after_fire` reference `ThreadState::Runnable` in the
+// `signal` caller-frame (the faithful enqueue re-threads a Runnable old ready-tail).
 use crate::thread::ThreadState;
 use vstd::prelude::*;
 // `StoreSpec` (the `external_trait_extension`) must be in scope to resolve
@@ -51,7 +51,7 @@ impl TimerObj {
 verus! {
 
 /// Disarm a timer: unlink it from the armed list and release the ref it held on
-/// its bound notification (rev1§3.6).
+/// its bound notification (rev2§3.6).
 ///
 /// Verus proves this the `remove_waiter` analog over the
 /// GLOBAL armed list — singly-linked, head-only (no tail). `!armed` ⇒ a no-op; `armed`
@@ -85,7 +85,7 @@ pub fn disarm<S: Store>(store: &mut S, t: ObjId)
         final(store).chan_view() == old(store).chan_view(),
         final(store).notif_view() == old(store).notif_view(),
         final(store).tcb_view() == old(store).tcb_view(),
-        // B8C: `disarm` touches only timer state; every setter frames `ready_view`, so the
+        // `disarm` touches only timer state; every setter frames `ready_view`, so the
         // ready queue is untouched — `check_expired` carries the `ready_wf`/`ready_complete`
         // pair across the disarm (via `lemma_ready_inv_frame`) to feed the in-loop `signal`.
         final(store).ready_view() == old(store).ready_view(),
@@ -165,7 +165,7 @@ pub fn disarm<S: Store>(store: &mut S, t: ObjId)
             store.cspace_view() == old(store).cspace_view(),
             store.irq_view() == old(store).irq_view(),
             store.refs_view() == old(store).refs_view(),
-            // B8C: `disarm` never touches the ready queue; the setters frame `ready_view`, so it
+            // `disarm` never touches the ready queue; the setters frame `ready_view`, so it
             // is pinned across the splice loop — gives the new `ready_view` frame ensure.
             store.ready_view() == old(store).ready_view(),
             store.timer_view() == tmv0,
@@ -476,7 +476,7 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
         final(store).chan_view() == old(store).chan_view(),
         final(store).notif_view() == old(store).notif_view(),
         final(store).tcb_view() == old(store).tcb_view(),
-        // B8C: `destroy_timer` is just a `disarm`, which frames `ready_view`; carry it so
+        // `destroy_timer` is just a `disarm`, which frames `ready_view`; carry it so
         // `obj_unref`'s Timer arm can frame the ready pair across the destructor.
         final(store).ready_view() == old(store).ready_view(),
         final(store).cspace_view() == old(store).cspace_view(),
@@ -602,13 +602,13 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
 // every *other* armed timer `cp` (bound to `np`):
 //   - `np != n`: the fire touches only `n`'s notification view, the woken thread, and `n`'s
 //     refs, so `np`'s liveness/`notif_wf`/refs are framed (`lemma_notif_wf_frame`) and `cp`'s
-//     `timer_signal_ok_at` carries from the pre-state — the old injectivity path.
+//     `timer_signal_ok_at` carries from the pre-state — the framing path.
 //   - `np == n` (shared notification): `cp` is still armed on `n` after the fire, so the
 //     armed-timer census term `armed_timer_refs(n) >= 1`; `signal` keeps `n` well-formed; and
 //     `refcount_sound` pins `refs[n] == obj_census(n)`, whose nat summands include
 //     `armed_timer_refs(n)` (⇒ `refs[n] >= 1`) and, when a waiter is queued, `waiter_refs(n)`
-//     (⇒ `refs[n] >= 2`). The census reconstructs exactly the refs facts injectivity used to
-//     give for free — the census phase that replaces the injectivity precondition.
+//     (⇒ `refs[n] >= 2`). The census reconstructs exactly these refs facts, standing in for
+//     a distinct-notification injectivity precondition.
 proof fn lemma_signal_ok_after_fire<S: Store>(
     store2: &S,
     tmv_pre: Map<ObjId, cspace::TimerView>,
@@ -640,13 +640,13 @@ proof fn lemma_signal_ok_after_fire<S: Store>(
         forall|m: ObjId| #![trigger store2.notif_view()[m]]
             m != n ==> store2.notif_view()[m] == nv_pre[m],
         store2.tcb_view().dom() == tv_pre.dom(),
-        // B8C: a thread with a pending wait is not Runnable. The caller derives this from
+        // A thread with a pending wait is not Runnable. The caller derives this from
         // `ready_complete` (Runnable ⇒ `wait_notif None`); it lets the contrapositive frame
         // below discharge `lemma_notif_wf_frame` for an *unshared* notification `np`'s waiters.
         forall|th: ObjId| #![trigger tv_pre[th].wait_notif]
             tv_pre.dom().contains(th) && tv_pre[th].wait_notif is Some
                 ==> tv_pre[th].state != ThreadState::Runnable,
-        // B8C: `signal`'s **contrapositive** caller-frame — a *changed* TCB was an `n`-waiter or
+        // `signal`'s **contrapositive** caller-frame — a *changed* TCB was an `n`-waiter or
         // was Runnable (the faithful enqueue re-threads the Runnable old ready-tail). Replaces the
         // old un-guarded `wait_notif != Some(n) ==> unchanged`, which that Runnable tail violated.
         forall|th: ObjId| #![trigger store2.tcb_view()[th]]
@@ -695,7 +695,7 @@ proof fn lemma_signal_ok_after_fire<S: Store>(
                 // Distinct notification: the fire framed `np`'s view and refs.
                 assert(nv2[np] == nv_pre[np]);
                 assert(rv2[np] == rv_pre[np]);
-                // B8C: `np`'s in-domain waiters are unchanged across the fire — each has
+                // `np`'s in-domain waiters are unchanged across the fire — each has
                 // `wait_notif == Some(np) != Some(n)` (not an `n`-waiter) and is non-Runnable
                 // (`wait_notif Some ⇒ non-Runnable`), so the contrapositive frame leaves it whole.
                 assert forall|k: ObjId| #[trigger] tv_pre[k].wait_notif == Some(np)
@@ -736,7 +736,7 @@ pub fn check_expired<S: Store>(store: &mut S, now: u64)
         cspace::refcount_sound(old(store)),
         cspace::timer_signal_ok(old(store).timer_view(), old(store).notif_view(),
             old(store).tcb_view(), old(store).refs_view()),
-        // B8C: the in-loop `signal` faithfully enqueues the woken thread, so it requires the
+        // The in-loop `signal` faithfully enqueues the woken thread, so it requires the
         // ready-queue invariants. `disarm` frames the ready views, so the pair carries to each
         // `signal` (via `lemma_ready_inv_frame`) and `signal` re-establishes them across the wake.
         cspace::ready_wf(old(store).ready_view(), old(store).tcb_view()),
@@ -772,7 +772,7 @@ pub fn check_expired<S: Store>(store: &mut S, now: u64)
             cspace::refcount_sound(store),
             cspace::timer_signal_ok(store.timer_view(), store.notif_view(),
                 store.tcb_view(), store.refs_view()),
-            // B8C: the ready pair carries the loop — `disarm` frames the ready views and `signal`
+            // The ready pair carries the loop — `disarm` frames the ready views and `signal`
             // re-establishes them, so each iteration both consumes them (for `signal`'s requires)
             // and restores them.
             cspace::ready_wf(store.ready_view(), store.tcb_view()),
@@ -803,7 +803,7 @@ pub fn check_expired<S: Store>(store: &mut S, now: u64)
         let ghost rv_pre = store.refs_view();
         let ghost rrv_pre = store.ready_view();
         proof {
-            // B8C: the ready pair over the captured pre-disarm views (from the loop invariant).
+            // The ready pair over the captured pre-disarm views (from the loop invariant).
             assert(cspace::ready_wf(rrv_pre, tv_pre));
             assert(cspace::ready_complete(rrv_pre, tv_pre));
         }
@@ -839,7 +839,7 @@ pub fn check_expired<S: Store>(store: &mut S, now: u64)
                 // `disarm` carries the census soundness from the loop invariant (its conditional
                 // `refcount_sound` ensures) — what lets `signal` carry it onward.
                 assert(cspace::refcount_sound(store));
-                // B8C: `disarm` frames `ready_view` + `tcb_view`, so the ready pair carries
+                // `disarm` frames `ready_view` + `tcb_view`, so the ready pair carries
                 // unchanged across the disarm — feeding the in-loop `signal`'s requires.
                 assert(store.ready_view() == rrv_pre);
                 assert(cspace::ready_wf(store.ready_view(), store.tcb_view()));
@@ -859,15 +859,15 @@ pub fn check_expired<S: Store>(store: &mut S, now: u64)
                     assert(nv2.dom() == nv_pre.dom());
                     assert(forall|m: ObjId| #![trigger nv2[m]] m != n ==> nv2[m] == nv_pre[m]);
                     assert(tv2.dom() == tv_pre.dom());
-                    // B8C: `signal`'s contrapositive frame — a *changed* TCB was an `n`-waiter
+                    // `signal`'s contrapositive frame — a *changed* TCB was an `n`-waiter
                     // or was Runnable (the faithful enqueue re-threads the Runnable old
-                    // ready-tail; the old un-guarded `wait_notif != Some(n) ==> unchanged` is now
-                    // false at that tail).
+                    // ready-tail, at which a plain `wait_notif != Some(n) ==> unchanged`
+                    // frame would be false).
                     assert(forall|th: ObjId| #![trigger tv2[th]]
                         tv2[th] != tv_pre[th]
                             ==> tv_pre[th].wait_notif == Some(n)
                                 || tv_pre[th].state == ThreadState::Runnable);
-                    // B8C: a thread with a pending wait is non-Runnable (from `ready_complete`
+                    // A thread with a pending wait is non-Runnable (from `ready_complete`
                     // over the pre-disarm views) — the helper `lemma_signal_ok_after_fire` needs
                     // to discharge `lemma_notif_wf_frame` for an unshared notification's waiters.
                     assert forall|th: ObjId| #![trigger tv_pre[th].wait_notif]

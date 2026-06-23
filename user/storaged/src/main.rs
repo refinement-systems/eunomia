@@ -1,18 +1,18 @@
-//! storaged — the storage server on Eunomia (spec rev1§4): mounts the
+//! storaged — the storage server on Eunomia (spec rev2§4): mounts the
 //! versioned store over virtio-blk and serves the handle-relative session
 //! protocol to the shell over a channel.
 //!
-//! World (built by init, rev1§5.1): slot 0 = bootstrap channel whose first
-//! message is the unified startup block (`b"EUS1"`, the rev1§5.1 named-grant
-//! table — C1B); slot 1 = the shell's session channel. The MMIO window, DMA
+//! World (built by init, rev2§5.1): slot 0 = bootstrap channel whose first
+//! message is the unified startup block (`b"EUS1"`, the rev2§5.1 named-grant
+//! table); slot 1 = the shell's session channel. The MMIO window, DMA
 //! region, and time page are pre-mapped by init and arrive in the block as three
 //! `REGION` grants — `virtio-mmio`, `dma` (its device address read via
-//! frame_paddr, the phys-read path, rev1§2.5), and `time` (rev1§2.6/rev1§5.1).
+//! frame_paddr, the phys-read path, rev2§2.5), and `time` (rev2§2.6/rev2§5.1).
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(not(test), no_main)]
-// Under `cfg(test)` the crate builds as a host harness (Design decision 2,
-// B15C): std and the default test `main` take over, the bare-metal items
+// Under `cfg(test)` the crate builds as a host harness:
+// std and the default test `main` take over, the bare-metal items
 // below are gated out, and only the pure `parse_config` decoder plus the
 // boot-only helpers (dead, but host-compilable) remain — allow the dead-code
 // / unused-import noise that leaves.
@@ -41,11 +41,11 @@ const WAKE_NOTIF: u32 = 2;
 // The reactor source key for the session channel. storaged multiplexes one
 // source today; the key is what a second session (a future connect) would
 // add alongside — the reactor returns it from `wait`, so the dispatch below
-// never names a notification bit (rev1§3.6: the API hides the bit shape).
+// never names a notification bit (rev2§3.6: the API hides the bit shape).
 const SESSION_KEY: ipc::Key = 0;
-/// The session's total bulk-window budget (rev1§3.5), enforced at the single
+/// The session's total bulk-window budget (rev2§3.5), enforced at the single
 /// admission point in `admit_connect`. The inline Read/Write path needs no bulk
-/// window today (the shared-memory bulk path is post-MVP, rev1§3.1), so the
+/// window today (the shared-memory bulk path is post-MVP, rev2§3.1), so the
 /// shell requests a zero window and this budget is only exercised as the quota
 /// the admission decision rides on — a token value, ample for the one session.
 const WINDOW_BUDGET: u32 = 64 * 1024;
@@ -84,7 +84,7 @@ unsafe impl DmaBacking for DmaRegion {
     }
 }
 
-/// The server clock: UTC nanoseconds from the time page (rev1§2.6). One
+/// The server clock: UTC nanoseconds from the time page (rev2§2.6). One
 /// value feeds snapshot timestamps, file mtimes, and ticket TTLs. The
 /// spec representation is signed 64-bit; init refuses an insane RTC at
 /// boot, so the value is positive and the u64 cast at the storage API
@@ -105,7 +105,7 @@ fn recv_blocking(chan: u32, buf: &mut [u8; 256]) -> usize {
 }
 
 /// Send one response message, retrying on backpressure. Responses are
-/// message-bounded (`encode_response` refuses > 256 bytes, rev1§3.1), so a single
+/// message-bounded (`encode_response` refuses > 256 bytes, rev2§3.1), so a single
 /// `Message` always suffices; `Full` means the shell hasn't drained its reply
 /// ring yet (it reads one reply per request), so a yield-retry drains promptly.
 /// `Closed` ends the loop — the peer is gone.
@@ -128,9 +128,9 @@ fn fail(msg: &[u8]) -> ! {
 }
 
 /// The three pre-mapped regions storaged needs from the init→storaged startup
-/// block (rev1§5.1): the virtio MMIO window VA, the DMA region (VA, length, and
-/// device PA — the phys-read path, rev1§2.5), and the time-page VA (rev1§2.6).
-/// All three arrive as `REGION` grants in the unified `b"EUS1"` block (C1B);
+/// block (rev2§5.1): the virtio MMIO window VA, the DMA region (VA, length, and
+/// device PA — the phys-read path, rev2§2.5), and the time-page VA (rev2§2.6).
+/// All three arrive as `REGION` grants in the unified `b"EUS1"` block;
 /// init maps each page before start, so only the VAs travel — never assumed.
 #[derive(Debug, PartialEq)]
 struct Config {
@@ -151,12 +151,12 @@ fn region(s: &startup::Startup, name: u8) -> Option<(u64, u64, u64)> {
 }
 
 /// Decode the init→storaged startup block and extract the three required
-/// regions. The block is an untrusted-shaped message (rev1§2.7): a malformed
+/// regions. The block is an untrusted-shaped message (rev2§2.7): a malformed
 /// block — bad magic, a truncated entry, or a missing/wrong-kind required region
 /// — is *refused* with `None`, never a panic (a panic in `_start` is a boot
 /// failure). Totality is `loader::startup::decode`'s (fuzzed) guarantee; this
 /// layer adds only the name lookups. init builds the inverse (its
-/// `build_storaged_block`); the codec is now shared on both ends (C1B).
+/// `build_storaged_block`); the codec is shared on both ends.
 fn parse_config(buf: &[u8]) -> Option<Config> {
     let s = startup::decode(buf)?;
     let (mmio_va, _mmio_len, _) = region(&s, startup::NAME_VIRTIO_MMIO)?;
@@ -206,8 +206,7 @@ pub extern "C" fn _start() -> ! {
             len: dma_len as usize,
         });
         // The driver's completion poll observes the device's used-index update
-        // via the pool's volatile read (B2A/I-4); the IRQ-driven wait between
-        // polls, replacing the busy-spin, arrives with B-IRQ/C-M9 (rev1§3.6).
+        // via the pool's volatile read.
         match VirtioBlk::new(win, pool, 64 * 1024) {
             Ok(b) => {
                 blk = Some(b);
@@ -229,10 +228,10 @@ pub extern "C" fn _start() -> ! {
     sys::debug_write(b"[storaged] store mounted\n");
 
     let mut server = Server::new(store, now_utc());
-    // The privileged stat-store holder (rev1§2.3): `root_grant` is the sole
-    // origin of `R_STAT_STORE`, so this single session can `statfs`. Phase C1
-    // splits this into per-process child sessions, which receive attenuated
-    // handles that strip `stat-store` unless explicitly granted.
+    // The privileged stat-store holder (rev2§2.3): `root_grant` is the sole
+    // origin of `R_STAT_STORE`, so this single session can `statfs`. Per-process
+    // child sessions receive attenuated handles that strip `stat-store` unless
+    // explicitly granted.
     let grant = match server.root_grant(b"main") {
         Ok(g) => g,
         Err(_) => fail(b"no main ref"),
@@ -240,7 +239,7 @@ pub extern "C" fn _start() -> ! {
     let session = server.open_session(alloc::vec![grant]);
     sys::debug_write(b"[storaged] serving\n");
 
-    // The IPC reactor (rev1§3.6) — storaged is its first production consumer.
+    // The IPC reactor (rev2§3.6) — storaged is its first production consumer.
     // `register` binds the session channel's readable event to WAKE_NOTIF and
     // self-signals (poll once), so the first `wait` drains anything already
     // queued and the bind-poll-wait lost-wakeup discipline lives in the crate,
@@ -258,7 +257,7 @@ pub extern "C" fn _start() -> ! {
     }
     let mut msg = Message::new();
 
-    // Connect handshake (rev1§3.5/§3.7, C3C): the session's first message is the
+    // Connect handshake (rev2§3.5/§3.7): the session's first message is the
     // raw `ipc` ConnectReq — a version range + a requested bulk window — over the
     // pre-wired channel (it rides the never-migrating connect codec, *not* a
     // storage `Request`, which could not itself be versioned). `admit_connect`
@@ -296,7 +295,7 @@ pub extern "C" fn _start() -> ! {
             negotiated
         );
     }
-    // Witness (C3C): drive a frame stamped with the *wrong* version through the
+    // Witness: drive a frame stamped with the *wrong* version through the
     // live decoder and confirm it is refused cleanly — never `Ok`, never a panic.
     // The line prints only when the real `wire::decode_request` actually rejects,
     // so a decoder that stopped checking the version would silence this witness
@@ -315,10 +314,10 @@ pub extern "C" fn _start() -> ! {
     }
 
     loop {
-        // Staleness sweep (rev1§4.4 trigger 4): before parking the reactor,
+        // Staleness sweep (rev2§4.4 trigger 4): before parking the reactor,
         // flush any ref quietly dirty past the staleness bound so it eventually
-        // becomes committed tree even with no further writes (Design decision 5 —
-        // opportunistic, no armed kernel timer). This is the reactor-idle point:
+        // becomes committed tree even with no further writes (opportunistic, no
+        // armed kernel timer). This is the reactor-idle point:
         // the request ring has just drained (the inner loop broke on Empty), so we
         // are about to block. Best-effort — a flush failure is non-fatal (the next
         // write still logs durably).
@@ -335,7 +334,7 @@ pub extern "C" fn _start() -> ! {
                 // means the peer is gone — stop draining and re-wait.
                 Err(_) => break,
             }
-            // Decode at the negotiated version (rev1§3.7): a request stamped with
+            // Decode at the negotiated version (rev2§3.7): a request stamped with
             // any other version is a `WireError::Version` — refused, never a crash.
             let resp = match wire::decode_request(msg.payload(), negotiated) {
                 Ok(req) => server.handle(session, req, now_utc()),
@@ -350,7 +349,7 @@ pub extern "C" fn _start() -> ! {
                     send_response(&ep, &wire::encode_response(&e, negotiated).unwrap());
                 }
             }
-            // Drain a pending GC trigger (rev1§4.6: post-rewrite or
+            // Drain a pending GC trigger (rev2§4.6: post-rewrite or
             // watermark) after replying: the foreground op stays fast,
             // reclamation follows promptly.
             if server.gc_requested() {
@@ -389,9 +388,9 @@ fn on_panic(info: &core::panic::PanicInfo) -> ! {
 
 #[cfg(test)]
 mod tests {
-    //! C1B — host tests for the storaged startup-block *consumer* (rev1§6
+    //! Host tests for the storaged startup-block *consumer* (rev2§6
     //! Baseline tier). storaged decodes the unified `b"EUS1"` block (init is the
-    //! producer); the codec is now the **shared** `loader::startup`, so these
+    //! producer); the codec is the **shared** `loader::startup`, so these
     //! tests drive the real `decode` through `parse_config` against blocks built
     //! by the real `encode` — the format is pinned on both ends by the same code,
     //! not by mirrored hand-parsers. `parse_config`'s own job is the three name
@@ -466,7 +465,7 @@ mod tests {
     #[test]
     fn parse_config_refuses_bad_magic_and_truncation() {
         // Empty, a wrong magic, and a one-byte-truncated valid block — each
-        // refused with None, never a panic (rev1§2.7 decode discipline).
+        // refused with None, never a panic (rev2§2.7 decode discipline).
         assert_eq!(parse_config(&[]), None);
         assert_eq!(parse_config(b"SD02\x00\x00\x00"), None);
         let block = storaged_block(1, 2, 3, 4, 5);
@@ -543,7 +542,7 @@ mod tests {
         })]
 
         /// Total over arbitrary bytes: `parse_config` never panics — the
-        /// refuse-not-crash floor (rev1§2.7), inherited from `decode`.
+        /// refuse-not-crash floor (rev2§2.7), inherited from `decode`.
         #[test]
         fn parse_config_is_total(bytes in proptest::collection::vec(any::<u8>(), 0..256)) {
             let _ = parse_config(&bytes);

@@ -1,8 +1,8 @@
 #![no_main]
-//! Two oracles over the directory node format (rev1§4.1, rev1§4.9):
+//! Two oracles over the directory node format (rev2§4.1, rev2§4.9):
 //!
 //! 1. **Shallow node decoder.** `parse_node` is the decoder the GC mark walk
-//!    (rev1§4.6) runs on raw stored bytes — *below* the fetch-time hash check,
+//!    (rev2§4.6) runs on raw stored bytes — *below* the fetch-time hash check,
 //!    so it must be total on hostile input. The node hash gate lives above it,
 //!    so this harness feeds arbitrary bytes directly. For leaf nodes we also
 //!    apply the canonical oracle: a level-0 node is `[0][count u32][entry…]`,
@@ -12,12 +12,12 @@
 //!    need them), so they get the totality check only — there is no lossless
 //!    single-node re-encoder for them.
 //!
-//! 2. **Whole-tree round-trip (B13C).** The same bytes are carved into
+//! 2. **Whole-tree round-trip.** The same bytes are carved into
 //!    directory entries and built into a tree; `Dir::save → Dir::load →
 //!    Dir::save` must reproduce the identical root over the whole, possibly
 //!    multi-level tree. This reaches the lossless **internal-node** level the
 //!    single-node leaf oracle above cannot — the separator-key discipline and
-//!    the spine get their canonical-round-trip guard here (the rev1§6
+//!    the spine get their canonical-round-trip guard here (the rev2§6
 //!    decode-then-re-encode oracle at the whole-tree grain).
 use libfuzzer_sys::fuzz_target;
 

@@ -41,7 +41,7 @@ pub struct FakeBlock {
     used_idx: u16,
     // Deferred completion (host async-poll tests): when set, QUEUE_NOTIFY only
     // stages the queue; `device_step` runs it later, so the driver's poll loop
-    // observes a stale used-index first and runs as a real loop (audit I-4).
+    // observes a stale used-index first and runs as a real loop.
     deferred: bool,
     pending: bool,
 }

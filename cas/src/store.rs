@@ -1,4 +1,4 @@
-//! The storage engine (rev1§4.3-4.7): memtable + WAL + flush + the A/B
+//! The storage engine (rev2§4.3-4.7): memtable + WAL + flush + the A/B
 //! superblock commit, with crash recovery and GC. This is the code the
 //! CommitProtocol TLA+ model models; the crash-injection proptest at the
 //! bottom checks the model's headline invariant against the real bytes:
@@ -7,7 +7,7 @@
 //!
 //! Commit is always: fsync chunks (barrier 1) → write new superblock to
 //! the older slot → fsync (barrier 2). Nothing is freed on the write
-//! path, ever; reclamation is GC's job exclusively (rev1§4.6): `gc` marks
+//! path, ever; reclamation is GC's job exclusively (rev2§4.6): `gc` marks
 //! from the committed root set and sweeps by *removing index entries* —
 //! a pure metadata edit that commits through the ordinary superblock
 //! flip, so a crash anywhere inside GC recovers the previous commit with
@@ -23,13 +23,13 @@
 //!   - The allocator is first-fit over a flat extent list and the tail
 //!     high-water mark never retracts (freed space is reusable, but the
 //!     region never visibly shrinks). Fine at MVP scale.
-//!   - GC is synchronous (rev1§8.3 defers concurrency to Phase C4). The
-//!     rev1§4.6 step-3 dedup-resurrection check (`ChunkStore::put`'s
+//!   - GC is synchronous (rev2§8.3 defers concurrency to future work). The
+//!     rev2§4.6 step-3 dedup-resurrection check (`ChunkStore::put`'s
 //!     `condemned` consultation) and the birth-generation live-by-fiat filter
 //!     (`gc`'s `birth < epoch` clause) are installed and structurally correct
 //!     but inert under the synchronous cycle — no flush interleaves a sweep,
 //!     so no chunk is condemned-then-resurrected and none is born mid-cycle.
-//!     Both become load-bearing when C4 makes GC concurrent.
+//!     Both become load-bearing once GC becomes concurrent (rev2§8.3).
 
 use crate::chunk::ChunkerParams;
 use crate::dev::{BlockDev, DevError};
@@ -49,7 +49,7 @@ use alloc::vec::Vec;
 use vstd::prelude::*;
 
 /// Minimal chunk region a freshly-`format`ted device must hold beyond the WAL,
-/// for the initial ref-table object and durable index frame (rev1§4.5 geometry
+/// for the initial ref-table object and durable index frame (rev2§4.5 geometry
 /// floor). A device that does not clear this is refused, not panicked; a write
 /// that nonetheless overruns the device surfaces as a `DevError`, also no panic.
 const MIN_CHUNK_REGION: u64 = 4096;
@@ -60,25 +60,25 @@ pub enum StoreError {
     Format(FormatError),
     NoSuperblock,
     /// An intact superblock from another format version. Old images are
-    /// re-created with mkfs, never migrated or reinterpreted (rev1§2.6).
+    /// re-created with mkfs, never migrated or reinterpreted (rev2§2.6).
     UnsupportedVersion(u32),
     NoSuchRef,
     NoSuchSnapshot,
     /// An id-addressed op (`write_id`/`read_id`/`close`) named a [`FileId`] that
-    /// is not an open handle (rev1§4.9 / C2C): never opened, already closed, or
+    /// is not an open handle (rev2§4.9): never opened, already closed, or
     /// gone after a crash (handles do not survive a remount).
     NoSuchHandle,
     NotAFile,
-    /// A rename named a source path that resolves to nothing (rev1§4.9): no live
+    /// A rename named a source path that resolves to nothing (rev2§4.9): no live
     /// overlay file, no committed tree entry. Rejected before the WAL so an
     /// acked record always has something to move.
     NotFound,
     Corrupt(&'static str),
     NoSpace,
-    /// The snapshot is a tag target; tags are keep-strength pins (rev1§4.7).
+    /// The snapshot is a tag target; tags are keep-strength pins (rev2§4.7).
     Pinned,
     /// A guarded ref-table batch's `expected_version` no longer matches the
-    /// ref's current edit version (rev1§4.7): a concurrent mutation advanced it
+    /// ref's current edit version (rev2§4.7): a concurrent mutation advanced it
     /// between the caller's enumerate and its `apply_batch`. Carries the
     /// current version so the caller can re-read and retry; the batch made no
     /// mutation and did not commit.
@@ -89,7 +89,7 @@ pub enum StoreError {
     WriteOutOfRange,
     /// `format` was handed a device too small to hold the requested geometry —
     /// the two superblock slots, the WAL region, and a minimal chunk region
-    /// (rev1§4.5: `format` is total over device *geometry*, refusing an
+    /// (rev2§4.5: `format` is total over device *geometry*, refusing an
     /// undersized or un-layoutable device with an error, never a panic).
     DeviceTooSmall,
 }
@@ -140,10 +140,10 @@ impl core::fmt::Display for StoreError {
 #[cfg(feature = "std")]
 impl std::error::Error for StoreError {}
 
-/// One edit in a guarded ref-table batch (rev1§4.7). The vocabulary is
+/// One edit in a guarded ref-table batch (rev2§4.7). The vocabulary is
 /// row + tag surgery — exactly the mutations a retention daemon issues ("mark
 /// survivors `keep`, then run the policy") — and deliberately excludes data
-/// writes (rev1§4.4 stays last-write-wins) and head moves (`Rollback` is a
+/// writes (rev2§4.4 stays last-write-wins) and head moves (`Rollback` is a
 /// flush-bearing operation of its own; a concurrent head move still advances
 /// the edit version, so it invalidates a batch, but it is not itself a
 /// batchable edit). Snapshot ids and tag names are scoped to the one ref the
@@ -153,16 +153,16 @@ impl std::error::Error for StoreError {}
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
 pub enum RefEdit {
-    /// Drop a snapshot row (rev1§4.6): fails `Pinned` if a tag points at it,
+    /// Drop a snapshot row (rev2§4.6): fails `Pinned` if a tag points at it,
     /// `NoSuchSnapshot` if absent; survivors re-parent to the grandparent.
     DeleteSnapshot { id: u64 },
     /// Edit a snapshot's retention class (the "mark survivors `keep`" flow).
     SetClass { id: u64, class: u8 },
-    /// Re-point a snapshot's parent (history surgery, rev1§4.6).
+    /// Re-point a snapshot's parent (history surgery, rev2§4.6).
     SetParent { id: u64, parent: Option<u64> },
     /// Replace a snapshot's commit message.
     SetMessage { id: u64, message: Vec<u8> },
-    /// Pin a snapshot under a tag name (rev1§4.7); the tag maps to the snapshot
+    /// Pin a snapshot under a tag name (rev2§4.7); the tag maps to the snapshot
     /// id, so it survives metadata edits.
     CreateTag { name: Vec<u8>, snap_id: u64 },
     /// Remove a tag, unpinning its snapshot.
@@ -173,29 +173,29 @@ pub enum RefEdit {
 pub struct StoreOptions {
     pub wal_len: u64,
     pub chunker: ChunkerParams,
-    /// Global dirty-overlay byte budget (rev1§4.4 high watermark): the sum of
+    /// Global dirty-overlay byte budget (rev2§4.4 high watermark): the sum of
     /// every per-ref overlay may not exceed it. Crossing it forces a flush —
     /// the "global budget exists because memory is finite" half of the policy.
     pub global_budget: usize,
-    /// Per-ref soft byte bound (rev1§4.4 containment): a single ref's overlay
+    /// Per-ref soft byte bound (rev2§4.4 containment): a single ref's overlay
     /// flushes once it exceeds this size, so one ref cannot consume the whole
     /// `global_budget` (the per-ref soft quota under the global budget). The
     /// recommended default (8 MiB) is a tunable number — the mechanism, not the
     /// figure, is mandatory.
     pub per_ref_budget: usize,
-    /// Per-ref operation-count secondary bound (rev1§4.4): a ref also flushes
+    /// Per-ref operation-count secondary bound (rev2§4.4): a ref also flushes
     /// once it has accumulated this many unflushed mutating ops, so a metadata
     /// storm whose dirty *bytes* stay small cannot hide under the byte budget.
     pub op_count_bound: u64,
-    /// Size-pressure low watermark (rev1§4.4): flushing the biggest offenders
+    /// Size-pressure low watermark (rev2§4.4): flushing the biggest offenders
     /// starts here, below the high watermark (`global_budget`), so writers
     /// rarely hit the high one.
     pub size_low_watermark: usize,
-    /// WAL-usage watermark that triggers flush-the-pinner (rev1§4.4, the
+    /// WAL-usage watermark that triggers flush-the-pinner (rev2§4.4, the
     /// recommended 50% of `wal_len`): the circular WAL ring flushes the ref
     /// pinning the tail once usage crosses it.
     pub wal_watermark: u64,
-    /// Staleness bound in nanoseconds (rev1§4.4 timer trigger): a quietly dirty
+    /// Staleness bound in nanoseconds (rev2§4.4 timer trigger): a quietly dirty
     /// ref eventually becomes committed tree once its oldest-dirty age exceeds
     /// this.
     pub staleness_ns: u64,
@@ -203,7 +203,7 @@ pub struct StoreOptions {
 
 impl Default for StoreOptions {
     fn default() -> Self {
-        // The rev1§4.4 recommended defaults (S-9, spec line 266): the *triggers
+        // The rev2§4.4 recommended defaults (spec line 266): the *triggers
         // and bounds* are mandatory mechanisms; these
         // *numbers* are the recommended figures a store may tune. The storage
         // server (`storaged`) mounts with this `default()`, so it *is* "the
@@ -224,8 +224,8 @@ impl Default for StoreOptions {
             // Flush-the-biggest-offenders starts here, below the high watermark
             // (`global_budget`), so writers rarely hit it.
             size_low_watermark: global_budget / 4 * 3,
-            wal_watermark: wal_len / 2, // flush-the-pinner at 50% (M-5)
-            staleness_ns: 30 * 1_000_000_000, // 30 s staleness bound (M-6 timer)
+            wal_watermark: wal_len / 2,       // flush-the-pinner at 50%
+            staleness_ns: 30 * 1_000_000_000, // 30 s staleness bound
         }
     }
 }
@@ -250,13 +250,13 @@ struct ChunkStore<D: BlockDev> {
     /// at; freed (via `pending_free`) when the next commit supersedes it.
     index_extent: (u64, u64),
     io_error: Option<DevError>,
-    /// rev1§4.6 step 3 / §8.3: the *exact deletion-candidate list* for the
+    /// rev2§4.6 step 3 / §8.3: the *exact deletion-candidate list* for the
     /// in-flight GC sweep. In-memory and transient — empty at every commit
     /// boundary, populated only inside a `gc()` sweep window, never
     /// serialized. While non-empty, `put` treats an index hit on one of these
     /// hashes as a miss and rewrites the chunk (the single GC/mutator
-    /// interaction point, rev1§4.6). Inert under synchronous GC (no put
-    /// interleaves a sweep); load-bearing once C4 makes GC concurrent.
+    /// interaction point, rev2§4.6). Inert under synchronous GC (no put
+    /// interleaves a sweep); load-bearing once GC becomes concurrent (rev2§8.3).
     condemned: BTreeSet<Hash>,
 }
 
@@ -374,7 +374,7 @@ impl<D: BlockDev> ChunkStore<D> {
         };
         let mut buf = vec![0u8; len as usize];
         self.dev.read(self.chunk_off + off, &mut buf)?;
-        // Every layer self-verifies (rev1§4.8).
+        // Every layer self-verifies (rev2§4.8).
         if Hash::of(&buf) != *hash {
             return Err(StoreError::Corrupt("chunk hash mismatch"));
         }
@@ -387,13 +387,13 @@ impl<D: BlockDev> ChunkStore<D> {
 impl<D: BlockDev> NodeStore for ChunkStore<D> {
     fn put(&mut self, bytes: &[u8]) -> Hash {
         let hash = Hash::of(bytes);
-        // Dedup (rev1§4.3): a *live* index hit returns the existing object.
-        // rev1§4.6 step 3 (dedup-resurrection): an index hit on a chunk the
+        // Dedup (rev2§4.3): a *live* index hit returns the existing object.
+        // rev2§4.6 step 3 (dedup-resurrection): an index hit on a chunk the
         // in-flight sweep has condemned is treated as a miss and rewritten
         // below, so all GC/mutator interaction is confined to this one point.
         // The `is_empty` short-circuit keeps the hot path free of the set
         // lookup whenever no sweep is in flight. Inert under synchronous GC;
-        // load-bearing once C4 makes GC concurrent.
+        // load-bearing once GC becomes concurrent (rev2§8.3).
         if self.index.contains_key(&hash)
             && (self.condemned.is_empty() || !self.condemned.contains(&hash))
         {
@@ -404,7 +404,7 @@ impl<D: BlockDev> NodeStore for ChunkStore<D> {
         // GC epoch, so the rewrite is never re-condemned this cycle). The old
         // condemned extent is still freed by the sweep (via `pending_free`),
         // and the index no longer points at it after this replace, so there is
-        // no double-reference and no early reuse (rev1§4.2 deferred-reuse law).
+        // no double-reference and no early reuse (rev2§4.2 deferred-reuse law).
         self.condemned.remove(&hash);
         let frame = disk::encode_chunk_frame(bytes, self.birth_gen, &hash);
         let Some(off) = self.alloc(frame.len() as u64) else {
@@ -433,7 +433,7 @@ impl<D: BlockDev> NodeStore for ChunkStore<D> {
 
 // ── The engine ──────────────────────────────────────────────────────────
 
-// ── The recovery decision core (rev1§4.8) ─────────────────────────────────
+// ── The recovery decision core (rev2§4.8) ─────────────────────────────────
 //
 // The pure recovery/commit *decisions* extracted from `mount`/`commit` and
 // proven faithful to the CommitProtocol ∀ inputs — Verus closing the model-to-
@@ -448,7 +448,7 @@ impl<D: BlockDev> NodeStore for ChunkStore<D> {
 verus! {
 
 /// Which superblock slot won recovery — the verified form of the `match decoded`
-/// arms in `Store::mount` (rev1§4.5), one variant per arm of the original control
+/// arms in `Store::mount` (rev2§4.5), one variant per arm of the original control
 /// flow.
 pub enum Survivor {
     SlotA,
@@ -487,7 +487,7 @@ pub fn pick_survivor(gen_a: u64, valid_a: bool, gen_b: u64, valid_b: bool) -> (r
     }
 }
 
-/// Which superblock slot the next commit writes (the A/B alternation, rev1§4.2).
+/// Which superblock slot the next commit writes (the A/B alternation, rev2§4.2).
 pub enum Slot {
     A,
     B,
@@ -544,7 +544,7 @@ struct HeadAdvance {
 /// queue (the TLA+ `CommitPrepare.newHead` — "longest contiguous prefix of
 /// records whose effects are flushed"). The new head/seq is read off the first
 /// non-flushed record, or the linear-WAL reset sentinel `(0, wal_seq)` when the
-/// log drains (rev1§4.4). **Total** ∀ records, **terminating**. Pure sequence
+/// log drains (rev2§4.4). **Total** ∀ records, **terminating**. Pure sequence
 /// reasoning — the prefix-scan kcore already did for the channel FIFO head.
 ///
 /// Out of scope here (a Store-level concern, not a property of this pure
@@ -587,13 +587,13 @@ fn advance_head(records: &[RecMeta], wal_seq: u64) -> (r: HeadAdvance)
     }
 }
 
-// ── Recovery walk (rev1§4.8) ──────────────────────────────────────────────
+// ── Recovery walk (rev2§4.8) ──────────────────────────────────────────────
 //
 // The recovery-path dual of `advance_head`: from the committed head, how much of
-// the WAL is a valid recoverable run. `Store::mount` (rev1§4.5) reads contiguous,
+// the WAL is a valid recoverable run. `Store::mount` (rev2§4.5) reads contiguous,
 // checksummed, seq-continuous records until the first torn or seq-discontinuous
 // one (an unacked tail). The *decision* of that walk — the records, the resulting
-// `(wal_tail, wal_seq)`, and (B7C) the proof the run is `laid_out` — lives in the
+// `(wal_tail, wal_seq)`, and the proof the run is `laid_out` — lives in the
 // verified `recover_records` core (below, in the gap-freedom block), leaving the
 // overlay apply + the content-level extent gate as the plain-Rust applier: a
 // verified parser, a plain-Rust applier.
@@ -602,7 +602,7 @@ fn advance_head(records: &[RecMeta], wal_seq: u64) -> (r: HeadAdvance)
 // is what makes the walk terminate and stay in range, the unbounded form of an
 // `off += rlen` in-bounds argument. The blake3 checksum stays the **content seam**
 // (`wal_checksum_ok`, `external_body`) — the same boundary drawn for the
-// superblock; the `WalOp` structural decode is verified (`wal_struct_ok`, B7B).
+// superblock; the `WalOp` structural decode is verified (`wal_struct_ok`).
 
 /// One WAL record's framing: its sequence number and total on-disk length. The
 /// `Hash`-free verified analogue of `WalOp::decode_record`'s header parse.
@@ -688,14 +688,14 @@ fn decode_frame(wal: &[u8], off: usize) -> (r: Option<RecFrame>)
     }
 }
 
-// ── The record content seam, split (rev1§3.7/§6.1(e), T-5) ─────────────────
+// ── The record content seam, split (rev2§3.7/§6.1(e)) ─────────────────
 //
 // `decode_record`'s post-framing acceptance folds three things into one
 // `is_some()`: framing (already verified by `decode_frame`/`frame_at`), the
 // **blake3 record checksum** (interpreted hashing — irreducibly trusted, the
 // same seam class as `checksum_ok`), and the **structural payload decode**
 // (`WalOp::decode_payload` — a bounded, total tag-dispatch + length-prefixed
-// walk). B7B pulls the structural half into the verified surface so blake3 is
+// walk). The structural half is pulled into the verified surface so blake3 is
 // the *only* uninterpreted part of the record seam:
 //   content_ok_spec(rec) == wal_payload_struct_ok_spec(rec)   [verified]
 //                        && checksum_ok_spec(rec)             [trusted: blake3]
@@ -739,8 +739,8 @@ spec fn s_path(pay: Seq<u8>, pos: int, count: int) -> Option<int>
 /// 2 = Unlink, 3 = Rename), then for Write `ref_name`/`path`/`offset`/`mtime`/
 /// `data` (the data length a `u32`), for Unlink `ref_name`/`path`/`mtime`, for
 /// Rename `ref_name`/`from`/`to`/`mtime` (two paths), with the final cursor at
-/// the end (`Reader::done`). Verified-equal to the exec walk by [`wal_struct_ok`];
-/// no longer trusted.
+/// the end (`Reader::done`). Verified-equal to the exec walk by [`wal_struct_ok`],
+/// so it stays out of the trusted base.
 spec fn s_payload_ok(pay: Seq<u8>) -> bool {
     match s_take(pay, 0, 1) {
         None => false,
@@ -837,14 +837,14 @@ spec fn wal_payload_struct_ok_spec(rec: Seq<u8>) -> bool {
 
 /// The blake3 record-checksum gate, uninterpreted — interpreted hashing out of
 /// SMT scope (the same seam class as `checksum_ok`, `disk.rs`). [`wal_checksum_ok`]
-/// is its `external_body` exec twin. After B7B's structural split this is the
-/// **only** uninterpreted part of the record seam (rev1§6.1(e)).
+/// is its `external_body` exec twin. This is the **only** uninterpreted part of
+/// the record seam (rev2§6.1(e)).
 uninterp spec fn checksum_ok_spec(rec: Seq<u8>) -> bool;
 
 /// "This record is content-valid": the structural decode (verified) **and** the
 /// blake3 checksum (trusted). Opaque so `run_len`/`laid_out`/`recover_records` and
-/// the gap-freedom lemmas keep treating it as a black box exactly as before the
-/// split — only [`wal_content_ok`] reveals the conjunction.
+/// the gap-freedom lemmas treat it as a black box — only [`wal_content_ok`]
+/// reveals the conjunction.
 #[verifier::opaque]
 spec fn content_ok_spec(rec: Seq<u8>) -> bool {
     wal_payload_struct_ok_spec(rec) && checksum_ok_spec(rec)
@@ -900,9 +900,9 @@ fn e_path(pay: &[u8], pos: usize, count: usize) -> (r: Option<usize>)
 
 /// Exec twin of [`s_payload_ok`]: the structural payload walk as a verified
 /// `bool`, proven equal to the spec ∀ bytes (the totality + correctness theorem
-/// for the structural half of the record seam, rev1§3.7). Mirrors
+/// for the structural half of the record seam, rev2§3.7). Mirrors
 /// `WalOp::decode_payload` byte-for-byte but returns acceptance instead of
-/// building the `Vec`s (that stays the plain-Rust applier's job, rev1§6.1(e)).
+/// building the `Vec`s (that stays the plain-Rust applier's job, rev2§6.1(e)).
 fn e_payload_ok(pay: &[u8]) -> (r: bool)
     ensures
         r == s_payload_ok(pay@),
@@ -1038,7 +1038,7 @@ fn wal_struct_ok(wal: &[u8], off: usize, rlen: usize) -> (r: bool)
 }
 
 /// The **trusted** half of the record seam: the blake3 record checksum, the lone
-/// uninterpreted part after B7B's split. `external_body` because blake3 is
+/// uninterpreted part after the seam split. `external_body` because blake3 is
 /// interpreted hashing — out of SMT scope, the same boundary as `checksum_ok`
 /// (`disk.rs`). Total: inspects the exact-`rlen` record and returns a bool;
 /// recomputes the canonical `record_checksum` (`disk.rs`) over `seq‖len‖payload`
@@ -1065,12 +1065,11 @@ fn wal_checksum_ok(wal: &[u8], off: usize, rlen: usize) -> (r: bool)
     disk::record_checksum(seq, len, payload).as_bytes() == &rec[16..48]
 }
 
-/// The content-layer acceptance `decode_record` makes after framing, now a
-/// **verified composition** (no longer one `external_body` box): the structural
-/// decode (verified, [`wal_struct_ok`]) **and** the blake3 checksum (trusted,
-/// [`wal_checksum_ok`]). Equal to [`content_ok_spec`], so `run_len`/`recover_records`
-/// reason over the maximal run exactly as before — only the *internal* trust
-/// boundary shrank to blake3 (rev1§6.1(e), T-5).
+/// The content-layer acceptance `decode_record` makes after framing, a
+/// **verified composition**: the structural decode (verified, [`wal_struct_ok`])
+/// **and** the blake3 checksum (trusted, [`wal_checksum_ok`]). Equal to
+/// [`content_ok_spec`], so `run_len`/`recover_records` reason over the maximal
+/// run; the only trusted part is blake3 (rev2§6.1(e)).
 fn wal_content_ok(wal: &[u8], off: usize, rlen: usize) -> (r: bool)
     requires
         off + rlen <= wal@.len(),
@@ -1085,7 +1084,7 @@ fn wal_content_ok(wal: &[u8], off: usize, rlen: usize) -> (r: bool)
 /// `seq`: each record must frame ([`frame_at`]), continue the sequence, and pass
 /// the content seam (`content_ok_spec`); the run ends at the first that does not.
 /// The record at `seq == u64::MAX` is *counted* but ends the run (the sequence
-/// can't advance) — matching `recover_records`/`mount`'s rev1§4.4 seq-exhaustion
+/// can't advance) — matching `recover_records`/`mount`'s rev2§4.4 seq-exhaustion
 /// gate (the `mnt1_forged_wal_seq_max_rejected` corner; `recover_records` flags it
 /// as `forged_max` rather than fold it into the laid-out skeleton). This is the
 /// closed form `recover_records`'s `records.len() + forged_max` is proven equal
@@ -1117,13 +1116,12 @@ spec fn run_len(wal: Seq<u8>, off: int, seq: u64) -> nat
 
 // The recovery walk that *bounds* and *materializes* the run — totality, the
 // maximal-run equality `count == run_len`, and the proven `laid_out` skeleton —
-// is `recover_records`, in the gap-freedom composition block below (B7C folded
-// the former `replay_bound` into it so the recovery decision and its gap-freedom
-// guarantee are proven at one site, with no dead proof left behind).
+// is `recover_records`, in the gap-freedom composition block below: the recovery
+// decision and its gap-freedom guarantee are proven at one site.
 
 } // verus!
 
-// ── The gap-freedom composition (rev1§4.8) ────────────────────────────────
+// ── The gap-freedom composition (rev2§4.8) ────────────────────────────────
 //
 // `advance_head` (write path) and the recovery walk operate on different views —
 // a `&[RecMeta]` queue vs. the raw WAL bytes. The composition theorem relates
@@ -1137,7 +1135,7 @@ spec fn run_len(wal: Seq<u8>, off: int, seq: u64) -> nat
 // "flushed ⇒ effects already in the committed root" — stays the `CommitProtocol`
 // design gate, deliberately out of scope here.
 //
-// B7C discharges `laid_out` rather than assuming it: `recover_records` *rebuilds*
+// The recovery walk discharges `laid_out` rather than assuming it: `recover_records` *rebuilds*
 // the run from the committed head and **proves `laid_out(wal@, records@, 0)`**
 // from the per-record framing/content/sequence facts its walk establishes, then
 // fires `lemma_gap_freedom` (and `lemma_run_len_covers` / `lemma_laid_out_mono`)
@@ -1146,7 +1144,7 @@ spec fn run_len(wal: Seq<u8>, off: int, seq: u64) -> nat
 // running recovery sequencing is the proved one. What stays trusted is only the
 // *lifetime* join — that the live `wal_records` queue keeps matching the bytes as
 // write/flush/commit mutate it — the §6.1(c)/(e) Store seam; the full
-// replay-equality invariant remains the `CommitProtocol` model's (rev1§6.1(e)).
+// replay-equality invariant remains the `CommitProtocol` model's (rev2§6.1(e)).
 
 verus! {
 
@@ -1274,25 +1272,25 @@ proof fn lemma_gap_freedom(
     // exists — the conclusion is vacuous (any such i would be flushed by the hyp).
 }
 
-// ── B7C: discharge `laid_out`; fire the gap-freedom theorem on the running
-// recovery decision (T-2 + the mount/commit glue) ──────────────────────────
+// ── Discharge `laid_out`; fire the gap-freedom theorem on the running
+// recovery decision (plus the mount/commit glue) ───────────────────────────
 //
-// `laid_out` used to be a *documented* invariant: `lemma_gap_freedom` took it on
-// faith and fired nowhere. B7C makes the recovery walk *produce* it.
-// `recover_records` rebuilds the maximal seq-continuous, content-valid run from
-// the committed head and **proves `laid_out(wal@, records@, 0)`** from the
-// per-record framing/content/sequence facts the walk already establishes — so the
-// linking invariant is discharged at the one site the recovery decision is made.
-// It then fires `lemma_gap_freedom` (and its supports `lemma_run_len_covers` /
-// `lemma_laid_out_mono`) on that rebuilt run, making the whole composition live.
-// `mount` consumes the verified skeleton to drive its applier, so the running
-// recovery sequencing *is* the proved one (the §4.2 glue contract).
+// The recovery walk *produces* the `laid_out` linking invariant rather than
+// taking it on faith. `recover_records` rebuilds the maximal seq-continuous,
+// content-valid run from the committed head and **proves `laid_out(wal@,
+// records@, 0)`** from the per-record framing/content/sequence facts the walk
+// already establishes — so the linking invariant is discharged at the one site
+// the recovery decision is made. It then fires `lemma_gap_freedom` (and its
+// supports `lemma_run_len_covers` / `lemma_laid_out_mono`) on that rebuilt run,
+// making the whole composition live. `mount` consumes the verified skeleton to
+// drive its applier, so the running recovery sequencing *is* the proved one
+// (the §4.2 glue contract).
 //
 // What stays trusted is the join across the Store's *lifetime* — that the live
 // in-memory `wal_records` queue keeps matching the on-device bytes as
 // write/flush/commit mutate it — the same trusted-Store seam §6.1(c)/(e) already
 // names; the full replay-equality invariant remains the `CommitProtocol` model's
-// (rev1§6.1(e)). The discharge ties the recovery *decision* to the code; it does
+// (rev2§6.1(e)). The discharge ties the recovery *decision* to the code; it does
 // not pull the device I/O or the `WalOp` applier into the verified core.
 
 /// The framing length of the record at `off` (0 if none) — names the `rlen`
@@ -1341,7 +1339,7 @@ proof fn lemma_forall_laid_out(wal: Seq<u8>, records: Seq<RecMeta>, k: int)
 /// The recovery span plus the rebuilt record skeleton. `records` is the maximal
 /// seq-continuous, content-valid run from the head with `seq < u64::MAX` — the
 /// records `mount` replays — and is *proven* `laid_out`. `forged_max` flags an
-/// otherwise-valid record at `seq == u64::MAX` right after the run: the rev1§4.4
+/// otherwise-valid record at `seq == u64::MAX` right after the run: the rev2§4.4
 /// seq-exhaustion forgery `mount` rejects (the run can't extend past it).
 /// `end_off`/`next_seq` are the post-run cursor for the new WAL tail/seq.
 struct Recovered {
@@ -1352,10 +1350,9 @@ struct Recovered {
 }
 
 /// Rebuild the recoverable run from `wal_head` and **prove it is laid out** —
-/// discharging what `lemma_gap_freedom` used to assume. The verified recovery
-/// core (B7C folded the former `replay_bound` bound into it): it walks the WAL
-/// (framing via `decode_frame`, the content seam via `wal_content_ok`, seq
-/// continuity), proves the **maximal-run equality** (`run_len`), *and*
+/// discharging the `lemma_gap_freedom` premise. The verified recovery core walks
+/// the WAL (framing via `decode_frame`, the content seam via `wal_content_ok`,
+/// seq continuity), proves the **maximal-run equality** (`run_len`), *and*
 /// materializes the records so the linking invariant `laid_out` is established
 /// where the recovery decision is made. Then it fires the gap-freedom theorem on
 /// the rebuilt run (the in-code shadow of `AckedWritesRecoverable`'s WAL-replay
@@ -1364,9 +1361,9 @@ fn recover_records(wal: &[u8], wal_head: u64, wal_next_seq: u64) -> (r: Recovere
     requires
         wal_head <= wal@.len(),
     ensures
-        // The maximal-run equality `replay_bound` used to prove, now keyed to the
-        // rebuilt records: the run accounts for exactly `run_len` (the `forged_max`
-        // record, if any, is the one counted past the laid-out skeleton).
+        // The maximal-run equality, keyed to the rebuilt records: the run accounts
+        // for exactly `run_len` (the `forged_max` record, if any, is the one
+        // counted past the laid-out skeleton).
         run_len(wal@, wal_head as int, wal_next_seq)
             == r.records@.len() + (if r.forged_max { 1nat } else { 0nat }),
         r.end_off <= wal@.len(),
@@ -1490,7 +1487,7 @@ fn recover_records(wal: &[u8], wal_head: u64, wal_next_seq: u64) -> (r: Recovere
 
 } // verus!
 
-/// Per-ref flush-scheduler accounting (rev1§4.4), riding alongside `overlays`.
+/// Per-ref flush-scheduler accounting (rev2§4.4), riding alongside `overlays`.
 /// Every field is *derived* from the ref's currently-unflushed records, so it
 /// is reconstructed at mount during WAL replay and never persisted (no
 /// `SB_VERSION` bump, no corpus regen). Reset when the ref
@@ -1499,9 +1496,9 @@ fn recover_records(wal: &[u8], wal_head: u64, wal_next_seq: u64) -> (r: Recovere
 #[derive(Debug, Default)]
 struct RefAcct {
     /// Mutating ops applied to this ref since its last flush — the op-count
-    /// secondary bound (rev1§4.4), so a metadata storm with tiny bytes flushes.
+    /// secondary bound (rev2§4.4), so a metadata storm with tiny bytes flushes.
     op_count: u64,
-    /// Physical WAL offset of this ref's oldest unflushed record (rev1§4.4). Set
+    /// Physical WAL offset of this ref's oldest unflushed record (rev2§4.4). Set
     /// by the first op after a flush, untouched after; `None` while clean. For
     /// the tail-pinner this equals the live `wal_head`. The pinner is **not**
     /// picked by sorting on this field — that is wrong across the ring wrap
@@ -1510,7 +1507,7 @@ struct RefAcct {
     /// field stays as the per-ref position datum the tests assert against.
     oldest_wal_pos: Option<u64>,
     /// UTC-nanos timestamp at which this ref first became dirty: the staleness
-    /// trigger's age key (rev1§4.4). `None` while clean.
+    /// trigger's age key (rev2§4.4). `None` while clean.
     oldest_dirty_ns: Option<u64>,
 }
 
@@ -1524,26 +1521,26 @@ pub struct Store<D: BlockDev> {
     /// and staged row edits. Serialized at commit.
     table: RefTable,
     /// Refs whose entry-set changed since the last commit. Drained at the top
-    /// of `commit()`, advancing each named ref's rev1§4.7 edit version exactly
+    /// of `commit()`, advancing each named ref's rev2§4.7 edit version exactly
     /// once — so N staged edits on one ref (a guarded batch) tick the version
     /// once, and a no-op commit ticks nothing.
     dirty_refs: BTreeSet<Vec<u8>>,
     overlays: BTreeMap<Vec<u8>, Overlay>,
-    /// Per-ref flush-scheduler accounting (rev1§4.4), keyed like `overlays`.
+    /// Per-ref flush-scheduler accounting (rev2§4.4), keyed like `overlays`.
     /// Derived runtime state, reconstructed on WAL replay (not persisted).
     acct: BTreeMap<Vec<u8>, RefAcct>,
     wal_tail: u64,
     wal_seq: u64,
     wal_records: VecDeque<RecMeta>,
-    /// Monotonic allocator for ephemeral overlay file ids (rev1§4.9). Store-
+    /// Monotonic allocator for ephemeral overlay file ids (rev2§4.9). Store-
     /// global, never persisted, and re-derived deterministically by WAL replay,
     /// which re-runs the same op stream through `apply_to_overlay`.
     next_file_id: FileId,
-    /// Open file handles (rev1§4.9 / C2C): `FileId → ref_name`, locating which
+    /// Open file handles (rev2§4.9): `FileId → ref_name`, locating which
     /// ref's overlay an id-addressed `write_id`/`read_id`/`close` acts on. The
     /// id↔name binding lives in that overlay's `names`; this only routes by ref.
     /// Like the ids, it is ephemeral — never persisted, empty after a crash (no
-    /// open/close WAL record), so replay restores no handles (Design decision 2).
+    /// open/close WAL record), so replay restores no handles.
     open_files: BTreeMap<FileId, Vec<u8>>,
 }
 
@@ -1551,7 +1548,7 @@ impl<D: BlockDev> Store<D> {
     // ── Lifecycle ───────────────────────────────────────────────────
 
     pub fn format(mut dev: D, opts: StoreOptions) -> Result<Store<D>, StoreError> {
-        // rev1§4.5: `format` is total over device *geometry* — validate the
+        // rev2§4.5: `format` is total over device *geometry* — validate the
         // requested layout against the device *before writing anything*, and
         // refuse an undersized or un-layoutable device with an error, never a
         // panic. (Mount is total over device *contents*; this is its geometry
@@ -1624,7 +1621,7 @@ impl<D: BlockDev> Store<D> {
         })
     }
 
-    /// Mount = crash recovery (rev1§4.5): both paths are the same code. Read
+    /// Mount = crash recovery (rev2§4.5): both paths are the same code. Read
     /// both slots, discard invalid, take the higher generation; load the
     /// durable index it points at; replay the WAL tail into overlays.
     pub fn mount(dev: D, opts: StoreOptions) -> Result<Store<D>, StoreError> {
@@ -1653,7 +1650,7 @@ impl<D: BlockDev> Store<D> {
             // not a recovery case: tick-era timestamp fields are byte-
             // compatible with nanoseconds, so falling through to
             // "no superblock" (or worse, mounting) would misread, and the
-            // rev1§2.6 stance — pre-v3 images are re-created with mkfs — is
+            // rev2§2.6 stance — pre-v3 images are re-created with mkfs — is
             // only real if the user is told that's what happened.
             Survivor::Neither => {
                 use crate::disk::SbError;
@@ -1768,13 +1765,13 @@ impl<D: BlockDev> Store<D> {
         // *decision* — which records replay, the resulting `(wal_tail, wal_seq)`,
         // and the rebuilt `RecMeta` skeleton — is the Verus-verified
         // `recover_records`: total + terminating ∀ bytes, and it **proves the
-        // rebuilt run is `laid_out`** (B7C/T-2), discharging the `lemma_gap_freedom`
+        // rebuilt run is `laid_out`**, discharging the `lemma_gap_freedom`
         // premise on exactly this run. So the sequencing here is the proved one;
         // the applier below decodes + applies each record over that verified
         // skeleton — the content layer (`WalOp` decode) and the extent gate stay
-        // plain Rust (rev1§6.1(e)).
+        // plain Rust (rev2§6.1(e)).
         //
-        // Circular WAL (rev1§4.4, M-5): the live window runs from the
+        // Circular WAL (rev2§4.4): the live window runs from the
         // committed `wal_head` around the ring to the tail and may straddle the
         // buffer end. Rotate the buffer so the head sits at offset 0, linearizing
         // the ring into the contiguous run `recover_records` walks — so the
@@ -1823,7 +1820,7 @@ impl<D: BlockDev> Store<D> {
             }
             store.apply_to_overlay(&op)?;
             // Reconstruct per-ref flush accounting from the replayed records
-            // (rev1§4.4): nothing of it is persisted, so the live state is
+            // (rev2§4.4): nothing of it is persisted, so the live state is
             // recomputed here exactly as the write path built it. The accounted
             // position is the record's *physical* ring offset, so
             // `oldest_wal_pos` matches the live write path.
@@ -1837,7 +1834,7 @@ impl<D: BlockDev> Store<D> {
             });
         }
         // An otherwise-valid record at the seq ceiling immediately past the run is
-        // the rev1§4.4 seq-exhaustion forgery (an honest counter never nears
+        // the rev2§4.4 seq-exhaustion forgery (an honest counter never nears
         // u64::MAX). `recover_records` flags it rather than fold it into the
         // laid-out run; reject it loudly, as the original re-walk's `checked_add` did.
         if recovered.forged_max {
@@ -1871,7 +1868,7 @@ impl<D: BlockDev> Store<D> {
                 next_snap_id: 1,
                 // A fresh ref starts at edit version 0; create_ref does not mark
                 // it dirty, so its first committed entry-set mutation ticks it
-                // to 1 (rev1§4.7).
+                // to 1 (rev2§4.7).
                 edit_version: 0,
             },
         );
@@ -1882,7 +1879,7 @@ impl<D: BlockDev> Store<D> {
         self.table.refs.iter()
     }
 
-    /// The ref's current rev1§4.7 edit version (the value a guarded batch's
+    /// The ref's current rev2§4.7 edit version (the value a guarded batch's
     /// `expected_version` is compared against), or `None` if the ref is
     /// unknown. Reads the working table, so an enumerate and a follow-up
     /// `expected_version` taken back-to-back see one consistent value.
@@ -1890,7 +1887,7 @@ impl<D: BlockDev> Store<D> {
         self.table.refs.get(ref_name).map(|e| e.edit_version)
     }
 
-    /// Mark a ref's entry-set as mutated this commit cycle (rev1§4.7). The
+    /// Mark a ref's entry-set as mutated this commit cycle (rev2§4.7). The
     /// version is advanced once in `commit()`, no matter how many times this
     /// is called for the same ref before the flip.
     fn touch_ref(&mut self, name: &[u8]) {
@@ -1911,13 +1908,13 @@ impl<D: BlockDev> Store<D> {
     }
 
     /// Snapshot the ref (forces a flush — a snapshot must name a tree
-    /// hash, rev1§4.4). `now` is UTC nanoseconds from the caller
-    /// (server-assigned, rev1§4.7) and is clamped per-ref strictly monotone:
+    /// hash, rev2§4.4). `now` is UTC nanoseconds from the caller
+    /// (server-assigned, rev2§4.7) and is clamped per-ref strictly monotone:
     /// `ts = max(now, predecessor_ts + 1)`. A host clock regressing
     /// between boots can therefore never make a child snapshot "older"
     /// than its parent — the clamp protects exactly what retention needs
     /// (per-ref strict order) and nothing it can't (a wildly wrong RTC
-    /// still skews absolute ages, rev1§2.6/rev1§4.7).
+    /// still skews absolute ages, rev2§2.6/rev2§4.7).
     pub fn snapshot(
         &mut self,
         ref_name: &[u8],
@@ -1946,7 +1943,7 @@ impl<D: BlockDev> Store<D> {
         };
         self.table.snaps.insert((ref_name.to_vec(), id), row);
         self.table.refs.get_mut(ref_name).unwrap().next_snap_id = id + 1;
-        self.touch_ref(ref_name); // new snapshot row + next_snap_id (rev1§4.7)
+        self.touch_ref(ref_name); // new snapshot row + next_snap_id (rev2§4.7)
         self.commit()?;
         Ok(id)
     }
@@ -1955,7 +1952,7 @@ impl<D: BlockDev> Store<D> {
     /// flushed first (into the abandoned pre-rollback root) so the WAL
     /// stays coherent; the rollback then commits the snapshot's root as
     /// the new head. History rewriting at the storage layer is just a
-    /// ref-table edit (rev1§4.6).
+    /// ref-table edit (rev2§4.6).
     pub fn rollback(&mut self, ref_name: &[u8], snap_id: u64) -> Result<(), StoreError> {
         let root = self
             .table
@@ -1969,15 +1966,15 @@ impl<D: BlockDev> Store<D> {
             .get_mut(ref_name)
             .ok_or(StoreError::NoSuchRef)?
             .root = root;
-        self.touch_ref(ref_name); // head move (rev1§4.7)
+        self.touch_ref(ref_name); // head move (rev2§4.7)
         self.commit()
     }
 
-    /// Pin a snapshot under a tag name (rev1§4.7): the tag maps to the
+    /// Pin a snapshot under a tag name (rev2§4.7): the tag maps to the
     /// snapshot *id*, so it survives metadata edits, and it is a
     /// `keep`-strength pin — `delete_snapshot` of a tagged snapshot fails
     /// `Pinned`. A tag is an entry-set mutation, so it advances the ref's
-    /// edit version (rev1§4.7) like a row edit or a head move.
+    /// edit version (rev2§4.7) like a row edit or a head move.
     pub fn tag(&mut self, name: &[u8], ref_name: &[u8], snap_id: u64) -> Result<(), StoreError> {
         if !self.table.snaps.contains_key(&(ref_name.to_vec(), snap_id)) {
             return Err(StoreError::NoSuchSnapshot);
@@ -1985,11 +1982,11 @@ impl<D: BlockDev> Store<D> {
         self.table
             .tags
             .insert(name.to_vec(), (ref_name.to_vec(), snap_id));
-        self.touch_ref(ref_name); // tag added (rev1§4.7 entry-set mutation)
+        self.touch_ref(ref_name); // tag added (rev2§4.7 entry-set mutation)
         self.commit()
     }
 
-    /// Remove a tag, unpinning its snapshot (rev1§4.7). Ref-scoped: only a
+    /// Remove a tag, unpinning its snapshot (rev2§4.7). Ref-scoped: only a
     /// tag that currently pins a snapshot on `ref_name` is removed, so a
     /// handle on one ref cannot reach across to another ref's tags (the same
     /// confinement `RefEdit::DeleteTag` keeps inside a guarded batch).
@@ -1999,14 +1996,14 @@ impl<D: BlockDev> Store<D> {
         match self.table.tags.get(name) {
             Some((r, _)) if r.as_slice() == ref_name => {
                 self.table.tags.remove(name);
-                self.touch_ref(ref_name); // tag removed (rev1§4.7 entry-set mutation)
+                self.touch_ref(ref_name); // tag removed (rev2§4.7 entry-set mutation)
                 self.commit()
             }
             _ => Ok(()),
         }
     }
 
-    /// Enumerate every tag as `(name, ref_name, snap_id)` (rev1§4.7). Reads
+    /// Enumerate every tag as `(name, ref_name, snap_id)` (rev2§4.7). Reads
     /// the working table; the wire `ListTags` handler scopes the view to the
     /// caller's ref.
     pub fn tags(&self) -> impl Iterator<Item = (&[u8], &[u8], u64)> + '_ {
@@ -2016,7 +2013,7 @@ impl<D: BlockDev> Store<D> {
             .map(|(name, (r, id))| (name.as_slice(), r.as_slice(), *id))
     }
 
-    // ── Write path (rev1§4.3) ───────────────────────────────────────────
+    // ── Write path (rev2§4.3) ───────────────────────────────────────────
 
     /// A mutation must be rejected *before* it reaches the WAL if it can
     /// never flush (writing onto a directory, or under a file): an acked
@@ -2097,19 +2094,19 @@ impl<D: BlockDev> Store<D> {
         self.log_then_apply(op)
     }
 
-    // ── Id-addressed surface: open handles (rev1§4.9, Design decision 2) ──
+    // ── Id-addressed surface: open handles (rev2§4.9) ──
     //
-    // These realize the rev1§4.9 *open handle* at the `Store` API. The file-id
-    // layer stays server-internal (no wire op — that is C2D); the rename/unlink
+    // These realize the rev2§4.9 *open handle* at the `Store` API. The file-id
+    // layer stays server-internal (no wire op); the rename/unlink
     // interleaving proptest drives this surface to hold a file open across an
     // unlink. A *named* handle routes its writes through the durable path-
     // addressed `write`, sharing one WAL/replay path; only an *orphaned*
     // (unlinked-while-open) handle's writes are ephemeral.
 
     /// Open a handle on `(ref_name, path)`, returning its ephemeral [`FileId`]
-    /// (rev1§4.9). The id resolves any existing binding (a dirty file or another
+    /// (rev2§4.9). The id resolves any existing binding (a dirty file or another
     /// open handle on the same name) or is freshly allocated; the handle then
-    /// follows the name across unlinks (and renames, C2B). Errors if the ref is
+    /// follows the name across unlinks (and renames). Errors if the ref is
     /// unknown. Opening does not create the file — until written, the name still
     /// reads from the tree (or as absent if tombstoned).
     pub fn open(&mut self, ref_name: &[u8], path: &Path) -> Result<FileId, StoreError> {
@@ -2128,12 +2125,12 @@ impl<D: BlockDev> Store<D> {
         Ok(id)
     }
 
-    /// Write through an open handle (rev1§4.9). A *named* handle delegates to the
+    /// Write through an open handle (rev2§4.9). A *named* handle delegates to the
     /// durable path-addressed [`Self::write`] (the same id, resolved via the
     /// overlay's `by_name`), so the write is WAL-logged and replays. An
     /// *orphaned* handle (its name was unlinked while open) writes ephemerally to
     /// the overlay: the data has no path, is never logged, and is discarded at
-    /// flush — exactly rev1§4.9's "the open handle keeps working against the
+    /// flush — exactly rev2§4.9's "the open handle keeps working against the
     /// overlay." Errors if `id` is not an open handle.
     pub fn write_id(
         &mut self,
@@ -2165,7 +2162,7 @@ impl<D: BlockDev> Store<D> {
         }
     }
 
-    /// Read through an open handle (rev1§4.9). A named handle reads like its path
+    /// Read through an open handle (rev2§4.9). A named handle reads like its path
     /// (overlay over tree); an orphaned handle reads its overlay data against an
     /// empty base (its tree path is gone). Errors if `id` is not an open handle.
     pub fn read_id(&self, id: FileId) -> Result<Option<Vec<u8>>, StoreError> {
@@ -2181,7 +2178,7 @@ impl<D: BlockDev> Store<D> {
         }
     }
 
-    /// Close an open handle (rev1§4.9). On the last close the overlay reaps by
+    /// Close an open handle (rev2§4.9). On the last close the overlay reaps by
     /// state: an orphaned id's data is discarded, an opened-but-never-written
     /// name reverts to the tree, a dirty named id is kept to flush normally.
     /// Errors if `id` is not an open handle.
@@ -2202,13 +2199,13 @@ impl<D: BlockDev> Store<D> {
         Ok(())
     }
 
-    /// Move `from` to `to` within one ref (rev1§4.9). Within-subtree only — the
+    /// Move `from` to `to` within one ref (rev2§4.9). Within-subtree only — the
     /// wire layer resolves both endpoints under a handle's subtree, so a
-    /// cross-subtree target is unnameable (DD4); cross-ref rename is a copy with
+    /// cross-subtree target is unnameable; cross-ref rename is a copy with
     /// new lineage, a different op (out of scope). A dirty file's rename is the
     /// O(1) name swap in the overlay; a clean file or a directory is logged the
     /// same and resolved at apply/flush. A directory rename drains the ref first
-    /// (DD4) so the move is a pure tree detach/reattach, then flushes the move.
+    /// so the move is a pure tree detach/reattach, then flushes the move.
     pub fn rename(
         &mut self,
         ref_name: &[u8],
@@ -2277,7 +2274,7 @@ impl<D: BlockDev> Store<D> {
         };
         if is_dir {
             // Drain the ref so the directory move is a pure tree detach/reattach
-            // with no dirty-prefix re-pathing (DD4), then log, apply (records the
+            // with no dirty-prefix re-pathing, then log, apply (records the
             // move), flush (executes it), and commit so it is durable at once.
             self.flush_ref(ref_name)?;
             self.commit()?;
@@ -2298,7 +2295,7 @@ impl<D: BlockDev> Store<D> {
         &mut self.chunks.dev
     }
 
-    /// Live WAL usage in bytes (rev1§4.4): the span the unflushed records occupy
+    /// Live WAL usage in bytes (rev2§4.4): the span the unflushed records occupy
     /// on the circular ring, `[wal_head, wal_tail)` modulo `wal_len`. `0` when the
     /// log is empty; `wal_len` when it is exactly full (the tail has wrapped back
     /// onto the head — the only non-empty state where the raw difference is `0`,
@@ -2318,7 +2315,7 @@ impl<D: BlockDev> Store<D> {
     }
 
     /// Append a WAL record's bytes at ring offset `off`, splitting the write
-    /// across the buffer end when the record wraps (rev1§4.4 circular ring), then
+    /// across the buffer end when the record wraps (rev2§4.4 circular ring), then
     /// a **single** `flush()` after both halves. The single fsync is load-bearing
     /// for crash-safety: a flush *between* the halves would make one half durable
     /// while the other is not, and that half-record was never acked — a later
@@ -2342,7 +2339,7 @@ impl<D: BlockDev> Store<D> {
     }
 
     /// WAL append + fsync before the overlay sees the write — the ack
-    /// implies durability (rev1§4.3 step 2).
+    /// implies durability (rev2§4.3 step 2).
     fn log_then_apply(&mut self, op: WalOp) -> Result<(), StoreError> {
         let rec = op.encode_record(self.wal_seq);
         let reclen = rec.len() as u64;
@@ -2353,7 +2350,7 @@ impl<D: BlockDev> Store<D> {
             self.flush_ref(&r)?;
             return self.commit();
         }
-        // WAL pressure (rev1§4.4 trigger 2, M-5): make room for this record on the
+        // WAL pressure (rev2§4.4 trigger 2): make room for this record on the
         // ring and, if usage crosses the watermark, flush the tail-pinning ref so
         // `wal_head` advances past the freed prefix. This may `commit()` (which
         // can move `wal_tail`), so `rec_off` MUST be read *after* it returns.
@@ -2378,7 +2375,7 @@ impl<D: BlockDev> Store<D> {
         self.apply_to_overlay(&op)?;
         self.account_op(&op, rec_off);
 
-        // Per-ref soft bound (rev1§4.4 containment, M-3/M-6): a ref that
+        // Per-ref soft bound (rev2§4.4 containment): a ref that
         // crosses its byte quota or its op-count secondary bound self-flushes,
         // so one hot ref cannot consume the whole global budget and a metadata
         // storm with tiny bytes still flushes. Backpressure is a synchronous
@@ -2393,14 +2390,14 @@ impl<D: BlockDev> Store<D> {
             self.commit()?;
         }
 
-        // Size pressure (rev1§4.4, M-4): when total dirty overlay bytes cross
+        // Size pressure (rev2§4.4): when total dirty overlay bytes cross
         // the *low* watermark, flush the biggest offenders — not flush-everything
         // at one hard threshold. Small refs stay dirty; the high watermark
         // (`global_budget`) is the backpressure point, rarely reached because
         // flushing starts at the low one.
         self.relieve_size_pressure()?;
 
-        // Staleness (rev1§4.4 trigger 4, M-6 timer half): lowest priority, after
+        // Staleness (rev2§4.4 trigger 4): lowest priority, after
         // WAL/size pressure relieved. The incoming op's mtime is the clock — a
         // write whose timestamp leaves an *older* quiet ref past the bound flushes
         // that ref, so the write path itself bounds staleness without a timer.
@@ -2410,7 +2407,7 @@ impl<D: BlockDev> Store<D> {
         Ok(())
     }
 
-    /// Size-pressure flush (rev1§4.4 trigger 3, M-4): when total dirty overlay
+    /// Size-pressure flush (rev2§4.4 trigger 3): when total dirty overlay
     /// bytes cross the *low* watermark, flush the **biggest offenders** — sort
     /// the dirty refs by overlay bytes descending and `flush_ref` them until the
     /// total is back at or below the low watermark (or only one ref remains) —
@@ -2418,7 +2415,7 @@ impl<D: BlockDev> Store<D> {
     /// `global_budget`, the backpressure point; because flushing starts at the
     /// low one, writers rarely reach it.
     ///
-    /// Backpressure is the synchronous flush itself (Design decision 4): the
+    /// Backpressure is the synchronous flush itself: the
     /// flush runs inline and the write proceeds once pressure is relieved — no
     /// eviction (overlay leaves memory only by becoming tree) and no `FULL`
     /// return (a refusal a single-threaded server can never need — the flush
@@ -2449,28 +2446,28 @@ impl<D: BlockDev> Store<D> {
             // Leave at least one ref dirty: size pressure flushes the biggest
             // offenders, never everything (that is the WAL-full / explicit-sync
             // path). A single ref over the low watermark is contained instead by
-            // the per-ref soft bound (rev1§4.4 M-3), not by size pressure.
+            // the per-ref soft bound (rev2§4.4), not by size pressure.
             if self.overlays.len() <= 1 || total(self) <= self.opts.size_low_watermark {
                 break;
             }
             self.flush_ref(&name)?;
             flushed_any = true;
         }
-        // One commit folds in every flush this round (rev1§4.2 atomicity).
+        // One commit folds in every flush this round (rev2§4.2 atomicity).
         if flushed_any {
             self.commit()?;
         }
         Ok(())
     }
 
-    /// WAL-pressure flush (rev1§4.4 trigger 2, M-5): keep the circular WAL below
+    /// WAL-pressure flush (rev2§4.4 trigger 2): keep the circular WAL below
     /// its watermark and make room for the next `incoming`-byte record by flushing
     /// the ref **pinning the tail** — the ref whose oldest unflushed record sits
     /// at `wal_head`, i.e. the front of `wal_records`. Flushing it lets `commit`'s
     /// Verus-verified `advance_head` move `wal_head` past the now-flushed
     /// contiguous prefix, reclaiming exactly that span of the ring. (The old
     /// linear WAL could only reclaim by resetting to 0 when *everything* flushed —
-    /// the M-5 gap: flush-the-pinner was meaningless without space reclaim.)
+    /// flush-the-pinner was meaningless without space reclaim.)
     ///
     /// Repeats until comfortable: `usage + incoming` fits and `usage` is below the
     /// watermark. Each iteration flushes the front ref (which always has an overlay
@@ -2479,12 +2476,12 @@ impl<D: BlockDev> Store<D> {
     /// `usage` strictly shrinks, and the loop terminates. Under interleaved refs it
     /// may flush more than the lone pinner, which is fine. When one ref pins the
     /// whole ring, flushing it empties the WAL and `commit` resets the tail to 0 —
-    /// the normative "a full WAL flushes everything and resets" edge case (rev1§4.4).
+    /// the normative "a full WAL flushes everything and resets" edge case (rev2§4.4).
     ///
     /// Picking the victim by `front()` is mandatory: sorting refs by their raw
     /// `oldest_wal_pos` is wrong across the ring wrap (a newer ref can sit at a
     /// lower physical offset than the tail-pinner). Backpressure is the synchronous
-    /// flush itself (Design decision 4): no eviction, no `FULL` return.
+    /// flush itself: no eviction, no `FULL` return.
     fn relieve_wal_pressure(&mut self, incoming: u64) -> Result<(), StoreError> {
         loop {
             let usage = self.wal_usage();
@@ -2506,7 +2503,7 @@ impl<D: BlockDev> Store<D> {
         Ok(())
     }
 
-    /// Staleness flush (rev1§4.4 trigger 4, M-6 timer half): a quietly dirty ref
+    /// Staleness flush (rev2§4.4 trigger 4): a quietly dirty ref
     /// whose *oldest-dirty* age exceeds `staleness_ns` becomes committed tree, so
     /// no dirty byte sits unflushed indefinitely — "a quietly dirty ref
     /// eventually becomes committed tree." It keys on the ref's oldest unflushed
@@ -2514,7 +2511,7 @@ impl<D: BlockDev> Store<D> {
     /// flush), so it bounds the *maximum* staleness of any dirty byte, not the
     /// time since the last touch.
     ///
-    /// Lowest priority of the four triggers (Design decision 5): it fires only
+    /// Lowest priority of the four triggers: it fires only
     /// after WAL/size/per-ref pressure had their say, opportunistically at the
     /// points the single-threaded server already runs — the write path
     /// (`log_then_apply`, with the incoming op's mtime as the clock) and the
@@ -2526,7 +2523,7 @@ impl<D: BlockDev> Store<D> {
     ///
     /// Selective like size pressure (not flush-everything): only overdue refs
     /// flush; fresher dirty refs stay in overlay. Backpressure is the synchronous
-    /// flush itself (Design decision 4) — `flush_ref` turns the overlay into tree
+    /// flush itself — `flush_ref` turns the overlay into tree
     /// and a single `commit` folds in the whole sweep, riding the verified
     /// `advance_head` exactly as the other relievers do.
     fn relieve_staleness(&mut self, now: u64) -> Result<(), StoreError> {
@@ -2552,16 +2549,16 @@ impl<D: BlockDev> Store<D> {
             self.flush_ref(&name)?;
             flushed_any = true;
         }
-        // One commit folds in every staleness flush this sweep (rev1§4.2 atomicity).
+        // One commit folds in every staleness flush this sweep (rev2§4.2 atomicity).
         if flushed_any {
             self.commit()?;
         }
         Ok(())
     }
 
-    /// The storage server's opportunistic staleness sweep (rev1§4.4 trigger 4):
+    /// The storage server's opportunistic staleness sweep (rev2§4.4 trigger 4):
     /// flush every ref dirty past the `staleness_ns` bound as of `now`. Called at
-    /// request boundaries and at reactor idle (Design decision 5), the points a
+    /// request boundaries and at reactor idle, the points a
     /// single-threaded request-driven server already runs — so a quietly dirty
     /// ref eventually becomes committed tree even with no further writes. A no-op
     /// at the disabled sentinel `staleness_ns == u64::MAX` (set by test fixtures).
@@ -2570,7 +2567,7 @@ impl<D: BlockDev> Store<D> {
     }
 
     /// Update a ref's flush-scheduler accounting after one mutating op lands in
-    /// its overlay (rev1§4.4). `wal_pos` is the op's byte offset in the WAL.
+    /// its overlay (rev2§4.4). `wal_pos` is the op's byte offset in the WAL.
     /// Pure derived state: called on the live write path and again, identically,
     /// during mount WAL replay, so a remounted store recomputes it (not
     /// persisted in the on-disk format). Reset in `flush_ref` when the ref's
@@ -2613,7 +2610,7 @@ impl<D: BlockDev> Store<D> {
                 // A live dirty file renames via the O(1) name swap. Otherwise
                 // classify the committed entity: a clean file is opened into the
                 // overlay so flush moves it via its `origin`; a directory is
-                // recorded for a flush-time tree detach/reattach (DD4/DD5). Ids
+                // recorded for a flush-time tree detach/reattach. Ids
                 // are re-derived on replay, so this single branch reconstructs
                 // the live op's overlay state from the path-keyed record.
                 let live = self
@@ -2651,7 +2648,7 @@ impl<D: BlockDev> Store<D> {
         Ok(())
     }
 
-    // ── Read path (overlay first, tree below — rev1§4.3) ────────────────
+    // ── Read path (overlay first, tree below — rev2§4.3) ────────────────
 
     pub fn read(&self, ref_name: &[u8], path: &Path) -> Result<Option<Vec<u8>>, StoreError> {
         let entry = self.table.refs.get(ref_name).ok_or(StoreError::NoSuchRef)?;
@@ -2669,7 +2666,7 @@ impl<D: BlockDev> Store<D> {
                 } else {
                     // A renamed dirty file reads its pre-edit base from the
                     // committed `origin` (the original name), not the current
-                    // path — the tree still holds it there until flush (DD3).
+                    // path — the tree still holds it there until flush.
                     let origin = fo.origin().unwrap_or(path);
                     self.read_from_tree(&entry.root, origin)?
                         .unwrap_or_default()
@@ -2685,7 +2682,7 @@ impl<D: BlockDev> Store<D> {
         self.read_from_tree(root, path)
     }
 
-    /// Mass revocation of a ref's storage handles (rev1§2.2): O(1) — bump the
+    /// Mass revocation of a ref's storage handles (rev2§2.2): O(1) — bump the
     /// generation; every handle recorded at an older generation goes
     /// stale lazily, on next use. Persists through the normal commit.
     pub fn bump_generation(&mut self, ref_name: &[u8]) -> Result<(), StoreError> {
@@ -2734,7 +2731,7 @@ impl<D: BlockDev> Store<D> {
         }
     }
 
-    /// Merged directory listing: committed tree + dirty overlay (rev1§4.4
+    /// Merged directory listing: committed tree + dirty overlay (rev2§4.4
     /// read path applies to listings too).
     pub fn list(
         &self,
@@ -2790,13 +2787,13 @@ impl<D: BlockDev> Store<D> {
         self.overlays.values().map(|o| o.bytes()).sum()
     }
 
-    // ── Flush and commit (rev1§4.3 steps 3–4) ───────────────────────────
+    // ── Flush and commit (rev2§4.3 steps 3–4) ───────────────────────────
 
     /// Turn one ref's overlay into immutable tree (path-copy to a new
     /// root). Nothing on disk references the result until commit.
     pub fn flush_ref(&mut self, ref_name: &[u8]) -> Result<(), StoreError> {
         // The overlay becomes immutable tree, so the ref is no longer dirty:
-        // drop its flush-scheduler accounting (rev1§4.4). No-op when clean —
+        // drop its flush-scheduler accounting (rev2§4.4). No-op when clean —
         // a clean ref never has an accounting entry.
         self.acct.remove(ref_name);
         let Some(overlay) = self.overlays.remove(ref_name) else {
@@ -2804,14 +2801,14 @@ impl<D: BlockDev> Store<D> {
         };
         if overlay.is_empty() {
             // No dirty content to commit — but any open handles must survive the
-            // flush (rev1§4.9), so re-seed their bindings before returning.
+            // flush (rev2§4.9), so re-seed their bindings before returning.
             if let Some(carry) = overlay.carry_open() {
                 self.overlays.insert(ref_name.to_vec(), carry);
             }
             return Ok(());
         }
         // The pre-flush committed root. File bases are read against this
-        // immutable snapshot (DD3): a renamed dirty file's base lives at its
+        // immutable snapshot: a renamed dirty file's base lives at its
         // `origin` (the original name), which a later removal in this same flush
         // would otherwise have already deleted from the mutating `root`.
         let base_root = self
@@ -2822,10 +2819,10 @@ impl<D: BlockDev> Store<D> {
             .root;
         let mut root = base_root;
 
-        // Phase 1: directory moves (rev1§4.9 detach/reattach). Move the committed
+        // Phase 1: directory moves (rev2§4.9 detach/reattach). Move the committed
         // `DirRoot` entry wholesale — O(depth), no content materialization. The
         // source's dirty descendants were drained before the move was recorded
-        // (DD4), so the file phase below depends on nothing under `from`.
+        // so the file phase below depends on nothing under `from`.
         for (from, to) in overlay.dir_renames() {
             let from_comps: Vec<&[u8]> = from.iter().map(|c| c.as_slice()).collect();
             let (new_root, removed) = tree::remove(&mut self.chunks, &root, &from_comps)?;
@@ -2845,7 +2842,7 @@ impl<D: BlockDev> Store<D> {
         // (which now include file-rename sources) plus any base `origin` that
         // differs from its file's current name — minus any name a live file is
         // about to (re)create, so `a→b` then a fresh write to `a` keeps the new
-        // `a` instead of deleting it as the rename's stale source (DD3).
+        // `a` instead of deleting it as the rename's stale source.
         let live: BTreeSet<Path> = overlay.files().map(|(name, _)| name.clone()).collect();
         let mut removals: BTreeSet<Path> = overlay.unlinks().cloned().collect();
         for (name, fo) in overlay.files() {
@@ -2890,9 +2887,9 @@ impl<D: BlockDev> Store<D> {
             };
             let flags = old.as_ref().map(|e| e.flags).unwrap_or(0);
             let content = fo.apply(reuse.as_ref().map(|(_, b)| b.as_slice()).unwrap_or(&[]));
-            // rev1§4.3 step 3: re-chunk only the edited neighborhood when an old
+            // rev2§4.3 step 3: re-chunk only the edited neighborhood when an old
             // chunk list is available, hashing O(edit) chunks instead of the
-            // whole file; the result is the same canonical chunking (rev1§4.1).
+            // whole file; the result is the same canonical chunking (rev2§4.1).
             let entry_content = match &reuse {
                 Some((old_content, base)) => store_file_neighborhood(
                     &mut self.chunks,
@@ -2918,9 +2915,9 @@ impl<D: BlockDev> Store<D> {
         }
 
         self.table.refs.get_mut(ref_name).unwrap().root = root;
-        // A flush that re-points the head is an entry-set mutation (rev1§4.7):
+        // A flush that re-points the head is an entry-set mutation (rev2§4.7):
         // a concurrent writer's commit between a retention daemon's read and
-        // its guarded batch advances the version, invalidating the batch (I-2).
+        // its guarded batch advances the version, invalidating the batch.
         self.touch_ref(ref_name);
         for rec in &mut self.wal_records {
             if rec.ref_name.as_slice() == ref_name {
@@ -2929,20 +2926,20 @@ impl<D: BlockDev> Store<D> {
         }
         // The named data is now tree and any orphaned (unlinked-while-open) data
         // was dropped above (absent from `files()`); the open handles keep working
-        // across the flush (rev1§4.9), so re-seed their id↔name bindings onto a
+        // across the flush (rev2§4.9), so re-seed their id↔name bindings onto a
         // fresh, data-free overlay. `None` ⇒ nothing open ⇒ the ref's overlay is
-        // simply gone, the C2A behavior.
+        // simply gone.
         if let Some(carry) = overlay.carry_open() {
             self.overlays.insert(ref_name.to_vec(), carry);
         }
         Ok(())
     }
 
-    /// The single atomicity mechanism (rev1§4.2): barrier 1, superblock to the
+    /// The single atomicity mechanism (rev2§4.2): barrier 1, superblock to the
     /// older slot, barrier 2. The WAL head advances past the contiguous
-    /// prefix of flushed records (rev1§4.3 step 4).
+    /// prefix of flushed records (rev2§4.3 step 4).
     pub fn commit(&mut self) -> Result<(), StoreError> {
-        // rev1§4.7: advance the edit version of every ref whose entry-set
+        // rev2§4.7: advance the edit version of every ref whose entry-set
         // changed since the last commit — once per ref, regardless of how many
         // edits (head moves, rows, tags) were staged. Drained before the table
         // is serialized so the bumped values are what lands on disk. A ref that
@@ -2969,7 +2966,7 @@ impl<D: BlockDev> Store<D> {
         // decision is the Verus-verified `advance_head`: everything popped is
         // flushed, the head record (if any) is not — the TLA+
         // `CommitPrepare.newHead`. This is the write-path half of the gap-freedom
-        // composition (B7C): `advance_head` here + the recovery walk
+        // composition: `advance_head` here + the recovery walk
         // (`recover_records`) compose in `lemma_gap_freedom` to guarantee no
         // acked-but-unflushed record is left behind the advanced head — leaving
         // the bytes from `wal_head` recoverable, which the next `mount` replays.
@@ -3027,7 +3024,7 @@ impl<D: BlockDev> Store<D> {
         self.commit()
     }
 
-    // ── GC and history rewriting (rev1§4.6-4.7) ─────────────────────
+    // ── GC and history rewriting (rev2§4.6-4.7) ─────────────────────
 
     /// Mark-and-sweep GC. Marks from the committed root set (every ref
     /// head and snapshot root; tags name snapshot IDs, so their targets
@@ -3043,15 +3040,15 @@ impl<D: BlockDev> Store<D> {
         self.sync_all()?;
         // The birth-generation "live by fiat" filter (the `e.birth < epoch`
         // clause below) and the put-side resurrection check (`ChunkStore::put`)
-        // are the two halves of the rev1§4.6 single GC/mutator interaction
+        // are the two halves of the rev2§4.6 single GC/mutator interaction
         // point. Both are installed and structurally correct here, and become
-        // load-bearing once C4 (rev1§8.3) makes GC concurrent: a chunk written
+        // load-bearing once GC becomes concurrent (rev2§8.3): a chunk written
         // after the epoch then has `birth >= epoch` (never condemned), and a
         // dedup hit on a condemned chunk rewrites rather than resurrects. Under
         // today's synchronous cycle both are inert — `sync_all` above pins
         // `epoch == birth_gen`, so every existing chunk has `birth < epoch` and
         // none can be born between mark and sweep. Kept, not optimized away,
-        // because the contract is stated and C4 needs both halves in place.
+        // because the contract is stated and concurrent GC needs both halves in place.
         let epoch = self.chunks.birth_gen;
         let mut live: BTreeSet<Hash> = BTreeSet::new();
         live.insert(self.sb.ref_table);
@@ -3068,7 +3065,7 @@ impl<D: BlockDev> Store<D> {
             .filter(|(h, e)| !live.contains(h) && e.birth < epoch)
             .map(|(h, e)| (*h, *e))
             .collect();
-        // Open the resurrection-check window (rev1§4.6 step 3): for the
+        // Open the resurrection-check window (rev2§4.6 step 3): for the
         // duration of the sweep, a dedup hit on one of these condemned hashes
         // rewrites the chunk instead of resurrecting the about-to-be-deleted
         // index entry. Assigning (rather than extending) also discards any set
@@ -3106,8 +3103,8 @@ impl<D: BlockDev> Store<D> {
         }
     }
 
-    /// History rewriting (rev1§4.6): drop one snapshot row, re-pointing
-    /// children's advisory parent past it (rev1§4.7). Tag targets are
+    /// History rewriting (rev2§4.6): drop one snapshot row, re-pointing
+    /// children's advisory parent past it (rev2§4.7). Tag targets are
     /// keep-strength pins and refuse deletion. The newly unreachable
     /// mass is reclaimed by the next GC, not here — this op is O(small).
     pub fn delete_snapshot(&mut self, ref_name: &[u8], snap_id: u64) -> Result<(), StoreError> {
@@ -3133,11 +3130,11 @@ impl<D: BlockDev> Store<D> {
                 r.parent = new_parent;
             }
         }
-        self.touch_ref(ref_name); // snapshot row removed + re-parented (rev1§4.7)
+        self.touch_ref(ref_name); // snapshot row removed + re-parented (rev2§4.7)
         self.commit()
     }
 
-    /// Retention-class edit (rev1§4.7): the "mark survivors `keep`, run the
+    /// Retention-class edit (rev2§4.7): the "mark survivors `keep`, run the
     /// policy" flow is this plus `delete_snapshot`, policy in userspace.
     pub fn set_snapshot_class(
         &mut self,
@@ -3155,11 +3152,11 @@ impl<D: BlockDev> Store<D> {
             .get_mut(&(ref_name.to_vec(), snap_id))
             .ok_or(StoreError::NoSuchSnapshot)?
             .class = class;
-        self.touch_ref(ref_name); // retention-class edit on a snapshot row (rev1§4.7)
+        self.touch_ref(ref_name); // retention-class edit on a snapshot row (rev2§4.7)
         self.commit()
     }
 
-    /// Guarded ref-table batch (rev1§4.7) — the I-2/S-1 read-then-act fix.
+    /// Guarded ref-table batch (rev2§4.7) — the read-then-act fix.
     /// Apply `edits` to `ref_name` all-or-nothing within one commit, but only
     /// if the ref's edit version still equals `expected_version`:
     ///
@@ -3169,7 +3166,7 @@ impl<D: BlockDev> Store<D> {
     /// * **Invalid edit** (missing snapshot, pinned deletion, bad class, …):
     ///   the whole batch is rejected with the edit's `StoreError` and no commit
     ///   — the staged clone is discarded, so the live table is untouched.
-    /// * **Success**: every edit lands in the one superblock flip (rev1§4.2,
+    /// * **Success**: every edit lands in the one superblock flip (rev2§4.2,
     ///   the system's sole atomicity mechanism — no new machinery), the ref's
     ///   edit version advances exactly once (the §4.7 dirty-set rule, regardless
     ///   of edit count), and the new version is returned.
@@ -3317,7 +3314,7 @@ mod tests {
             },
             global_budget: 32 * 1024,
             // Keep the low watermark consistent with this fixture's tightened
-            // global_budget (rev1§4.4 invariant: size_low_watermark <= the high
+            // global_budget (rev2§4.4 invariant: size_low_watermark <= the high
             // watermark). Default would leave it at 96 MiB, above this 32 KiB
             // high watermark; pin it equal so size pressure (flush-the-biggest-
             // offenders) triggers at this fixture's scale.
@@ -3335,7 +3332,7 @@ mod tests {
     }
 
     /// `test_opts` with a tight per-ref op-count bound so the per-ref
-    /// soft-bound auto-flush (rev1§4.4) fires mid-stream — used by the
+    /// soft-bound auto-flush (rev2§4.4) fires mid-stream — used by the
     /// crash-injection proptest to re-witness all-acked-survives across the new
     /// selective-flush path (flush_ref + commit inside a write).
     fn crash_opts() -> StoreOptions {
@@ -3363,9 +3360,9 @@ mod tests {
         rec
     }
 
-    // ── refuse-not-panic format contract (rev1§4.5, S-10) ──
+    // ── refuse-not-panic format contract (rev2§4.5) ──
 
-    /// rev1§4.5: `format` is total over device *geometry* — an undersized or
+    /// rev2§4.5: `format` is total over device *geometry* — an undersized or
     /// un-layoutable device is refused with `StoreError::DeviceTooSmall`, never
     /// a panic (`mkfs`'s clean `ExitCode::FAILURE` path depends on this). With
     /// the 8 KiB-WAL fixture the geometry floor is `WAL_OFF (8 KiB) + wal_len
@@ -3396,12 +3393,12 @@ mod tests {
         }
     }
 
-    // ── per-ref accounting + per-ref soft bound (rev1§4.4, M-3/M-6) ──
+    // ── per-ref accounting + per-ref soft bound (rev2§4.4) ──
     //
     // `mod tests` is a child module of `store`, so these read the private
     // `Store::overlays` / `Store::acct` directly — no accessors needed.
 
-    /// rev1§4.4 M-3: a ref written far past its per-ref soft bound self-flushes
+    /// rev2§4.4: a ref written far past its per-ref soft bound self-flushes
     /// (backpressure, not eviction — the overlay becomes committed tree), so it
     /// cannot consume the whole global budget; a quiet ref under its bound stays
     /// dirty. The flushed data is materialized to tree (read-backable), not lost.
@@ -3430,7 +3427,7 @@ mod tests {
                 .write(b"hot", &p(&[&format!("f{i}")]), 0, &chunk, (i + 2) as u64)
                 .unwrap();
             hot_total += chunk.len();
-            // M-3 invariant: the soft-bound flush fires inside the write that
+            // Soft-bound invariant: the soft-bound flush fires inside the write that
             // would cross the bound, so the overlay never exceeds it.
             let hot_bytes = store
                 .overlays
@@ -3472,7 +3469,7 @@ mod tests {
             cases: if cfg!(miri) { 4 } else { 256 },
             ..ProptestConfig::default()
         })]
-        /// rev1§4.4 M-3 invariant under arbitrary multi-ref write sequences: the
+        /// rev2§4.4 invariant under arbitrary multi-ref write sequences: the
         /// per-ref soft-bound flush keeps every ref's overlay at or below the
         /// soft bound after every op, so no single ref can ever reach the global
         /// budget — containment holds regardless of interleaving.
@@ -3506,7 +3503,7 @@ mod tests {
         }
     }
 
-    /// rev1§4.4 M-6 (op-count half): a metadata storm — many tiny ops whose
+    /// rev2§4.4 (op-count half): a metadata storm — many tiny ops whose
     /// dirty bytes stay far under the per-ref byte bound — still flushes once it
     /// crosses the op-count secondary bound. The byte-only bound would miss it.
     #[test]
@@ -3553,7 +3550,7 @@ mod tests {
         assert_eq!(store.read(b"main", &p(&["f8"])).unwrap(), Some(vec![1u8]));
     }
 
-    /// rev1§4.4 / Design decision 1: all per-ref accounting is derived runtime
+    /// rev2§4.4: all per-ref accounting is derived runtime
     /// state, reconstructed at mount from WAL replay; not part of the on-disk
     /// format. A remount must recompute bytes / op-count / oldest-WAL-position /
     /// oldest-dirty-timestamp identical to the pre-remount live state.
@@ -3619,9 +3616,9 @@ mod tests {
     }
 
     // ── size-pressure low/high watermarks + flush-the-biggest-offenders ──
-    //         (rev1§4.4 trigger 3, M-4)
+    //         (rev2§4.4 trigger 3)
 
-    /// rev1§4.4 M-4 headline: crossing the size low watermark flushes the
+    /// rev2§4.4 headline: crossing the size low watermark flushes the
     /// *biggest offenders*, not everything. Three refs of unequal size cross the
     /// low watermark; the largest flushes (overlay → committed tree, read-backable)
     /// while the smaller two stay dirty — not a `sync_all` that empties all of
@@ -3679,7 +3676,7 @@ mod tests {
         );
     }
 
-    /// rev1§4.4 M-4: because flushing starts at the low watermark, steady traffic
+    /// rev2§4.4: because flushing starts at the low watermark, steady traffic
     /// keeps total dirty bytes around the low watermark and never reaches the high
     /// watermark (`global_budget`) — the writer "rarely hits FULL at the high one".
     #[test]
@@ -3722,7 +3719,7 @@ mod tests {
         assert!(total <= LOW);
     }
 
-    // ── circular WAL ring + flush-the-pinner (rev1§4.4 trigger 2, M-5) ──
+    // ── circular WAL ring + flush-the-pinner (rev2§4.4 trigger 2) ──
 
     /// Options that isolate the WAL-pressure trigger: a small ring with the given
     /// watermark, every *other* flush trigger disabled (huge byte budgets, no
@@ -3740,7 +3737,7 @@ mod tests {
         }
     }
 
-    /// rev1§4.4 M-5 headline: WAL pressure flushes the ref **pinning the tail**
+    /// rev2§4.4 headline: WAL pressure flushes the ref **pinning the tail**
     /// (the oldest record, at `wal_head`), not everything. A pinner sits at the
     /// head while a newer ref fills the ring; crossing the watermark flushes the
     /// pinner — its overlay becomes committed tree and `wal_head` advances past
@@ -3774,7 +3771,7 @@ mod tests {
             i += 1;
             assert!(i < 100_000, "pinner never flushed");
         }
-        // The pinner flushed; the newer ref stayed dirty (M-5, not flush-everything).
+        // The pinner flushed; the newer ref stayed dirty (not flush-everything).
         assert!(
             store
                 .overlays
@@ -3801,7 +3798,7 @@ mod tests {
         );
     }
 
-    /// rev1§4.4 M-5 across a ring **wrap**: the victim is the front of the WAL
+    /// rev2§4.4 across a ring **wrap**: the victim is the front of the WAL
     /// queue (the record at `wal_head`), *not* the ref with the smallest
     /// `oldest_wal_pos` — those differ once the ring has wrapped (a newer ref sits
     /// at a lower physical offset than the pinner). Flushing the front advances
@@ -3931,7 +3928,7 @@ mod tests {
         );
     }
 
-    /// rev1§4.4 edge case: an exactly-full ring. With `wal_len` a multiple of the
+    /// rev2§4.4 edge case: an exactly-full ring. With `wal_len` a multiple of the
     /// record size, the tail wraps back exactly onto the head — `wal_usage` must
     /// report `wal_len` (full), not `0` (empty). The next write then relieves; one
     /// ref pinning the whole ring degenerates to flush-everything-and-reset.
@@ -3980,7 +3977,7 @@ mod tests {
         );
     }
 
-    /// rev1§4.4 edge case: a record whose **header** (not just payload) straddles
+    /// rev2§4.4 edge case: a record whose **header** (not just payload) straddles
     /// the wrap. The write must split mid-header, and the mount-time rotation must
     /// reassemble it so `decode_frame` reads a contiguous header.
     #[test]
@@ -4043,7 +4040,7 @@ mod tests {
         );
     }
 
-    /// rev1§4.4 normative edge case: an oversized record (larger than the whole
+    /// rev2§4.4 normative edge case: an oversized record (larger than the whole
     /// WAL region) bypasses the log and commits synchronously before ack — even
     /// while the ring already holds live records. The bypass must not corrupt the
     /// ring's tail; the prior live record and the oversized write both survive.
@@ -4087,7 +4084,7 @@ mod tests {
             cases: if cfg!(miri) { 4 } else { 256 },
             ..ProptestConfig::default()
         })]
-        /// rev1§4.4 M-5 ring-arithmetic guard: across arbitrary multi-ref write
+        /// rev2§4.4 ring-arithmetic guard: across arbitrary multi-ref write
         /// streams on a small ring (so it wraps repeatedly and flush-the-pinner
         /// fires), the WAL invariants hold after every op — `wal_head` equals the
         /// front record's offset, `wal_usage` equals the independent sum of live
@@ -4153,7 +4150,7 @@ mod tests {
             cases: if cfg!(miri) { 4 } else { 64 },
             ..ProptestConfig::default()
         })]
-        /// rev1§4.4 M-5 under crash injection: the circular-WAL flush-the-pinner
+        /// rev2§4.4 under crash injection: the circular-WAL flush-the-pinner
         /// path — selective flush, partial head advance, **split writes across the
         /// wrap** — preserves all-acked-survives. A small ring (not record-aligned)
         /// with a 50% watermark makes writes wrap and straddle and the scheduler
@@ -4232,7 +4229,7 @@ mod tests {
             cases: if cfg!(miri) { 4 } else { 256 },
             ..ProptestConfig::default()
         })]
-        /// rev1§4.4 M-4 containment under arbitrary multi-ref write interleavings:
+        /// rev2§4.4 containment under arbitrary multi-ref write interleavings:
         /// the per-ref soft bound caps each ref, and size pressure caps the total,
         /// so dirty bytes stay at or below the low watermark and the high watermark
         /// (`global_budget`) is never reached — except the documented one-ref guard
@@ -4283,7 +4280,7 @@ mod tests {
             cases: if cfg!(miri) { 4 } else { 64 },
             ..ProptestConfig::default()
         })]
-        /// rev1§4.4 M-4 under crash injection: the size-pressure flush-the-biggest-
+        /// rev2§4.4 under crash injection: the size-pressure flush-the-biggest-
         /// offenders path (`flush_ref` + `commit`, partial head advance) preserves
         /// all-acked-survives. Multi-ref writes of unequal size cross a tight low
         /// watermark mid-stream, so the crash point can land inside a *partial*
@@ -4369,7 +4366,7 @@ mod tests {
         }
     }
 
-    /// B7B/T-5: the structural decode split out of `wal_content_ok` and verified
+    /// The structural decode split out of `wal_content_ok` and verified
     /// like the other on-disk decoders. This test gives the verified predicate
     /// *teeth* (verus.md §11): it must accept well-formed records and reject
     /// structurally-malformed ones, and the blake3 half must stay independent.
@@ -4450,7 +4447,7 @@ mod tests {
         assert!(!wal_struct_ok(&[0u8; 4], 0, 4));
     }
 
-    /// B7C/T-2: the recovery core `recover_records` rebuilds the laid-out run and
+    /// The recovery core `recover_records` rebuilds the laid-out run and
     /// flags the seq-exhaustion forgery — teeth for the discharge that makes
     /// `lemma_gap_freedom` live (verus.md §11). The `laid_out` ensures is checked
     /// by Verus; here we pin the *runtime* behaviour the proof rides on: the right
@@ -4504,7 +4501,7 @@ mod tests {
         assert_eq!(rec_gap.records.len(), 1);
         assert!(!rec_gap.forged_max);
 
-        // A valid record at the seq ceiling is the rev1§4.4 forgery: flagged, not
+        // A valid record at the seq ceiling is the rev2§4.4 forgery: flagged, not
         // folded into the laid-out run (mount rejects it loudly).
         let r_max = WalOp::Write {
             ref_name: b"main".to_vec(),
@@ -4592,9 +4589,9 @@ mod tests {
         );
     }
 
-    // ── C2C: unlink-while-open + open handles (rev1§4.9, Design decision 2) ──
+    // ── unlink-while-open + open handles (rev2§4.9) ──
 
-    /// rev1§4.9: "the open handle keeps working against the overlay" after its
+    /// rev2§4.9: "the open handle keeps working against the overlay" after its
     /// name is unlinked — the path reads as absent, but the handle still sees and
     /// can extend the data.
     #[test]
@@ -4619,7 +4616,7 @@ mod tests {
         store.close(h).unwrap();
     }
 
-    /// rev1§4.9: "if at flush time the ID resolves to no path, the data is
+    /// rev2§4.9: "if at flush time the ID resolves to no path, the data is
     /// discarded." The orphaned handle's data never reaches the tree.
     #[test]
     fn unlinked_open_data_discarded_at_flush() {
@@ -4639,7 +4636,7 @@ mod tests {
         assert_eq!(store.read(b"main", &p(&["f"])).unwrap(), None);
     }
 
-    /// rev1§4.9: closing the last handle on an orphaned id discards its dirty data
+    /// rev2§4.9: closing the last handle on an orphaned id discards its dirty data
     /// at once — the overlay reclaims the bytes and the id is forgotten.
     #[test]
     fn close_reaps_orphaned_handle() {
@@ -4659,7 +4656,7 @@ mod tests {
         ));
     }
 
-    /// rev1§4.9: an open handle keeps working *across* a flush (which auto-flushes
+    /// rev2§4.9: an open handle keeps working *across* a flush (which auto-flushes
     /// can trigger mid-write). A named handle's data commits; a later write
     /// through it re-materializes over the now-committed base.
     #[test]
@@ -4701,7 +4698,7 @@ mod tests {
         assert!(store.open_files.is_empty());
     }
 
-    /// rev1§4.9 / work item 4: an open-then-unlinked id has no client across a
+    /// rev2§4.9 / work item 4: an open-then-unlinked id has no client across a
     /// crash (ids are ephemeral). The acked `Write`+`Unlink` records replay to the
     /// same path-visible state — `f` absent — with no special replay logic, and
     /// the orphaned handle's later ephemeral writes (never WAL-logged) are gone.
@@ -4722,7 +4719,7 @@ mod tests {
         assert_eq!(store2.read(b"main", &p(&["f"])).unwrap(), None);
     }
 
-    // ── C2C negative controls (anti-theater): the interleaving oracle has teeth ──
+    // ── Negative controls (anti-theater): the interleaving oracle has teeth ──
 
     /// A model that *kept* an orphaned id's data at flush would predict the path
     /// still readable; the real store discards it, so the two must disagree.
@@ -4753,15 +4750,15 @@ mod tests {
         assert_ne!(got, Vec::<u8>::new()); // a reap-on-unlink oracle would diverge
     }
 
-    // ── C2C interleaving proptest: real Store vs a path-keyed handle model ──
+    // ── Interleaving proptest: real Store vs a path-keyed handle model ──
     //
     // The reference model is a path-keyed naive store with explicit open-handle
     // tracking — the semantics the id indirection optimizes. Files are whole byte
     // vectors applied fresh each read (no interval maps); the committed tree is a
     // plain map (no chunk store). A non-fresh file's base is read lazily at read
     // time from the committed map — so an orphaned id reads against an empty base,
-    // exactly as the real overlay does. `rename` joins the op set when C2B lands;
-    // C2C exercises open/write/write_id/unlink/close/flush.
+    // exactly as the real overlay does. The op set is `rename` plus
+    // open/write/write_id/unlink/close/flush.
 
     #[derive(Default)]
     struct OpenModel {
@@ -4896,7 +4893,7 @@ mod tests {
             for t in self.tombs.clone() {
                 self.committed.remove(&t);
             }
-            // Carry only open handles forward (rev1§4.9); non-open ids vanish.
+            // Carry only open handles forward (rev2§4.9); non-open ids vanish.
             let keep: BTreeSet<u64> = self.open.keys().copied().collect();
             self.by_name.retain(|_, id| keep.contains(id));
             self.name_of.retain(|id, _| keep.contains(id));
@@ -5099,7 +5096,7 @@ mod tests {
             b"original"
         );
 
-        // Snapshot identity is the per-ref sequence number (rev1§4.7).
+        // Snapshot identity is the per-ref sequence number (rev2§4.7).
         let rows: Vec<u64> = store.snapshots(b"main").map(|r| r.id).collect();
         assert_eq!(rows, vec![1]);
     }
@@ -5174,9 +5171,9 @@ mod tests {
 
     #[test]
     fn resurrection_rewrites_condemned_chunk() {
-        // The I-3 witness (rev1§4.6 step 3): a dedup lookup that hits a chunk
+        // The resurrection witness (rev2§4.6 step 3): a dedup lookup that hits a chunk
         // the in-flight sweep has condemned must rewrite under the same hash,
-        // not resurrect the about-to-be-deleted index entry. Pre-B6A this
+        // not resurrect the about-to-be-deleted index entry. Without the guard this
         // dedup'd straight onto the condemned entry — the resurrection bug.
         let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
         let content = b"resurrect me";
@@ -5214,7 +5211,7 @@ mod tests {
     #[test]
     fn live_dedup_unaffected_outside_sweep() {
         // With no sweep in flight (`condemned` empty), a re-put dedups: same
-        // hash, same index entry, no fresh extent — the rev1§4.3 fast path and
+        // hash, same index entry, no fresh extent — the rev2§4.3 fast path and
         // the `is_empty` short-circuit are preserved.
         let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
         let content = b"dedup me";
@@ -5328,7 +5325,7 @@ mod tests {
         );
 
         // Dropping the snapshot is a ref-table edit; the next GC reclaims
-        // the now-unreachable mass (rev1§4.6 "history rewriting").
+        // the now-unreachable mass (rev2§4.6 "history rewriting").
         let used_before = store.space().used;
         store.delete_snapshot(b"main", snap).unwrap();
         let stats = store.gc().unwrap();
@@ -5348,7 +5345,7 @@ mod tests {
         store
             .write(b"main", &p(&["f"]), 0, &[7u8; 5000], 1)
             .unwrap();
-        // Two snapshots of unchanged content share one root (rev1§4.7: same
+        // Two snapshots of unchanged content share one root (rev2§4.7: same
         // root for different events is normal under canonical trees).
         let s1 = store
             .snapshot(b"main", b"t", b"a", disk::CLASS_AUTO, 10)
@@ -5392,7 +5389,7 @@ mod tests {
             .snapshot(b"main", b"t", b"", disk::CLASS_AUTO, 30)
             .unwrap();
 
-        // Prune the middle: the child re-points to the grandparent (rev1§4.7).
+        // Prune the middle: the child re-points to the grandparent (rev2§4.7).
         store.delete_snapshot(b"main", s2).unwrap();
         let rows: Vec<(u64, Option<u64>)> =
             store.snapshots(b"main").map(|r| (r.id, r.parent)).collect();
@@ -5405,7 +5402,7 @@ mod tests {
             Err(StoreError::Pinned)
         ));
 
-        // Retention class is an editable row field (rev1§4.7).
+        // Retention class is an editable row field (rev2§4.7).
         store
             .set_snapshot_class(b"main", s3, disk::CLASS_KEEP)
             .unwrap();
@@ -5415,7 +5412,7 @@ mod tests {
         );
     }
 
-    /// rev1§4.7 "Tags" (M-8): `tag`/`untag`/`tags` round-trip; a tag is an
+    /// rev2§4.7 "Tags": `tag`/`untag`/`tags` round-trip; a tag is an
     /// entry-set mutation (advances the edit version) that pins the snapshot,
     /// persists across mount, and survives a metadata edit (it names the id);
     /// `untag` is ref-scoped and idempotent.
@@ -5485,7 +5482,7 @@ mod tests {
             cases: if cfg!(miri) { 4 } else { 256 },
             ..ProptestConfig::default()
         })]
-        /// rev1§4.7 invariant under random tag/untag/delete interleavings: a
+        /// rev2§4.7 invariant under random tag/untag/delete interleavings: a
         /// pinned snapshot is never deleted, and a tag never strands on a
         /// snapshot that is gone — the model mirrors which ids are tagged and
         /// which still exist, and the store must agree at every step.
@@ -5630,7 +5627,7 @@ mod tests {
         /// unflushed writes), every acknowledged mutation is recoverable.
         /// At most the single in-flight unacked mutation is ambiguous.
         /// Selectors 12–17 mix in maintenance ops (sync, snapshot,
-        /// snapshot deletion, GC, and rev1§4.7 guarded ref-table batches) so
+        /// snapshot deletion, GC, and rev2§4.7 guarded ref-table batches) so
         /// the crash point can land anywhere in the commit too — none of them
         /// may change logical (file) state, and a batch is all-or-nothing.
         #[test]
@@ -5671,7 +5668,7 @@ mod tests {
                             }
                         }
                         15 => store.gc().map(|_| ()),
-                        // 16/17: a rev1§4.7 guarded batch at the ref's current
+                        // 16/17: a rev2§4.7 guarded batch at the ref's current
                         // version (so it never version-mismatches here). Edits
                         // are row/tag surgery — content-neutral like the others
                         // — and ride the one commit all-or-nothing across the
@@ -5764,10 +5761,10 @@ mod tests {
         }
     }
 
-    // ── C2B: rename (rev1§4.9) ──────────────────────────────────────────────
+    // ── rename (rev2§4.9) ──────────────────────────────────────────────
 
     /// A dirty file's rename moves the name in the overlay and flushes at the
-    /// new name with the source gone from the tree (DD3). The base is read from
+    /// new name with the source gone from the tree. The base is read from
     /// the `origin`, so a renamed-but-unflushed read already sees the content.
     #[test]
     fn rename_dirty_file_flushes_at_new_name() {
@@ -5789,7 +5786,7 @@ mod tests {
 
     /// A clean (committed) file's rename: the store opens it into the overlay so
     /// flush reads the committed bytes at the `origin` and writes them at the
-    /// new name (rev1§4.9).
+    /// new name (rev2§4.9).
     #[test]
     fn rename_clean_file_moves_committed_bytes() {
         let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
@@ -5813,7 +5810,7 @@ mod tests {
     }
 
     /// Renaming over an existing committed file is last-write-wins: the
-    /// destination's old content is replaced by the source's (rev1§4.4).
+    /// destination's old content is replaced by the source's (rev2§4.4).
     #[test]
     fn rename_over_existing_is_last_write_wins() {
         let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
@@ -5831,7 +5828,7 @@ mod tests {
     }
 
     /// `a→b` then a fresh write to `a`: flush keeps the new `a` (the rename's
-    /// stale source must not delete the freshly recreated file — DD3).
+    /// stale source must not delete the freshly recreated file).
     #[test]
     fn rename_then_recreate_source_keeps_both() {
         let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
@@ -5849,7 +5846,7 @@ mod tests {
     }
 
     /// A directory rename is an O(depth) detach/reattach: the subtree moves
-    /// wholesale and the children follow (rev1§4.9 `:337`).
+    /// wholesale and the children follow (rev2§4.9 `:337`).
     #[test]
     fn rename_directory_detach_reattach() {
         let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
@@ -5877,7 +5874,7 @@ mod tests {
         ));
     }
 
-    /// An acknowledged-but-unflushed rename replays after a crash (rev1§4.5):
+    /// An acknowledged-but-unflushed rename replays after a crash (rev2§4.5):
     /// the WAL `Rename` record reconstructs the move on mount. Negative control:
     /// an otherwise-identical store that never issued the rename recovers the
     /// pre-rename state — so the record is load-bearing, not incidental.
@@ -5915,8 +5912,8 @@ mod tests {
     /// directory drains + commits, logs the `Rename`, then flushes + commits, so
     /// the power cut can land in any of those. After recovery (draining any
     /// replayed-but-unflushed move), the subtree is intact at *exactly one*
-    /// location — old or new, never both, neither, nor torn (rev1§4.2 atomicity
-    /// + rev1§4.5 replay). `clear_fail` is mandatory: the recovery mount itself
+    /// location — old or new, never both, neither, nor torn (rev2§4.2 atomicity
+    /// + rev2§4.5 replay). `clear_fail` is mandatory: the recovery mount itself
     /// must not hit the injected failure.
     #[test]
     fn directory_rename_survives_crash() {
@@ -6060,7 +6057,7 @@ mod tests {
         }
     }
 
-    /// Regression for the WAL stale-record graft (rev1§4.5): the record
+    /// Regression for the WAL stale-record graft (rev2§4.5): the record
     /// checksum once covered only the payload, not the sequence number. The WAL
     /// is a reused linear region whose stale bytes are rejected on replay by the
     /// seq check, but a torn write at a reused offset could overwrite *just* the
@@ -6191,7 +6188,7 @@ mod tests {
         }
     }
 
-    /// rev1§2.6: pre-v3 images are re-created with mkfs, and that stance is
+    /// rev2§2.6: pre-v3 images are re-created with mkfs, and that stance is
     /// only mechanical if an intact old-version image is refused with a
     /// *version* error — tick and nanosecond timestamp fields are
     /// structurally identical, so nothing else stands between an old
@@ -6225,8 +6222,8 @@ mod tests {
         );
     }
 
-    /// B5A bumped the format v3 → v4 (each `RefEntry` now carries a fixed-width
-    /// `edit_version`, rev1§4.7). A v3 ref record is one u64 shorter, so a v3
+    /// Format v4 has each `RefEntry` carry a fixed-width
+    /// `edit_version`, rev2§4.7). A v3 ref record is one u64 shorter, so a v3
     /// reader handed a v4 record — or vice versa — would desync; the version
     /// gate must refuse the superseded format cleanly, never mis-decode.
     #[test]
@@ -6258,8 +6255,8 @@ mod tests {
         );
     }
 
-    /// C2B bumped the format v4 → v5 (the WAL gained a tag-3 `Rename` op). A
-    /// pre-C2B (v4) binary could decode a tag-3 record as a torn tail and
+    /// Format v5 has the WAL carry a tag-3 `Rename` op. A
+    /// v4 binary decodes a tag-3 record as a torn tail and
     /// silently drop a renamed-but-unflushed write, so the version gate refuses
     /// a v4 image cleanly. `mkfs`/`format` write v5 — checked by the round-trip
     /// mount above (a freshly formatted store mounts), here we pin the refusal.
@@ -6292,10 +6289,10 @@ mod tests {
         );
     }
 
-    /// rev1§4.7: the edit version advances once per committed entry-set
+    /// rev2§4.7: the edit version advances once per committed entry-set
     /// mutation (snapshot row, head move, row surgery) and persists through the
     /// commit — the value a later guarded batch's `expected_version` compares
-    /// against (B5B).
+    /// against.
     #[test]
     fn edit_version_advances_per_committed_mutation_and_persists() {
         let mut store = Store::format(MemDev::new(1 << 20), test_opts()).unwrap();
@@ -6327,7 +6324,7 @@ mod tests {
         assert_eq!(store2.edit_version(b"main"), Some(4));
     }
 
-    /// rev1§4.7/§2.2: the edit version and the revocation generation are
+    /// rev2§4.7/§2.2: the edit version and the revocation generation are
     /// orthogonal counters in the same `RefEntry`. A revoke advances generation
     /// and leaves the edit version untouched; an entry-set mutation advances the
     /// edit version and leaves generation untouched. (Load-bearing: a retention
@@ -6381,8 +6378,8 @@ mod tests {
         assert_eq!(store.edit_version(b"main"), Some(1));
     }
 
-    /// Design decision 2 / rev1§4.7: the bump is once per commit per dirtied
-    /// ref, not once per edit — so the guarded batch (B5B), which stages several
+    /// rev2§4.7: the bump is once per commit per dirtied
+    /// ref, not once per edit — so the guarded batch, which stages several
     /// edits on one ref in one commit, ticks the version exactly once. The
     /// dirty-set collapses repeated touches before the single commit.
     #[test]
@@ -6397,7 +6394,7 @@ mod tests {
         assert_eq!(store.edit_version(b"main"), Some(1));
     }
 
-    /// rev1§4.7 / I-2: the guarded batch is conditional on the ref's edit
+    /// rev2§4.7: the guarded batch is conditional on the ref's edit
     /// version. A stale `expected_version` is refused carrying the current
     /// version, with no mutation and no commit; re-reading and retrying at the
     /// current version applies the batch and ticks the version once.
@@ -6445,7 +6442,7 @@ mod tests {
         );
     }
 
-    /// rev1§4.7: a guarded batch is all-or-nothing. An invalid edit anywhere in
+    /// rev2§4.7: a guarded batch is all-or-nothing. An invalid edit anywhere in
     /// the batch (deleting a pinned snapshot, or a nonexistent id) rejects the
     /// whole batch with that edit's error — none of the earlier valid edits
     /// land, and the version does not advance (no commit).
@@ -6510,7 +6507,7 @@ mod tests {
         assert_eq!(store.edit_version(b"main"), Some(v));
     }
 
-    /// rev1§4.7: a multi-edit batch commits once (one version bump) and every
+    /// rev2§4.7: a multi-edit batch commits once (one version bump) and every
     /// edit lands — including a tag create that then pins its snapshot — and
     /// the result survives a remount.
     #[test]
@@ -6574,7 +6571,7 @@ mod tests {
         );
     }
 
-    /// rev1§4.7: `ts = max(now, predecessor_ts + 1)` — an RTC that regressed
+    /// rev2§4.7: `ts = max(now, predecessor_ts + 1)` — an RTC that regressed
     /// between boots can never disorder a ref's snapshot log.
     #[test]
     fn snapshot_timestamps_are_strictly_monotone_per_ref() {
@@ -6599,7 +6596,7 @@ mod tests {
         assert_eq!(rows, vec![(a, 1000), (b, 1001), (c, 1002)]);
     }
 
-    // ── staleness-timer trigger (rev1§4.4 trigger 4, M-6 timer half) ──
+    // ── staleness-timer trigger (rev2§4.4 trigger 4) ──
     //
     // Time is the caller-injected `now`/`mtime` (UTC-nanos, the same source op
     // mtimes carry) — there is no internal store clock — so these drive it with
@@ -6622,7 +6619,7 @@ mod tests {
         }
     }
 
-    /// rev1§4.4 trigger 4 (M-6 timer half): the explicit staleness sweep
+    /// rev2§4.4 trigger 4: the explicit staleness sweep
     /// (`flush_stale`, the reactor-idle / request-boundary entry point) flushes a
     /// ref whose oldest-dirty age exceeds `staleness_ns` to committed tree, while
     /// a ref dirtied within the bound stays dirty — selective, not flush-everything.
@@ -6675,7 +6672,7 @@ mod tests {
     }
 
     /// The staleness trigger also fires opportunistically on the write path
-    /// (rev1§4.4: a check at the request entry, lowest priority): a write whose
+    /// (rev2§4.4: a check at the request entry, lowest priority): a write whose
     /// timestamp leaves an *older* quiet ref past the bound flushes that quiet
     /// ref, while the just-written ref stays dirty.
     #[test]

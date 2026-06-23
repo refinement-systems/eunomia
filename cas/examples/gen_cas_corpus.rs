@@ -255,7 +255,7 @@ fn chunker_seeds() {
     write_seed("chunker", "multi", &mid);
 }
 
-/// The format-v4 ref table (rev1§4.7): refs (now carrying `edit_version`),
+/// The format-v4 ref table (rev2§4.7): refs (now carrying `edit_version`),
 /// snapshot rows, and tags. Built with the real `RefTable::encode`, with
 /// non-zero `edit_version`s so the new field is exercised on the happy path.
 fn ref_table_seeds() {
@@ -381,7 +381,7 @@ fn mount_recovery_seeds() {
     seed_both("wal_pending", &dump(&store.into_dev()));
 
     // Torn images straight out of the crash device: durable state plus a
-    // random kept/dropped/torn subset of unflushed writes (rev1§4.5).
+    // random kept/dropped/torn subset of unflushed writes (rev2§4.5).
     for seed in [0xDEADu64, 0x1234, 0xF00D] {
         let mut store = Store::format(CrashDev::new(32 * 1024), small_opts()).unwrap();
         store.create_ref(b"main").unwrap();

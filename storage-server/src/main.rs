@@ -1,4 +1,4 @@
-//! Storage server — userspace process holding the virtio-blk cap (spec rev1§4).
+//! Storage server — userspace process holding the virtio-blk cap (spec rev2§4).
 //!
 //! The session/handle/dispatch core lives in lib.rs and is host-testable.
 //! This binary is the on-OS server (real processes + IPC transport over

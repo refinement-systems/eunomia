@@ -1,4 +1,4 @@
-//! mkfs — host-side tool to build the initial disk image (rev1§7).
+//! mkfs — host-side tool to build the initial disk image (rev2§7).
 //!
 //! Reuses the cas storage engine: format the device, create the `main`
 //! ref, populate it from a host directory tree, take snapshot #1. The
@@ -6,7 +6,7 @@
 //! mounts in QEMU.
 //!
 //! The logic is in this lib so a host `cargo test` can drive the directory
-//! walk in-process (rev1§6 Baseline tier); `src/main.rs` is the thin CLI
+//! walk in-process (rev2§6 Baseline tier); `src/main.rs` is the thin CLI
 //! shell over [`run`].
 
 use cas::dev::{BlockDev, FileDev};
@@ -24,7 +24,7 @@ pub fn mtime_nanos(md: &std::fs::Metadata) -> u64 {
         .unwrap_or(0)
 }
 
-/// The tooling name-acceptance rule (rev1§4.9): tooling enforces the
+/// The tooling name-acceptance rule (rev2§4.9): tooling enforces the
 /// printable-ASCII convention — every byte in `0x20..0x7F` and no `'/'` —
 /// even though the format itself only excludes NUL and `'/'`. A name that
 /// is not UTF-8, or carries a non-printable/`'/'` byte, is *not acceptable*
@@ -39,8 +39,8 @@ pub fn name_acceptable(name: &OsStr) -> Option<&str> {
     }
 }
 
-/// `StoreOptions` for the one-shot batch image build (rev1§4.4 — the numbers
-/// are tunable). A deliberately modest WAL — *not* drift from the rev1§4.4
+/// `StoreOptions` for the one-shot batch image build (rev2§4.4 — the numbers
+/// are tunable). A deliberately modest WAL — *not* drift from the rev2§4.4
 /// recommended 64 MiB. Two reasons it is tuned down for the batch tool:
 /// recovery replay buffers the whole region and the on-OS server has a few
 /// MiB of heap, not gigabytes (streaming replay is future work, tracked in
@@ -64,7 +64,7 @@ pub fn batch_store_options() -> StoreOptions {
 /// under `prefix`. Entries are sorted by name (the determinism hinge — the
 /// mount is a function of the *logical* tree, not host `read_dir` order);
 /// names that fail [`name_acceptable`] and non-regular entries are skipped,
-/// never fatal (rev1§4.9). Returns the count of regular files written.
+/// never fatal (rev2§4.9). Returns the count of regular files written.
 ///
 /// Generic over the [`BlockDev`] backend so host tests can drive it against
 /// an in-memory `MemDev` store; `run` instantiates it with `FileDev`.

@@ -1,16 +1,16 @@
-//! Asynchronous IPC channels (spec rev1§3.1-3.4, rev1§3.6).
+//! Asynchronous IPC channels (spec rev2§3.1-3.4, rev2§3.6).
 //!
 //! A channel is two endpoints (A, B) over two fixed-depth rings of message
 //! slots — ring 0 carries A→B, ring 1 carries B→A. A message slot is a
 //! 256-byte inline payload plus 4 real `CapSlot`s: queued caps are
 //! CDT-visible and owned by the channel, so revocation sees through queues
-//! (rev1§3.4) with no special case.
+//! (rev2§3.4) with no special case.
 //!
 //! Queue memory comes from the untyped donated at retype; capacity is the
-//! creator-chosen depth (rev1§3.2). Send is non-blocking and returns FULL;
+//! creator-chosen depth (rev2§3.2). Send is non-blocking and returns FULL;
 //! messages are never dropped. Each endpoint carries fixed binding slots
 //! (on-readable / on-writable / on-peer-closed → notification, bits);
-//! event delivery never allocates (rev1§3.6).
+//! event delivery never allocates (rev2§3.6).
 //!
 //! The channel is addressed by an opaque
 //! [`ObjId`](crate::id::ObjId) and all of its state is reached through the
@@ -53,7 +53,7 @@ pub struct MsgSlot {
 pub struct Channel {
     pub hdr: ObjHeader,
     pub depth: u32,
-    /// Live endpoint caps per end, for peer-closed (rev1§3.3).
+    /// Live endpoint caps per end, for peer-closed (rev2§3.3).
     pub end_caps: [u32; 2],
     pub head: [u32; 2],
     pub count: [u32; 2],
@@ -175,7 +175,7 @@ impl Channel {
 
 verus! {
 
-/// Account a newly installed endpoint cap (retype's channel arm, rev1§2.5; rev1§3.3
+/// Account a newly installed endpoint cap (retype's channel arm, rev2§2.5; rev2§3.3
 /// peer-closed accounting).
 ///
 /// Bumps `end_caps[end]` by one, leaving `slot_view`/
@@ -224,7 +224,7 @@ pub fn endpoint_cap_added<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
 }
 
 /// Called on every endpoint-cap deletion; the last cap of an end raises
-/// the other end's peer-closed event (rev1§3.3, session cleanup rev1§2.4).
+/// the other end's peer-closed event (rev2§3.3, session cleanup rev2§2.4).
 ///
 /// Decrements `end_caps[end]`, then — only when that count
 /// reaches zero — fires the *other* end's peer-closed event through the verified
@@ -243,14 +243,14 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
             old(store).tcb_view(), ch),
         cspace::binding_refs_ok(old(store).chan_view(), old(store).notif_view(),
             old(store).refs_view(), ch, 1 - end_idx_spec(end), EV_PEER_CLOSED as int),
-        // The cap→object invariant + the rev1§3.3 endpoint census, both off by one at `(ch, end)`:
+        // The cap→object invariant + the rev2§3.3 endpoint census, both off by one at `(ch, end)`:
         // `delete` cleared the deleted cap's slot before this call, so
         // `end_caps[ch][end]` over-counts the arena by one. The decrement here restores
         // `end_caps_sound` and re-establishes `caps_consistent` (no sibling stranded — a live
         // sibling makes the count ≥ 1, so the over-count is ≥ 2). `delete`-supplied.
         cspace::caps_consistent(old(store)),
         cspace::end_caps_off_by_one(old(store), ch, end_idx_spec(end)),
-        // B8C: the peer-closed `fire` faithfully enqueues the woken thread, so carry the
+        // The peer-closed `fire` faithfully enqueues the woken thread, so carry the
         // ready-queue invariants (`delete` supplies them; `fire` re-establishes them on the wake).
         cspace::ready_wf(old(store).ready_view(), old(store).tcb_view()),
         cspace::ready_complete(old(store).ready_view(), old(store).tcb_view()),
@@ -362,7 +362,7 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
         }
     }
     proof {
-        // B8C: `set_chan_end_caps` frames `ready_view` + `tcb_view`, so the ready pair carries
+        // `set_chan_end_caps` frames `ready_view` + `tcb_view`, so the ready pair carries
         // to feed `fire`'s requires (bound branch) and the no-fire ensures (else branch).
         cspace::lemma_ready_inv_frame(old(store), store);
     }
@@ -425,7 +425,7 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
     }
 }
 
-/// Raise an endpoint's event into its bound notification, if bound (rev1§3.6).
+/// Raise an endpoint's event into its bound notification, if bound (rev2§3.6).
 ///
 /// Reads a binding (a getter) and
 /// conditionally calls `signal` (a proven body). `signal`'s
@@ -444,7 +444,7 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
             old(store).tcb_view(), ch),
         cspace::binding_refs_ok(old(store).chan_view(), old(store).notif_view(),
             old(store).refs_view(), ch, end as int, event as int),
-        // B8C: the fire carries the ready-queue invariants across the bound `signal`
+        // The fire carries the ready-queue invariants across the bound `signal`
         // (the teardown/IPC callers supply them; `signal` re-establishes them on the wake).
         cspace::ready_wf(old(store).ready_view(), old(store).tcb_view()),
         cspace::ready_complete(old(store).ready_view(), old(store).tcb_view()),
@@ -517,7 +517,7 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
                 // other by the frame lemma (signal touched no waiter of `m != n`).
                 assert(old(store).chan_view()[ch].bindings[(e, v)].notif is Some);
                 if m != n {
-                    // B8C: signal's contrapositive frame freezes every in-domain waiter of
+                    // Signal's contrapositive frame freezes every in-domain waiter of
                     // `m != n`. If such a `k` (`wait_notif == Some(m)`) had changed, signal's
                     // frame says it was an `n`-waiter (`Some(n) != Some(m)`) or Runnable (⇒
                     // `wait_notif None` by `ready_complete`, contradicting `Some(m)`) — neither
@@ -587,7 +587,7 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
         // `old` is this `old`, nothing preceded it); the unbound branch frames `refs` whole.
         if b.notif is None {
             cspace::lemma_refs_death_persist_from_refs_eq(old(store), store);
-            // B8C: the unbound branch is a no-op, so the ready invariants ride the equal-views
+            // The unbound branch is a no-op, so the ready invariants ride the equal-views
             // frame. (The bound branch rides `signal`'s own `ready_wf`/`ready_complete` ensures.)
             cspace::lemma_ready_inv_frame(old(store), store);
         }
@@ -655,9 +655,9 @@ proof fn lemma_bind_refs_post_at(
     }
 }
 
-/// Configure an endpoint's event binding (holder-configured, rev1§3.6).
+/// Configure an endpoint's event binding (holder-configured, rev2§3.6).
 /// Replacing a binding releases the old notification's ref and adds the new
-/// one's (rev1§3.6 binding-refcount discipline).
+/// one's (rev2§3.6 binding-refcount discipline).
 ///
 /// Installs `Binding { notif, bits }` at `(end, event)`,
 /// leaving `slot_view` and every other channel field untouched; the `refs_view`
@@ -745,7 +745,7 @@ pub fn bind<S: Store>(
 }
 
 /// Send: copy the payload into the ring and move caps from the sender's
-/// slots into the message's CDT-visible slots (rev1§3.4 move semantics).
+/// slots into the message's CDT-visible slots (rev2§3.4 move semantics).
 ///
 /// On `Ok` the message is enqueued FIFO at the tail —
 /// `ring_fifo` of the sending ring grows by `Seq::push`, the other ring is
@@ -780,7 +780,7 @@ pub fn send<S: Store>(
             old(store).tcb_view(), ch),
         cspace::binding_refs_ok(old(store).chan_view(), old(store).notif_view(),
             old(store).refs_view(), ch, 1 - end_idx_spec(end), EV_READABLE as int),
-        // B8C: the readable `fire` faithfully enqueues a woken receiver, so `send` carries the
+        // The readable `fire` faithfully enqueues a woken receiver, so `send` carries the
         // ready-queue invariants in. (The trusted syscall shell supplies them; `send` consumes
         // them only to discharge `fire`'s requires — no kcore caller needs them in `ensures`.)
         cspace::ready_wf(old(store).ready_view(), old(store).tcb_view()),
@@ -877,7 +877,7 @@ pub fn send<S: Store>(
             store.refs_view() == r0,
             store.notif_view() == nv0,
             store.tcb_view() == tv0,
-            // B8C: the ring/cap loop touches no thread state; the setters frame `ready_view`,
+            // The ring/cap loop touches no thread state; the setters frame `ready_view`,
             // so it stays pinned to entry — lets `lemma_ready_inv_frame` carry the pair to `fire`.
             store.ready_view() == rrv0,
             cspace::cspace_wf(store.slot_view()),
@@ -1028,7 +1028,7 @@ pub fn send<S: Store>(
     assert(store.refs_view() == old(store).refs_view());
     assert(store.chan_view()[ch].bindings == cv0[ch].bindings);
     proof {
-        // B8C: the ring enqueue framed `ready_view` + `tcb_view`, so the ready pair carries
+        // The ring enqueue frames `ready_view` + `tcb_view`, so the ready pair carries
         // unchanged to feed `fire`'s requires.
         cspace::lemma_ready_inv_frame(old(store), store);
     }
@@ -1117,9 +1117,9 @@ verus! {
 
 /// Receive into `buf`, installing caps into `dests`. If any arriving cap
 /// has no free destination the receive fails and the message stays queued
-/// (rev1§3.3) — receive-side exhaustion is the receiver's own problem.
+/// (rev2§3.3) — receive-side exhaustion is the receiver's own problem.
 /// Revocation may have emptied queued slots in flight; receivers see those
-/// as absent caps (rev1§3.4 null slots).
+/// as absent caps (rev2§3.4 null slots).
 ///
 /// Two-pass atomicity — pass 1 is read-only, so `Empty`/
 /// `NoCapSlot` leave the store (and the queued message) unchanged; pass 2 moves
@@ -1153,7 +1153,7 @@ pub fn recv<S: Store>(
             old(store).tcb_view(), ch),
         cspace::binding_refs_ok(old(store).chan_view(), old(store).notif_view(),
             old(store).refs_view(), ch, 1 - end_idx_spec(end), EV_WRITABLE as int),
-        // B8C: the writable `fire` faithfully enqueues a woken sender, so `recv` carries the
+        // The writable `fire` faithfully enqueues a woken sender, so `recv` carries the
         // ready-queue invariants in (trusted shell supplies them; consumed only for `fire`).
         cspace::ready_wf(old(store).ready_view(), old(store).tcb_view()),
         cspace::ready_complete(old(store).ready_view(), old(store).tcb_view()),
@@ -1249,7 +1249,7 @@ pub fn recv<S: Store>(
             store.refs_view() == r0,
             store.notif_view() == nv0,
             store.tcb_view() == tv0,
-            // B8C: the ring/cap loop touches no thread state; the setters frame `ready_view`,
+            // The ring/cap loop touches no thread state; the setters frame `ready_view`,
             // so it stays pinned to entry — lets `lemma_ready_inv_frame` carry the pair to `fire`.
             store.ready_view() == rrv0,
             // Pass 1 is read-only, so the binding invariant rides through unchanged — it
@@ -1302,7 +1302,7 @@ pub fn recv<S: Store>(
             store.refs_view() == r0,
             store.notif_view() == nv0,
             store.tcb_view() == tv0,
-            // B8C: the ring/cap loop touches no thread state; the setters frame `ready_view`,
+            // The ring/cap loop touches no thread state; the setters frame `ready_view`,
             // so it stays pinned to entry — lets `lemma_ready_inv_frame` carry the pair to `fire`.
             store.ready_view() == rrv0,
             cspace::cspace_wf(store.slot_view()),
@@ -1496,7 +1496,7 @@ pub fn recv<S: Store>(
     assert(store.refs_view() == old(store).refs_view());
     assert(store.chan_view()[ch].bindings == cv0[ch].bindings);
     proof {
-        // B8C: the ring dequeue framed `ready_view` + `tcb_view`, so the ready pair carries
+        // The ring dequeue frames `ready_view` + `tcb_view`, so the ready pair carries
         // unchanged to feed `fire`'s requires.
         cspace::lemma_ready_inv_frame(old(store), store);
     }
@@ -1636,7 +1636,7 @@ fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
         final(store).slot_view() == old(store).slot_view(),
         final(store).cspace_view() == old(store).cspace_view(),
         final(store).irq_view() == old(store).irq_view(),
-        // B8C: `release_binding` touches only chan bindings + `refs[n]`; the setters frame
+        // `release_binding` touches only chan bindings + `refs[n]`; the setters frame
         // `tcb_view` + `ready_view`, so `destroy_channel`'s binding-release loop carries the
         // ready pair across it (via `lemma_ready_inv_frame`).
         final(store).tcb_view() == old(store).tcb_view(),
@@ -1795,7 +1795,7 @@ fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
 
 /// Tear a channel down once its last endpoint cap is gone (`refs == 0`): delete
 /// every queued cap with ordinary CDT cleanup — cashing a shredded envelope
-/// (rev1§3.4) — and release every event binding's notification ref.
+/// (rev2§3.4) — and release every event binding's notification ref.
 ///
 /// The teardown verifies against the full contract, closing the channel arm of the
 /// cross-object SCC `obj_unref → destroy_channel → delete → obj_unref` under the
@@ -1813,7 +1813,7 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
         // Cap→object consistency: the body deletes ring caps of
         // arbitrary kind, so it needs each one's object well-formed.
         cspace::caps_consistent(old(store)),
-        // The rev1§3.3 endpoint-cap census: ring caps may be
+        // The rev2§3.3 endpoint-cap census: ring caps may be
         // channel caps, so the body's `delete`s thread it.
         cspace::end_caps_sound(old(store)),
         // Refs-domain completeness: the body's `delete`s thread it.
@@ -1822,7 +1822,7 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
         // sits there at `refs == 0` (`obj_unref` calls this at `refs[ch] == 0`). `ch` homes its ring
         // caps, so it is the death witness for each ring slot the teardown empties.
         cspace::dead_obj(old(store), ch),
-        // B8C: ring-cap `delete`s can fire / tear down threads, touching the ready queue.
+        // Ring-cap `delete`s can fire / tear down threads, touching the ready queue.
         cspace::ready_wf(old(store).ready_view(), old(store).tcb_view()),
         cspace::ready_complete(old(store).ready_view(), old(store).tcb_view()),
     ensures
@@ -1901,7 +1901,7 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
             // Dual provenance composes across the ring-cap deletes.
             cspace::emptied_via_dead_home_free(old(store), store),
             cspace::refs_death_persist(old(store), store),
-            // B8C: the ready pair carries across the ring loop — each `delete` ensures it.
+            // The ready pair carries across the ring loop — each `delete` ensures it.
             cspace::ready_wf(store.ready_view(), store.tcb_view()),
             cspace::ready_complete(store.ready_view(), store.tcb_view()),
             // `ch` is dead throughout (it entered dead, death is monotone-preserved) — the witness
@@ -2096,7 +2096,7 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
             cspace::unhomed_frozen_free(old(store), store),
             cspace::emptied_via_dead_home_free(old(store), store),
             cspace::refs_death_persist(old(store), store),
-            // B8C: the ready pair carries across the binding-release loop — `release_binding`
+            // The ready pair carries across the binding-release loop — `release_binding`
             // frames `ready_view` + `tcb_view`, threaded by `lemma_ready_inv_frame`.
             cspace::ready_wf(store.ready_view(), store.tcb_view()),
             cspace::ready_complete(store.ready_view(), store.tcb_view()),
@@ -2139,7 +2139,7 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
             let ghost st_before = *store;
             release_binding(store, ch, end, ev);
             proof {
-                // B8C: `release_binding` frames `ready_view` + `tcb_view`; carry the pair.
+                // `release_binding` frames `ready_view` + `tcb_view`; carry the pair.
                 cspace::lemma_ready_inv_frame(&st_before, store);
                 cspace::lemma_chan_struct_frame_trans(
                     old(store).chan_view(), cv_before, store.chan_view());

@@ -11,7 +11,7 @@
 //! sorted, pairwise-disjoint list of `(offset, len)` extents over `[0, N)`. The
 //! allocation algorithm (first-fit search, alignment round-up, split,
 //! two-sided coalesce) is therefore the **Verus-verified** `FreeList`
-//! arithmetic of the shared `freelist` crate (rev1§6). The only `unsafe` left in
+//! arithmetic of the shared `freelist` crate (rev2§6). The only `unsafe` left in
 //! the allocator is a three-step arena seam: `UnsafeCell` → `&mut`,
 //! `offset → *mut u8` via `base.add(off)` (in-arena by `alloc`'s `ensures`), and
 //! `*mut u8 → offset` on dealloc — the same trusted byte-region boundary the
@@ -42,7 +42,7 @@
 //!   static HEAP: urt::Heap<{ 2 * 1024 * 1024 }> = urt::Heap::new();
 
 // `no_std` for every real build; under `cargo test` the crate links `std` so the
-// B11C wrapper proptests can use `std::panic::catch_unwind` + the panic hook (the
+// wrapper proptests can use `std::panic::catch_unwind` + the panic hook (the
 // fragmentation-cap leak path's `debug_assert!` witness). Verus verification is
 // not a test build, so it still sees `no_std`. Same idiom as `dma-pool`.
 #![cfg_attr(not(test), no_std)]
@@ -72,12 +72,12 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::ptr;
 
-// The verified free-list core (shared with dma-pool; extracted in B11A). The
+// The verified free-list core (shared with dma-pool). The
 // heap's whole allocation algorithm is this proof — see the module doc.
 use freelist::FreeList;
 
 /// Free-extent fragmentation cap: the side-stored `FreeList` is a fixed array of
-/// this many `(offset, len)` extents (Design decision 3). Disclosed MVP bound.
+/// this many `(offset, len)` extents. Disclosed MVP bound.
 const HEAP_RANGES: usize = 1024;
 /// Arena granularity: every allocation is rounded up to this, so carved offsets
 /// stay 16-aligned (the minimum alignment every Rust allocation expects).
@@ -161,7 +161,7 @@ unsafe impl<const N: usize> GlobalAlloc for Heap<N> {
             return;
         }
         // Double-free / overlap guard. `is_allocated` is the verified accessor
-        // (in `freelist`); heap input is trusted in-process (note 4 of the B11
+        // (in `freelist`); heap input is trusted in-process (note 4 of the
         // verification tier), so this is a debug_assert — release rests on
         // `core`'s correctness, the same line dma-pool draws.
         debug_assert!(
@@ -267,13 +267,13 @@ mod tests {
         }
     }
 
-    // ---- B11C: wrapper Miri + proptest tier (mirrors dma-pool's B4C). --------
+    // ---- wrapper Miri + proptest tier (mirrors dma-pool). --------
     //
     // The verified `freelist::FreeList` proves the allocation *arithmetic*; these
     // properties prove the wrapper *drivers* — alloc → write the bytes →
     // dealloc/realloc over a real arena through the `UnsafeCell` + `base.add(off)`
     // seam — are sound under randomized sequences, with Miri as the UB oracle (the
-    // rev1§6 "everything gets Miri + proptest" baseline the heap had never met).
+    // rev2§6 "everything gets Miri + proptest" baseline the heap had never met).
 
     use proptest::prelude::*;
     use std::panic;

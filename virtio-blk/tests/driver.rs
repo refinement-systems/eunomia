@@ -75,7 +75,7 @@ fn blockdev_adapter_handles_unaligned_io() {
     assert!(dev.read(256 * SECTOR as u64 - 2, &mut over).is_err());
 }
 
-// S-11 (rev1§4.x): the driver carries a defensive LBA-vs-capacity bound, so an
+// rev2§4.x: the driver carries a defensive LBA-vs-capacity bound, so an
 // out-of-range transfer is refused locally (`OutOfRange`) *before* any device
 // round-trip — distinct from the device's own `DeviceError`, which a real
 // round-trip past the end would surface.

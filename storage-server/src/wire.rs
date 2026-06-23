@@ -1,6 +1,6 @@
-//! Wire encoding for the storage protocol (spec rev1§3.7): a fixed
+//! Wire encoding for the storage protocol (spec rev2§3.7): a fixed
 //! hand-defined header (magic, protocol id, version) + a postcard body.
-//! Messages fit the 256-byte inline channel payload (rev1§3.1); bulk data
+//! Messages fit the 256-byte inline channel payload (rev2§3.1); bulk data
 //! rides in bounded Read/Write slices until the shared-memory bulk path
 //! lands. Decoders treat payloads as untrusted and reject bad headers
 //! and trailing bytes.
@@ -11,13 +11,13 @@ use crate::{Request, Response};
 use alloc::vec::Vec;
 
 /// The fixed header prefix: magic 'E' + protocol id 0x51 (storage). The third
-/// header byte is the **negotiated** wire version (rev1§3.7): version 2 (v2
+/// header byte is the **negotiated** wire version (rev2§3.7): version 2 (v2
 /// carries the history-rewriting/GC opcodes) is the only version both peers
-/// speak today, but as of C3C it is selected at session establishment — the
+/// speak today, but it is selected at session establishment — the
 /// shell offers `[PROTO_VERSION, PROTO_VERSION]` in the `ipc` connect request,
 /// storaged picks the highest common version, and every message is then
 /// *stamped* with it and *validated* per-message (`ipc::version_ok`). The
-/// header layout never migrates (rev1§3.7); only the value of the version byte
+/// header layout never migrates (rev2§3.7); only the value of the version byte
 /// is dynamic.
 pub const PROTO_MAGIC: [u8; 2] = [0x45, 0x51];
 /// The storage protocol version this tree speaks. **Distinct namespace** from
@@ -29,7 +29,7 @@ pub const PROTO_VERSION: u8 = 2;
 pub enum WireError {
     BadHeader,
     /// The header's stamped version did not equal the session's negotiated
-    /// version (rev1§3.7/§2.7): refused cleanly, never a crash. Distinct from
+    /// version (rev2§3.7/§2.7): refused cleanly, never a crash. Distinct from
     /// `BadHeader` (bad magic/proto) so a version mismatch is diagnosable.
     Version,
     Body,
@@ -54,7 +54,7 @@ fn decode<T: serde::de::DeserializeOwned>(buf: &[u8], negotiated: u8) -> Result<
     if buf.len() < 3 || buf[..2] != PROTO_MAGIC {
         return Err(WireError::BadHeader);
     }
-    // Per-message version validation (rev1§2.7/§3.7): the stamped version must
+    // Per-message version validation (rev2§2.7/§3.7): the stamped version must
     // equal the session's negotiated value, else refuse — never a crash. This
     // is dispatch-discipline outside the header codec, so the header layout and
     // the `ipc` `header.rs` bijection proofs are untouched.

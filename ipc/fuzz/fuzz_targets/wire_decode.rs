@@ -1,5 +1,5 @@
 #![no_main]
-//! The IPC wire body decoder on arbitrary bytes (spec rev1§3.7).
+//! The IPC wire body decoder on arbitrary bytes (spec rev2§3.7).
 //! Oracle: `decode` is total (never panics — that is the whole point of the
 //! target), and any value that decodes survives a re-encode/re-decode
 //! unchanged. We compare the value, not the bytes: postcard varints are not

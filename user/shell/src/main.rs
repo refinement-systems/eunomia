@@ -1,8 +1,8 @@
-//! The Eunomia shell (spec rev1§7): built-ins over a storage session.
+//! The Eunomia shell (spec rev2§7): built-ins over a storage session.
 //!
-//! World (built by init, rev1§5.1): slot 0 = bootstrap channel (first message
-//! is the `b"EUS1"` startup block — a `loader::startup` named-grant table; C1C
-//! resolves `time`/`storage`/`root` from it), slot 1 = storage session
+//! World (built by init, rev2§5.1): slot 0 = bootstrap channel (first message
+//! is the `b"EUS1"` startup block — a `loader::startup` named-grant table from
+//! which the shell resolves `time`/`storage`/`root`), slot 1 = storage session
 //! (handle 0 = main ref root, full rights), slot 2 = untyped pool for spawning,
 //! slot 5 = a read-only time-frame cap the shell re-grants to children. The
 //! shell carves slot 3 (a persistent event notification) and slot 4 (a reusable
@@ -10,19 +10,19 @@
 //! cap window.
 //!
 //! `run`/`runloop` spawn a child from the store and reclaim it on exit
-//! (rev1§5.1): one donation untyped per child, the whole subtree revoked and
+//! (rev2§5.1): one donation untyped per child, the whole subtree revoked and
 //! the donation reset between spawns — so a process can be run, watched to
 //! completion (exit *or* fault), reaped, and its memory and slots reused.
 //!
 //!   ls [path] · cat <path> · write <path> <text> · rm <path>
 //!   snap [msg] · snaps · rollback <id> · sync · help
-//!   run <path> [mode] · runloop <path> <count>          (rev1§5.1 spawn/reap)
+//!   run <path> [mode] · runloop <path> <count>          (rev2§5.1 spawn/reap)
 //!   snapdel <id> · keep <id> · prune <n> · gc · df
-//!   date                                              (time page, rev1§2.6)
+//!   date                                              (time page, rev2§2.6)
 //!
-//! Structure (B15B): the syscall-/spawn-bound runtime lives in `runtime` and is
+//! Structure: the syscall-/spawn-bound runtime lives in `runtime` and is
 //! validated by the QEMU boot smoke; the pure formatting/parsing/policy logic
-//! below is host-tested (rev1§6 Baseline tier). `runtime` is excluded from the
+//! below is host-tested (rev2§6 Baseline tier). `runtime` is excluded from the
 //! host test build because the shell's spawn/clock path depends on `urt::spawn`
 //! and `urt::time::cntvct`, which are aarch64-bare-metal only.
 
@@ -39,7 +39,7 @@ use storage_server::SnapInfo;
 mod runtime;
 
 // ---------------------------------------------------------------------------
-// Pure, host-testable logic (rev1§6 Baseline tier, B15B). No syscalls, spawn,
+// Pure, host-testable logic (rev2§6 Baseline tier). No syscalls, spawn,
 // or clock — these compile and run on the host, so `cargo test --manifest-path
 // user/shell/Cargo.toml` property-tests them directly. `runtime` calls them on
 // the target; `tests` exercises them on the host. Formatting is split into a
@@ -93,8 +93,8 @@ pub(crate) fn civil_from_days(days: u64) -> (u64, u64, u64) {
 
 /// UTC nanoseconds → ISO-8601 with nanosecond precision
 /// (`2026-06-11T12:34:56.123456789Z`) appended to `buf`. All stored time is
-/// UTC; timezones are presentation and this shell presents UTC only (rev1§2.6).
-/// Full precision so per-ref strict ordering (rev1§4.7) is visible, not rounded
+/// UTC; timezones are presentation and this shell presents UTC only (rev2§2.6).
+/// Full precision so per-ref strict ordering (rev2§4.7) is visible, not rounded
 /// away — the RTC's whole-second base makes sub-second digits relative, not
 /// absolute. For any u64 nanosecond the year is 4 digits (≤ 2554), so the
 /// output is always the fixed 30-byte shape.
@@ -157,7 +157,7 @@ pub(crate) fn fmt_hex(buf: &mut Vec<u8>, n: u64) {
     buf.extend_from_slice(&d[start..]);
 }
 
-/// Classify a fault from ESR_EL1 (rev1§5.3): the EC names the kind of abort,
+/// Classify a fault from ESR_EL1 (rev2§5.3): the EC names the kind of abort,
 /// the low data-fault-status bits name why. Enough to print
 /// `faulted(translation, …)` for the wild-pointer demo without a full ESR
 /// table.
@@ -176,7 +176,7 @@ pub(crate) fn fault_class(esr: u64) -> &'static [u8] {
     }
 }
 
-/// Retention policy is shell-side (rev1§4.7: the server stores fields, it does
+/// Retention policy is shell-side (rev2§4.7: the server stores fields, it does
 /// not interpret policy): the snapshot ids to delete to keep the newest
 /// `keep_n` non-`keep` snapshots. `keep`-class rows (`class == 0`) and tagged
 /// rows never appear among the candidates; the victims are the oldest excess,
@@ -188,7 +188,7 @@ pub(crate) fn prune_victims(rows: &[SnapInfo], keep_n: u64) -> Vec<u64> {
 }
 
 // ---------------------------------------------------------------------------
-// Standard-name resolution (rev1§5.1, C1C). init delivers the shell's world as
+// Standard-name resolution (rev2§5.1). init delivers the shell's world as
 // a `loader::startup` named-grant table; `runtime::_start` resolves each name
 // once at boot. These are pure (no syscalls) so they are host-tested below; the
 // `runtime` callers store the results and read them on every request. An absent
@@ -213,8 +213,8 @@ fn resolve_root_handle(s: &loader::startup::Startup) -> Option<u32> {
 }
 
 /// `stdin` → the cspace slot holding the console-channel endpoint the shell
-/// reads keystrokes from (rev1§5.1, C-M9-B). Once the userspace console driver
-/// owns the PL011 RX line there is no ambient input path left, so an absent
+/// reads keystrokes from (rev2§5.1). The userspace console driver
+/// owns the PL011 RX line, so there is no ambient input path, and an absent
 /// grant is fatal (no silent `debug_getc` fallback — the driver would have
 /// stolen the FIFO from under it); the caller refuses cleanly.
 fn resolve_stdin_slot(s: &loader::startup::Startup) -> Option<u32> {
@@ -225,7 +225,7 @@ fn resolve_stdin_slot(s: &loader::startup::Startup) -> Option<u32> {
 }
 
 /// `stdout` → the cspace slot holding the console-channel endpoint the shell
-/// writes terminal output to (rev1§5.1, C-M9-C). An interactive console is one
+/// writes terminal output to (rev2§5.1). An interactive console is one
 /// channel granted under both `stdin` and `stdout` (init points both names at
 /// the same slot), so this resolves to the same endpoint as
 /// [`resolve_stdin_slot`]. An absent grant is fatal — with the console driver
@@ -237,7 +237,7 @@ fn resolve_stdout_slot(s: &loader::startup::Startup) -> Option<u32> {
     }
 }
 
-/// `time` → the virtual address of the read-only time page (rev1§2.6).
+/// `time` → the virtual address of the read-only time page (rev2§2.6).
 fn resolve_time_va(s: &loader::startup::Startup) -> Option<u64> {
     match s.grant(loader::startup::NAME_TIME)? {
         loader::startup::GrantKind::Region { va, .. } => Some(va),
@@ -245,19 +245,19 @@ fn resolve_time_va(s: &loader::startup::Startup) -> Option<u64> {
     }
 }
 
-/// The time page is one frame (kcore `PAGE`, rev1§2.6). The child reads only the
+/// The time page is one frame (kcore `PAGE`, rev2§2.6). The child reads only the
 /// VA; the length is informational on the `REGION` grant (matches init's `TIME_LEN`).
 pub(crate) const TIME_LEN: u64 = 4096;
 
-/// Build the shell→child startup block (rev1§5.1, C1D): the unified `b"EUS1"`
+/// Build the shell→child startup block (rev2§5.1): the unified `b"EUS1"`
 /// format carrying a `TIME` `REGION` grant for the pre-mapped time page plus the
-/// command-line `argv` (`argv[0]` is the program path). Supersedes the bespoke
-/// `"ST01"` magic + mode-byte layout; the codec is now shared with the consumer
-/// (selftest's `parse_startup`), so the round-trip drives the real `encode`.
-/// Total in the producer direction (rev1§2.7): an over-arena (`> MAX_ARGV`) or
+/// command-line `argv` (`argv[0]` is the program path). The codec is shared with
+/// the consumer (selftest's `parse_startup`), so the round-trip drives the real
+/// `encode`.
+/// Total in the producer direction (rev2§2.7): an over-arena (`> MAX_ARGV`) or
 /// over-budget (`> MAX_BLOCK`) block returns a clean `EncodeError` the spawn path
 /// maps to a `RunErr` — refuse, never panic or silently truncate. `env` is left
-/// empty (defined and round-tripped, unpopulated; rev1§5.1). The region carries
+/// empty (defined and round-tripped, unpopulated; rev2§5.1). The region carries
 /// no new authority: the shell `map`s the time page before start, only the VA
 /// travels.
 pub(crate) fn build_child_block(

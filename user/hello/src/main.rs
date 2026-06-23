@@ -1,7 +1,7 @@
 //! The first program ever spawned by another Eunomia process. Its whole
-//! world arrives via the startup convention (rev1§5.1): a bootstrap channel
+//! world arrives via the startup convention (rev2§5.1): a bootstrap channel
 //! cap in cspace slot 0 with the startup block as the first queued
-//! message. It decodes the block (the unified `b"EUS1"` format, C1D), replies,
+//! message. It decodes the block (the unified `b"EUS1"` format), replies,
 //! exits.
 
 #![no_std]
@@ -28,7 +28,7 @@ pub extern "C" fn _start() -> ! {
         sys::yield_now();
     };
 
-    // Decode the unified startup block (rev1§2.7: total, refuse-not-crash). A
+    // Decode the unified startup block (rev2§2.7: total, refuse-not-crash). A
     // well-formed EUS1 block from the shell's `build_child_block` acks; anything
     // else is a malformed bootstrap. (The retired `b"startup:hello"` magic-string
     // check predated the real format — no producer ever sent it.)

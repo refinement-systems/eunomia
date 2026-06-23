@@ -9,7 +9,7 @@ edition.workspace = true
 # wire-codec fuzz support (representative body type + oracle) — §5.4 — so it
 # implies "wire". (Mirrors storage-server's optional-serde gating.)
 [features]
-# `debug-log` (rev1§7, C-M9-C): gates the EL0 debug-print libcalls
+# `debug-log` (rev2§7): gates the EL0 debug-print libcalls
 # (`sys::debug_putc`/`debug_write`) — the kernel-diagnostic path for pre-console
 # server logging + panic reporting, not user-facing I/O. Default-on so every
 # server binary (all carry `ipc` with default features) keeps its diagnostics; a
@@ -21,15 +21,15 @@ wire = ["dep:serde", "dep:postcard"]
 fuzzing = ["wire"]
 
 [dependencies]
-# The wire codec (rev1§3.7): a postcard body behind a module-private trait. no_std +
+# The wire codec (rev2§3.7): a postcard body behind a module-private trait. no_std +
 # alloc (same as storage-server); the aarch64 build links these over urt's heap.
 # Optional — only the `wire` feature pulls them, so the codec is opt-in.
 serde = { version = "1", default-features = false, features = ["derive", "alloc"], optional = true }
 postcard = { version = "1", default-features = false, features = ["alloc"], optional = true }
 
 # vstd is the *Verus* dependency (see doc/guidelines/verus.md):
-# the `verus!{}` macro + ghost vocabulary for the rev1§4.7 host-chokepoint proofs
-# (the rev1§3.7 message header in `header.rs`). `default-features = false` ⇒ no_std,
+# the `verus!{}` macro + ghost vocabulary for the rev2§4.7 host-chokepoint proofs
+# (the rev2§3.7 message header in `header.rs`). `default-features = false` ⇒ no_std,
 # no alloc, so it rides into the minimal alloc-free user binaries unchanged. In an
 # ordinary build (host `cargo test` *and* the aarch64 userspace cross-build via
 # kernel/build.rs) the `feature(..)` flags are gated on `verus_keep_ghost` — set
@@ -42,14 +42,14 @@ vstd = { version = "=0.0.0-2026-05-31-0205", default-features = false }
 # loom/shuttle reach the IPC model's *library* code (ModelTransport's sync
 # primitives), so they are real deps, not dev-deps — but only when a model is
 # being built (RUSTFLAGS="--cfg loom|shuttle"); a normal/aarch64 build never
-# pulls them. Pinned per plan 1_loom-shuttle-rewrite §5 (same as urt).
+# pulls them. Pinned (same as urt).
 [target.'cfg(loom)'.dependencies]
 loom = "0.7"
 
 [target.'cfg(shuttle)'.dependencies]
 shuttle = "0.7"
 
-# proptest is the baseline (rev1§6) property tier for the reactor's *sequential*
+# proptest is the baseline (rev2§6) property tier for the reactor's *sequential*
 # dispatch (the `used`-mask bit allocation, the `pending` drain, the lowest-bit
 # scan) and the endpoint cap marshalling — single-threaded state-machine logic,
 # not the concurrent protocol (that is the Loom/Shuttle harnesses' + the TLA
@@ -70,7 +70,7 @@ required-features = ["fuzzing"]
 verify = true
 
 # cfg(kani) is injected by cargo-kani; cfg(loom)/cfg(shuttle) by
-# RUSTFLAGS="--cfg loom|shuttle" for the IPC reactor models (plan 2_ipc.md §5.2);
+# RUSTFLAGS="--cfg loom|shuttle" for the IPC reactor models;
 # cfg(verus_keep_ghost)/cfg(verus_only) by Verus during `cargo verus verify`.
 # Teach plain cargo all are expected (same handling as urt/kcore).
 [lints.rust]

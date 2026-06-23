@@ -1,9 +1,9 @@
-//! B15B — host tests for the shell's pure non-I/O logic (rev1§6 Baseline tier).
+//! Host tests for the shell's pure non-I/O logic (rev2§6 Baseline tier).
 //!
 //! The shell binary is aarch64 `#![no_std] #![no_main]`; its syscall-/spawn-
 //! bound runtime lives in `mod runtime` and is gated out of this (host) build
-//! (`#[cfg(not(test))]`), validated instead by the QEMU boot smoke (Design
-//! decision 3). What is host-tested here is the syscall-independent core in
+//! (`#[cfg(not(test))]`), validated instead by the QEMU boot smoke. What is
+//! host-tested here is the syscall-independent core in
 //! `main.rs`: the date math (`civil_from_days`, `fmt_utc`), the byte
 //! formatters (`fmt_num`/`fmt_num_pad`/`fmt_hex`), the parsers (`parse_path`,
 //! `parse_u64`), the fault classifier (`fault_class`), and the retention
@@ -293,7 +293,7 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
-// fault_class — golden ESR_EL1 vectors (rev1§5.3)
+// fault_class — golden ESR_EL1 vectors (rev2§5.3)
 // ---------------------------------------------------------------------------
 
 /// Assemble an ESR_EL1 value from an exception class and data-fault-status code.
@@ -323,7 +323,7 @@ fn fault_class_golden() {
 }
 
 // ---------------------------------------------------------------------------
-// prune_victims — retention policy (rev1§4.7)
+// prune_victims — retention policy (rev2§4.7)
 // ---------------------------------------------------------------------------
 
 fn snap(id: u64, class: u8) -> SnapInfo {
@@ -406,7 +406,7 @@ fn reference_has_teeth() {
 }
 
 // ---------------------------------------------------------------------------
-// C1C — standard-name resolution (rev1§5.1). The shell resolves `storage`,
+// Standard-name resolution (rev2§5.1). The shell resolves `storage`,
 // `root`, and `time` from the init→shell `loader::startup` table; these pin the
 // pure resolvers `runtime::_start` calls. The block is built and round-tripped
 // through the *shared* codec, so the test drives the real decode the shell runs.
@@ -440,8 +440,8 @@ fn resolve_names_golden() {
         kind: GrantKind::CapSlot(6),
     })
     .unwrap();
-    // `stdin`/`stdout` name the one console-channel endpoint (rev1§5.1) — init
-    // points both at the same slot (C-M9-B/C).
+    // `stdin`/`stdout` name the one console-channel endpoint (rev2§5.1) — init
+    // points both at the same slot.
     s.push_grant(Grant {
         name: NAME_STDOUT,
         kind: GrantKind::CapSlot(6),
@@ -461,13 +461,13 @@ fn resolve_names_golden() {
 #[test]
 fn resolve_names_absent_yields_none() {
     // An empty table (e.g. a degraded producer) → every name absent, so the
-    // caller keeps its default (graceful degradation, rev1§5.1).
+    // caller keeps its default (graceful degradation, rev2§5.1).
     let s = loader::startup::Startup::new();
     assert_eq!(resolve_time_va(&s), None);
     assert_eq!(resolve_storage_slot(&s), None);
     assert_eq!(resolve_root_handle(&s), None);
     // `stdin`/`stdout` absent → None; the runtime treats both as fatal (no
-    // fallback — the console must be wired, C-M9-C).
+    // fallback — the console must be wired).
     assert_eq!(resolve_stdin_slot(&s), None);
     assert_eq!(resolve_stdout_slot(&s), None);
 }
@@ -493,10 +493,10 @@ fn resolve_wrong_kind_yields_none() {
 }
 
 // ---------------------------------------------------------------------------
-// C1D — the shell→child startup-block producer (`build_child_block`). The codec
+// The shell→child startup-block producer (`build_child_block`). The codec
 // is the shared `loader::startup`, so the producer's output is checked by the
 // real `decode` — no mirrored hand-parser. The producer must be total
-// (rev1§2.7): an over-arena / over-budget block returns `Err`, never a panic or
+// (rev2§2.7): an over-arena / over-budget block returns `Err`, never a panic or
 // silent truncation.
 // ---------------------------------------------------------------------------
 
@@ -527,7 +527,7 @@ fn build_child_block_round_trips_time_and_argv() {
     assert_eq!(s.nargv, 2);
     assert_eq!(s.argv[0], b"bin/selftest");
     assert_eq!(s.argv[1], b"254");
-    // env is carried empty (defined, unpopulated — rev1§5.1, DD5).
+    // env is carried empty (defined, unpopulated — rev2§5.1).
     assert_eq!(s.nenv, 0);
 }
 

@@ -1,4 +1,4 @@
-//! Per-directory prolly trees (Merkle search trees) — spec rev1§4.1, rev1§4.9.
+//! Per-directory prolly trees (Merkle search trees) — spec rev2§4.1, rev2§4.9.
 //!
 //! A directory is a sorted sequence of entries, split into content-addressed
 //! nodes by a content-defined rule, so tree shape is history-independent
@@ -7,7 +7,7 @@
 //!
 //! Format constants (changing any of these is a format migration):
 //!   - Entry encoding: deterministic TLV, little-endian, exactly one
-//!     encoding per logical entry (rev1§4.9).
+//!     encoding per logical entry (rev2§4.9).
 //!   - Split rule: an item is a node boundary iff the low SPLIT_BITS bits
 //!     of BLAKE3(item bytes) are zero (average fanout 2^SPLIT_BITS), with
 //!     a forced boundary every MAX_NODE_ENTRIES items. The split decision
@@ -19,26 +19,26 @@
 //!
 //! Incremental node-level surgery is deliberately absent: `Dir::save`
 //! rebuilds one directory's node tree from its full entry list. Editing a
-//! file path-copies only the directories on its path (rev1§4.3), and per-node
+//! file path-copies only the directories on its path (rev2§4.3), and per-node
 //! dedup in the store makes the rebuild emit only changed nodes. Node-level
 //! incremental update is an optimization for very large directories,
 //! deferred past MVP.
 //!
-//! Decoders here are strict (they are cargo-fuzz targets, rev1§3.7/rev1§6): every
+//! Decoders here are strict (they are cargo-fuzz targets, rev2§3.7/rev2§6): every
 //! canonicality rule checked on encode is also rejected on decode, and
 //! trailing bytes are errors.
 //!
-//! Verification (rev1§6, doc/guidelines/verus.md). The node **decoder**
+//! Verification (rev2§6, doc/guidelines/verus.md). The node **decoder**
 //! (`decode_node`) is Verus-total over arbitrary bytes with a leaf canonical
-//! round-trip (B13A). The level **partition** — `build_level`'s node-cutting —
+//! round-trip. The level **partition** — `build_level`'s node-cutting —
 //! is verified to conserve and order its input (no item dropped, duplicated, or
 //! reordered: `lemma_partition_flatten`), cut only at a boundary or the
 //! `MAX_NODE_ENTRIES` cap, and emit non-empty ≤ MAX nodes, for *any* split
-//! predicate (`split_points`/`boundary_flags`, B13B). The split rule
+//! predicate (`split_points`/`boundary_flags`). The split rule
 //! `is_boundary` is the one trusted-total BLAKE3 seam, proven *around* (the
 //! partition is correct regardless of *which* items boundary), never *through*.
 //! The *concrete* tree shape — which contents map to which root hash, the
-//! hash-determined clustering — stays test-routed at the rev1§6 baseline tier
+//! hash-determined clustering — stays test-routed at the rev2§6 baseline tier
 //! (the `canonical_form`/`roundtrip` proptests, Miri-replayed), not
 //! Verus-mechanized: mechanizing it would drag interpreted BLAKE3 into the proof.
 
@@ -48,12 +48,12 @@ use alloc::vec;
 use alloc::vec::Vec;
 use vstd::prelude::*;
 
-/// Files at or below this size live inline in the directory entry (rev1§4.9).
+/// Files at or below this size live inline in the directory entry (rev2§4.9).
 /// The rule is a pure function of content, preserving canonical form.
 pub const INLINE_MAX: usize = 512;
 
 /// Advisory-executable bit in the flags word — a type hint with zero
-/// security semantics (rev1§4.9).
+/// security semantics (rev2§4.9).
 pub const FLAG_EXECUTABLE: u32 = 1 << 0;
 
 const SPLIT_BITS: u32 = 5;
@@ -83,7 +83,7 @@ pub enum EntryKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Content {
-    /// ≤ INLINE_MAX bytes, inlined (rev1§4.9).
+    /// ≤ INLINE_MAX bytes, inlined (rev2§4.9).
     Inline(Vec<u8>),
     /// Chunk-list object hash (file > INLINE_MAX bytes).
     ChunkList(Hash),
@@ -116,7 +116,7 @@ impl core::fmt::Display for FormatError {
 impl std::error::Error for FormatError {}
 
 /// Content-addressed object store: chunks, tree nodes, and chunk lists all
-/// live in one keyspace (hash = address, rev1§4.1).
+/// live in one keyspace (hash = address, rev2§4.1).
 pub trait NodeStore {
     fn put(&mut self, bytes: &[u8]) -> Hash;
     fn get(&self, hash: &Hash) -> Option<Vec<u8>>;
@@ -306,7 +306,7 @@ pub(crate) fn decode_entry(r: &mut Reader) -> Result<Entry, FormatError> {
 // The split predicate `is_boundary` and the level-cutting core (`boundary_flags`,
 // `split_points`) live inside the `verus!{}` block at the end of this file: the
 // cut logic is verified (conservation + boundary discipline + ≤ MAX_NODE_ENTRIES
-// fanout) over the *opaque* `is_boundary` seam (B13B, rev1§4.1). `build_level`
+// fanout) over the *opaque* `is_boundary` seam (rev2§4.1). `build_level`
 // below stays plain Rust — it drives the proven cut points and does the I/O.
 
 fn encode_internal_item(key: &[u8], child: &Hash, out: &mut Vec<u8>) {
@@ -320,7 +320,7 @@ fn encode_internal_item(key: &[u8], child: &Hash, out: &mut Vec<u8>) {
 /// lockstep). The cut points come from the verified `split_points` (driven by
 /// the verified `boundary_flags` over the `is_boundary` seam), so the running
 /// node boundaries *are* the proven ones (conservation + ≤ MAX_NODE_ENTRIES);
-/// only the node assembly and `store.put` I/O stay plain Rust (B13B).
+/// only the node assembly and `store.put` I/O stay plain Rust.
 fn build_level(
     store: &mut impl NodeStore,
     level: u8,
@@ -349,7 +349,7 @@ fn build_level(
 
 // ── Directory ───────────────────────────────────────────────────────────
 
-/// In-memory logical directory: name → entry, memcmp order (rev1§4.9).
+/// In-memory logical directory: name → entry, memcmp order (rev2§4.9).
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct Dir {
     entries: BTreeMap<Vec<u8>, Entry>,
@@ -438,7 +438,7 @@ impl Dir {
     }
 }
 
-/// One stored node, shallowly parsed — the GC mark walk (rev1§4.6) needs the
+/// One stored node, shallowly parsed — the GC mark walk (rev2§4.6) needs the
 /// raw child hashes of internal nodes, which `Dir::load` flattens away.
 #[derive(Debug)]
 pub enum NodeRefs {
@@ -532,7 +532,7 @@ pub enum DiffKind {
 }
 
 /// Entry-level diff between two directory roots. Equal roots short-circuit
-/// (equal hashes ⇒ identical subtrees, rev1§4.9). Node-granular pruning inside
+/// (equal hashes ⇒ identical subtrees, rev2§4.9). Node-granular pruning inside
 /// one directory is a deferred optimization; nested-tree diff recursion
 /// belongs to the storage server.
 pub fn diff(
@@ -564,7 +564,7 @@ pub fn diff(
 
 // ── Verified TLV core ─────────────────────────────────────────────────────
 //
-// The directory-entry TLV codec (rev1§4.9), proven in Verus: `decode_raw` is
+// The directory-entry TLV codec (rev2§4.9), proven in Verus: `decode_raw` is
 // **total ∀ bytes** (verifying the body *is* the no-panic theorem) and the
 // **canonical-form round-trip is a theorem ∀** — `encode_raw(decode_raw(b)) ==
 // b[..k]` (the property `cas/fuzz/.../tlv_entry.rs` samples). `Hash` is kept
@@ -577,7 +577,7 @@ pub fn diff(
 // path.
 verus! {
 
-/// Hard cap on optional-TLV bytes per entry (rev1§4.9) — keeps directory nodes
+/// Hard cap on optional-TLV bytes per entry (rev2§4.9) — keeps directory nodes
 /// directory-shaped regardless of future tags. Inside the macro so the verified
 /// `decode_raw` can name it (a const outside `verus!{}` is invisible to Verus).
 pub const MAX_OPT_BYTES: usize = 4096;
@@ -585,7 +585,7 @@ pub const MAX_OPT_BYTES: usize = 4096;
 /// The one optional tag defined by format v0 (the advisory flags word).
 const OPT_TAG_FLAGS: u8 = 1;
 
-/// Forced node boundary: at most this many items per directory node (rev1§4.1).
+/// Forced node boundary: at most this many items per directory node (rev2§4.1).
 /// Inside the macro so the verified `decode_node` can name it; erases to the same
 /// module-level `const` that `build_level` uses.
 const MAX_NODE_ENTRIES: usize = 128;
@@ -691,8 +691,8 @@ pub open spec fn entries_bytes(es: Seq<RawEntry>) -> Seq<u8>
 
 /// The canonical byte image of a whole **leaf** node: `[level=0][count u32][entries…]`.
 /// `decode_node` proves the consumed bytes equal this for every accepted leaf —
-/// the node-grain of rev1§4.9 ("exactly one encoding per logical leaf node") and
-/// the rev1§6 decode-then-re-encode oracle.
+/// the node-grain of rev2§4.9 ("exactly one encoding per logical leaf node") and
+/// the rev2§6 decode-then-re-encode oracle.
 pub open spec fn canonical_leaf_bytes(es: Seq<RawEntry>) -> Seq<u8> {
     seq![0u8] + u32_le(es.len() as u32) + entries_bytes(es)
 }
@@ -1218,9 +1218,9 @@ proof fn lemma_entries_push(es: Seq<RawEntry>, e: RawEntry)
 /// loop; internal items are `[key_len u8][key][child u8;32]`. The whole buffer
 /// must be consumed (a node is one stored object; trailing bytes are rejected).
 /// For a **leaf** the consumed bytes equal `canonical_leaf_bytes` — the
-/// node-grain canonical round-trip (rev1§4.9/§6). Internal nodes get **totality
+/// node-grain canonical round-trip (rev2§4.9/§6). Internal nodes get **totality
 /// only**: `parse_node` lowers separator keys into child hashes, so there is no
-/// lossless single-node internal re-encoder (B13C's whole-tree oracle covers it).
+/// lossless single-node internal re-encoder (the whole-tree oracle covers it).
 pub fn decode_node(buf: &[u8]) -> (r: Result<(u8, RawNodeBody), TlvErr>)
     ensures
         r matches Ok((lvl, RawNodeBody::Leaf(es))) ==> lvl == 0 && canonical_leaf_bytes(es@)
@@ -1368,7 +1368,7 @@ pub fn encode_node_leaf(es: &Vec<RawEntry>, out: &mut Vec<u8>)
 // order** its input (no item dropped, duplicated, or reordered), to cut **only**
 // where the predicate or the cap says, and to emit non-empty ≤ MAX blocks, for
 // *any* predicate. So it holds under the real (BLAKE3) `is_boundary` without the
-// proof ever modeling BLAKE3 (rev1§4.1).
+// proof ever modeling BLAKE3 (rev2§4.1).
 
 /// Spec model of the per-item split decision — `uninterp` because its witness
 /// (`is_boundary`) is BLAKE3. The partition core needs only that this is a
@@ -1377,7 +1377,7 @@ pub fn encode_node_leaf(es: &Vec<RawEntry>, out: &mut Vec<u8>)
 uninterp spec fn is_boundary_spec(item: Seq<u8>) -> bool;
 
 /// An item is a node boundary iff the low `SPLIT_BITS` bits of BLAKE3(item) are
-/// zero (rev1§4.1). `external_body` because BLAKE3 is interpreted hashing — out
+/// zero (rev2§4.1). `external_body` because BLAKE3 is interpreted hashing — out
 /// of SMT scope; trusted **total** (hashes a slice and returns a bool, never
 /// panics — `as_bytes()[..8]` is always 8 of the 32 hash bytes). Totality +
 /// determinism only; no collision-freedom is assumed. The same boundary drawn
@@ -1437,14 +1437,14 @@ spec fn block_start(ends: Seq<usize>, k: int) -> int {
 /// exclusive end of each block; the cut-index representation that keeps the
 /// conservation proof a single subrange concat). Cuts where `flags[i]` (a
 /// boundary), or the block reaches `MAX_NODE_ENTRIES`, or the input ends —
-/// byte-for-byte the cut points `build_level` used before B13B. Proven, for any
+/// byte-for-byte the cut points `build_level` produces. Proven, for any
 /// `flags`:
 ///   * **conservation/order** — the ends strictly increase from ≥ 1 to
 ///     `flags.len()`, so the blocks tile `[0, flags.len())` losslessly and in
 ///     order (see [`lemma_partition_flatten`]);
 ///   * **well-formedness** — every block is non-empty and ≤ `MAX_NODE_ENTRIES`;
 ///   * **boundary discipline** — every block except the last ends at a boundary
-///     item or exactly at the cap (rev1§4.1 / detail Design decision 3).
+///     item or exactly at the cap (rev2§4.1).
 fn split_points(flags: &Vec<bool>) -> (ends: Vec<usize>)
     requires
         flags@.len() >= 1,
@@ -1555,7 +1555,7 @@ proof fn lemma_flatten_covers<T>(items: Seq<T>, ends: Seq<usize>)
     }
 }
 
-/// **Conservation** (the load-bearing rev1§4.1 property): the partition emitted
+/// **Conservation** (the load-bearing rev2§4.1 property): the partition emitted
 /// by [`split_points`] reproduces its whole input — no item dropped, duplicated,
 /// or reordered. Stated generically over the item type, so it holds whatever the
 /// per-level items are (leaf entries or internal child slots).
@@ -1714,7 +1714,7 @@ mod tests {
         assert!(diff(&store, &r1, &r1).unwrap().is_empty());
     }
 
-    // ── Node-decoder rejection cases (B13A) ─────────────────────────────
+    // ── Node-decoder rejection cases ─────────────────────────────
     //
     // The node decoder is verified total ∀ bytes; these pin the rejection
     // *messages* the running path returns (the verified totality is the
@@ -1848,7 +1848,7 @@ mod tests {
         }
     }
 
-    // ── Partition core (B13B) ───────────────────────────────────────────
+    // ── Partition core ───────────────────────────────────────────
     //
     // `split_points` is verified (conservation + ≤ MAX_NODE_ENTRIES + boundary
     // discipline over the opaque `is_boundary`); these pin the concrete cut
@@ -2094,7 +2094,7 @@ mod tests {
             cases: if cfg!(miri) { 4 } else { 1024 },
             ..ProptestConfig::default()
         })]
-        /// rev1§4.1: same logical contents ⇒ same root, regardless of edit
+        /// rev2§4.1: same logical contents ⇒ same root, regardless of edit
         /// order and regardless of churn (inserts later removed). Entry counts
         /// span past the MAX_NODE_ENTRIES (128) cap, so the sweep builds
         /// multi-level trees and fires the forced boundary — shapes the old
@@ -2180,13 +2180,13 @@ mod tests {
             prop_assert_eq!(loaded.save(&mut store), root);
         }
 
-        /// Split locality (rev1§4.1): a one-entry edit rewrites only the leaf
+        /// Split locality (rev2§4.1): a one-entry edit rewrites only the leaf
         /// holding it plus the spine above — O(depth) nodes, not O(N), because
         /// the split decision is a pure per-item function, so an edit
-        /// self-synchronizes immediately (unlike a rolling window — the module
-        /// doc's per-item-vs-rolling-window contrast, now tested not just
-        /// asserted). The bound scales with tree depth rather than a fixed
-        /// constant, so it holds as the sweep climbs levels.
+        /// self-synchronizes immediately (unlike a rolling window — this test
+        /// exercises the module doc's per-item-vs-rolling-window contrast). The
+        /// bound scales with tree depth rather than a fixed constant, so it
+        /// holds as the sweep climbs levels.
         #[test]
         fn split_locality(
             entries in arb_entries(if cfg!(miri) { 64 } else { 1024 }),

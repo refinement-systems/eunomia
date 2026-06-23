@@ -1,4 +1,4 @@
-//! Storage server core: sessions, handles, tickets (spec rev1§2.2-2.4).
+//! Storage server core: sessions, handles, tickets (spec rev2§2.2-2.4).
 //!
 //! A storage cap at the boundary is a small integer handle, meaningful
 //! only relative to its session. The server keeps, per session:
@@ -7,7 +7,7 @@
 //!
 //! The wire protocol is handle-relative: every operation names a handle
 //! plus a component-list path resolved *under* the handle's subtree —
-//! confinement by unreachability, not checked policy (rev1§2.3). Raw hashes
+//! confinement by unreachability, not checked policy (rev2§2.3). Raw hashes
 //! never appear as request parameters.
 //!
 //! This module is transport-agnostic and host-testable: `Server::handle`
@@ -32,19 +32,19 @@ use cas::overlay::Path as TreePath;
 use cas::prolly::{Content, Entry, EntryKind};
 use cas::store::{Store, StoreError};
 // Re-exported: `RefEdit` is part of the public `Request::Apply` wire type, so
-// wire consumers reach it from this crate (rev1§4.7 guarded batch vocabulary).
+// wire consumers reach it from this crate (rev2§4.7 guarded batch vocabulary).
 pub use cas::store::RefEdit;
 
-// ── Rights (rev1§2.3) ───────────────────────────────────────────────────
+// ── Rights (rev2§2.3) ───────────────────────────────────────────────────
 
 pub const R_READ: u8 = 1 << 0;
 pub const R_WRITE: u8 = 1 << 1;
 pub const R_SNAPSHOT: u8 = 1 << 2;
-/// Destructive enough to deserve its own bit (rev1§2.3); also gates mass
-/// revocation (generation bump, rev1§2.2).
+/// Destructive enough to deserve its own bit (rev2§2.3); also gates mass
+/// revocation (generation bump, rev2§2.2).
 pub const R_REWRITE_HISTORY: u8 = 1 << 3;
 pub const R_ENUMERATE: u8 = 1 << 4;
-/// Store-global observation (rev1§2.3): gates `statfs(handle)` and any
+/// Store-global observation (rev2§2.3): gates `statfs(handle)` and any
 /// future global observable (GC counters, index occupancy). The one right
 /// whose scope ignores the subtree its handle denotes — and the one right
 /// kept OUT of `R_ALL`, so ordinary delegation strips it by default
@@ -56,7 +56,7 @@ pub const R_STAT_STORE: u8 = 1 << 5;
 /// numeric value is stable — the committed fuzz corpora depend on it.
 pub const R_ALL: u8 = 0b1_1111;
 
-/// Monotone rights attenuation (rev1§2.3): a derived handle's rights are the
+/// Monotone rights attenuation (rev2§2.3): a derived handle's rights are the
 /// intersection of the parent's rights with the requested mask — never a
 /// superset. The sole arithmetic by which delegation narrows authority; it is
 /// also what strips `R_STAT_STORE` when a mask omits bit 5.
@@ -72,7 +72,7 @@ pub enum HandleTarget {
     /// Immutable subtree, denoted by its node hash (internal only — the
     /// hash never crosses the boundary).
     Snapshot { root: Hash },
-    /// Live ref, subtree-scoped by server-side path resolution (rev1§2.3).
+    /// Live ref, subtree-scoped by server-side path resolution (rev2§2.3).
     Ref {
         name: Vec<u8>,
         subtree: TreePath,
@@ -103,7 +103,7 @@ impl Session {
 
 // ── Protocol ────────────────────────────────────────────────────────────
 
-/// Handle-relative requests (rev1§2.4). Paths are component lists; `/` is
+/// Handle-relative requests (rev2§2.4). Paths are component lists; `/` is
 /// shell presentation. Capability-bearing results are handle ids; tickets
 /// are the only bearer tokens and are one-shot with a TTL.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,7 +130,7 @@ pub enum Request {
         handle: HandleId,
         path: TreePath,
     },
-    /// Attenuate: sub-subtree + rights mask, in one step (rev1§2.4 delegation).
+    /// Attenuate: sub-subtree + rights mask, in one step (rev2§2.4 delegation).
     OpenChild {
         handle: HandleId,
         path: TreePath,
@@ -162,7 +162,7 @@ pub enum Request {
         snap_id: u64,
     },
     /// Mass revocation: bump the ref's generation; every outstanding
-    /// handle on it (all sessions) goes stale on next use (rev1§2.2).
+    /// handle on it (all sessions) goes stale on next use (rev2§2.2).
     RevokeRef {
         handle: HandleId,
     },
@@ -179,7 +179,7 @@ pub enum Request {
         path: TreePath,
     },
     EnumerateSession,
-    /// History rewriting (rev1§4.6-4.7): drop one snapshot row. Sets the
+    /// History rewriting (rev2§4.6-4.7): drop one snapshot row. Sets the
     /// post-rewrite GC trigger; the reclamation itself is asynchronous.
     DeleteSnapshot {
         handle: HandleId,
@@ -199,9 +199,9 @@ pub enum Request {
     Statfs {
         handle: HandleId,
     },
-    /// Guarded ref-table batch (rev1§4.7): apply `edits` to the ref
+    /// Guarded ref-table batch (rev2§4.7): apply `edits` to the ref
     /// all-or-nothing, but only if its edit version still equals
-    /// `expected_version`. The read-then-act race fix (I-2/S-1) — a
+    /// `expected_version`. The read-then-act race fix — a
     /// concurrent snapshot/edit/write between the caller's enumerate and this
     /// op has advanced the version, so the batch is refused with the current
     /// version (`Response::VersionMismatch`) and the caller re-reads. Requires
@@ -213,7 +213,7 @@ pub enum Request {
         expected_version: u64,
         edits: Vec<RefEdit>,
     },
-    /// Pin a snapshot under a tag name (rev1§4.7 "Tags"): `name → snapshot id`,
+    /// Pin a snapshot under a tag name (rev2§4.7 "Tags"): `name → snapshot id`,
     /// surviving metadata edits, acting as a `keep`-strength pin. Row surgery,
     /// so it requires `may-rewrite-history` on a ref-root handle (the
     /// `DeleteSnapshot`/`Apply` gate) and the tag is scoped to that ref.
@@ -222,20 +222,20 @@ pub enum Request {
         name: Vec<u8>,
         snap_id: u64,
     },
-    /// Delete a tag, unpinning its snapshot (rev1§4.7). Ref-scoped to the
+    /// Delete a tag, unpinning its snapshot (rev2§4.7). Ref-scoped to the
     /// handle's ref and `may-rewrite-history`-gated, like `Tag`.
     Untag {
         handle: HandleId,
         name: Vec<u8>,
     },
-    /// Enumerate the handle ref's tags (rev1§4.7). Read-only, so it needs only
+    /// Enumerate the handle ref's tags (rev2§4.7). Read-only, so it needs only
     /// `R_READ`, like `ListSnapshots`. Appended after `Apply`/`Tag`/`Untag` to
     /// keep every prior variant's postcard discriminant — and the committed
     /// `request_dispatch` corpus — stable.
     ListTags {
         handle: HandleId,
     },
-    /// Rename `from` to `to` within the handle's ref (rev1§4.9). `R_WRITE`-gated
+    /// Rename `from` to `to` within the handle's ref (rev2§4.9). `R_WRITE`-gated
     /// and ref-only, like `Write`/`Unlink`; both paths are subtree-scoped under
     /// the handle, so a cross-subtree target is unnameable and therefore denied
     /// for free. Appended last to keep every prior variant's postcard
@@ -272,7 +272,7 @@ pub enum Response {
     NotFound,
     Handle(HandleId),
     Listing(Vec<DirEnt>),
-    /// Snapshot rows plus the ref's current rev1§4.7 edit version, read in the
+    /// Snapshot rows plus the ref's current rev2§4.7 edit version, read in the
     /// same call so a retention daemon's enumerate and its later guarded-batch
     /// `expected_version` come from one atomic snapshot of the ref.
     Snapshots {
@@ -294,18 +294,18 @@ pub enum Response {
         free: u64,
     },
     /// A guarded batch (`Request::Apply`) committed; carries the ref's
-    /// post-batch edit version (rev1§4.7).
+    /// post-batch edit version (rev2§4.7).
     Applied {
         edit_version: u64,
     },
     /// A guarded batch was refused because `expected_version` was stale;
     /// carries the ref's current edit version so the caller re-reads and
     /// retries. A data-carrying reply, not an `ErrorCode` — "fails carrying
-    /// the current version" (rev1§4.7).
+    /// the current version" (rev2§4.7).
     VersionMismatch {
         edit_version: u64,
     },
-    /// The handle ref's tags (rev1§4.7), each `(name, ref_name, snap_id)`.
+    /// The handle ref's tags (rev2§4.7), each `(name, ref_name, snap_id)`.
     /// Appended last to keep prior variants' postcard discriminants stable.
     Tags(Vec<(Vec<u8>, Vec<u8>, u64)>),
 }
@@ -314,7 +314,7 @@ pub enum Response {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ErrorCode {
     BadHandle,
-    /// Generation mismatch: the handle was mass-revoked (rev1§2.2).
+    /// Generation mismatch: the handle was mass-revoked (rev2§2.2).
     Stale,
     Denied,
     BadPath,
@@ -323,7 +323,7 @@ pub enum ErrorCode {
     NoSuchSnapshot,
     BadTicket,
     Internal,
-    /// The snapshot is a tag target; tags are keep-strength pins (rev1§4.7).
+    /// The snapshot is a tag target; tags are keep-strength pins (rev2§4.7).
     Pinned,
     /// Write offset/length out of range (overflow or beyond store capacity).
     BadOffset,
@@ -331,7 +331,7 @@ pub enum ErrorCode {
 
 // ── Server ──────────────────────────────────────────────────────────────
 
-/// Maximum claim-ticket lifetime (rev1§2.4): the caller's requested TTL is
+/// Maximum claim-ticket lifetime (rev2§2.4): the caller's requested TTL is
 /// clamped to this so no ticket outlives the bound. Tickets are for prompt
 /// peer hand-off, not durable authority — that stays in the handle/session
 /// regime. Default 60 s; a tunable policy default, not an ABI promise.
@@ -349,7 +349,7 @@ pub struct Server<D: BlockDev> {
     tickets: BTreeMap<[u8; 16], PendingTicket>,
     ticket_seq: u64,
     ticket_seed: u64,
-    /// GC requested by a trigger (rev1§4.6): a history-rewriting op, or the
+    /// GC requested by a trigger (rev2§4.6): a history-rewriting op, or the
     /// space watermark. The transport drains it after replying, so the
     /// foreground op stays O(small) and reclamation follows promptly.
     gc_requested: bool,
@@ -390,7 +390,7 @@ impl<D: BlockDev> Server<D> {
     }
 
     /// Open a session pre-populated with grants — the delegation-along-
-    /// spawn path (rev1§2.4): the parent names handles + attenuation, the
+    /// spawn path (rev2§2.4): the parent names handles + attenuation, the
     /// child gets a fresh session. Grant construction is the caller's
     /// (init's / the parent's) authority; there is no other way to get a
     /// first handle.
@@ -405,7 +405,7 @@ impl<D: BlockDev> Server<D> {
         id
     }
 
-    /// Transport's peer-closed path (rev1§2.4 cleanup): drop the whole table.
+    /// Transport's peer-closed path (rev2§2.4 cleanup): drop the whole table.
     pub fn close_session(&mut self, id: SessionId) {
         self.sessions.remove(&id);
     }
@@ -423,7 +423,7 @@ impl<D: BlockDev> Server<D> {
     }
 
     /// The privileged init/maintenance grant: a full-rights handle at a
-    /// ref's root. This is the **sole origin** of `R_STAT_STORE` (rev1§2.3) —
+    /// ref's root. This is the **sole origin** of `R_STAT_STORE` (rev2§2.3) —
     /// every other handle is derived by intersection, which strips it. init
     /// hands this (or a stat-store-bearing attenuation of it) only to the
     /// shell and to maintenance holders.
@@ -450,7 +450,7 @@ impl<D: BlockDev> Server<D> {
             Ok(resp) => resp,
             Err(e) => Response::Err(e),
         };
-        // The crude space watermark (rev1§4.6): below ~20% free, request a
+        // The crude space watermark (rev2§4.6): below ~20% free, request a
         // cycle — unless GC already ran at this generation and this is
         // simply how full the store is.
         let sp = self.store.space();
@@ -461,7 +461,7 @@ impl<D: BlockDev> Server<D> {
     }
 
     /// Validate handle liveness (generation check — lazy mass revocation,
-    /// rev1§2.2) and the rights needed for the op.
+    /// rev2§2.2) and the rights needed for the op.
     fn lookup(
         &self,
         session: SessionId,
@@ -498,7 +498,7 @@ impl<D: BlockDev> Server<D> {
     }
 
     /// "." and ".." are path syntax for shells, never sent to the server
-    /// (rev1§4.9); reject them and any malformed component up front.
+    /// (rev2§4.9); reject them and any malformed component up front.
     fn validate_path(path: &TreePath) -> Result<(), ErrorCode> {
         for c in path {
             cas::prolly::validate_name(c).map_err(|_| ErrorCode::BadPath)?;
@@ -583,7 +583,7 @@ impl<D: BlockDev> Server<D> {
                     return Err(ErrorCode::ReadOnly); // snapshots are immutable
                 };
                 // Both paths are resolved under the handle's subtree, so a
-                // target outside it is unnameable (rev1§4.9) — no extra check.
+                // target outside it is unnameable (rev2§4.9) — no extra check.
                 self.store
                     .rename(
                         name,
@@ -620,7 +620,7 @@ impl<D: BlockDev> Server<D> {
                 rights_mask,
             } => {
                 let e = self.lookup(session, handle, 0)?;
-                // Monotone derivation (rev1§2.3): intersection only. This is
+                // Monotone derivation (rev2§2.3): intersection only. This is
                 // also what strips `R_STAT_STORE` from delegated children — a
                 // mask of `R_ALL` (which omits bit 5) clears it for free, so
                 // it survives only when the holder has it AND sets bit 5.
@@ -682,7 +682,7 @@ impl<D: BlockDev> Server<D> {
                 let HandleTarget::Ref { name, .. } = &e.target else {
                     return Err(ErrorCode::ReadOnly);
                 };
-                // Provenance is server-filled (rev1§4.7), never client-supplied.
+                // Provenance is server-filled (rev2§4.7), never client-supplied.
                 let prov = format!("session={session}");
                 let id = self
                     .store
@@ -707,7 +707,7 @@ impl<D: BlockDev> Server<D> {
                     })
                     .collect();
                 // Same atomic read as the rows above: the version a daemon will
-                // present as `expected_version` (rev1§4.7).
+                // present as `expected_version` (rev2§4.7).
                 let edit_version = self.store.edit_version(name).unwrap_or(0);
                 Ok(Response::Snapshots {
                     snaps,
@@ -764,7 +764,7 @@ impl<D: BlockDev> Server<D> {
                 self.store
                     .rollback(&name.clone(), snap_id)
                     .map_err(store_err)?;
-                // Post-rewrite trigger (rev1§4.6): the abandoned head (unless
+                // Post-rewrite trigger (rev2§4.6): the abandoned head (unless
                 // snapshotted) just became garbage.
                 self.gc_requested = true;
                 Ok(Response::Ok)
@@ -784,7 +784,7 @@ impl<D: BlockDev> Server<D> {
             }
             Request::MintTicket { handle, ttl_nanos } => {
                 let e = self.lookup(session, handle, 0)?;
-                // rev1§2.4: the caller requests the TTL, the server clamps it.
+                // rev2§2.4: the caller requests the TTL, the server clamps it.
                 let ttl = ttl_nanos.min(MAX_TICKET_TTL_NANOS);
                 self.ticket_seq += 1;
                 let mut seed = [0u8; 24];
@@ -848,7 +848,7 @@ impl<D: BlockDev> Server<D> {
                 self.store
                     .delete_snapshot(&name, snap_id)
                     .map_err(store_err)?;
-                // Post-rewrite trigger (rev1§4.6): reclamation follows
+                // Post-rewrite trigger (rev2§4.6): reclamation follows
                 // promptly while this op stays O(small).
                 self.gc_requested = true;
                 Ok(Response::Ok)
@@ -874,7 +874,7 @@ impl<D: BlockDev> Server<D> {
                 })
             }
             Request::Statfs { handle } => {
-                // Store-global observation needs `stat-store` (rev1§2.3),
+                // Store-global observation needs `stat-store` (rev2§2.3),
                 // deny-by-default. `lookup` runs the generation check before
                 // the rights check, so a revoked handle dies with `Stale` and
                 // a handle lacking the bit is `Denied`. The handle's subtree
@@ -896,7 +896,7 @@ impl<D: BlockDev> Server<D> {
                 // ref-root handle. The store is the single authority — it does
                 // the version check, validates every edit, and commits once.
                 let name = self.rewrite_target(session, handle)?;
-                // A batched snapshot deletion is history rewriting (rev1§4.6),
+                // A batched snapshot deletion is history rewriting (rev2§4.6),
                 // so it arms the same post-rewrite GC trigger DeleteSnapshot
                 // uses — but only once the batch actually commits.
                 let deletes = edits
@@ -910,7 +910,7 @@ impl<D: BlockDev> Server<D> {
                         Ok(Response::Applied { edit_version })
                     }
                     // Carries the current version, so it is a data reply, not
-                    // an `ErrorCode` (rev1§4.7 "fails carrying the version").
+                    // an `ErrorCode` (rev2§4.7 "fails carrying the version").
                     Err(StoreError::VersionMismatch { current }) => Ok(Response::VersionMismatch {
                         edit_version: current,
                     }),
@@ -922,7 +922,7 @@ impl<D: BlockDev> Server<D> {
                 name,
                 snap_id,
             } => {
-                // Tags are row surgery (rev1§4.7), so the same gate as
+                // Tags are row surgery (rev2§4.7), so the same gate as
                 // DeleteSnapshot/Apply: `may-rewrite-history` on a ref-root
                 // handle. The tag is scoped to that ref.
                 let ref_name = self.rewrite_target(session, handle)?;

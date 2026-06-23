@@ -63,7 +63,7 @@ fn main() {
         "header_only",
         &[0xDE, 1, 0, 0, 0, 0, 0, 0, 0, 0],
     );
-    // A valid message with one trailing byte (the rev1§3.7 rejection path).
+    // A valid message with one trailing byte (the rev2§3.7 rejection path).
     let mut trailing = encode_demo(&DemoMsg::Ping);
     trailing.push(0);
     write_seed("wire_decode", "trailing", &trailing);
@@ -73,7 +73,7 @@ fn main() {
         msgs.len() + 3
     );
 
-    // The session connect codecs (rev1§3.5/§3.7), driven by the `connect_decode`
+    // The session connect codecs (rev2§3.5/§3.7), driven by the `connect_decode`
     // target. Fixed-width, byte-canonical forms the random search rarely hits by
     // chance (the tag bytes + exact REQ_LEN/GRANT_LEN framing).
     let req_single = ConnectReq::for_window(4096).encode();

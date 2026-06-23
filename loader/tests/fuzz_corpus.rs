@@ -1,7 +1,7 @@
 //! Replay the committed fuzz corpora through their targets, re-checking the
 //! invariants. Keeps fuzz inputs alive as ordinary tests and lets `cargo miri
 //! test` UB-check them on each. Covers all targets — `elf_parse` (the parser),
-//! `segment_layout` (the page-rounding math, the I-5 site), and `startup` (the
+//! `segment_layout` (the page-rounding math), and `startup` (the
 //! startup-block codec) — so the one documented Miri command (`--test
 //! fuzz_corpus`) replays them all.
 

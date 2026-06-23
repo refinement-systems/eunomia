@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 # "std" enables host testing; "no_std" for embedded use is planned but
-# not yet wired — all algorithms are host-testable (spec rev1§1).
+# not yet wired — all algorithms are host-testable (spec rev2§1).
 [features]
 default = ["std"]
 std = ["blake3/std"]
@@ -25,17 +25,17 @@ serde = { version = "1", default-features = false, features = ["derive", "alloc"
 arbitrary = { version = "1", features = ["derive"], optional = true }
 
 # vstd is the *Verus* dependency (see doc/guidelines/verus.md):
-# the `verus!{}` macro + ghost vocabulary for the rev1§4.7 host-chokepoint proofs —
+# the `verus!{}` macro + ghost vocabulary for the rev2§4.7 host-chokepoint proofs —
 # the on-disk superblock chokepoint (`validate_geometry`/`decode_checked` in
-# disk.rs, 7f) and the rev1§4.9 directory-entry TLV codec (`decode_raw`/`encode_raw`
-# in prolly.rs, 7g — full exec-level canonical-form round-trip + decode totality).
-# The `alloc` feature (added in 7g) enables vstd's `Vec` specs, which the
-# `Vec`-building TLV encoder needs (7f's fixed-size superblock was Vec-free). It
+# disk.rs) and the rev2§4.9 directory-entry TLV codec (`decode_raw`/`encode_raw`
+# in prolly.rs — full exec-level canonical-form round-trip + decode totality).
+# The `alloc` feature enables vstd's `Vec` specs, which the `Vec`-building TLV
+# encoder needs (the fixed-size superblock chokepoint is Vec-free). It
 # stays `no_std` (no `std` feature), so it rides into the one user binary that
 # pulls cas (storaged) unchanged — storaged already carries vstd transitively via
-# its ipc/urt path-deps (vstd since 7a) and is itself no_std+alloc, so this edge
-# adds no new binary and vstd-with-alloc was re-confirmed to erase under the
-# aarch64 cross-build (the chief phase-7 risk). In an ordinary build (host `cargo
+# its ipc/urt path-deps and is itself no_std+alloc, so this edge
+# adds no new binary and vstd-with-alloc erases under the
+# aarch64 cross-build. In an ordinary build (host `cargo
 # test` *and* the aarch64 userspace cross-build via kernel/build.rs) the
 # `verus!{}` macro erases to plain Rust and vstd compiles to nothing
 # load-bearing. Pinned (=version) in lockstep with kcore/ipc/urt/dma-pool: an
@@ -45,7 +45,7 @@ vstd = { version = "=0.0.0-2026-05-31-0205", default-features = false, features 
 # `cargo verus verify -p cas --no-default-features` targets this crate. cas is
 # std-on-host / Vec/BTreeMap-heavy, but the verified chokepoint fns (superblock
 # byte parsing in disk.rs, the TLV codec in prolly.rs) are feature-agnostic, so
-# the no_std+alloc variant is the one verified (the plan §7f/§7g feature-pin).
+# the no_std+alloc variant is the one verified.
 [package.metadata.verus]
 verify = true
 
@@ -53,9 +53,8 @@ verify = true
 proptest = "1"
 
 # cfg(verus_keep_ghost)/cfg(verus_only) are set by Verus during `cargo verus
-# verify` (plan 3_verus-rewrite §7f); teach plain cargo they're expected (same
-# handling as ipc/urt/dma-pool/kcore). cfg(kani) is gone: `cas` is off Kani
-# after 7f (proofs.rs deleted — the superblock harnesses were the last in the
-# project), so nothing injects it.
+# verify`; teach plain cargo they're expected (same handling as
+# ipc/urt/dma-pool/kcore). `cas` does not use Kani, so nothing injects
+# cfg(kani).
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(verus_keep_ghost)", "cfg(verus_only)"] }

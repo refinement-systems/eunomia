@@ -1,23 +1,23 @@
-//! init — the one process the kernel constructs (rev1§1). Holds all initial
-//! authority and wires the running system (rev1§5.2: init is the only
-//! binder): it reads the PL031 once and publishes the time page (rev1§2.6),
+//! init — the one process the kernel constructs (rev2§1). Holds all initial
+//! authority and wires the running system (rev2§5.2: init is the only
+//! binder): it reads the PL031 once and publishes the time page (rev2§2.6),
 //! spawns storaged (granting the virtio MMIO window, a DMA region whose
 //! device address it reads via phys-read, the session channel, and the
 //! time page) and the shell (granting the session's other end, an untyped
 //! for spawning, the time page, and the console-by-syscall), each with an
-//! explicitly constructed cspace and a rev1§5.1 startup block.
+//! explicitly constructed cspace and a rev2§5.1 startup block.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(not(test), no_main)]
-// Under `cfg(test)` the crate builds as a host harness (Design decision 2,
-// B15C): std and the default test `main` take over, the bare-metal items and
+// Under `cfg(test)` the crate builds as a host harness:
+// std and the default test `main` take over, the bare-metal items and
 // the ELF `include_bytes!`d at boot are gated out, and only the pure startup-
 // block builders + the RTC sanity rule remain. Allow the dead-code / unused-
 // import noise the boot-only items leave behind.
 #![cfg_attr(test, allow(dead_code, unused_imports))]
 
 use ipc::sys::{self, OBJ_CHANNEL, OBJ_FRAME, PERM_DEVICE, PERM_W, RIGHT_READ};
-// The shared startup-block codec (rev1§5.1, C1B) — host-buildable, used by both
+// The shared startup-block codec (rev2§5.1) — host-buildable, used by both
 // `_start` (the producer) and the builder tests.
 use loader::startup::{self, Grant, GrantKind};
 // `loader::spawn` exists only on the bare-metal target (it is gated
@@ -30,7 +30,7 @@ use loader::spawn;
 static STORAGED_ELF: &[u8] = include_bytes!(env!("STORAGED_ELF_PATH"));
 #[cfg(not(test))]
 static SHELL_ELF: &[u8] = include_bytes!(env!("SHELL_ELF_PATH"));
-// C-M9-B: the userspace PL011 console driver, spawned before the shell.
+// The userspace PL011 console driver, spawned before the shell.
 #[cfg(not(test))]
 static CONSOLE_ELF: &[u8] = include_bytes!(env!("CONSOLE_ELF_PATH"));
 
@@ -60,11 +60,11 @@ const TIME_SH_CHILD: u32 = 18;
 const SD_SPAWN_BASE: u32 = 20;
 const SH_SPAWN_BASE: u32 = 40;
 
-// ── the console driver (C-M9-B) ────────────────────────────────────────────
-// The PL011 console caps the kernel grants real init (`kernel/src/main.rs`,
-// C-M9-B): the MMIO frame and the IRQ-handler cap, in the contiguous top pair
-// 62/63 — clear of every `spawn::prepare` scratch range by construction (C-M9
-// Design decision 4). init delegates both to the console driver at spawn.
+// ── the console driver ─────────────────────────────────────────────────────
+// The PL011 console caps the kernel grants real init (`kernel/src/main.rs`):
+// the MMIO frame and the IRQ-handler cap, in the contiguous top pair
+// 62/63 — clear of every `spawn::prepare` scratch range by construction
+// init delegates both to the console driver at spawn.
 const CONSOLE_FRAME: u32 = 62;
 const CONSOLE_IRQ: u32 = 63;
 // init's working slots for the console spawn, in the free gap above storaged's
@@ -81,14 +81,14 @@ const CON_FRAME_COPY: u32 = 35; // R/W copy of CONSOLE_FRAME, mapped into consol
 const CON_SPAWN_BASE: u32 = 50;
 
 /// Where init maps the PL011 register window in the console's aspace. The VA
-/// travels in the startup block's `pl011-mmio` region grant (rev1§5.1) — the
+/// travels in the startup block's `pl011-mmio` region grant (rev2§5.1) — the
 /// driver never assumes it (the storaged virtio-mmio precedent).
 const PL011_VA: u64 = 0xA000_0000;
 /// The PL011 register window is a single 4 KiB frame; its length rides the
 /// region grant (the driver reads fixed offsets and ignores the length).
 const PL011_LEN: u64 = 4096;
 
-/// The shell cspace slot holding its console-channel endpoint (rev1§5.1, C-M9-B):
+/// The shell cspace slot holding its console-channel endpoint (rev2§5.1):
 /// init `cap_install`s `CON_B` here and the startup table names it as **both**
 /// `stdin` and `stdout` (the interactive console is one channel under both
 /// names). Slots 0–5 are wired/carved by the shell and 8.. is its spawn window,
@@ -100,14 +100,14 @@ const MMIO_VA: u64 = 0xA000_0000;
 /// in the `virtio-mmio` region grant for completeness — storaged drives its own
 /// probe loop and does not consume the length (it is informational).
 const MMIO_LEN: u64 = 32 * 0x200;
-/// The time page is a single frame (rev1§2.6); its length rides the `time`
+/// The time page is a single frame (rev2§2.6); its length rides the `time`
 /// region grant. storaged `attach`es by VA and ignores the length.
 const TIME_LEN: u64 = 4096;
 const DMA_VA: u64 = 0xA100_0000;
 /// PL031 window in init's own aspace (the one self-mapping in the system).
 const RTC_VA: u64 = 0xA200_0000;
 /// Where the time page lands in every child; the address still travels in
-/// the startup block (the `"time"` grant, rev1§5.1) — never assumed.
+/// the startup block (the `"time"` grant, rev2§5.1) — never assumed.
 const TIME_VA: u64 = 0xA300_0000;
 const DMA_PAGES: u64 = 64;
 
@@ -120,16 +120,16 @@ const RIGHTS_WITH_PHYS: u64 = 0b111;
 /// Is the one-shot RTC reading sane? A reading before this code's own era
 /// (2020-01-01, `RTC_MIN_SANE_SECS`) or a zero counter frequency means the
 /// device is absent/unbacked, not that it is 1970 — a boot failure, since
-/// every store timestamp inherits this value (rev1§2.6).
+/// every store timestamp inherits this value (rev2§2.6).
 fn rtc_sane(secs: u64, cntfrq: u64) -> bool {
     secs >= RTC_MIN_SANE_SECS && cntfrq != 0
 }
 
-/// Build the init→storaged startup block (rev1§5.1, C1B): the unified `b"EUS1"`
+/// Build the init→storaged startup block (rev2§5.1): the unified `b"EUS1"`
 /// format carrying three `REGION` grants — the virtio MMIO window, the DMA pool
-/// (with its device PA, the phys-read path rev1§2.5), and the time page
-/// (rev1§2.6). Supersedes the bespoke `"SD02"` fixed layout; storaged decodes
-/// the inverse (its `parse_config`), the codec now shared on both ends. Returns
+/// (with its device PA, the phys-read path rev2§2.5), and the time page
+/// (rev2§2.6). storaged decodes the inverse (its `parse_config`); the codec is
+/// shared on both ends. Returns
 /// the encoded length or a clean `EncodeError` (the producer maps it to a boot
 /// failure — refuse, never panic). The regions carry no new authority: init
 /// `map`s every page before start, so only the VAs travel.
@@ -169,7 +169,7 @@ fn build_storaged_block(
     startup::encode(&s, out)
 }
 
-/// Build the init→console startup block (rev1§5.1, C-M9-B): the unified `b"EUS1"`
+/// Build the init→console startup block (rev2§5.1): the unified `b"EUS1"`
 /// format carrying a single `REGION` grant — the PL011 register window at the VA
 /// init pre-mapped it to. The driver decodes the inverse (its `region` helper) to
 /// build its `MmioWindow`; the region carries no new authority (init `map`s the
@@ -189,21 +189,21 @@ fn build_console_block(out: &mut [u8], pl011_va: u64) -> Result<usize, startup::
     startup::encode(&s, out)
 }
 
-/// The shell's cspace slot holding the storage-session channel (rev1§5.1):
+/// The shell's cspace slot holding the storage-session channel (rev2§5.1):
 /// init `cap_install`s `SESSION_B` here and the startup table names it as the
 /// `storage` grant, so the name and the install can never drift.
 const SHELL_SESSION_SLOT: u32 = 1;
 
-/// Build the init→shell startup block (rev1§5.1, C1C + C-M9-B): the unified
+/// Build the init→shell startup block (rev2§5.1): the unified
 /// `b"EUS1"` named-grant table (`loader::startup`) carrying the standard names the
 /// shell holds — `time` (the read-only page init mapped at `TIME_VA`, as a region
 /// grant carrying the VA), `storage` (the session channel at the shell's cspace
 /// slot 1), `root` (the full-rights ref at handle 0 on that session), and
-/// `stdin`/`stdout` (C-M9-B populates the names C1 reserved — both name the one
-/// console-channel endpoint at `SHELL_CONSOLE_SLOT`). `tmp` (Design decision 3, no
+/// `stdin`/`stdout` (both name the one
+/// console-channel endpoint at `SHELL_CONSOLE_SLOT`). `tmp` (no
 /// subtree today) stays a reserved, unemitted name. Returns the encoded length, or
 /// an `EncodeError` the caller maps to a clean boot failure (refuse-not-crash,
-/// rev1§2.7) — never a panic.
+/// rev2§2.7) — never a panic.
 fn build_shell_block(out: &mut [u8]) -> Result<usize, loader::startup::EncodeError> {
     use loader::startup::*;
     let mut s = Startup::new();
@@ -223,10 +223,10 @@ fn build_shell_block(out: &mut [u8]) -> Result<usize, loader::startup::EncodeErr
         name: NAME_ROOT,
         kind: GrantKind::StorageHandle(0),
     })?;
-    // `stdin`/`stdout` (rev1§5.1, C-M9-B populates the names C1 reserved): both
+    // `stdin`/`stdout` (rev2§5.1): both
     // name the **same** console-channel endpoint in the shell's cspace — "an
-    // interactive console is the same channel granted under both names". As of
-    // C-M9-C the shell does all terminal I/O over this channel (input *and*
+    // interactive console is the same channel granted under both names". The
+    // shell does all terminal I/O over this channel (input *and*
     // output); an absent grant is fatal in the shell (no debug-scaffold
     // fallback — the no-console negative control).
     s.push_grant(Grant {
@@ -250,7 +250,7 @@ fn check(r: i64, what: &[u8]) -> i64 {
     r
 }
 
-/// One-shot PL031 read (rev1§2.6): map the RTC read-only into our own aspace,
+/// One-shot PL031 read (rev2§2.6): map the RTC read-only into our own aspace,
 /// pair seconds-since-epoch from RTCDR with CNTVCT, and never touch the
 /// device again — there is deliberately no RTC driver. Boot-only: it reads
 /// the aarch64-only `urt::time::cntvct`/`cntfrq` intrinsics, so it is gated
@@ -269,7 +269,7 @@ fn read_boot_utc() -> (i64, u64, u64) {
     let cntfrq = urt::time::cntfrq();
     // A missing or insane RTC is a boot failure, not a degraded mode:
     // the one-shot read is the design and QEMU virt always provides the
-    // device (rev1§2.6). Every timestamp in the store inherits this value —
+    // device (rev2§2.6). Every timestamp in the store inherits this value —
     // fail loudly rather than seed them garbage.
     if !rtc_sane(secs, cntfrq) {
         sys::debug_write(b"[init] FAILED: insane PL031/CNTFRQ read\n");
@@ -278,7 +278,7 @@ fn read_boot_utc() -> (i64, u64, u64) {
     // The RTC's one-second granularity leaves ±1 s absolute error in
     // wall_base. Polling for a tick edge would shrink it at the cost of
     // up to a second of boot latency — wrong trade for retention rules
-    // denominated in hours. Accepted, not polled away (rev1§2.6).
+    // denominated in hours. Accepted, not polled away (rev2§2.6).
     ((secs as i64) * 1_000_000_000, cntvct_base, cntfrq)
 }
 
@@ -301,8 +301,8 @@ pub extern "C" fn _start() -> ! {
         b"session chan",
     );
     // The console's bootstrap channel (init→console startup block) and the
-    // console↔shell channel (rev1§7's "console cap" — one bidirectional channel,
-    // granted to the shell under both stdin/stdout, C-M9-B).
+    // console↔shell channel (rev2§7's "console cap" — one bidirectional channel,
+    // granted to the shell under both stdin/stdout).
     check(
         sys::retype(UNTYPED, OBJ_CHANNEL, 4, CON_BOOT_A, CON_BOOT_B),
         b"console boot chan",
@@ -312,8 +312,8 @@ pub extern "C" fn _start() -> ! {
         b"console chan",
     );
 
-    // ── the time page (rev1§2.6) ────────────────────────────────────────
-    // Funded from init's untyped — the rev1§2.5 grant rule in its degenerate,
+    // ── the time page (rev2§2.6) ────────────────────────────────────────
+    // Funded from init's untyped — the rev2§2.5 grant rule in its degenerate,
     // correct form: the supervisor whose liveness dominates everyone's
     // funds the mapping everyone shares, so nobody can fault anybody.
     let (wall_base_ns, cntvct_base, cntfrq) = read_boot_utc();
@@ -333,7 +333,7 @@ pub extern "C" fn _start() -> ! {
         }
     };
     // The MMIO window: a phys-capable copy, device-mapped into the
-    // child. The phys-read bit travels only along this one grant (rev1§2.5).
+    // child. The phys-read bit travels only along this one grant (rev2§2.5).
     check(
         sys::cap_copy(DEVICE_FRAME, DEV_COPY, RIGHTS_WITH_PHYS),
         b"dev copy",
@@ -353,7 +353,7 @@ pub extern "C" fn _start() -> ! {
         sys::map(sd.aspace_slot, DMA_FRAME, DMA_VA, PERM_W),
         b"map dma",
     );
-    // The "time" grant (rev1§5.1): a read-only derivation per consumer —
+    // The "time" grant (rev2§5.1): a read-only derivation per consumer —
     // rights-level read-only, so no holder can ever map it writable.
     check(
         sys::cap_copy(TIME_FRAME, TIME_SD, RIGHT_READ),
@@ -375,7 +375,7 @@ pub extern "C" fn _start() -> ! {
     ) {
         Ok(n) => n,
         // The block is built from fixed init constants, so an overflow would be
-        // a build-time bug — but refuse cleanly rather than panic (rev1§2.7).
+        // a build-time bug — but refuse cleanly rather than panic (rev2§2.7).
         Err(_) => {
             sys::debug_write(b"[init] FAILED: build storaged block\n");
             sys::exit();
@@ -386,7 +386,7 @@ pub extern "C" fn _start() -> ! {
         b"sd startup block",
     );
     // Block-don't-spin: requests wake storaged through a readable→
-    // notification binding (rev1§3.6) — under strict priorities a busy-poll
+    // notification binding (rev2§3.6) — under strict priorities a busy-poll
     // server would starve its clients.
     check(
         sys::retype(UNTYPED, sys::OBJ_NOTIF, 0, SD_NOTIF, 0),
@@ -410,8 +410,8 @@ pub extern "C" fn _start() -> ! {
     );
     check(spawn::start(&sd, 5).map_or(-1, |_| 0), b"start storaged");
 
-    // ── the console driver (C-M9-B) ──────────────────────────────────
-    // Spawned **before** the shell (Design decision 6): the shell's first prompt
+    // ── the console driver ───────────────────────────────────────────
+    // Spawned **before** the shell: the shell's first prompt
     // needs a live console to send to. The driver owns the PL011 (its MMIO frame
     // + IRQ cap, granted by the kernel at CONSOLE_FRAME/CONSOLE_IRQ); it delivers
     // RX keystrokes and accepts TX bytes over the console↔shell channel.
@@ -466,7 +466,7 @@ pub extern "C" fn _start() -> ! {
     );
     // The console's cspace (its `_start` reads fixed slots): 0 = bootstrap
     // channel, 1 = the console↔shell channel, 2 = the wake notif, 3 = the PL011
-    // IRQ cap (delegated from CONSOLE_IRQ — first real-boot use of an IRQ cap).
+    // IRQ cap (delegated from CONSOLE_IRQ).
     check(
         sys::cap_install(con.cspace_slot, CON_BOOT_B, 0),
         b"console boot install",
@@ -491,7 +491,7 @@ pub extern "C" fn _start() -> ! {
     // ── shell ───────────────────────────────────────────────────────
     // 64-slot cspace: slots 0-4 are wired below / carved by the shell,
     // slot 5 is the re-grantable time cap, and 8.. is the shell's
-    // recyclable spawn window (rev1§5.1 reclaim loop).
+    // recyclable spawn window (rev2§5.1 reclaim loop).
     let sh = match spawn::prepare(SHELL_ELF, UNTYPED, SH_SPAWN_BASE, 64) {
         Ok(p) => p,
         Err(_) => {
@@ -509,7 +509,7 @@ pub extern "C" fn _start() -> ! {
     );
     // Re-grantable copy in the shell's cspace slot 5: the shell holds a
     // read-only time cap it can copy and map into each child it spawns,
-    // extending the rev1§2.6 time grant one hop (init→shell→child, rev1§5.1).
+    // extending the rev2§2.6 time grant one hop (init→shell→child, rev2§5.1).
     check(
         sys::cap_copy(TIME_FRAME, TIME_SH_CHILD, RIGHT_READ),
         b"time child copy",
@@ -543,9 +543,9 @@ pub extern "C" fn _start() -> ! {
         sys::cap_install(sh.cspace_slot, UNTYPED2, 2),
         b"sh untyped install",
     );
-    // The console-channel endpoint (rev1§7's "console cap", C-M9-B): named in the
-    // startup table as both `stdin` and `stdout`. The shell holds it from C-M9-B
-    // and moves its terminal I/O onto it in C-M9-C.
+    // The console-channel endpoint (rev2§7's "console cap"): named in the
+    // startup table as both `stdin` and `stdout`. The shell holds it and does
+    // its terminal I/O over it.
     check(
         sys::cap_install(sh.cspace_slot, CON_B, SHELL_CONSOLE_SLOT),
         b"sh console install",
@@ -566,10 +566,10 @@ fn on_panic(_: &core::panic::PanicInfo) -> ! {
 #[cfg(test)]
 mod tests {
     //! Host tests for init's startup-block *builders* and the RTC sanity rule
-    //! (rev1§6 Baseline tier). C1B + C1C migrated both producer blocks onto the
-    //! shared `loader::startup` codec: the init→storaged and init→shell
+    //! (rev2§6 Baseline tier). Both producer blocks use the shared
+    //! `loader::startup` codec: the init→storaged and init→shell
     //! round-trips drive the real `encode` through the real `decode`, so no
-    //! mirrored hand-parser remains on either side.
+    //! mirrored hand-parser exists on either side.
     use super::*;
     use proptest::prelude::*;
 
@@ -611,21 +611,21 @@ mod tests {
                 pa: 0
             })
         );
-        // The storaged block carries no argv/env (rev1§5.1 fields, empty here).
+        // The storaged block carries no argv/env (rev2§5.1 fields, empty here).
         assert_eq!(s.nargv, 0);
         assert_eq!(s.nenv, 0);
     }
 
     #[test]
     fn shell_block_carries_named_grants() {
-        // The init→shell block (C1C) is now the unified `b"EUS1"` table; drive
+        // The init→shell block is the unified `b"EUS1"` table; drive
         // the real shared codec on both ends (encode here, decode via
         // `loader::startup`) — no mirrored hand-parser.
         use loader::startup::*;
         let mut buf = [0u8; MAX_BLOCK];
         let n = build_shell_block(&mut buf).expect("encode shell block");
         let s = decode(&buf[..n]).expect("decode shell block");
-        // `time`: the read-only page init mapped at TIME_VA (rev1§2.6).
+        // `time`: the read-only page init mapped at TIME_VA (rev2§2.6).
         assert_eq!(
             s.grant(NAME_TIME),
             Some(GrantKind::Region {
@@ -638,8 +638,8 @@ mod tests {
         assert_eq!(s.grant(NAME_STORAGE), Some(GrantKind::CapSlot(1)));
         // `root`: the full-rights ref at handle 0.
         assert_eq!(s.grant(NAME_ROOT), Some(GrantKind::StorageHandle(0)));
-        // stdin/stdout (C-M9-B): both name the one console-channel endpoint
-        // (rev1§5.1 "same channel under both names"). `tmp` stays unpopulated.
+        // stdin/stdout: both name the one console-channel endpoint
+        // (rev2§5.1 "same channel under both names"). `tmp` stays unpopulated.
         assert_eq!(
             s.grant(NAME_STDIN),
             Some(GrantKind::CapSlot(SHELL_CONSOLE_SLOT))
@@ -653,7 +653,7 @@ mod tests {
 
     #[test]
     fn console_block_carries_the_pl011_region() {
-        // The init→console block (C-M9-B) carries exactly the PL011 register
+        // The init→console block carries exactly the PL011 register
         // window as a region grant — the driver builds its `MmioWindow` from the
         // VA. Drive the real shared codec (encode here, decode via the crate).
         let mut buf = [0u8; startup::MAX_BLOCK];

@@ -1,8 +1,8 @@
-//! IRQ-handler objects (rev1§1, rev1§3.6): a cap granting the right to receive and
+//! IRQ-handler objects (rev2§1, rev2§3.6): a cap granting the right to receive and
 //! acknowledge a device interrupt. The **census twin of the timer object** (`crate::timer`),
 //! minus the armed list: an IRQ cap binds a (notification, bits) pair exactly as a timer
 //! does, and a hardware interrupt signals that notification — but delivery is by direct
-//! INTID→object lookup (the trusted `kernel` shell, B-IRQ-B), not by sweeping a chain, so
+//! INTID→object lookup (the trusted `kernel` shell), not by sweeping a chain, so
 //! there is **no armed list** here. The binding holds a ref on its notification (the
 //! `irq_binding_refs` census term), so revoking the notification cap cannot free it under a
 //! bound IRQ — the exact hazard `armed_timer_refs` guards for timers.
@@ -49,7 +49,7 @@ impl IrqObj {
         });
     }
 
-    /// Boot-static constructor (B-IRQ-B, Design decision 3): a `const` IRQ object
+    /// Boot-static constructor: a `const` IRQ object
     /// for the kernel's fixed `IRQ_TABLE`. The `init` value as a `const fn`, so the
     /// trusted shell can place the IRQ objects in the kernel image (the device-MMIO
     /// -frame precedent) rather than retype them from untyped — no `ExIrqObj` seam.
@@ -68,7 +68,7 @@ impl IrqObj {
 
 verus! {
 
-/// Unbind an IRQ: release the ref it held on its bound notification (rev1§3.6) and clear
+/// Unbind an IRQ: release the ref it held on its bound notification (rev2§3.6) and clear
 /// the binding. The `disarm` analog, **minus the armed-list splice** — a single-key edit at
 /// `i`, so the proof is the census delta alone (`lemma_irq_binding_retarget` with `post`
 /// unbound). `!bound` ⇒ a no-op; `bound` ⇒ the queued ref is released (`refs[notif] -= 1`,
@@ -185,7 +185,7 @@ pub fn irq_unbind<S: Store>(store: &mut S, i: ObjId)
 }
 
 /// Bind (or rebind) an IRQ: signal `bits` on `notif` when the line fires (the signal itself
-/// lives in the trusted delivery shell, B-IRQ-B). The bound IRQ holds a ref on the
+/// lives in the trusted delivery shell). The bound IRQ holds a ref on the
 /// notification. The `arm` analog, **minus the head-push**: `irq_unbind` first (idempotent
 /// rebind, net-zero on a same-notif rebind), `+1` on the notification ref, set the fields.
 ///

@@ -1,9 +1,9 @@
 //! Async-completion tests: the fake completes a request *after* the driver
 //! has already polled a stale used-index, so `try_complete` runs over a real
-//! stale→fresh transition. This is the coverage that was missing when audit
-//! I-4 (a non-volatile, hoistable used-ring load) slipped through: the
-//! synchronous fake processes the queue *inside* `QUEUE_NOTIFY`, so by the
-//! first poll the used-index is already advanced and the loop body never runs.
+//! stale→fresh transition. This is the coverage that guards against a
+//! non-volatile, hoistable used-ring load: the synchronous fake processes the
+//! queue *inside* `QUEUE_NOTIFY`, so by the first poll the used-index is
+//! already advanced and the loop body never runs.
 //! Deferred mode forces the stale poll, exercising `poll_used`/`try_complete`
 //! and the `Acquire` fence across the transition.
 //!

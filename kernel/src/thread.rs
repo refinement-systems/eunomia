@@ -1,4 +1,4 @@
-//! Kernel-side scheduler (spec rev1§1, rev1§5.4). The thread *object* — TCB layout,
+//! Kernel-side scheduler (spec rev2§1, rev2§5.4). The thread *object* — TCB layout,
 //! trap frame, report state machine, binding slots — lives in
 //! [`kcore::thread`] (re-exported below); this module keeps the
 //! architectural half: the ready-queue *backing* (the `READY`/`READY_BITMAP`
@@ -6,10 +6,10 @@
 //! switch, `CURRENT`, the idle WFI loop, and ASID-tagged TTBR0 activation.
 //!
 //! The ready-queue list *logic* (enqueue/dequeue/unqueue/`top_ready`) is the
-//! Verus-verified [`kcore::ready`] ops (B8C); the `enqueue`/`dequeue`/`top_ready`/
+//! Verus-verified [`kcore::ready`] ops; the `enqueue`/`dequeue`/`top_ready`/
 //! `unqueue_ready` wrappers below are thin pointer-convert + `kcore::ready::*`
 //! calls via [`KernelStore`]. The scheduler *policy* (`maybe_switch`) and the asm
-//! context switch stay trusted shell (rev1§6.1(d)).
+//! context switch stay trusted shell (rev2§6.1(d)).
 //!
 //! Strict fixed-priority preemptive scheduling: 32 levels, round-robin
 //! within a level on the periodic tick, idle is a WFI loop at priority 0.
@@ -63,11 +63,11 @@ pub unsafe fn bind(t: *mut Tcb, which: usize, notif_src: *mut CapSlot, bits: u64
 }
 
 /// See [`kcore::thread::set_priority`]. Routes spawn's priority write through the
-/// verified setter, which now *makes the refusal itself*: an over-ceiling `prio`
-/// returns `Err` and leaves the TCB untouched (the rev1§6.1(d) spawn-time gate,
-/// no longer a shell `if`), an accepted one lands in the TCB under a
-/// machine-checked `priority == prio (<= ceiling)` instead of a raw
-/// `(*tp).priority` store. Callers map `Err` to `ERR_PERM`.
+/// verified setter, which *makes the refusal itself*: an over-ceiling `prio`
+/// returns `Err` and leaves the TCB untouched (the rev2§6.1(d) spawn-time gate),
+/// an accepted one lands in the TCB under a machine-checked
+/// `priority == prio (<= ceiling)` instead of a raw `(*tp).priority` store.
+/// Callers map `Err` to `ERR_PERM`.
 pub unsafe fn set_priority(t: *mut Tcb, prio: u8, ceiling: u8) -> Result<(), ()> {
     kcore::thread::set_priority(&mut KernelStore, ObjId(t as u64), prio, ceiling)
 }
@@ -89,7 +89,7 @@ static mut CURRENT: *mut Tcb = ptr::null_mut();
 // By-handle accessors over the ready-queue statics — the realization of the
 // `Store::ready_*` seam (kernel/src/store.rs) the verified `kcore::ready` ops run
 // against. Trusted shell: the ObjId↔`*mut Tcb` conversion is the same `as_tcb`/`tcb_id`
-// link the notif/timer queues use (rev1§6.1(d), Honesty note 3).
+// link the notif/timer queues use (rev2§6.1(d), Honesty note 3).
 pub(crate) unsafe fn ready_head_at(level: usize) -> Option<ObjId> {
     tcb_id(READY[level].head)
 }

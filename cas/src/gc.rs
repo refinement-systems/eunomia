@@ -1,4 +1,4 @@
-//! GC mark phase (spec rev1§4.6): the reachability walk from a tree root.
+//! GC mark phase (spec rev2§4.6): the reachability walk from a tree root.
 //!
 //! Mark state is an exact in-memory hash set — the MVP bet that mark time
 //! ≪ server uptime. The walk reads only directory nodes and chunk-list
@@ -11,7 +11,7 @@
 //! check, extent accounting) lives in `store::Store::gc` — this module is
 //! pure tree traversal.
 //!
-//! Bound (rev1§4.8 "detect on read, never fault"): the walk is an explicit
+//! Bound (rev2§4.8 "detect on read, never fault"): the walk is an explicit
 //! heap work-stack of nodes-to-parse, not native recursion, so native stack
 //! depth is **O(1)** regardless of tree depth/width. Nodes are marked
 //! *on push*, so each distinct reachable parse-node is pushed at most once
@@ -21,14 +21,14 @@
 //! children's), so depth/width are the only adversarial axes, and the
 //! work-stack + mark-on-push dedup absorb both. A malformed node yields a
 //! clean `FormatError` (`parse_node`/`chunk_list_entries` are total), never
-//! a fault. The mark walk is a host cargo-fuzz target (`gc_mark`, rev1§6);
+//! a fault. The mark walk is a host cargo-fuzz target (`gc_mark`, rev2§6);
 //! its driver `check_recipe` lives here so the target and its corpus-replay
 //! test share one sufficiency oracle.
 //!
-//! Verification posture (rev1§6, B6 Design decision 3): mark-set
+//! Verification posture (rev2§6): mark-set
 //! **sufficiency** — every object reachable from a live root lands in the
 //! mark set, so the set alone serves every read — is a global reachability
-//! invariant over a content-addressed graph, delivered at the rev1§6 *oracle
+//! invariant over a content-addressed graph, delivered at the rev2§6 *oracle
 //! tier*, not mechanized in Verus. Mechanizing it would model `parse_node`,
 //! `chunk_list_entries`, and the store in spec and drag `Hash` into the
 //! Hash-free recovery core (`store.rs`, `prolly.rs`), against that core's
@@ -100,7 +100,7 @@ pub fn mark(
     Ok(())
 }
 
-// ── GC fuzz/test driver (rev1§6: the mark walk is a host cargo-fuzz target) ──
+// ── GC fuzz/test driver (rev2§6: the mark walk is a host cargo-fuzz target) ──
 //
 // `check_recipe` is the single oracle driven by both the `gc_mark` cargo-fuzz
 // target (`cas/fuzz`, built with the `fuzzing` feature) and its corpus-replay
@@ -108,7 +108,7 @@ pub fn mark(
 // Miri-replayed). Integration tests link the library compiled normally — they
 // see neither `#[cfg(test)]` nor `fuzzing`-gated items — so the shared driver
 // is ungated `pub`, matching the host-test posture of `mark`/`parse_node`/
-// `MemStore`. The strengthened sufficiency proptest (B6C) reuses the same
+// `MemStore`. The strengthened sufficiency proptest reuses the same
 // `LiveOnly`/`walk_collect` helpers via the child `tests` module.
 
 /// Chunker params for recipe-built chunked files (small, fuzz-friendly).
@@ -276,7 +276,7 @@ pub(crate) fn build_recipe(data: &[u8]) -> (MemStore, Option<Hash>) {
 
 /// Serves only marked objects — reads through it succeed exactly when the mark
 /// set is sufficient. The sufficiency oracle for the `gc_mark` fuzz target, the
-/// corpus replay, and (B6C) the strengthened proptest.
+/// corpus replay, and the strengthened proptest.
 pub(crate) struct LiveOnly<'a> {
     pub(crate) inner: &'a MemStore,
     pub(crate) live: &'a BTreeSet<Hash>,
@@ -322,7 +322,7 @@ pub(crate) fn walk_collect(
     Ok(out)
 }
 
-/// Run the GC mark walk over a recipe-built store and check it (rev1§4.6/§6):
+/// Run the GC mark walk over a recipe-built store and check it (rev2§4.6/§6):
 /// the walk must never panic or overflow; on `Err` it refused cleanly (a
 /// dangling reference → `MissingNode`); on `Ok` the mark set must be
 /// **sufficient** — every reachable read through the mark set alone matches
@@ -407,7 +407,7 @@ mod tests {
         /// depth, fanout, inline vs chunked files, and structural sharing from
         /// repeated `tree::put` over shared roots. Asserts the *same* oracle
         /// the `gc_mark` fuzz target drives (`walk_collect` full == `LiveOnly`
-        /// view) — one oracle, two drivers (rev1§6, B6 Design decision 3).
+        /// view) — one oracle, two drivers (rev2§6).
         ///
         /// Disjoint dir/file name alphabets (`d*` vs `f*`) mean a path
         /// component never names a file, so `tree::put` never hits the
@@ -450,9 +450,9 @@ mod tests {
         }
     }
 
-    /// A `DirRoot` chain deep enough that the pre-B6B native recursion
-    /// overflowed the stack; the heap work-stack makes native depth O(1), so
-    /// it completes (rev1§4.8 refuse/complete, never fault). Miri runs a small
+    /// A `DirRoot` chain deep enough that native recursion would overflow
+    /// the stack; the heap work-stack makes native depth O(1), so
+    /// it completes (rev2§4.8 refuse/complete, never fault). Miri runs a small
     /// depth (the path, not the scale, is what it UB-checks).
     #[test]
     fn deep_dir_root_chain_does_not_overflow() {

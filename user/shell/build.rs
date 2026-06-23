@@ -1,10 +1,10 @@
 fn main() {
     println!("cargo:rerun-if-changed=link.ld");
     // The bare-metal linker script + page-size flag are for the Eunomia target
-    // only (`target_os = "none"`). A host build — the B15B test harness — links
+    // only (`target_os = "none"`). A host build — the test harness — links
     // with the platform default; applying the script there breaks the link
-    // (`clang: unknown argument: -zmax-page-size`). The shipped aarch64
-    // binary's link args are unchanged.
+    // (`clang: unknown argument: -zmax-page-size`). The gate leaves the shipped
+    // aarch64 binary's link args alone.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("none") {
         return;
     }

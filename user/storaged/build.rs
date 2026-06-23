@@ -2,7 +2,7 @@ fn main() {
     let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     // The custom linker script + page size are meaningful only for the
     // bare-metal aarch64 EL0 image (the kernel-built binary). For host test
-    // builds (B15C: `cargo test` under cfg(test)) they must NOT be applied —
+    // builds (`cargo test` under cfg(test)) they must NOT be applied —
     // they would break the libtest harness link with `cc`. Gate on the
     // bare-metal `*-none` target, and scope to bin targets so a host test
     // harness never receives them.

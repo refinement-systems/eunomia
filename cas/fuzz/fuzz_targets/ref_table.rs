@@ -1,10 +1,10 @@
 #![no_main]
-//! The durable reference table (rev1§4.1, rev1§4.7): per-ref roots +
+//! The durable reference table (rev2§4.1, rev2§4.7): per-ref roots +
 //! revocation generation + edit version, the snapshot rows, and the tags.
-//! `RefTable::decode` is plain Rust with `FormatError` decode discipline and,
-//! until B5A, was reached only indirectly through `mount_recovery`; this fuzzes
-//! the decoder directly. Its content hash is verified one layer up in
-//! `Store::mount`, so the decoder itself sees unauthenticated bytes.
+//! `RefTable::decode` is plain Rust with `FormatError` decode discipline; this
+//! fuzzes the decoder directly rather than only through `mount_recovery`. Its
+//! content hash is verified one layer up in `Store::mount`, so the decoder
+//! itself sees unauthenticated bytes.
 //!
 //! Oracle — the same deliberate weakening as `index_frame`. `RefTable::decode`
 //! rebuilds three `BTreeMap`s, which *normalize* key order and collapse

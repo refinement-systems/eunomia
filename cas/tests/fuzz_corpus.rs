@@ -61,7 +61,7 @@ fn tree_node() {
 fn gc_mark() {
     // Same driver the `gc_mark` target runs: each recipe builds a store of
     // tree nodes and marks it; the walk must never panic/overflow, and on
-    // success the mark set must read back everything reachable (rev1§4.6/§6).
+    // success the mark set must read back everything reachable (rev2§4.6/§6).
     for data in corpus_files("gc_mark") {
         cas::gc::check_recipe(&data).unwrap();
     }
@@ -125,9 +125,9 @@ fn wal_replay_scan() {
     }
 }
 
-/// Generator for the C2B tag-3 (Rename) corpus seed (`corpus/wal_replay_scan/
+/// Generator for the tag-3 (Rename) corpus seed (`corpus/wal_replay_scan/
 /// rename`): a Write then a Rename record so the fuzzer — and the Miri replay
-/// in `wal_replay_scan` above — exercise the new rename decode path. `#[ignore]`d
+/// in `wal_replay_scan` above — exercise the rename decode path. `#[ignore]`d
 /// because it rewrites a committed file; run explicitly to regenerate:
 /// `cargo test -p cas --test fuzz_corpus gen_rename_corpus_seed -- --ignored`.
 #[test]

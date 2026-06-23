@@ -1,4 +1,4 @@
-//! Notification objects (spec rev1§3.6): a machine word of signal bits plus a
+//! Notification objects (spec rev2§3.6): a machine word of signal bits plus a
 //! FIFO waiter queue. Signalers OR bits in; a waiter receives the whole
 //! accumulated word, which clears. Event delivery never allocates — the
 //! waiter queue is intrusive through the TCBs.
@@ -63,9 +63,9 @@ pub open spec fn signal_wakes(nv: Map<ObjId, NotifView>, n: ObjId, bits: u64) ->
 /// queued ref is released (`refs -= 1`), and the thread is made Runnable; on the
 /// **accumulate** path the word grows and the queue/refs are untouched. `notif_wf`
 /// is preserved either way.
-// B8C: the reworked wake (faithful enqueue + the ready pair + the three caller-frame ensures —
-// contrapositive, field, BlockedNotif-frozen) carries more proof obligations; raise the private
-// resource cap (own Z3 instance, no other proof affected) to restore margin.
+// The wake (faithful enqueue + the ready pair + the three caller-frame ensures —
+// contrapositive, field, BlockedNotif-frozen) carries many proof obligations; the private
+// resource cap (own Z3 instance, no other proof affected) is raised to hold margin.
 #[verifier::spinoff_prover]
 #[verifier::rlimit(50)]
 pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
@@ -74,7 +74,7 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
         cspace::notif_wf(old(store).notif_view(), old(store).tcb_view(), n),
         old(store).notif_view()[n].wait_head is Some
             ==> old(store).refs_view().dom().contains(n) && old(store).refs_view()[n] > 0,
-        // B8C: the wake faithfully enqueues the woken thread, so `signal` carries the
+        // The wake faithfully enqueues the woken thread, so `signal` carries the
         // ready-queue invariants. The cascade callers supply them (via `lemma_ready_inv_frame`
         // across object-only steps); `make_runnable` re-establishes them across the enqueue.
         cspace::ready_wf(old(store).ready_view(), old(store).tcb_view()),
@@ -129,9 +129,9 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
         // `signal` touches only TCBs that were waiting on `n` (the woken head) or the old
         // ready-tail it re-threads on enqueue (a Runnable thread) — the frame a caller needs to
         // keep *other* notifications' `notif_wf` intact across a fire (`lemma_notif_wf_frame`).
-        // B8C states it in **contrapositive** form ("a *changed* TCB was an `n`-waiter or was
-        // Runnable"): the faithful enqueue now perturbs the old level-tail `p` (Runnable,
-        // `wait_notif None`), which the old `wait_notif`-only frame wrongly claimed unchanged.
+        // Stated in **contrapositive** form ("a *changed* TCB was an `n`-waiter or was
+        // Runnable"): the faithful enqueue perturbs the old level-tail `p` (Runnable,
+        // `wait_notif None`), which a `wait_notif`-only frame would wrongly claim unchanged.
         // The contrapositive is vacuous on out-of-domain phantom keys (which `signal` never
         // perturbs), so a caller can frame any `m != n`'s waiters — each `BlockedNotif`
         // (non-Runnable by `ready_complete`) with `wait_notif == Some(m) != Some(n)`, hence
@@ -140,7 +140,7 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
             ==> old(store).tcb_view()[k].wait_notif == Some(n)
                 || old(store).tcb_view()[k].state == ThreadState::Runnable,
         cspace::notif_wf(final(store).notif_view(), final(store).tcb_view(), n),
-        // B8C: `signal` writes only the wake/scheduler fields — the fixups clear `t`'s queue/wait
+        // `signal` writes only the wake/scheduler fields — the fixups clear `t`'s queue/wait
         // links and set its `retval`, and `make_runnable` sets `state`/`qnext` (on `t` plus the
         // re-threaded old ready-tail). Every *other* field of every thread (`report`, `cspace`,
         // `aspace`, `bind_slots`, `bind_bits`, `priority`) is preserved, so a caller can read its
@@ -152,14 +152,14 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
             wait_notif: final(store).tcb_view()[k].wait_notif,
             ..old(store).tcb_view()[k]
         }),
-        // B8C: the wake produces only Runnable threads — it sets the woken (formerly
-        // `BlockedNotif`) thread to Runnable and re-threads the old ready-tail's `qnext` (which
+        // The wake produces only Runnable threads — it sets the woken
+        // `BlockedNotif` thread to Runnable and re-threads the old ready-tail's `qnext` (which
         // stays Runnable). So **a thread that ends `BlockedNotif` was unchanged** by the wake;
         // `fire`/`delete`'s caps + waiter-coherence proofs use this to frame every still-blocked
         // waiter (the only changed nodes are non-blocked, so they cannot be stray waiters).
         forall|k: ObjId| #[trigger] final(store).tcb_view()[k].state == ThreadState::BlockedNotif
             ==> final(store).tcb_view()[k] == old(store).tcb_view()[k],
-        // B8C: the ready-queue invariants survive the wake (enqueue re-establishes them; the
+        // The ready-queue invariants survive the wake (enqueue re-establishes them; the
         // accumulate path frames the views).
         cspace::ready_wf(final(store).ready_view(), final(store).tcb_view()),
         cspace::ready_complete(final(store).ready_view(), final(store).tcb_view()),
@@ -175,9 +175,9 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
         signal_wakes(old(store).notif_view(), n, bits) ==> {
             let t = old(store).notif_view()[n].wait_head->Some_0;
             &&& old(store).tcb_view()[t].wait_notif == Some(n)
-            // B8C: the faithful enqueue changes only `t` and the old ready-tail of `t`'s level
-            // (its `qnext` retargeted to `t`); every other TCB is framed. (Replaces the
-            // pre-B8C single-key `insert(t, ..)` — the wake now perturbs a second node.)
+            // The faithful enqueue changes only `t` and the old ready-tail of `t`'s level
+            // (its `qnext` retargeted to `t`); every other TCB is framed. The wake perturbs
+            // two nodes: `t` and that ready-tail.
             &&& forall|k: ObjId| #![trigger final(store).tcb_view()[k]]
                     k != t
                     && Some(k) != old(store).ready_view().tails[old(store).tcb_view()[t].priority as int]
@@ -257,7 +257,7 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
             cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, n);
             // "Dead stays dead": the accumulate path frames `refs` whole, so death is preserved.
             cspace::lemma_refs_death_persist_from_refs_eq(old(store), store);
-            // B8C: the accumulate path frames `ready_view`+`tcb_view`, so the ready invariants carry.
+            // The accumulate path frames `ready_view`+`tcb_view`, so the ready invariants carry.
             cspace::lemma_ready_inv_frame(old(store), store);
         }
         return;
@@ -420,7 +420,7 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
         // dead_tcb_frozen: a signal-shaped edit. The woken head `t` (`wait_notif == Some(n)`) and
         // the old ready-tail `p` (Runnable) moved; `refs` dropped only at `n`, which had
         // `refs > 0` (the woken waiter held it). A dead (`refs 0`), detached (`wait_notif None`),
-        // *non-Runnable* `x` is none of `{t, p, n}`, so it is frozen (B8C `dead_tcb_frozen_at`).
+        // *non-Runnable* `x` is none of `{t, p, n}`, so it is frozen (`dead_tcb_frozen_at`).
         assert(old(store).refs_view()[n] > 0);
         assert(store.refs_view()
             == old(store).refs_view().insert(n, (old(store).refs_view()[n] - 1) as nat));
@@ -462,7 +462,7 @@ pub fn wait<S: Store>(store: &mut S, n: ObjId, cur: ObjId) -> (res: Option<u64>)
         old(store).tcb_view().dom().contains(cur),
         cspace::notif_wf(old(store).notif_view(), old(store).tcb_view(), n),
         old(store).tcb_view()[cur].wait_notif is None,
-        // B8C: the blocking thread's priority is a valid ready-queue level. `wait` is the sole
+        // The blocking thread's priority is a valid ready-queue level. `wait` is the sole
         // appender to a waiter chain, so this leaf precondition (the kernel supplies it for the
         // running thread) re-establishes the strengthened `waiter_chain` priority covenant; it
         // then rides `notif_wf` to `signal`, which needs it for the faithful `make_runnable`.
@@ -588,7 +588,7 @@ pub fn wait<S: Store>(store: &mut S, n: ObjId, cur: ObjId) -> (res: Option<u64>)
                     assert(pws[i] == cur);
                 }
             }
-            // B8C: the strengthened priority covenant. `wait` never writes any `priority`
+            // The strengthened priority covenant. `wait` never writes any `priority`
             // (only state/wait_notif/qnext), so the bound rides framed for the `ws0` prefix
             // (from the input chain) and from the new leaf precondition for `cur`.
             assert forall|i: int| 0 <= i < pws.len() implies
@@ -685,7 +685,7 @@ pub fn destroy_notif<S: Store>(store: &mut S, n: ObjId)
         final(store).timer_head_view() == old(store).timer_head_view(),
         final(store).cspace_view() == old(store).cspace_view(),
         final(store).irq_view() == old(store).irq_view(),
-        // B8C: the model no-op frames the ready queue too — `obj_unref`'s Notification arm
+        // The model no-op frames the ready queue too — `obj_unref`'s Notification arm
         // frames the ready pair across the destructor.
         final(store).ready_view() == old(store).ready_view(),
         // A model no-op (the kernel reclaims the object's memory; the abstract views are
@@ -710,9 +710,8 @@ pub fn destroy_notif<S: Store>(store: &mut S, n: ObjId)
 /// read-only — the only writes are on the found path, which returns. The `refs > 0`
 /// precondition (a non-empty queue ⇒ live) discharges the release `-1`, exactly as in
 /// `signal`.
-// B8C: carrying the ready-queue pair through the splice-walk loop invariant adds proof load
-// to an already-heavy loop body; raise the private resource cap (own Z3 instance) to restore
-// margin. The proof is unchanged.
+// Carrying the ready-queue pair through the splice-walk loop invariant adds proof load
+// to an already-heavy loop body; the private resource cap (own Z3 instance) holds margin.
 #[verifier::spinoff_prover]
 #[verifier::rlimit(40)]
 pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
@@ -721,7 +720,7 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
         cspace::notif_wf(old(store).notif_view(), old(store).tcb_view(), n),
         old(store).notif_view()[n].wait_head is Some
             ==> old(store).refs_view().dom().contains(n) && old(store).refs_view()[n] > 0,
-        // B8C: the splice moves only `BlockedNotif` nodes (`t` + its chain predecessor), so the
+        // The splice moves only `BlockedNotif` nodes (`t` + its chain predecessor), so the
         // ready-queue invariants ride it (the off-chain frame); `destroy_tcb` carries the pair.
         cspace::ready_wf(old(store).ready_view(), old(store).tcb_view()),
         cspace::ready_complete(old(store).ready_view(), old(store).tcb_view()),
@@ -756,7 +755,7 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
         // The teardown system invariants survive the splice (the `signal`→`fire` precedent):
         // it is a signal-shaped edit (only `n`'s notif view + `n`'s waiter TCBs move, every
         // TCB's `bind_slots`/`cspace` fixed), so `lemma_caps_consistent_frame` applies; the
-        // rev1§3.3 endpoint census reads only the framed chan/slot views; and the census only
+        // rev2§3.3 endpoint census reads only the framed chan/slot views; and the census only
         // drops while the refs domain is fixed. Conditional + `requires`-free, so the teardown
         // callers keep no obligation; `destroy_tcb` (the only kcore caller) consumes them for
         // its bind-slot `delete`s.
@@ -828,7 +827,7 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
             // the absent-path post-state can frame it, and `destroy_tcb` carries it forward.
             store.cspace_view() == old(store).cspace_view(),
             store.irq_view() == old(store).irq_view(),
-            // B8C: the walk is read-only on the ready view too — pinned so both return paths can
+            // The walk is read-only on the ready view too — pinned so both return paths can
             // re-establish the ready invariants (off-chain on the found path, equal on absent).
             store.ready_view() == old(store).ready_view(),
             // …and the entry-state ready invariants survive into the body (the function `requires`
@@ -1053,7 +1052,7 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
                 cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, n);
                 // "Dead stays dead": the splice drops only `refs[n]` (positive), keeping the domain.
                 cspace::lemma_refs_death_persist_dec_ref(old(store), store, n);
-                // B8C: ready invariants ride the splice — every changed node is an `n`-waiter
+                // Ready invariants ride the splice — every changed node is an `n`-waiter
                 // (`wait_notif == Some(n)`, hence non-Runnable by `ready_complete`), and the
                 // splice writes only `qnext`/`wait_notif`, never `state`, so each changed node is
                 // non-Runnable in both states. The off-chain frame then carries the pair.
@@ -1104,7 +1103,7 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
         cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, n);
         // "Dead stays dead" (absent): the store is unchanged, so death is trivially preserved.
         cspace::lemma_refs_death_persist_from_refs_eq(old(store), store);
-        // B8C: the walk is read-only (`ready_view`/`tcb_view` pinned to `old`), so the ready
+        // The walk is read-only (`ready_view`/`tcb_view` pinned to `old`), so the ready
         // invariants ride the no-op via the equal-views frame.
         cspace::lemma_ready_inv_frame(old(store), store);
     }

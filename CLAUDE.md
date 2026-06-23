@@ -17,18 +17,18 @@ kernel/          AArch64 bare-metal microkernel (aarch64-unknown-none) —
                  the architectural shell over kcore (boot, MMU, GIC, sched)
 kcore/           Host-buildable kernel object core: cspace/CDT, untyped,
                  channels, notifications, thread/timer objects, aspace data;
-                 Verus-verified (rev1§6, doc/guidelines/verus.md). no_std,
+                 Verus-verified (rev2§6, doc/guidelines/verus.md). no_std,
                  zero deps; the kernel links it, hardware + objects behind the
                  handle/Store seam
-ipc/             Async IPC crate — shared by all userspace servers (rev1§3.5)
-dma-pool/        DMA buffer pool — the only place PAs are visible (rev1§2.5)
-cas/             CAS primitives: chunker, prolly tree, commit protocol (rev1§4)
-storage-server/  Userspace storage server process (rev1§4)
-virtio-blk/      Virtio-blk driver, written against dma-pool (rev1§2.5)
-loader/          ELF loader / program spawner (rev1§5)
+ipc/             Async IPC crate — shared by all userspace servers (rev2§3.5)
+dma-pool/        DMA buffer pool — the only place PAs are visible (rev2§2.5)
+cas/             CAS primitives: chunker, prolly tree, commit protocol (rev2§4)
+storage-server/  Userspace storage server process (rev2§4)
+virtio-blk/      Virtio-blk driver, written against dma-pool (rev2§2.5)
+loader/          ELF loader / program spawner (rev2§5)
 user/            Real userspace binaries (init, shell, storaged, …) — own
-                 mini-workspaces, built by kernel/build.rs (rev1§5, rev1§7)
-mkfs/            Host-side disk image builder; reuses cas crate (rev1§7)
+                 mini-workspaces, built by kernel/build.rs (rev2§5, rev2§7)
+mkfs/            Host-side disk image builder; reuses cas crate (rev2§7)
 tla/             TLA+ formal specifications
 tools/tla/       Scripts: tla-check.sh (SANY), tla-model-check.sh (TLC)
 doc/spec/        Design documents
@@ -144,10 +144,10 @@ cargo test -p cas
 MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri nextest run -p cas -j4
 # Serial fallback (no nextest, single-core), same required flag:
 #   MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri test -p cas
-# The DMA-pool wrapper (the one place PAs are visible) joins the sweep as of
-# B4C: it has no fuzz corpus, so its proptests run as the crate's lib tests —
+# The DMA-pool wrapper (the one place PAs are visible) joins the sweep:
+# it has no fuzz corpus, so its proptests run as the crate's lib tests —
 #   MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri nextest run -p dma-pool -j4
-# The urt heap allocator wrapper joins as of B11C (same posture as dma-pool: no
+# The urt heap allocator wrapper joins (same posture as dma-pool: no
 # fuzz corpus, so its proptests run as the crate's lib tests — randomized
 # alloc/dealloc/realloc, exhaustion, and the fragmentation-cap leak path). The
 # fragmentation-cap proptest fully carves a ~2050-block heap, so it caps Miri at

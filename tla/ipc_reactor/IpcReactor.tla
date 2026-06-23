@@ -1,24 +1,24 @@
 ---- MODULE IpcReactor ----
-\* Userspace IPC reactor: the lost-wakeup + backpressure protocol (spec rev1§3.3,
-\* rev1§3.6).
+\* Userspace IPC reactor: the lost-wakeup + backpressure protocol (spec rev2§3.3,
+\* rev2§3.6).
 \*
 \* Models one channel between a sender and a receiver: the bounded FIFO queue and
 \* TWO kernel notification words (faithful to kcore::notification — signal ORs a
 \* bit in and either wakes the FIFO waiter or accumulates; wait consumes the word
 \* if non-zero, else blocks). `word` is the on-readable notification (the receiver
 \* waits on it); `wword` is the on-writable notification (a blocked sender waits on
-\* it). The receiver runs the rev1§3.6 "bind, poll once, then wait" discipline and
-\* the sender runs the symmetric rev1§3.3 backpressure discipline — both lost-wakeup
+\* it). The receiver runs the rev2§3.6 "bind, poll once, then wait" discipline and
+\* the sender runs the symmetric rev2§3.3 backpressure discipline — both lost-wakeup
 \* guards are now checked here, each with a committed, runnable negative control.
 \*
-\* The "bind, poll once, then wait" discipline (rev1§3.6, ipc/src/reactor.rs):
+\* The "bind, poll once, then wait" discipline (rev2§3.6, ipc/src/reactor.rs):
 \*   - Register binds the source's events to the notification and then **self-
 \*     signals** ("poll once") — IF the queue is already non-empty it sets `word`,
 \*     surfacing a message that was queued *before* the bind (whose edge signal
 \*     went nowhere). Without it, a send-before-bind message is slept through (the
 \*     IpcReactor_NegControl.cfg negative control).
 \*   - Send fires the on-readable binding **only when bound** (the receiver has
-\*     registered). A Send before the bind still enqueues (no drop, rev1§3.3) but
+\*     registered). A Send before the bind still enqueues (no drop, rev2§3.3) but
 \*     its edge signal is lost (`word` UNCHANGED) — exactly the send-before-bind
 \*     hazard the poll-once exists to defeat.
 \*   - The receiver runs `register -> loop { wait(); while recv_nb() {..} }`. It
@@ -34,7 +34,7 @@
 \*   "blocked" = wait() slept on a clear word;
 \*   "drain"   = wait() returned, running the recv_nb drain loop.
 \*
-\* The symmetric backpressure discipline (rev1§3.3, ipc/src/endpoint.rs):
+\* The symmetric backpressure discipline (rev2§3.3, ipc/src/endpoint.rs):
 \*   - Send returns Full (never a drop) when the queue is full; the blocking sender
 \*     (send_blocking) then waits on the on-writable notification `wword`. SendBlock
 \*     blocks iff `wword = 0` (the writable lost-wakeup guard — see
@@ -54,26 +54,26 @@
 \* dispatch — the `used`-mask bit allocation, the `pending` drain, and the
 \* `trailing_zeros` lowest-bit-first scan (ipc/src/reactor.rs) — is not modelled
 \* here, and that lowest-bit ordering bias carries no fairness / starvation
-\* property. The multi-source dispatch is proptest-routed (B14B); extending this
+\* property. The multi-source dispatch is proptest-routed; extending this
 \* spec to multiple bits is a possible future step.
 \*
 \* Properties:
 \*   Safety (the gate):
 \*     - NoLostWakeup: a blocked receiver has nothing pending — no set on-readable
 \*       bit. A lost wakeup is exactly a blocked receiver with work waiting and no
-\*       pending signal to deliver it (rev1§3.6).
+\*       pending signal to deliver it (rev2§3.6).
 \*     - NoLostWakeupWritable: a blocked sender has a genuinely full queue and no
 \*       set on-writable bit. A blocked sender with a free slot (or a missed
-\*       writable signal) would be the symmetric lost wakeup (rev1§3.3).
+\*       writable signal) would be the symmetric lost wakeup (rev2§3.3).
 \*     - NoDrop: every offered message is accounted for (received or still
-\*       queued) — Full is the only refusal, never a silent drop (rev1§3.3).
-\*     - FifoPerChannel: receive order = send order (rev1§3.3).
+\*       queued) — Full is the only refusal, never a silent drop (rev2§3.3).
+\*     - FifoPerChannel: receive order = send order (rev2§3.3).
 \*   Liveness (TLC-only; a bounded randomized search cannot establish it):
 \*     - EventuallyDelivered: under weak fairness, every offered message is
 \*       eventually received — no lost wakeup (readable or writable) strands
 \*       delivery forever, even under genuine two-sided blocking.
 \*
-\* Negative controls (committed, runnable; the B7/B9 convention — the strongest
+\* Negative controls (committed, runnable; the project's negative-control convention — the strongest
 \* anti-theatre signal). Each lives in its own cfg (TLC admits one SPECIFICATION
 \* per cfg) and reports the named property VIOLATED with a short trace:
 \*   - IpcReactor_NegControl.cfg (SpecBadPoll): Register minus the poll-once self-
@@ -87,7 +87,7 @@ EXTENDS Naturals, Sequences
 
 CONSTANTS
     MaxMsgs,     \* messages the sender offers — bounds the state space
-    QueueDepth   \* channel queue capacity (rev1§3.2)
+    QueueDepth   \* channel queue capacity (rev2§3.2)
 
 VARIABLES
     nextSend,    \* count of messages enqueued so far (ids 1..nextSend)
@@ -113,7 +113,7 @@ Init ==
 
 \* --- Actions -----------------------------------------------------------
 
-\* The receiver registers its on-readable binding (rev1§3.6, reactor.rs:132-156):
+\* The receiver registers its on-readable binding (rev2§3.6, reactor.rs:132-156):
 \* it binds, then performs the poll-once self-signal — IF a message is already
 \* queued it sets `word`, so the first wait() surfaces it instead of sleeping
 \* through it. The hazard this defeats is reachable only because the binding is
@@ -259,23 +259,23 @@ TypeOK ==
 \* a set on-readable word would mean an accumulated wakeup was slept through; and
 \* in this protocol a blocked receiver always has an empty queue (a queued message
 \* under a bound sender always set the word), so blocked with a queued message is
-\* exactly a send-before-bind lost wakeup (rev1§3.6).
+\* exactly a send-before-bind lost wakeup (rev2§3.6).
 NoLostWakeup ==
     (recv = "blocked") => (Len(queue) = 0 /\ word = 0)
 
 \* No lost wakeup (writable): a blocked sender has a genuinely full queue and no
 \* set on-writable word. Blocked with a free slot (Len(queue) < QueueDepth) is a
-\* missed writable wakeup — the symmetric defect (rev1§3.3).
+\* missed writable wakeup — the symmetric defect (rev2§3.3).
 NoLostWakeupWritable ==
     (send = "blocked") => (Len(queue) = QueueDepth /\ wword = 0)
 
 \* No drop: every offered message is either received or still queued — Full is
-\* the only refusal (rev1§3.3). With FIFO contiguity this is a counting identity.
+\* the only refusal (rev2§3.3). With FIFO contiguity this is a counting identity.
 NoDrop ==
     nextSend = Len(recvd) + Len(queue)
 
 \* FIFO per channel: received in send order, with the queue holding the next
-\* contiguous run (rev1§3.3).
+\* contiguous run (rev2§3.3).
 FifoPerChannel ==
     /\ \A i \in 1..Len(recvd) : recvd[i] = i
     /\ \A i \in 1..Len(queue) : queue[i] = Len(recvd) + i
@@ -289,7 +289,7 @@ FifoPerChannel ==
 EventuallyDelivered ==
     <>(Len(recvd) = MaxMsgs)
 
-\* --- Negative controls (committed, runnable; the B7/B9 convention) ------
+\* --- Negative controls (committed, runnable; the negative-control convention) ------
 \* Each broken spec swaps exactly one action for a guard-stripped variant; under
 \* it the named safety invariant MUST be reachable-false. Checked by its own cfg
 \* (one SPECIFICATION per cfg). The real model (Spec) keeps every guard and all
@@ -344,8 +344,8 @@ NextBadWritable ==
 
 SpecBadWritable == Init /\ [][NextBadWritable]_vars
 
-\* (3) Wait-side lost-wakeup control (IpcReactor_NegLostWakeup.cfg), upgrading the
-\* previously documented-only control to a runnable artifact. RecvBlock WITHOUT the
+\* (3) Wait-side lost-wakeup control (IpcReactor_NegLostWakeup.cfg), a runnable
+\* artifact. RecvBlock WITHOUT the
 \* `word = 0` guard: the receiver blocks without checking the accumulated word.
 \* Under SpecBadWait, NoLostWakeup MUST be violated — a blocked receiver holding
 \* word = 1 (a missed accumulated wakeup).

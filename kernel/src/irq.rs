@@ -1,10 +1,10 @@
-//! Kernel-side IRQ surface (rev1§1, rev1§3.6): the trusted int→ptr shell over the
+//! Kernel-side IRQ surface (rev2§1, rev2§3.6): the trusted int→ptr shell over the
 //! verified [`kcore::irq`] object core — the twin of [`crate::timer`]'s tick shell.
 //!
 //! kcore owns the binding/census logic (`irq_bind`/`irq_unbind`/`destroy_irq`,
 //! reached through the [`kcore::store::Store`] seam); this module keeps what is
-//! architectural and trusted (rev1§6.1(c)/(d)): the boot-static `IRQ_TABLE` of
-//! `IrqObj` (Design decision 3 — the device-MMIO-frame precedent, *not* retyped),
+//! architectural and trusted (rev2§6.1(c)/(d)): the boot-static `IRQ_TABLE` of
+//! `IrqObj` (the device-MMIO-frame precedent, *not* retyped),
 //! the INTID→object lookup (the `ARMED_HEAD`-resolution analog), the device-IRQ
 //! delivery path (mask-on-deliver + the verified `notification::signal`), and the
 //! per-IRQ GIC mask/unmask the `IrqBind`/`IrqAck` syscalls drive.
@@ -14,7 +14,7 @@ use kcore::id::ObjId;
 use kcore::irq::IrqObj;
 use kcore::notification::{self, NotifObj};
 
-/// PL011 RX is SPI 1 → INTID 33 on QEMU virt (rev1§7's console line).
+/// PL011 RX is SPI 1 → INTID 33 on QEMU virt (rev2§7's console line).
 pub const PL011_INTID: u32 = 33;
 
 /// The boot-static device-SPI set. Sized for the platform's device IRQs (just the
@@ -34,21 +34,21 @@ unsafe fn slot(i: usize) -> *mut IrqObj {
     core::ptr::addr_of_mut!(IRQ_TABLE[i])
 }
 
-/// The boot-static PL011 IRQ object's handle, for init's boot grant (`main.rs`,
-/// B-IRQ-C). init holds this IRQ-handler cap (rev1§1: "init … holds all device
-/// resources … IRQ caps") and delegates an attenuated copy to the console driver
-/// (C-M9). The `ObjId` is the table entry's address — exactly what `Store::irq_*`
-/// resolves back through (the boot-static device-frame precedent, Design
-/// decision 3), uniform with how `irq::bind` forms the handle below.
+/// The boot-static PL011 IRQ object's handle, for init's boot grant (`main.rs`).
+/// init holds this IRQ-handler cap (rev2§1: "init … holds all device
+/// resources … IRQ caps") and delegates an attenuated copy to the console driver.
+/// The `ObjId` is the table entry's address — exactly what `Store::irq_*`
+/// resolves back through (the boot-static device-frame precedent), uniform with
+/// how `irq::bind` forms the handle below.
 ///
-/// Used by the m1-test boot grant today; the real-boot grant (and so the other
-/// caller) lands with C-M9 — hence `allow(dead_code)` for the non-m1-test build.
+/// Used by the m1-test boot grant; the real-boot grant (and so the other caller)
+/// is absent in the non-m1-test build — hence `allow(dead_code)` there.
 #[allow(dead_code)]
 pub fn pl011_objid() -> ObjId {
     unsafe { ObjId(slot(PL011) as u64) }
 }
 
-/// Trusted INTID→object lookup (the `ARMED_HEAD`-resolution analog, rev1§6.1(d)).
+/// Trusted INTID→object lookup (the `ARMED_HEAD`-resolution analog, rev2§6.1(d)).
 unsafe fn irq_for_intid(intid: u32) -> Option<*mut IrqObj> {
     (0..N_SPI).map(|i| slot(i)).find(|&p| (*p).intid == intid)
 }
@@ -65,7 +65,7 @@ pub fn init() {
     }
 }
 
-/// Device-IRQ delivery (Design decision 2): on a *bound* INTID, mask the line and
+/// Device-IRQ delivery: on a *bound* INTID, mask the line and
 /// signal its bound notification through the **verified** `notification::signal`
 /// (the primitive the timer's `check_expired` uses). Returns whether a
 /// notification was signalled, so the caller can hint a reschedule. An *unbound*
@@ -93,7 +93,7 @@ pub unsafe fn deliver(intid: u32) -> bool {
 /// (notification, bits) pair via the verified [`kcore::irq::irq_bind`].
 pub unsafe fn bind(i: *mut IrqObj, notif: *mut NotifObj, bits: u64) {
     kcore::irq::irq_bind(&mut KernelStore, ObjId(i as u64), ObjId(notif as u64), bits);
-    // m1-test self-kick (B-IRQ-C): the embedded EL0 test has no real device to
+    // m1-test self-kick: the embedded EL0 test has no real device to
     // assert the line, so software-pend it now that it is bound. On `eret` to
     // EL0 the pending+enabled INTID fires through the real exception path →
     // `deliver` → the verified `signal`. Compiled out of real boot.
@@ -102,11 +102,11 @@ pub unsafe fn bind(i: *mut IrqObj, notif: *mut NotifObj, bits: u64) {
 }
 
 /// `IrqAck` core: clear the mask and re-enable the line so the next interrupt is
-/// delivered (the "acknowledge" half of rev1§1's "receive and acknowledge").
+/// delivered (the "acknowledge" half of rev2§1's "receive and acknowledge").
 pub unsafe fn ack(i: *mut IrqObj) {
     (*i).masked = false;
     crate::gic::enable((*i).intid);
-    // m1-test self-kick (B-IRQ-C): re-pend after the unmask so the test observes
+    // m1-test self-kick: re-pend after the unmask so the test observes
     // a second delivery — the witness that ack re-enabled the line (the
     // mask-on-deliver / unmask-on-ack cycle works). Compiled out of real boot.
     #[cfg(feature = "m1-test")]

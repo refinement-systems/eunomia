@@ -1,4 +1,4 @@
-//! FastCDC chunker (spec rev1§4.1): gear-hash content-defined chunking,
+//! FastCDC chunker (spec rev2§4.1): gear-hash content-defined chunking,
 //! target chunk size 16–64 KiB, with normalized chunking (a stricter
 //! boundary mask below the target size, a looser one above it).
 //!
@@ -42,7 +42,7 @@ pub struct ChunkerParams {
 }
 
 impl ChunkerParams {
-    /// Production parameters (spec rev1§4.1: target ~16–64 KiB).
+    /// Production parameters (spec rev2§4.1: target ~16–64 KiB).
     pub const DEFAULT: ChunkerParams = ChunkerParams {
         min: 16 * 1024,
         avg: 32 * 1024,
@@ -95,7 +95,7 @@ fn find_boundary(params: &ChunkerParams, data: &[u8]) -> Option<usize> {
 /// `data.len()` when the remaining bytes form the final (possibly sub-min)
 /// chunk. Lets a caller re-chunk forward from a known boundary one chunk at a
 /// time and stop as soon as it realigns with an existing boundary, instead of
-/// scanning the whole tail — the rev1§4.3 neighborhood re-chunk primitive.
+/// scanning the whole tail — the rev2§4.3 neighborhood re-chunk primitive.
 /// Because `find_boundary` restarts the gear fingerprint at offset 0, the cut
 /// depends only on bytes since the chunk start, so resuming at a canonical
 /// boundary reproduces the canonical cut.

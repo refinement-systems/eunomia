@@ -8,11 +8,11 @@ name = "kernel"
 path = "src/main.rs"
 
 [features]
-# `debug-log` (rev1§7, C-M9-C): the EL0 debug-print scaffold (DebugPutc/DebugWrite)
+# `debug-log` (rev2§7): the EL0 debug-print scaffold (DebugPutc/DebugWrite)
 # re-scoped to a disclosed kernel-diagnostic path. Default-on for dev images so
 # pre-console server diagnostics and panic reporting reach the UART; a production
 # kernel (`cargo build --no-default-features`) makes the two EL0 debug-output
-# syscalls inert no-ops, closing the ambient-authority hole for EL0 (audit S-8).
+# syscalls inert no-ops, closing the ambient-authority hole for EL0.
 default = ["debug-log"]
 debug-log = []
 

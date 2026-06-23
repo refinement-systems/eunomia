@@ -1,4 +1,4 @@
-# cargo-fuzz harnesses for the IPC wire codec (spec rev1§3.7, plan §5.4).
+# cargo-fuzz harnesses for the IPC wire codec (spec rev2§3.7).
 # Standalone workspace (see the empty [workspace] table): own target dir, own
 # profile. Run with: cargo +nightly fuzz run wire_decode
 [package]

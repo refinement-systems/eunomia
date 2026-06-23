@@ -1,8 +1,8 @@
 //! Minimal GICv3 bring-up for QEMU virt (single core, group-1 only).
 //!
 //! Enough to take the virtual-timer PPI (INTID 27) at EL1, plus the distributor
-//! routing/enable a device SPI needs so the IRQ-handler caps (rev1§1) the
-//! userspace drivers hold can deliver (B-IRQ-B; the per-INTID helpers below).
+//! routing/enable a device SPI needs so the IRQ-handler caps (rev2§1) the
+//! userspace drivers hold can deliver (the per-INTID helpers below).
 
 use core::arch::asm;
 
@@ -72,13 +72,13 @@ pub fn eoi(intid: u32) {
     unsafe { asm!("msr icc_eoir1_el1, {v}", v = in(reg) intid as u64) };
 }
 
-// ── Device-SPI distributor routing (B-IRQ-B) ──────────────────────────────
+// ── Device-SPI distributor routing ──────────────────────────────
 //
 // `GICD_CTLR` already enables affinity routing (ARE_NS) and group 1 in `init`,
 // and `ICC_PMR` is wide open (0xFF), so a device SPI need only be put in group
 // 1, given a priority below the mask, set level-triggered, routed to core 0,
 // and enabled. `enable`/`disable` are also the per-IRQ mask/unmask the delivery
-// path uses (mask-on-deliver / unmask-on-ack, rev1§3.6).
+// path uses (mask-on-deliver / unmask-on-ack, rev2§3.6).
 
 /// Route a device SPI to core 0: group 1, a priority below the mask,
 /// level-triggered, affinity 0.0.0.0. The caller enables it with [`enable`].
@@ -114,8 +114,8 @@ pub fn disable(intid: u32) {
     unsafe { mmio_w(GICD_ICENABLER + 4 * word, 1 << (intid % 32)) };
 }
 
-/// Software-pend a device SPI (set its pending state) — the m1-test self-kick
-/// (B-IRQ-C). The embedded EL0 exit-criterion test has no device to assert the
+/// Software-pend a device SPI (set its pending state) — the m1-test self-kick.
+/// The embedded EL0 exit-criterion test has no device to assert the
 /// PL011 line and no privilege to reach the distributor itself, and the smoke
 /// harness boots with no stdin, so the kernel pends INTID 33 from EL1 to drive
 /// the real exception → `irq::deliver` → `signal` path. For a level-sensitive

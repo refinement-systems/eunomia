@@ -181,7 +181,7 @@ extern "C" fn handle_el0_sync(frame: *mut TrapFrame) {
             }
             crate::thread::maybe_switch(frame, false);
         },
-        // Anything else from EL0 is a fault: suspend, never destroy (rev1§5.3).
+        // Anything else from EL0 is a fault: suspend, never destroy (rev2§5.3).
         _ => unsafe {
             use core::fmt::Write;
             let mut uart = crate::uart::Uart::new();
@@ -198,7 +198,7 @@ extern "C" fn handle_el0_sync(frame: *mut TrapFrame) {
             );
             (*t).state = crate::thread::ThreadState::Faulted;
             // The registers are already saved by this entry; the record
-            // is the rest of the report (rev1§5.1, rev1§5.3).
+            // is the rest of the report (rev2§5.1, rev2§5.3).
             crate::thread::report_terminal(t, crate::thread::Report::Faulted { cause: esr, far });
             crate::thread::maybe_switch(frame, false);
         },
@@ -218,7 +218,7 @@ extern "C" fn handle_el0_irq(frame: *mut TrapFrame) {
             crate::thread::maybe_switch(frame, true);
         }
     } else {
-        // Device SPI (B-IRQ-B): a bound INTID signals its notification and the
+        // Device SPI: a bound INTID signals its notification and the
         // line is masked (inside `deliver`) before we EOI; an unbound INTID is
         // EOI'd and dropped (no receiver). `woke` hints the reschedule.
         let woke = unsafe { crate::irq::deliver(intid) };

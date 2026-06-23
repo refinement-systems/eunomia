@@ -1,5 +1,5 @@
 #!/bin/bash
-# QEMU boot test — the rev1§5.1 spawn/reclaim proof, same genre as M1's
+# QEMU boot test — the rev2§5.1 spawn/reclaim proof, same genre as M1's
 # revocation test. Boots the full system and drives the shell through:
 #
 #   1. runloop bin/selftest 100  — spawn / wait / reclaim a trivial child
@@ -9,15 +9,15 @@
 #   2. run bin/selftest 42       — exit-status propagation: thread_exit(42)
 #      surfaces as exited(42) in the parent.
 #   3. run bin/selftest 255      — the fault demo: a wild store suspends the
-#      child (rev1§5.3) and the parent reads faulted(translation, 0xdead0000)...
+#      child (rev2§5.3) and the parent reads faulted(translation, 0xdead0000)...
 #   4. run bin/selftest 7        — ...and then spawns ANOTHER program, which
 #      exits(7): the burn fix witnessed in the same breath as the fault, the
 #      donation reused after a faulted child as cleanly as after an exited one.
-#   5. run bin/selftest 254      — the panic path (rev1§5.1 U2): the child panics,
+#   5. run bin/selftest 254      — the panic path (rev2§5.1 U2): the child panics,
 #      its runtime handler exits with the reserved STATUS_PANIC, and the
 #      parent reads 'panicked' — NOT exited(254). A crash can't pass for a
 #      clean stop. A following run bin/selftest 9 reclaims as cleanly again.
-#   6. run bin/selftest 253      — the time grant (rev1§2.6, S1): the shell maps
+#   6. run bin/selftest 253      — the time grant (rev2§2.6, S1): the shell maps
 #      the read-only time page into the child and passes its VA in the
 #      startup block; the child reads a sane UTC clock (time-ok). The
 #      init→shell time grant, one hop further (shell→child). run 11 after
@@ -108,7 +108,7 @@ wait_for 'panicked' 30
 printf 'run bin/selftest 9\r' >&3
 wait_for 'exited(9)' 30
 
-# 6. Time grant (rev1§2.6, S1): the shell maps the read-only time page into the
+# 6. Time grant (rev2§2.6, S1): the shell maps the read-only time page into the
 #    child and passes its VA in the startup block; the child reads a sane
 #    UTC clock — the init→shell time grant, one hop further (shell→child).
 #    A following run reclaims cleanly (the time copy is unmapped before the
@@ -149,7 +149,7 @@ if grep -q 'exited(254)' "$LOG"; then
     echo "SPAWN TEST FAIL: a panic surfaced as exited(254) — the reserved status leaked through" >&2
     fail=1
 fi
-# The child must read its granted time page (rev1§2.6 shell→child grant).
+# The child must read its granted time page (rev2§2.6 shell→child grant).
 if grep -q 'time-bad' "$LOG"; then
     echo "SPAWN TEST FAIL: a child could not read its time grant" >&2
     fail=1

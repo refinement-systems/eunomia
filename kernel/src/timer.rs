@@ -1,4 +1,4 @@
-//! Kernel-side time and timer surface (spec rev1§2.6, rev1§3.6). The armed-timer
+//! Kernel-side time and timer surface (spec rev2§2.6, rev2§3.6). The armed-timer
 //! list *logic* lives in [`kcore::timer`]; this module keeps what is
 //! architectural — the generic-timer register access (CNTVCT/CNTV, the
 //! 10 ms tick), and the list head itself (`ARMED_HEAD`), which kcore reaches
@@ -62,7 +62,7 @@ fn tick_interval() -> u64 {
 
 pub fn start_tick() {
     unsafe {
-        // Let EL0 read the virtual counter (time page basis, rev1§2.6).
+        // Let EL0 read the virtual counter (time page basis, rev2§2.6).
         asm!("msr cntkctl_el1, {v}", v = in(reg) 0b10u64); // EL0VCTEN
         rearm_tick();
         // CNTV_CTL: ENABLE=1, IMASK=0.

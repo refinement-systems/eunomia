@@ -7,7 +7,7 @@
 //!
 //!   - in production (`kernel` crate) a handle wraps the object's/slot's live
 //!     address, so the resolver is a behaviour-preserving cast at the one
-//!     sanctioned `unsafe` boundary (replacing the old `c.start as *mut T`);
+//!     sanctioned `unsafe` boundary;
 //!   - in proofs/host tests a handle is an index into a plain array.
 //!
 //! Because the core treats them opaquely, the same code verifies over the array

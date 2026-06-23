@@ -1,4 +1,4 @@
-//! Kernel-side address-space shell (spec rev1§2.5). The walker itself — table
+//! Kernel-side address-space shell (spec rev2§2.5). The walker itself — table
 //! allocation, `map`/`unmap`, the read-only lookup, the descriptor bit
 //! assembly, the VA-index arithmetic — lives in [`kcore::aspace`] as safe
 //! Rust over the table pool as an indexed slice, where it is Verus-verified.
@@ -12,7 +12,7 @@
 //!
 //! Layout of one process's view:
 //!   L1[0]   device GiB        — shared kernel entry, EL1-only
-//!   L1[1]   kernel DRAM table — shared kernel entry (incl. the legacy
+//!   L1[1]   kernel DRAM table — shared kernel entry (incl. the
 //!           identity user window used by the idle thread)
 //!   L1[2..] process-private   — user mappings (ELF base 0x8000_0000)
 //!
@@ -101,14 +101,14 @@ pub unsafe fn map(
 }
 
 /// Grow the aspace's intermediate-page-table pool by `add` zeroed tables, carved
-/// contiguously at the pool's current end (rev1§2.5 "accepts top-ups", B10). The
-/// caller (the `Sys::AspaceTopUp` handler, wired in B10B) places `add` fresh
+/// contiguously at the pool's current end (rev2§2.5 "accepts top-ups"). The
+/// caller (the `Sys::AspaceTopUp` handler) places `add` fresh
 /// tables physically abutting `pool_base + pool_pages*PAGE`; here we zero them and
 /// bump the recorded `pool_pages`, after which `pool_view`/`map` rebuild the larger
 /// slice automatically (no map-path change). Soundness — the extension preserves
 /// `pt_wf` and every existing mapping — is the verified
 /// [`kcore::aspace::lemma_grow_pool`]. Called by the `Sys::AspaceTopUp` handler
-/// via [`crate::untyped::aspace_topup`] (B10B).
+/// via [`crate::untyped::aspace_topup`].
 pub unsafe fn grow_pool(this: *mut AspaceObj, add: u64) {
     let old_len = (*this).pool_pages;
     let region = (*this).pool_base + old_len * PAGE;
@@ -142,5 +142,5 @@ pub unsafe fn range_mapped(this: *mut AspaceObj, va: u64, len: u64, write: bool)
 
 /// pre: refs == 0. The memory (tables included) returns to the donor
 /// untyped via revoke; nothing to do but note that mapped frames keep
-/// their own cap-side state and were unmapped when their caps died.
+/// their own cap-side state and are unmapped when their caps die.
 pub unsafe fn destroy_aspace(_a: *mut AspaceObj) {}

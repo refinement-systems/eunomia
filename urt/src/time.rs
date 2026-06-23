@@ -1,4 +1,4 @@
-//! The time page (spec rev1§2.6): wall-clock time with zero syscalls.
+//! The time page (spec rev2§2.6): wall-clock time with zero syscalls.
 //!
 //! Init reads the PL031 RTC once at boot and publishes
 //! `(seq, wall_base_ns, cntvct_base, cntfrq)` in a read-only frame mapped
@@ -8,7 +8,7 @@
 //!
 //! `seq` is constant zero today — the page is write-once at boot — but the
 //! reader ships seqlock-shaped anyway: if today's readers did plain loads
-//! because "the page never changes", deferred clock setting (rev1§8) would
+//! because "the page never changes", deferred clock setting (rev2§8) would
 //! mean updating every reader, the exact flag day the field was bought to
 //! avoid. The protocol is the deliverable, not the integer.
 //!
@@ -202,7 +202,7 @@ impl Sample {
 
     /// Monotone in the counter: `c1 ≤ c2 ⇒ utc_ns_at(c1) ≤ utc_ns_at(c2)`. A
     /// clock that ran backwards between two reads would re-disorder everything
-    /// the rev1§4.7 snapshot-timestamp clamp protects. Stated over [`Sample::result_spec`]
+    /// the rev2§4.7 snapshot-timestamp clamp protects. Stated over [`Sample::result_spec`]
     /// (the value [`Sample::utc_ns_at`] returns), so the exec ordering follows.
     pub proof fn lemma_utc_ns_at_monotone(self, c1: u64, c2: u64)
         requires
@@ -350,7 +350,7 @@ pub fn encode_boot(wall_base_ns: i64, cntvct_base: u64, cntfrq: u64) -> [u8; PAG
 static TIME_PAGE: AtomicUsize = AtomicUsize::new(0);
 
 /// Register the time-page mapping for this process. The address comes
-/// from the startup block (the `"time"` grant, rev1§5.1) — never a constant.
+/// from the startup block (the `"time"` grant, rev2§5.1) — never a constant.
 ///
 /// # Safety
 /// `va` must be the base of a live `TimePage` mapping (read-only is
@@ -393,7 +393,7 @@ pub fn cntfrq() -> u64 {
 }
 
 /// Current UTC nanoseconds — two register reads and a page read, no
-/// syscall, no IPC (rev1§2.6).
+/// syscall, no IPC (rev2§2.6).
 ///
 /// Panics if no time page was attached: a process that asks for wall time
 /// without holding the `"time"` grant is mis-wired, not degraded.
@@ -582,7 +582,7 @@ mod tests {
         }
 
         /// Monotone in the counter — a clock that runs backwards between
-        /// two reads would re-disorder everything the rev1§4.7 clamp protects.
+        /// two reads would re-disorder everything the rev2§4.7 clamp protects.
         #[test]
         fn conversion_is_monotone(
             wall_base_ns in -1_000_000_000_000_000_000i64..=2_000_000_000_000_000_000,
@@ -622,7 +622,7 @@ mod tests {
 /// — and flags a missing/weakened fence (a fence-removal negative control
 /// confirms it).
 ///
-/// Honest scope (audit §4.3). This is **not** a proof over "every C11-permitted
+/// Honest scope. This is **not** a proof over "every C11-permitted
 /// reordering": Loom does **not** faithfully model Relaxed-atomic reordering, and
 /// the data fields here are loaded/stored `Relaxed`. The seqlock's correctness
 /// rests on the explicit `fence(Release)` (writer) / `fence(Acquire)` (reader,

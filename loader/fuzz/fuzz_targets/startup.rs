@@ -1,7 +1,7 @@
 #![no_main]
-//! Startup-block decode on arbitrary bytes (rev1§5.1). The block is the first
+//! Startup-block decode on arbitrary bytes (rev2§5.1). The block is the first
 //! message on a child's bootstrap channel, decoded in `_start` before anything
-//! else exists, so a malformed block must be refused, never a crash (rev1§2.7).
+//! else exists, so a malformed block must be refused, never a crash (rev2§2.7).
 //! Property set: `decode` never panics; the counts it reports are within the
 //! fixed arenas; every borrowed argv/env slice lies inside the input (nothing it
 //! hands back can index out of `data`); and any block it accepts re-encodes and

@@ -1,7 +1,7 @@
 //! A free-list over a contiguous block of a process's own cspace slots.
 //!
 //! A parent that spawns children needs to recycle the cspace slots that
-//! held the children's object caps. The subtlety the rev1§5.1 reclaim loop
+//! held the children's object caps. The subtlety the rev2§5.1 reclaim loop
 //! turns on: those slots become free *because `cap_revoke` nulled them* —
 //! this allocator's bookkeeping must therefore agree with kernel behaviour,
 //! never run ahead of it. Free a range only after the revoke that emptied

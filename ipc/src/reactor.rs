@@ -1,8 +1,8 @@
-//! The IPC reactor (spec rev1§3.6) — the lost-wakeup core. An epoll-shaped
+//! The IPC reactor (spec rev2§3.6) — the lost-wakeup core. An epoll-shaped
 //! `register(source, signals, key)` / `wait() -> (key, signals)` API over a
 //! notification word's **bit-groups**.
 //! It **owns the "bind, poll once, then wait" discipline**, so no server reaches
-//! for a notification bit, and the rev1§3.6 wait-set kernel object is a future
+//! for a notification bit, and the rev2§3.6 wait-set kernel object is a future
 //! O(1) drop-in behind this same API.
 //!
 //! Lost-wakeup safety has two halves, both modeled by `tla/ipc_reactor` and
@@ -20,7 +20,7 @@
 //! and is **level-triggered**: it `bind`s the channel's events and self-signals
 //! a poll-once so a message queued before the bind still surfaces.
 //! [`Reactor::register_bound`] takes an **externally-bound, edge-triggered**
-//! source — a thread on-exit/on-fault binding (`thread_bind`, rev1§5.1), a timer, an
+//! source — a thread on-exit/on-fault binding (`thread_bind`, rev2§5.1), a timer, an
 //! IRQ — already wired to a caller-chosen bit; it neither binds nor self-signals
 //! (a poll-once would fabricate a one-shot event), so lost-wakeup safety there
 //! rests on the caller binding before the source can fire plus `wait`'s
@@ -38,7 +38,7 @@ use vstd::prelude::*;
 
 verus! {
 
-// The pure core of the reactor's bit allocator (rev1§3.6), verified. The lowest
+// The pure core of the reactor's bit allocator (rev2§3.6), verified. The lowest
 // **clear** bit of `used` is `(!used).trailing_zeros()`: a trailing *zero* of
 // `!used` is a trailing *one* of `used`, so the first zero of `!used` is the
 // first free bit of `used`. `None` when the 64-bit word is full.
@@ -100,7 +100,7 @@ fn lowest_clear_bit(used: u64) -> (r: Option<u32>)
 
 } // verus!
 
-/// The events a source can be registered for / reported ready on (rev1§3.3, rev1§3.6).
+/// The events a source can be registered for / reported ready on (rev2§3.3, rev2§3.6).
 /// A set of bits; combine with `|`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Signals(u8);
@@ -143,7 +143,7 @@ pub enum RegisterErr {
     Taken,
 }
 
-/// Width of the notification word — the MVP per-thread source limit (rev1§3.6).
+/// Width of the notification word — the MVP per-thread source limit (rev2§3.6).
 const WORD_BITS: usize = 64;
 
 #[derive(Debug, Clone, Copy)]
@@ -221,7 +221,7 @@ impl<'t, T: Transport> Reactor<'t, T> {
 
     /// Register a source whose events are bound to `mask` **outside** the reactor
     /// and are **edge-triggered**: a thread on-exit/on-fault binding (a
-    /// `thread_bind` into the TCB, rev1§5.1), a timer (armed via `sys::timer_arm`),
+    /// `thread_bind` into the TCB, rev2§5.1), a timer (armed via `sys::timer_arm`),
     /// or an IRQ — anything the kernel signals into this notification at a bit
     /// the caller controls. Each set bit in `mask` dispatches to `key`.
     ///
@@ -280,7 +280,7 @@ impl<'t, T: Transport> Reactor<'t, T> {
     }
 }
 
-// Sequential-dispatch property tests (B14B, rev1§6 baseline tier): the
+// Sequential-dispatch property tests (rev2§6 baseline tier): the
 // `used`-mask bit allocation, the `pending` drain, and the lowest-bit
 // `trailing_zeros` scan are single-threaded state-machine logic — the reactor
 // mutates them under the holder's own thread, so their tier is proptest + Miri,
@@ -405,7 +405,7 @@ mod proptests {
         /// The `pending` drain over an arbitrary signaled mask: `wait` yields
         /// exactly the *registered* set bits, each once, in lowest-first
         /// (`trailing_zeros`) order, mapping each to its `(key, signals)` — the
-        /// epoll-shaped O(1) dispatch (rev1§3.6). Signaled-but-unregistered bits
+        /// epoll-shaped O(1) dispatch (rev2§3.6). Signaled-but-unregistered bits
         /// (`u`) are silently skipped, never returned and never blocking. `m`
         /// and `u` are disjoint subsets so `wait` is called exactly `|m|` times
         /// and never sleeps.
@@ -438,7 +438,7 @@ mod proptests {
         }
     }
 
-    /// The 64-bit structural ceiling (rev1§3.6): exactly `WORD_BITS` `register`s
+    /// The 64-bit structural ceiling (rev2§3.6): exactly `WORD_BITS` `register`s
     /// succeed on distinct bits 0..64, and the 65th refuses with `Full` — no
     /// alias, no panic. (The proptest reaches this state probabilistically; this
     /// pins the boundary deterministically.)

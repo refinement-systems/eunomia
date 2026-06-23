@@ -1,5 +1,5 @@
 //! Property tests for `Segment::page_layout` — the page-rounding arithmetic
-//! B3A extracted out of the target-only `spawn::prepare` (the I-5 site). rev1§6
+//! `spawn::prepare` runs on each segment, host-buildable on its own. rev2§6
 //! routes loader's layout math to the host "Miri + proptest" baseline; this is
 //! that always-on gate (cargo-fuzz, in loader/fuzz, adds adversarial depth but
 //! is not part of `cargo test`). The invariant set below is the same oracle the
@@ -18,7 +18,7 @@ fn seg(vaddr: u64, memsz: u64) -> Segment {
     }
 }
 
-/// `u64` strategy that samples the full range but biases toward the I-5
+/// `u64` strategy that samples the full range but biases toward the
 /// overflow boundary (near `u64::MAX`) and page-edge values, so the boundary is
 /// hit by construction rather than by luck.
 fn word() -> impl Strategy<Value = u64> {
@@ -41,8 +41,8 @@ proptest! {
 
     /// `page_layout` is total and its geometry internally consistent on every
     /// `(vaddr, memsz)`; the only legal error is `BadSegment`, and it occurs
-    /// exactly at the page-rounding overflow boundary (rev1§5/§3.7: untrusted
-    /// images must refuse-not-crash; the boundary is the I-5 site B3A fixed).
+    /// exactly at the page-rounding overflow boundary (rev2§5/§3.7: untrusted
+    /// images must refuse-not-crash).
     #[test]
     fn page_layout_invariants(vaddr in word(), memsz in word()) {
         // Independent oracle for the refusal condition, written with checked_*
@@ -89,15 +89,16 @@ proptest! {
 }
 
 /// Oracle sanity (negative control): prove the property above guards a *real*
-/// wrap, not a tautology. On the audit's I-5 witness the pre-B3A unchecked
-/// formula `vaddr + memsz + (PAGE-1)` overflows u64 and, rounded down, lands
-/// *below* va_start — the bogus page count the fix refuses. (Same negative-
-/// control posture as storage-server rights_lattice's independent `&` oracle.)
+/// wrap, not a tautology. On the witness `vaddr + memsz == u64::MAX` an
+/// unchecked `vaddr + memsz + (PAGE-1)` formula overflows u64 and, rounded
+/// down, lands *below* va_start — the bogus page count the checked path
+/// refuses. (Same negative-control posture as storage-server rights_lattice's
+/// independent `&` oracle.)
 #[test]
 fn old_unchecked_formula_would_wrap_on_i5_witness() {
     let (vaddr, memsz) = (u64::MAX - 8, 8u64);
     let va_start = vaddr & !(PAGE - 1);
-    // The old round-up, reproduced with wrapping to model what an unchecked `+`
+    // The unchecked round-up, reproduced with wrapping to model what a raw `+`
     // does in release (and what overflow-checks would abort on in dev).
     let old_va_end = vaddr.wrapping_add(memsz).wrapping_add(PAGE - 1) & !(PAGE - 1);
     assert!(

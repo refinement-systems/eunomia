@@ -12,7 +12,7 @@
 # OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 # Download a standalone tla2tools.jar next to this script and record its SHA1,
-# so the TLA+ command-line tools no longer depend on the (deprecated, x86_64)
+# so the TLA+ command-line tools run without the (deprecated, x86_64)
 # TLA+ Toolbox.app. The jar is pure Java and runs natively on any JDK 11+.
 #
 # Override the release tag with TLA_TOOLS_TAG, e.g.

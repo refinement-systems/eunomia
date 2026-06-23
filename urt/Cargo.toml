@@ -12,12 +12,12 @@ ipc = { path = "../ipc" }
 freelist = { path = "../freelist" }
 
 # vstd is the *Verus* dependency (see doc/guidelines/verus.md):
-# the `verus!{}` macro + ghost vocabulary for the rev1§4.7 host-chokepoint proofs of
-# the cspace-slot bitmap free-list (`slots.rs`, 7c) and the tick→ns conversion
-# (`time.rs::utc_ns_at`, 7d — totality + monotonicity). `default-features = false`
+# the `verus!{}` macro + ghost vocabulary for the rev2§4.7 host-chokepoint proofs of
+# the cspace-slot bitmap free-list (`slots.rs`) and the tick→ns conversion
+# (`time.rs::utc_ns_at` — totality + monotonicity). `default-features = false`
 # ⇒ no_std, no alloc, so it rides into the alloc-free user binaries unchanged —
-# and it already arrives transitively via the `ipc` path-dep (which carries vstd
-# since 7a), so the userspace cross-build risk 7a cleared does not recur. In an
+# and it arrives transitively via the `ipc` path-dep (which carries vstd
+# too), so there is no userspace cross-build risk. In an
 # ordinary build (host `cargo test` *and* the aarch64 userspace cross-build via
 # kernel/build.rs) the `verus!{}` macro erases to plain Rust and vstd compiles to
 # nothing load-bearing (`time`'s proof uses only ghost `vstd::arithmetic` lemmas).
@@ -31,13 +31,13 @@ proptest = "1"
 # loom reaches the time-page seqlock's *library* code (the field atomics), so
 # it must be a real dependency, not a dev-dep — but only when the seqlock model
 # is being built (RUSTFLAGS="--cfg loom"). A normal/aarch64 build never pulls
-# it. Pinned per plan 1_loom-shuttle-rewrite §5.
+# it. Constrained to 0.7 so an upgrade is a deliberate PR.
 [target.'cfg(loom)'.dependencies]
 loom = "0.7"
 
 # shuttle is the same story as loom one stanza up (a cfg-gated real dependency,
 # off the normal build), for the non-certifying seqlock breadth-smoke
-# (RUSTFLAGS="--cfg shuttle"; plan 1_loom-shuttle-rewrite §4.1 item 5). Pinned §5.
+# (RUSTFLAGS="--cfg shuttle"). Constrained to 0.7 so an upgrade is a deliberate PR.
 [target.'cfg(shuttle)'.dependencies]
 shuttle = "0.7"
 
@@ -46,10 +46,9 @@ shuttle = "0.7"
 verify = true
 
 # cfg(loom)/cfg(shuttle) are set by RUSTFLAGS="--cfg loom|shuttle" for the
-# time-page seqlock models (plan 1_loom-shuttle-rewrite §4.1);
-# cfg(verus_keep_ghost)/cfg(verus_only) by Verus during `cargo verus verify`
-# (plan 3_verus-rewrite §7c/7d). Teach plain cargo all are expected (same
-# handling as ipc/kcore). cfg(kani) is gone: `urt` is fully off Kani after 7d
-# (proofs.rs deleted — the `time` harness was the last), so nothing injects it.
+# time-page seqlock models; cfg(verus_keep_ghost)/cfg(verus_only) by Verus
+# during `cargo verus verify`. Teach plain cargo all are expected (same
+# handling as ipc/kcore). `urt` carries no Kani harness, so nothing injects
+# cfg(kani).
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(shuttle)", "cfg(verus_keep_ghost)", "cfg(verus_only)"] }

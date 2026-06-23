@@ -1,5 +1,5 @@
 #![no_main]
-//! The GC mark walk (rev1§4.6) over adversarial *tree structure* — the
+//! The GC mark walk (rev2§4.6) over adversarial *tree structure* — the
 //! complement to `tree_node`, which fuzzes single-node decoding. The input is
 //! a recipe (`cas::gc::build_recipe`) that builds a `MemStore` of well-formed
 //! nodes wired into deep chains, wide fanout, shared subtrees, and dangling

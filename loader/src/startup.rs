@@ -1,13 +1,12 @@
-//! The startup block (rev1§5.1): the first message on a child's bootstrap
+//! The startup block (rev2§5.1): the first message on a child's bootstrap
 //! channel, carrying *argv*, *env*, and a **named-grant table**. One versioned,
-//! self-describing format (`b"EUS1"`) supersedes the three hand-rolled
-//! fixed-layout blocks (`SD02` init→storaged, `SH01` init→shell, `ST01`
-//! shell→child).
+//! self-describing format (`b"EUS1"`) serves every parent→child bootstrap
+//! (init→storaged, init→shell, shell→child).
 //!
 //! Strict, like the sibling `elf` decoder: the block is **untrusted-shaped
 //! input** consumed in `_start` before anything else exists, so `decode` is
 //! **total over arbitrary bytes** — a malformed block is refused (`None`),
-//! never a panic / out-of-bounds read / unbounded allocation (rev1§2.7
+//! never a panic / out-of-bounds read / unbounded allocation (rev2§2.7
 //! refuse-not-crash). The producer side is total the other way: `encode`
 //! refuses an over-budget block with a clean `Err`, never a panic or a silent
 //! truncation. `no_std`/`core`-only (no `alloc`): argv/env decode as borrowed
@@ -36,13 +35,11 @@
 //! The grant kinds: `CAP_SLOT` and `STORAGE_HANDLE` are the spec's literal two
 //! (kernel caps resolve to cspace slots, storage grants resolve to handle
 //! numbers). `REGION` generalizes the one grant the system already delivers —
-//! `time` is a pre-mapped VA in every block today, and the old `SD02` MMIO/DMA
-//! fields are the same shape (VA + len, plus a device PA for DMA). A region
-//! carries **no new authority**: the parent maps the page before start exactly
-//! as today; only the VA travels.
+//! `time` is a pre-mapped VA in every block, and an MMIO/DMA grant has the
+//! same shape (VA + len, plus a device PA for DMA). A region carries **no new
+//! authority**: the parent maps the page before start; only the VA travels.
 
-/// Magic for the unified startup block, version 1. Supersedes the bespoke
-/// `SD02`/`SH01`/`ST01` fixed layouts.
+/// Magic for the unified startup block, version 1.
 pub const MAGIC: [u8; 4] = *b"EUS1";
 
 /// Hard size budget for one block: the kernel's `MSG_PAYLOAD`
@@ -50,31 +47,31 @@ pub const MAGIC: [u8; 4] = *b"EUS1";
 /// refused by `encode`, since it could not be delivered in one message.
 pub const MAX_BLOCK: usize = 256;
 
-// Well-known name ids (rev1§5.1 standard names + bring-up device names). A
+// Well-known name ids (rev2§5.1 standard names + bring-up device names). A
 // small `u8` enum so a `no_std` `_start` resolves a name with an integer match,
 // not string handling. `name = 0` is reserved as a future string-name escape so
-// the eventual stable public ABI (rev1§8.3) can widen to byte-string names
+// the eventual stable public ABI (rev2§8.3) can widen to byte-string names
 // without a format break; v1 uses ids only.
 /// Reserved string-name escape (unused in v1; see module docs).
 pub const NAME_STRING: u8 = 0;
-/// The process's storage root (rev1§5.1).
+/// The process's storage root (rev2§5.1).
 pub const NAME_ROOT: u8 = 1;
-/// Standard input — deliberately split from `stdout` (rev1§5.1). Reserved in
-/// C1; populated by C-M9 (the console).
+/// Standard input — deliberately split from `stdout` (rev2§5.1). Reserved;
+/// populated by the console.
 pub const NAME_STDIN: u8 = 2;
-/// Standard output — deliberately split from `stdin`. Reserved in C1.
+/// Standard output — deliberately split from `stdin`. Reserved.
 pub const NAME_STDOUT: u8 = 3;
-/// A writable scratch subtree (rev1§5.1). Reserved unless carvable.
+/// A writable scratch subtree (rev2§5.1). Reserved unless carvable.
 pub const NAME_TMP: u8 = 4;
-/// The process's storage session channel (rev1§5.1).
+/// The process's storage session channel (rev2§5.1).
 pub const NAME_STORAGE: u8 = 5;
-/// The monotonic time page (rev1§2.6). The one named grant delivered today.
+/// The monotonic time page (rev2§2.6). The one named grant delivered today.
 pub const NAME_TIME: u8 = 6;
 /// The virtio MMIO transport window (bring-up; storaged).
 pub const NAME_VIRTIO_MMIO: u8 = 16;
 /// The DMA pool region (bring-up; storaged).
 pub const NAME_DMA: u8 = 17;
-/// The PL011 UART MMIO window (bring-up; the console driver, C-M9). The driver
+/// The PL011 UART MMIO window (bring-up; the console driver). The driver
 /// reads its register base from this `REGION` grant's VA rather than the
 /// hardcoded 0x0900_0000, exactly as storaged reads `NAME_VIRTIO_MMIO`.
 pub const NAME_PL011_MMIO: u8 = 18;
@@ -261,7 +258,7 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Decode a startup block. Total over arbitrary bytes (rev1§2.7): validates the
+/// Decode a startup block. Total over arbitrary bytes (rev2§2.7): validates the
 /// magic, then each count against its arena cap, then bounds-checks every grant
 /// body / argv / env length against the remaining slice before reading. Any
 /// shortfall, unknown grant `kind`, bad magic, or over-cap count returns `None`
@@ -650,8 +647,8 @@ mod tests {
             }
         }
 
-        /// Total over arbitrary bytes: `decode` never panics — the rev1§2.7
-        /// refuse-not-crash floor (the shape of B15C's `parse_config_is_total`).
+        /// Total over arbitrary bytes: `decode` never panics — the rev2§2.7
+        /// refuse-not-crash floor (the shape of `parse_config_is_total`).
         #[test]
         fn decode_is_total(bytes in prop::collection::vec(any::<u8>(), 0..512)) {
             if let Some(s) = decode(&bytes) {

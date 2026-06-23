@@ -1,6 +1,6 @@
-//! On-disk formats (rev1§4.2): superblocks, WAL records, the ref table,
+//! On-disk formats (rev2§4.2): superblocks, WAL records, the ref table,
 //! and the chunk index. All hand-defined and little-endian — nothing
-//! persistent speaks postcard (rev1§3.7). Decoders are strict and reject
+//! persistent speaks postcard (rev2§3.7). Decoders are strict and reject
 //! trailing bytes.
 //!
 //! Device layout:
@@ -11,11 +11,11 @@
 //!
 //! Format v2: the superblock references a durable index object — the
 //! hash → (offset, length, birth generation) map plus the free-extent
-//! list (rev1§4.2 items 3 and 4) — written as an ordinary self-verifying
+//! list (rev2§4.2 items 3 and 4) — written as an ordinary self-verifying
 //! frame. v1 rebuilt the index by scanning an append-only region; a scan
 //! cannot represent holes, and GC exists to make holes.
 //!
-//! Format v3 (time page, rev1§2.6): snapshot timestamps and file mtimes are
+//! Format v3 (time page, rev2§2.6): snapshot timestamps and file mtimes are
 //! UTC nanoseconds since the Unix epoch. The layout did not change — a
 //! tick field and a nanosecond field are structurally identical — which
 //! is exactly why the version had to: pre-v3 images (whose on-OS rows
@@ -23,7 +23,7 @@
 //! with mkfs, never silently misread as dates in 1970.
 //!
 //! The generation-checksummed A/B superblock flip is the single atomicity
-//! mechanism for the entire system (rev1§4.2).
+//! mechanism for the entire system (rev2§4.2).
 
 use crate::hash::Hash;
 use crate::prolly::{FormatError, Reader};
@@ -95,7 +95,7 @@ impl Superblock {
         )
     }
 
-    /// None = unusable for any reason; recovery discards it (rev1§4.5).
+    /// None = unusable for any reason; recovery discards it (rev2§4.5).
     pub fn decode(buf: &[u8]) -> Option<Superblock> {
         Self::decode_checked(buf).ok()
     }
@@ -104,7 +104,7 @@ impl Superblock {
     /// slot is recovery's business (discard, try the other slot), while an
     /// intact slot from another format version must surface as a version
     /// error — tick-era (pre-v3) timestamp fields are structurally
-    /// identical to nanosecond fields, so misreading is silent (rev1§2.6).
+    /// identical to nanosecond fields, so misreading is silent (rev2§2.6).
     ///
     /// Thin assembly wrapper over the Verus-verified [`decode_checked_fields`]:
     /// that function proves the parse is **total** ∀ buffer bytes (no panic —
@@ -134,10 +134,10 @@ verus! {
 pub const SB_SIZE: usize = 4096;
 /// First byte of the WAL region (after the two 4 KiB superblock slots).
 pub const WAL_OFF: u64 = 8192;
-/// On-disk format version (format v5, rev1§2.6). Inside the macro for the version
-/// gate in `decode_checked_fields`. Bumped 3 → 4 in B5A: each `RefEntry` now carries
-/// a fixed-width `edit_version` (rev1§4.7), so a v3 reader handed a v4 ref record would
-/// desync. Bumped 4 → 5 in C2B: the WAL gains a tag-3 `Rename` op, so a v4 (pre-C2B)
+/// On-disk format version (format v5, rev2§2.6). Inside the macro for the version
+/// gate in `decode_checked_fields`. Format v4: each `RefEntry` carries
+/// a fixed-width `edit_version` (rev2§4.7), so a v3 reader handed a v4 ref record would
+/// desync. Format v5: the WAL gains a tag-3 `Rename` op, so a v4
 /// reader could decode a tag-3 record as a torn tail and silently drop a renamed-but-
 /// unflushed write — the version gate refuses such a store cleanly rather than mis-replay.
 pub(crate) const SB_VERSION: u32 = 5;
@@ -170,7 +170,7 @@ pub open spec fn geometry_ok(
     &&& (index_off as int + CHUNK_HEADER as int <= chunk_tail as int)
 }
 
-/// The rev1§4.5 mount geometry chokepoint, verified ∀. Total over all
+/// The rev2§4.5 mount geometry chokepoint, verified ∀. Total over all
 /// field values and `dev_len` (it is all `checked_add`); accepts iff
 /// [`geometry_ok`]; and on `Ok` the committed chunk region provably fits the
 /// device.
@@ -232,7 +232,7 @@ pub enum SbError {
     /// Torn, unwritten, or not a superblock at all.
     Invalid,
     /// Intact (magic and checksum verify) but written by another format
-    /// version — refuse, never reinterpret (rev1§2.6).
+    /// version — refuse, never reinterpret (rev2§2.6).
     WrongVersion(u32),
 }
 
@@ -383,14 +383,14 @@ pub fn decode_checked_fields(buf: &[u8]) -> (r: Result<RawSuperblock, SbError>) 
 
 } // verus!
 
-// ── Chunk index object (rev1§4.2 items 3–4, durable since format v2) ───────
+// ── Chunk index object (rev2§4.2 items 3–4, durable since format v2) ───────
 
 const INDEX_MAGIC: &[u8; 4] = b"CIDX";
 
 /// One indexed object: `off` is the *data* offset within the chunk region
 /// (the frame header sits CHUNK_HEADER bytes before it). `birth` is the
 /// superblock generation the object was appended under — the GC epoch
-/// hook (rev1§4.2, rev1§4.6).
+/// hook (rev2§4.2, rev2§4.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexEntry {
     pub off: u64,
@@ -494,7 +494,7 @@ pub enum WalOp {
         path: Vec<Vec<u8>>,
         mtime: u64,
     },
-    /// Move `from` to `to` within one ref (rev1§4.9). The WAL stays purely
+    /// Move `from` to `to` within one ref (rev2§4.9). The WAL stays purely
     /// path-keyed: replaying this record reconstructs the same ephemeral
     /// file-id swap the live op produced, so the ids never touch disk.
     Rename {
@@ -514,8 +514,8 @@ impl WalOp {
         }
     }
 
-    /// The op's server-assigned UTC-nanos timestamp (rev1§4.7). Both variants
-    /// carry it; the per-ref dirty-staleness accounting (rev1§4.4) uses it as
+    /// The op's server-assigned UTC-nanos timestamp (rev2§4.7). Both variants
+    /// carry it; the per-ref dirty-staleness accounting (rev2§4.4) uses it as
     /// the oldest-dirty key, reconstructed identically on WAL replay since the
     /// value is the same one persisted in the record.
     pub fn mtime(&self) -> u64 {
@@ -645,7 +645,7 @@ impl WalOp {
     /// The checksum covers `seq ‖ len ‖ payload`, not the payload alone, so the
     /// record's freshness token (its sequence number) is bound to its body. The
     /// WAL is a reused linear region whose stale bytes are rejected on replay by
-    /// the seq check (rev1§4.5); a payload-only checksum let a torn write at a
+    /// the seq check (rev2§4.5); a payload-only checksum let a torn write at a
     /// reused offset overwrite *just* the seq field of a stale, already-superseded
     /// record — grafting a fresh seq onto an old body that still matched the old
     /// checksum — which replayed the stale write. Binding seq+len into the hash
@@ -665,7 +665,7 @@ impl WalOp {
 
     /// Parse one record at the start of `buf`. Returns (seq, op, record
     /// length). None = no valid record here (torn tail or end of log —
-    /// either way replay stops, rev1§4.5: such records were never acked).
+    /// either way replay stops, rev2§4.5: such records were never acked).
     pub fn decode_record(buf: &[u8]) -> Option<(u64, WalOp, usize)> {
         if buf.len() < WAL_HEADER || &buf[0..4] != WAL_MAGIC {
             return None;
@@ -691,7 +691,7 @@ impl WalOp {
 /// integrity-bound to its body (see [`WalOp::encode_record`]).
 ///
 /// `pub(crate)` so `store.rs`'s `wal_checksum_ok` (the BLAKE3-only record seam
-/// left after B7B splits the structural decode into the verified surface, T-5)
+/// left once the structural decode is split into the verified surface)
 /// recomputes the canonical checksum rather than re-deriving the hashed layout.
 pub(crate) fn record_checksum(seq: u64, len: u32, payload: &[u8]) -> Hash {
     let mut summed = Vec::with_capacity(8 + 4 + payload.len());
@@ -701,7 +701,7 @@ pub(crate) fn record_checksum(seq: u64, len: u32, payload: &[u8]) -> Hash {
     Hash::of(&summed)
 }
 
-// ── Ref table (rev1§4.1, rev1§4.7) ──────────────────────────────────────────────
+// ── Ref table (rev2§4.1, rev2§4.7) ──────────────────────────────────────────────
 
 const REFT_MAGIC: &[u8; 4] = b"REFT";
 
@@ -712,13 +712,13 @@ pub const CLASS_EPHEMERAL: u8 = 2;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefEntry {
     pub root: Hash,
-    /// Storage-cap revocation generation (rev1§2.2) — not the superblock
+    /// Storage-cap revocation generation (rev2§2.2) — not the superblock
     /// generation. Bumping it lazily invalidates all outstanding handles.
     pub generation: u64,
     pub next_snap_id: u64,
-    /// rev1§4.7 edit version: advances once per committed mutation of this
+    /// rev2§4.7 edit version: advances once per committed mutation of this
     /// ref's entries (head moves, snapshot rows, tags). Plain data through
-    /// the normal commit path; the guarded-batch CAS (B5B) compares against
+    /// the normal commit path; the guarded-batch CAS compares against
     /// it. Orthogonal to `generation` (§2.2 revocation) and to the superblock
     /// generation (§4.2).
     pub edit_version: u64,
@@ -729,9 +729,9 @@ pub struct SnapRow {
     pub id: u64,
     pub root: Hash,
     /// UTC nanoseconds since the Unix epoch (format v3; the spec-level
-    /// representation is signed 64-bit, rev1§2.6 — positive in practice, so
+    /// representation is signed 64-bit, rev2§2.6 — positive in practice, so
     /// the u64 carries identical bytes). Server-assigned, strictly
-    /// increasing per ref (rev1§4.7).
+    /// increasing per ref (rev2§4.7).
     pub timestamp: u64,
     pub provenance: Vec<u8>,
     pub parent: Option<u64>,
@@ -743,7 +743,7 @@ pub struct SnapRow {
 pub struct RefTable {
     pub refs: BTreeMap<Vec<u8>, RefEntry>,
     /// (ref name, snapshot id) → row. Snapshot identity is the per-ref
-    /// sequence number, never a hash (rev1§4.7).
+    /// sequence number, never a hash (rev2§4.7).
     pub snaps: BTreeMap<(Vec<u8>, u64), SnapRow>,
     pub tags: BTreeMap<Vec<u8>, (Vec<u8>, u64)>,
 }
@@ -862,7 +862,7 @@ pub const CHUNK_MAGIC: &[u8; 4] = b"CHNK";
 // it); it erases to the same `pub const CHUNK_HEADER: usize = 48`.
 
 /// Frame a chunk for the append-only store: magic, length, birth
-/// generation (rev1§4.2 — the GC epoch hook), content hash, data.
+/// generation (rev2§4.2 — the GC epoch hook), content hash, data.
 pub fn encode_chunk_frame(data: &[u8], birth_gen: u64, hash: &Hash) -> Vec<u8> {
     let mut out = Vec::with_capacity(CHUNK_HEADER + data.len());
     out.extend_from_slice(CHUNK_MAGIC);
@@ -1008,7 +1008,7 @@ mod tests {
 
     #[test]
     fn ref_record_missing_edit_version_is_rejected() {
-        // A v4 ref record ends with the 8-byte edit_version (rev1§4.7); a buffer
+        // A v4 ref record ends with the 8-byte edit_version (rev2§4.7); a buffer
         // cut short of it must be refused as truncated, never decoded with a
         // junk/zero version. One ref, no snaps/tags, so the encoding tail is
         // edit_version(8) | nsnaps=0 (4) | ntags=0 (4): dropping the last 12

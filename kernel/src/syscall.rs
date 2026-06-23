@@ -6,7 +6,7 @@
 //! lie inside the identity-mapped user window (until M3 address spaces).
 //!
 //! This ABI is a scaffold, not a stable surface — the public syscall ABI
-//! is deferred (rev1§3.7, rev1§8).
+//! is deferred (rev2§3.7, rev2§8).
 
 use crate::channel::{self, ChanError, MSG_CAPS, MSG_PAYLOAD};
 use crate::cspace::{self, CSpaceObj, CapKind, CapSlot, Rights};
@@ -73,15 +73,15 @@ pub const ERR_NOMEM: i64 = -8;
 pub const ERR_ARG: i64 = -9;
 pub const ERR_CLOSED: i64 = -10;
 pub const ERR_STATE: i64 = -11;
-/// Retry-later (B9): `CapRevoke` returns this when a bounded quantum ends with
+/// Retry-later: `CapRevoke` returns this when a bounded quantum ends with
 /// descendants still remaining, and `CapCopy` returns it when the source is under
-/// an in-flight revoke (rev1§2.2 preemptible/restartable walk). The caller loops.
+/// an in-flight revoke (rev2§2.2 preemptible/restartable walk). The caller loops.
 pub const ERR_AGAIN: i64 = -12;
 
 pub const SLOT_NONE: u32 = u32::MAX;
 
 /// Leaf-deletions performed per `CapRevoke` call before the kernel returns
-/// `ERR_AGAIN` (B9). A shell-policy constant (rev1§6.1(d)), chosen ≪ a 10 ms
+/// `ERR_AGAIN`. A shell-policy constant (rev2§6.1(d)), chosen ≪ a 10 ms
 /// scheduler tick's worth of deletions so interrupt latency stays bounded by one
 /// quantum; the caller (`ipc::sys::cap_revoke_all`) re-issues from EL0 where IRQs
 /// are unmasked. Tuning is left to measurement — not a verified parameter.
@@ -193,14 +193,13 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
 /// rights checks, user-range validation, and the operation.
 unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
     match sys {
-        // DebugPutc/DebugWrite (rev1§7): the EL0 debug-print scaffold, re-scoped in
-        // C-M9-C to a disclosed *kernel-diagnostic* path behind the `debug-log`
-        // build feature (default-on for dev images). With the feature off these
-        // EL0 syscalls are inert no-ops — "gated off for EL0," the carve-out's exit
-        // condition. The decoder still produces both variants, so the arms stay;
-        // only the body is conditional. The shell no longer calls them for terminal
-        // I/O (that crosses the console channel); pre-console server diagnostics and
-        // panic reporting are the remaining users.
+        // DebugPutc/DebugWrite (rev2§7): a disclosed *kernel-diagnostic* path behind
+        // the `debug-log` build feature (default-on for dev images). With the feature
+        // off these EL0 syscalls are inert no-ops — gated off for EL0. The decoder
+        // still produces both variants, so the arms stay; only the body is
+        // conditional. The shell does not call them for terminal I/O (that crosses
+        // the console channel); their users are server diagnostics and panic
+        // reporting.
         Sys::DebugPutc { ch } => {
             #[cfg(feature = "debug-log")]
             {
@@ -266,8 +265,8 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
                 Err(RetypeError::BadArg) => ERR_ARG,
             })
         }
-        // cap_copy — derive, monotone (rev1§2.3). `prio_ceiling` attenuates a thread-cap
-        // copy's rev1§5.4 ceiling to `min(parent, prio_ceiling)` (the supervision grant);
+        // cap_copy — derive, monotone (rev2§2.3). `prio_ceiling` attenuates a thread-cap
+        // copy's rev2§5.4 ceiling to `min(parent, prio_ceiling)` (the supervision grant);
         // `NO_PRIO_CEILING` (0xFF) from the default `cap_copy` leaves it unchanged.
         Sys::CapCopy {
             src,
@@ -280,7 +279,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if src.is_null() || dst.is_null() {
                 return Some(ERR_BADSLOT);
             }
-            // B9: refuse derivation into an in-flight revoke subtree with a
+            // Refuse derivation into an in-flight revoke subtree with a
             // distinguishable `ERR_AGAIN` (retry once the revoke finishes).
             // `derive` already rejects this internally, but only as a bare
             // `Err(())` indistinguishable from a structural failure, so we
@@ -315,7 +314,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if s.is_null() || (*s).cap.is_empty() {
                 return Some(ERR_BADSLOT);
             }
-            // B9: do one bounded quantum of leaf-deletions and return. `More`
+            // Do one bounded quantum of leaf-deletions and return. `More`
             // means the subtree still has descendants — userspace re-issues
             // (`ERR_AGAIN`); `Done` means the walk completed. The masked-EL1
             // entry is unchanged: preemption is delivered at the syscall
@@ -326,7 +325,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             }
         }
         // cap_install — move a cap into another cspace (explicit child-cspace
-        // construction, rev1§5.1).
+        // construction, rev2§5.1).
         Sys::CapInstall { cs, src, dst_index } => {
             let cs_slot = cur_slot(cs);
             let src = cur_slot(src);
@@ -499,15 +498,15 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if !user_range_ok(entry, 4) || !user_range_ok(sp, 0) {
                 return Some(ERR_FAULT);
             }
-            // rev1§5.4 maximum-controlled-priority: the ceiling is carried on the
+            // rev2§5.4 maximum-controlled-priority: the ceiling is carried on the
             // thread cap (`max_prio`, stamped at retype = the retyper's
             // priority), so spawn gates on the cap, not the caller's live
             // priority — the lattice stays monotone and the ceiling is
-            // cap-attenuated through `kcore::cspace::derive`. The refusal is now
-            // the verified `set_priority` op's own branch (rev1§6.1(d)), not a
-            // shell `if`: an over-ceiling `prio` returns `Err` and leaves the TCB
-            // untouched. Gated here, before any state mutation, so no refcount is
-            // bumped on refusal (the prior shell gate's position).
+            // cap-attenuated through `kcore::cspace::derive`. The refusal is
+            // the verified `set_priority` op's own branch (rev2§6.1(d)): an
+            // over-ceiling `prio` returns `Err` and leaves the TCB untouched.
+            // Gated here, before any state mutation, so no refcount is bumped on
+            // refusal.
             if thread::set_priority(tp, prio, max_prio).is_err() {
                 return Some(ERR_PERM);
             }
@@ -550,9 +549,9 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             );
             Some(0)
         }
-        // irq_bind (B-IRQ-B) — the TimerArm twin: bind an IRQ-handler cap to a
+        // irq_bind — the TimerArm twin: bind an IRQ-handler cap to a
         // (notification, bits) pair, so a hardware interrupt on the line signals
-        // that notification (rev1§1, rev1§3.6). WRITE on the notif is required —
+        // that notification (rev2§1, rev2§3.6). WRITE on the notif is required —
         // the kernel signals through it (as TimerArm/ChanBind do).
         Sys::IrqBind {
             irq: irq_cap,
@@ -576,7 +575,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             irq::bind(irq_ptr(i), notif_ptr(n), bits);
             Some(0)
         }
-        // irq_ack (B-IRQ-B) — the "acknowledge" half of rev1§1: clear the mask
+        // irq_ack — the "acknowledge" half of rev2§1: clear the mask
         // and re-enable the line after the driver has serviced the device.
         Sys::IrqAck { irq: irq_cap } => {
             let is = cur_slot(irq_cap);
@@ -589,7 +588,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             irq::ack(irq_ptr(i));
             Some(0)
         }
-        // thread_exit — the only voluntary stop (rev1§5.1). The kernel records
+        // thread_exit — the only voluntary stop (rev2§5.1). The kernel records
         // the status, so a child can neither lie about nor forget its own
         // death; the on-exit binding fires here.
         Sys::ThreadExit { status } => {
@@ -600,7 +599,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             // frame is never restored, so there is no x0 to write.
             None
         }
-        // map(aspace, frame, va, perms) — rev1§2.5: the mapping lives in the
+        // map(aspace, frame, va, perms) — rev2§2.5: the mapping lives in the
         // frame cap; mapping an already-mapped cap fails (copy the cap to
         // map the frame twice).
         Sys::Map {
@@ -630,12 +629,12 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if perms & crate::aspace::PERM_W != 0 && !(*fr_slot).cap.rights.has(Rights::WRITE) {
                 return Some(ERR_PERM);
             }
-            // Device mappings only via phys-capable caps (rev1§2.5).
+            // Device mappings only via phys-capable caps (rev2§2.5).
             if perms & crate::aspace::PERM_DEVICE != 0 && !(*fr_slot).cap.rights.has(Rights::PHYS) {
                 return Some(ERR_PERM);
             }
             // Cap-side bookkeeping (the mapping record + aspace refcount bump) is the verified
-            // `cspace::map_frame` (B8A, rev1§6.1(c)), symmetric with the delete/unmap path; it
+            // `cspace::map_frame` (rev2§6.1(c)), symmetric with the delete/unmap path; it
             // drives the page-table write through the `aspace_map` Store seam. The shell keeps
             // only the access-control validation above (§6.1(d)-style).
             match crate::cspace::map_frame(fr_slot, asp, va, perms) {
@@ -703,8 +702,8 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             if (*tp).state != ThreadState::Inactive {
                 return Some(ERR_STATE);
             }
-            // rev1§5.4 ceiling carried on the thread cap (see ThreadStart). The
-            // verified `set_priority` op makes the refusal itself (rev1§6.1(d)),
+            // rev2§5.4 ceiling carried on the thread cap (see ThreadStart). The
+            // verified `set_priority` op makes the refusal itself (rev2§6.1(d)),
             // gated here — before the range check and any refcount bump, the prior
             // shell gate's position — so an over-ceiling `prio` returns `Err` →
             // `ERR_PERM` (ahead of any `ERR_FAULT`) with the TCB untouched.
@@ -726,7 +725,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             thread::enqueue(tp);
             Some(0)
         }
-        // frame_paddr → PA. Gated on the phys-read bit (rev1§2.5): only the
+        // frame_paddr → PA. Gated on the phys-read bit (rev2§2.5): only the
         // DmaPool holder's caps carry it.
         Sys::FramePaddr { slot } => {
             let s = cur_slot(slot);
@@ -742,7 +741,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             Some(base as i64)
         }
         // thread_bind(tcb, which, notif, bits) — configure the on-exit /
-        // on-fault slot (rev1§5.1). `which` is already <= 1 (decode). The notif
+        // on-fault slot (rev2§5.1). `which` is already <= 1 (decode). The notif
         // cap moves into the TCB's CDT-visible slot; notif = SLOT_NONE
         // unbinds. A child holds no cap to its own threads, so it can neither
         // silence nor forge its own death notice.
@@ -759,7 +758,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             let CapKind::Thread(t, _) = (*ts).cap.kind else {
                 return Some(ERR_TYPE);
             };
-            // bind-reports gates slot configuration (rev1§2.3): a supervisor holds
+            // bind-reports gates slot configuration (rev2§2.3): a supervisor holds
             // it; an attenuated observer does not.
             if !(*ts).cap.rights.has(Rights::BIND_REPORTS) {
                 return Some(ERR_PERM);
@@ -774,7 +773,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
                 let CapKind::Notification(_) = (*ns).cap.kind else {
                     return Some(ERR_TYPE);
                 };
-                // The kernel will signal through this cap (rev1§3.6).
+                // The kernel will signal through this cap (rev2§3.6).
                 if !(*ns).cap.rights.has(Rights::WRITE) {
                     return Some(ERR_PERM);
                 }
@@ -784,7 +783,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             Some(0)
         }
         // read_report(tcb) → x0 = 0 running | 1 exited | 2 faulted,
-        // x1 = status / cause, x2 = faulting address (rev1§5.1).
+        // x1 = status / cause, x2 = faulting address (rev2§5.1).
         Sys::ReadReport { tcb } => {
             let ts = cur_slot(tcb);
             if ts.is_null() {
@@ -793,7 +792,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             let CapKind::Thread(t, _) = (*ts).cap.kind else {
                 return Some(ERR_TYPE);
             };
-            // read-report gates the read (rev1§2.3).
+            // read-report gates the read (rev2§2.3).
             if !(*ts).cap.rights.has(Rights::READ_REPORT) {
                 return Some(ERR_PERM);
             }
@@ -807,8 +806,8 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             Some(code)
         }
         // untyped_reset(ut) — watermark back to 0 once the caller has revoked
-        // every object carved from it (rev1§2.5). Pairs with cap_revoke for
-        // per-spawn donation reuse (rev1§5.1); refuses while CDT children remain
+        // every object carved from it (rev2§2.5). Pairs with cap_revoke for
+        // per-spawn donation reuse (rev2§5.1); refuses while CDT children remain
         // so a live object can never be reused under.
         Sys::UntypedReset { slot } => {
             let s = cur_slot(slot);
@@ -824,7 +823,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
         }
         // aspace_topup(aspace, ut, pages) — grow the aspace's page-table pool by
         // `pages` tables carved to abut its current end from the donated untyped
-        // (rev1§2.5 "accepts top-ups", B10B). Makes an exhausted-pool `ERR_NOMEM`
+        // (rev2§2.5 "accepts top-ups"). Makes an exhausted-pool `ERR_NOMEM`
         // recoverable: the caller donates untyped, grows the pool, retries `map`.
         // Validation mirrors `Sys::Map` (aspace cap + WRITE right); the untyped
         // needs no rights check, as `Sys::Retype`. The carve/accounting is the

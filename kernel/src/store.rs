@@ -247,7 +247,7 @@ impl Store for KernelStore {
         unsafe { (*obj_ptr::<TimerObj>(t)).next = n }
     }
 
-    // ── IRQ-handler object (B-IRQ): the `TimerObj` deref pattern, on `IrqObj` ─
+    // ── IRQ-handler object: the `TimerObj` deref pattern, on `IrqObj` ─
     fn irq_intid(&self, i: ObjId) -> u32 {
         unsafe { (*obj_ptr::<IrqObj>(i)).intid }
     }
@@ -277,7 +277,7 @@ impl Store for KernelStore {
     }
 
     // ── hardware / scheduler seam ─────────────────────────────────────────
-    // B8C-3: both realizations now route through the verified `kcore::ready` ops via the
+    // Both realizations route through the verified `kcore::ready` ops via the
     // thin `crate::thread` wrappers (`enqueue` → `ready_enqueue`, `unqueue_ready` →
     // `ready_unqueue`), so `destroy_tcb`'s `store.unqueue_ready(t)` and `signal`/`fire`'s
     // `store.make_runnable(t)` execute verified list logic — the seam contracts in
@@ -299,7 +299,7 @@ impl Store for KernelStore {
         pages: u64,
         perms: u64,
     ) -> Result<(), crate::aspace::MapError> {
-        // The trusted page-table join (rev1§6.1(c)): the verified cap-side record is
+        // The trusted page-table join (rev2§6.1(c)): the verified cap-side record is
         // `kcore::cspace::map_frame`, which drives this seam exactly as `delete` drives
         // `aspace_unmap`.
         unsafe { crate::aspace::map(obj_ptr::<AspaceObj>(a), pa, va, pages, perms) }
@@ -324,7 +324,7 @@ impl Store for KernelStore {
     fn set_timer_armed_head(&mut self, h: Option<ObjId>) {
         unsafe { crate::timer::set_armed_head(obj_or_null::<TimerObj>(h)) }
     }
-    // ── ready queue (B8C): the per-level head/tail + bitmap, realized over the
+    // ── ready queue: the per-level head/tail + bitmap, realized over the
     //    `READY`/`READY_BITMAP` kernel statics. The verified `kcore::ready` ops run
     //    against these by-handle accessors (the trusted ObjId↔`*mut Tcb` link seam).
     fn ready_head(&self, level: usize) -> Option<ObjId> {

@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 ipc = { path = "../../ipc" }
 urt = { path = "../../urt" }
-# C1B — the shared startup-block codec (rev1§5.1). `no_std` with default
+# The shared startup-block codec (rev2§5.1). `no_std` with default
 # features off; its only transitive dep is `ipc`, which storaged already carries.
 loader = { path = "../../loader", default-features = false }
 cas = { path = "../../cas", default-features = false }
@@ -16,7 +16,7 @@ dma-pool = { path = "../../dma-pool" }
 virtio-blk = { path = "../../virtio-blk", default-features = false }
 storage-server = { path = "../../storage-server", default-features = false, features = ["serde"] }
 
-# B15C — host tests for the SD02 startup-block decoder (rev1§6 Baseline tier).
+# Host tests for the startup-block decoder (rev2§6 Baseline tier).
 # Dev-only, so the aarch64 cross-build never pulls it.
 [dev-dependencies]
 proptest = "1"
