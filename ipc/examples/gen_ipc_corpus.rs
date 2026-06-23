@@ -10,6 +10,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use ipc::fuzz_support::{encode_demo, DemoMsg};
+use ipc::{ConnectReq, GrantReply, VersionRange, WindowGrant};
 
 fn corpus_dir(target: &str) -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -71,4 +72,42 @@ fn main() {
         "wrote {} seeds to ipc/fuzz/corpus/wire_decode/",
         msgs.len() + 3
     );
+
+    // The session connect codecs (rev1§3.5/§3.7), driven by the `connect_decode`
+    // target. Fixed-width, byte-canonical forms the random search rarely hits by
+    // chance (the tag bytes + exact REQ_LEN/GRANT_LEN framing).
+    let req_single = ConnectReq::for_window(4096).encode();
+    write_seed("connect_decode", "req_single", &req_single);
+    // A multi-version offer [1,4] — the negotiation case (the version bytes carry).
+    write_seed(
+        "connect_decode",
+        "req_range",
+        &ConnectReq::new(8192, VersionRange::new(1, 4)).encode(),
+    );
+    // A grant reply carrying the negotiated version 3 (its used GRANT_LEN prefix).
+    let (gbuf, gn) = GrantReply::Grant(
+        WindowGrant {
+            window: 0,
+            size: 8192,
+        },
+        3,
+    )
+    .encode();
+    write_seed("connect_decode", "grant", &gbuf[..gn]);
+    // A refusal (the 1-byte REFUSED_LEN prefix).
+    let (rbuf, rn) = GrantReply::Refused.encode();
+    write_seed("connect_decode", "refused", &rbuf[..rn]);
+
+    // Edge inputs both connect decoders must reject without panicking.
+    write_seed("connect_decode", "empty", &[]);
+    // Right length (REQ_LEN), wrong tag → decodes to None.
+    let mut wrong_tag = req_single;
+    wrong_tag[0] = 0xFF;
+    write_seed("connect_decode", "req_wrong_tag", &wrong_tag);
+    // A valid request with one trailing byte (length mismatch → None).
+    let mut req_trailing = req_single.to_vec();
+    req_trailing.push(0);
+    write_seed("connect_decode", "req_trailing", &req_trailing);
+
+    println!("wrote 7 seeds to ipc/fuzz/corpus/connect_decode/");
 }

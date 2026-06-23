@@ -13,6 +13,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use ipc::fuzz_support::{decode_demo, encode_demo};
+use ipc::{ConnectReq, GrantReply};
 
 fn corpus_files(target: &str) -> Vec<Vec<u8>> {
     let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -38,6 +39,24 @@ fn wire_decode() {
             let bytes = encode_demo(&m);
             let (_, m2) = decode_demo(&bytes).expect("re-encoded message must decode");
             assert_eq!(m, m2, "non-stable message in corpus");
+        }
+    }
+}
+
+#[test]
+fn connect_decode() {
+    for data in corpus_files("connect_decode") {
+        // The session connect codecs are fixed-width and byte-canonical (unlike
+        // the postcard body above), so an accepted input re-encodes to the exact
+        // same bytes — the runtime witness for the Verus bijection lemmas in
+        // session.rs. Both decoders are total: a malformed buffer is `None`, not
+        // a panic.
+        if let Some(req) = ConnectReq::decode(&data) {
+            assert_eq!(&req.encode()[..], &data[..], "ConnectReq not byte-stable");
+        }
+        if let Some(reply) = GrantReply::decode(&data) {
+            let (buf, n) = reply.encode();
+            assert_eq!(&buf[..n], &data[..], "GrantReply not byte-stable");
         }
     }
 }
