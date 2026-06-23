@@ -3,10 +3,10 @@
 Verus is the kernel core's **deductive-verification tier**: it proves the `kcore`
 object model and the rev1§4.7/rev1§4.8 host chokepoints meet functional `ensures`,
 **terminate**, and preserve their `wf` invariants **for all inputs**, with no
-bound to pick — the proofs hold over the unbounded input space. The enumerated trusted
-base is the ledger `../results/68_verus-findings.md`. (The Verus-rewrite plan and the
-dated 21…67 findings series this note distills are historical and not retained
-in-tree.)
+bound to pick — the proofs hold over the unbounded input space. The enumerated
+trusted base is the ledger `doc/guidelines/verus_trusted-base.md`. (The
+Verus-rewrite plan and the dated 21…67 findings series this note distills are
+historical and not retained in-tree.)
 
 Two parts: **Part A** is the working discipline (pin, CI, structure, trusted
 base, scope); **Part B** is the technique harvested from the rewrite, written to
@@ -133,10 +133,10 @@ Three rules govern what a contract may name:
 ## The trusted base
 
 Verus trusts a fact only through a named construct, and **every trust boundary is
-enumerated once** in the ledger (`../results/68_verus-findings.md`) — the source
-of truth for CLAUDE.md's "the trusted base is exactly …" claim. The discipline,
-in one line: **`external_body`/`external` only at a genuine boundary, each paired
-with a host test, and no bare `assume` survives.** The four legitimate
+enumerated once** in the ledger (`doc/guidelines/verus_trusted-base.md`) — the
+source of truth for CLAUDE.md's "the trusted base is exactly …" claim. The
+discipline, in one line: **`external_body`/`external` only at a genuine boundary,
+each paired with a host test, and no bare `assume` survives.** The four legitimate
 `external_body` categories and the host-test-with-teeth method are Part B
 ("Trusted seams"). An `external_body`/`external` row that cannot name **both** a
 reason and a test is a finding, not a boundary.
@@ -1506,7 +1506,8 @@ with opaque errors:
 ---
 
 *This guideline distills the technique; the enumerated source of record is the
-trusted-base ledger `../results/68_verus-findings.md` (the dated 21…67 findings series
-it distills is historical, not retained in-tree). When a snippet here and the live code
-disagree, the code is authoritative — this note is code-independent by design and is not
+trusted-base ledger `doc/guidelines/verus_trusted-base.md` (the dated 21…67
+findings series it distills is historical, not retained in-tree). When a snippet
+here and the live code disagree, the code is authoritative — this note is
+code-independent by design and is not
 updated for every refactor.*
