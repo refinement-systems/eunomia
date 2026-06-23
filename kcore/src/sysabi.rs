@@ -61,7 +61,6 @@ pub enum Sys {
     FrameWrite { frame: u64, off: u64, buf: u64, len: u64 },
     ThreadStartAs { tcb: u64, cspace: u64, aspace: u64, entry: u64, sp: u64, prio: u8 },
     FramePaddr { slot: u64 },
-    DebugGetc,
     ThreadBind { tcb: u64, which: usize, notif: u64, bits: u64 },
     ReadReport { tcb: u64 },
     UntypedReset { slot: u64 },
@@ -180,7 +179,9 @@ pub fn decode(nr: u64, a: [u64; 6]) -> (result: Result<Sys, SysError>)
             }
         }
         19 => Sys::FramePaddr { slot: a[0] },
-        20 => Sys::DebugGetc,
+        // 20 (DebugGetc) retired in C-M9-C: the userspace console driver owns the
+        // PL011 RX line, so no ambient input syscall remains — opcode 20 now
+        // falls through to `UnknownCall` (rev1§7 carve-out exit condition met).
         21 => {
             if a[1] > 1 {
                 return Err(SysError::BadWhich);
@@ -250,6 +251,9 @@ mod tests {
         assert_eq!(decode(99, [0; 6]), Err(SysError::UnknownCall));
         // B-IRQ-B moved the defined range to 0..=26, so 27 is the new first unknown.
         assert_eq!(decode(27, [0; 6]), Err(SysError::UnknownCall));
+        // C-M9-C retired DebugGetc (opcode 20): the ambient input syscall is gone,
+        // so 20 is now an interior gap that decodes to UnknownCall.
+        assert_eq!(decode(20, [0; 6]), Err(SysError::UnknownCall));
         assert_eq!(decode(3, [0, 99, 0, 0, 0, 0]), Err(SysError::BadObjType)); // bad ObjType
         assert_eq!(
             decode(8, [0, 0, MSG_PAYLOAD as u64 + 1, 0, 0, 0]),

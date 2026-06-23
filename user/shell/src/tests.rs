@@ -440,6 +440,13 @@ fn resolve_names_golden() {
         kind: GrantKind::CapSlot(6),
     })
     .unwrap();
+    // `stdin`/`stdout` name the one console-channel endpoint (rev1§5.1) — init
+    // points both at the same slot (C-M9-B/C).
+    s.push_grant(Grant {
+        name: NAME_STDOUT,
+        kind: GrantKind::CapSlot(6),
+    })
+    .unwrap();
     // Round-trip through the shared codec — what init sends, the shell decodes.
     let mut buf = [0u8; MAX_BLOCK];
     let n = encode(&s, &mut buf).unwrap();
@@ -448,6 +455,7 @@ fn resolve_names_golden() {
     assert_eq!(resolve_storage_slot(&dec), Some(1));
     assert_eq!(resolve_root_handle(&dec), Some(0));
     assert_eq!(resolve_stdin_slot(&dec), Some(6));
+    assert_eq!(resolve_stdout_slot(&dec), Some(6));
 }
 
 #[test]
@@ -458,8 +466,10 @@ fn resolve_names_absent_yields_none() {
     assert_eq!(resolve_time_va(&s), None);
     assert_eq!(resolve_storage_slot(&s), None);
     assert_eq!(resolve_root_handle(&s), None);
-    // `stdin` absent → None; the runtime treats this as fatal (no fallback).
+    // `stdin`/`stdout` absent → None; the runtime treats both as fatal (no
+    // fallback — the console must be wired, C-M9-C).
     assert_eq!(resolve_stdin_slot(&s), None);
+    assert_eq!(resolve_stdout_slot(&s), None);
 }
 
 #[test]
