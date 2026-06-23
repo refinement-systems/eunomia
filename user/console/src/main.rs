@@ -94,11 +94,25 @@ pub extern "C" fn _start() -> ! {
 
     sys::debug_write(b"[console] serving\n");
 
+    let mut rx = [0u8; 32];
+    let mut out = [0u8; 256];
+
+    // Drain keystrokes that arrived during boot, before RX interrupts were
+    // enabled: QEMU buffers them into the FIFO, but the level-crossing RX
+    // interrupt fires only for bytes arriving *after* the unmask — a pre-filled
+    // FIFO would never wake us, and once full it back-pressures the input
+    // (the shell would then see no keystrokes at all). Drain once up front, then
+    // ack so the line is unmasked; the ack-unmask cycle in the loop catches
+    // everything that follows. A no-op when nothing was typed during boot.
+    let n0 = drain_rx(&mut regs, &mut rx);
+    if n0 > 0 {
+        send_bytes(SHELL_CHAN, &rx[..n0]);
+    }
+    sys::irq_ack(IRQ_CAP);
+
     // 6. Serve loop: one wait(), two keys. RX → drain the FIFO, forward to the
     //    shell, then unmask (mask-on-deliver / ack-unmask). TX → drain the shell
     //    channel, write each message's bytes to the UART (polled on TXFF).
-    let mut rx = [0u8; 32];
-    let mut out = [0u8; 256];
     loop {
         let (key, _signals) = reactor.wait();
         match key {

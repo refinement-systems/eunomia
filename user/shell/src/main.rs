@@ -212,6 +212,18 @@ fn resolve_root_handle(s: &loader::startup::Startup) -> Option<u32> {
     }
 }
 
+/// `stdin` → the cspace slot holding the console-channel endpoint the shell
+/// reads keystrokes from (rev1§5.1, C-M9-B). Once the userspace console driver
+/// owns the PL011 RX line there is no ambient input path left, so an absent
+/// grant is fatal (no silent `debug_getc` fallback — the driver would have
+/// stolen the FIFO from under it); the caller refuses cleanly.
+fn resolve_stdin_slot(s: &loader::startup::Startup) -> Option<u32> {
+    match s.grant(loader::startup::NAME_STDIN)? {
+        loader::startup::GrantKind::CapSlot(slot) => Some(slot),
+        _ => None,
+    }
+}
+
 /// `time` → the virtual address of the read-only time page (rev1§2.6).
 fn resolve_time_va(s: &loader::startup::Startup) -> Option<u64> {
     match s.grant(loader::startup::NAME_TIME)? {

@@ -11,7 +11,7 @@
 
 use crate::{
     fault_class, fmt_hex, fmt_num, fmt_utc, parse_path, parse_u64, prune_victims,
-    resolve_root_handle, resolve_storage_slot, resolve_time_va,
+    resolve_root_handle, resolve_stdin_slot, resolve_storage_slot, resolve_time_va,
 };
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -690,6 +690,45 @@ fn dispatch(sp: &mut Spawner, line: &[u8]) {
     }
 }
 
+/// The shell's stdin (rev1§5.1, C-M9-B): keystrokes arrive from the userspace
+/// console driver as channel messages on the `stdin` endpoint, not the ambient
+/// `debug_getc` syscall (the driver now owns the PL011 RX line, so there is no
+/// ambient input path left to poll). Buffer one message and hand the REPL one
+/// byte at a time — the exact `debug_getc` shape the loop already consumes
+/// (negative = nothing queued, the caller yields).
+struct Stdin {
+    slot: u32,
+    buf: [u8; 256],
+    pos: usize,
+    len: usize,
+}
+
+impl Stdin {
+    const fn new(slot: u32) -> Self {
+        Self {
+            slot,
+            buf: [0u8; 256],
+            pos: 0,
+            len: 0,
+        }
+    }
+
+    /// One byte, or a negative `ERR_EMPTY` when the channel has nothing queued.
+    fn getc(&mut self) -> i64 {
+        if self.pos >= self.len {
+            let (n, _) = sys::chan_recv(self.slot, self.buf.as_mut_ptr(), None);
+            if n <= 0 {
+                return sys::ERR_EMPTY;
+            }
+            self.len = n as usize;
+            self.pos = 0;
+        }
+        let b = self.buf[self.pos];
+        self.pos += 1;
+        b as i64
+    }
+}
+
 #[no_mangle]
 #[link_section = ".text._start"]
 pub extern "C" fn _start() -> ! {
@@ -701,6 +740,10 @@ pub extern "C" fn _start() -> ! {
     // default to init's convention.
     let mut boot = [0u8; 256];
     let (blen, _) = sys::chan_recv(BOOT_CHAN, boot.as_mut_ptr(), None);
+    // `stdin` (C-M9-B): the console-channel endpoint the REPL reads from. Unlike
+    // the other names it has no graceful default — once the console driver owns
+    // RX there is no ambient input — so an absent grant is fatal below.
+    let mut stdin_slot: Option<u32> = None;
     if let Some(s) = loader::startup::decode(&boot[..blen.max(0) as usize]) {
         if let Some(slot) = resolve_storage_slot(&s) {
             STORE_SLOT.store(slot, Ordering::Relaxed);
@@ -713,6 +756,7 @@ pub extern "C" fn _start() -> ! {
             // before starting us; the mapping outlives the process.
             unsafe { urt::time::attach(va as usize) };
         }
+        stdin_slot = resolve_stdin_slot(&s);
     }
 
     // Carve the two persistent spawn objects from the pool (slot 2): the
@@ -727,12 +771,22 @@ pub extern "C" fn _start() -> ! {
     }
     let mut spawner = Spawner::new();
 
+    // The console must be wired (C-M9-B): with the userspace driver owning the
+    // PL011 RX line, an unbound `stdin` means no input path at all — fail
+    // cleanly and visibly rather than silently fall back to the now-defunct
+    // ambient poll (Design decision 6's no-console control).
+    let Some(stdin_slot) = stdin_slot else {
+        out(b"[shell] FATAL: stdin unbound (console not wired)\n");
+        sys::exit();
+    };
+    let mut stdin = Stdin::new(stdin_slot);
+
     out(b"\nEunomia shell - type help\n");
     let mut line = [0u8; 200];
     let mut len = 0usize;
     out(b"eunomia> ");
     loop {
-        let c = sys::debug_getc();
+        let c = stdin.getc();
         if c < 0 {
             sys::yield_now();
             continue;
