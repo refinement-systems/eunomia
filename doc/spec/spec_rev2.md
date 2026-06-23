@@ -1,7 +1,4 @@
-# Eunomia OS — Design Document (rev2 draft)
-
-_Working draft seeded from rev1; the only substantive change so far is the §4.4
-WAL-default correction (rev1 audit §6.3 / plan Phase C1)._
+# Eunomia OS — Design Document (rev2)
 
 Eunomia is an experimental operating system built around three commitments:
 
