@@ -30,6 +30,9 @@ use loader::spawn;
 static STORAGED_ELF: &[u8] = include_bytes!(env!("STORAGED_ELF_PATH"));
 #[cfg(not(test))]
 static SHELL_ELF: &[u8] = include_bytes!(env!("SHELL_ELF_PATH"));
+// C-M9-B: the userspace PL011 console driver, spawned before the shell.
+#[cfg(not(test))]
+static CONSOLE_ELF: &[u8] = include_bytes!(env!("CONSOLE_ELF_PATH"));
 
 // Kernel-bestowed slots.
 const UNTYPED: u32 = 0;
@@ -56,6 +59,41 @@ const SD_NOTIF: u32 = 17;
 const TIME_SH_CHILD: u32 = 18;
 const SD_SPAWN_BASE: u32 = 20;
 const SH_SPAWN_BASE: u32 = 40;
+
+// ── the console driver (C-M9-B) ────────────────────────────────────────────
+// The PL011 console caps the kernel grants real init (`kernel/src/main.rs`,
+// C-M9-B): the MMIO frame and the IRQ-handler cap, in the contiguous top pair
+// 62/63 — clear of every `spawn::prepare` scratch range by construction (C-M9
+// Design decision 4). init delegates both to the console driver at spawn.
+const CONSOLE_FRAME: u32 = 62;
+const CONSOLE_IRQ: u32 = 63;
+// init's working slots for the console spawn, in the free gap above storaged's
+// spawn scratch (which reaches slot 26 at 3 segments — ≥3 slots of margin).
+const CON_BOOT_A: u32 = 30; // init keeps this end to send the startup block
+const CON_BOOT_B: u32 = 31; // the console's bootstrap channel (its slot 0)
+const CON_A: u32 = 32; // console end of the console↔shell channel (its slot 1)
+const CON_B: u32 = 33; // shell end of the console↔shell channel (shell slot 6)
+const CON_NOTIF: u32 = 34; // the console's reactor/IRQ wake notif (its slot 2)
+const CON_FRAME_COPY: u32 = 35; // R/W copy of CONSOLE_FRAME, mapped into console
+/// The console's spawn scratch (`spawn::prepare`), in the free gap above the
+/// shell's spawn scratch (which reaches slot 46 at 3 segments — ≥3 of margin);
+/// the window (50..=50+3+nsegments) stays clear of the 62/63 grant.
+const CON_SPAWN_BASE: u32 = 50;
+
+/// Where init maps the PL011 register window in the console's aspace. The VA
+/// travels in the startup block's `pl011-mmio` region grant (rev1§5.1) — the
+/// driver never assumes it (the storaged virtio-mmio precedent).
+const PL011_VA: u64 = 0xA000_0000;
+/// The PL011 register window is a single 4 KiB frame; its length rides the
+/// region grant (the driver reads fixed offsets and ignores the length).
+const PL011_LEN: u64 = 4096;
+
+/// The shell cspace slot holding its console-channel endpoint (rev1§5.1, C-M9-B):
+/// init `cap_install`s `CON_B` here and the startup table names it as **both**
+/// `stdin` and `stdout` (the interactive console is one channel under both
+/// names). Slots 0–5 are wired/carved by the shell and 8.. is its spawn window,
+/// so 6 is free (the shell carves `EVENT_NOTIF`=3 and `DONATION`=4 from its pool).
+const SHELL_CONSOLE_SLOT: u32 = 6;
 
 const MMIO_VA: u64 = 0xA000_0000;
 /// The virtio-mmio window storaged probes: 32 transports × 0x200 each. Carried
@@ -131,20 +169,41 @@ fn build_storaged_block(
     startup::encode(&s, out)
 }
 
+/// Build the init→console startup block (rev1§5.1, C-M9-B): the unified `b"EUS1"`
+/// format carrying a single `REGION` grant — the PL011 register window at the VA
+/// init pre-mapped it to. The driver decodes the inverse (its `region` helper) to
+/// build its `MmioWindow`; the region carries no new authority (init `map`s the
+/// frame before start, so only the VA travels). Returns the encoded length or a
+/// clean `EncodeError` (the producer maps it to a boot failure — refuse, never
+/// panic). The console needs no time page (it never reads the clock).
+fn build_console_block(out: &mut [u8], pl011_va: u64) -> Result<usize, startup::EncodeError> {
+    let mut s = startup::Startup::new();
+    s.push_grant(Grant {
+        name: startup::NAME_PL011_MMIO,
+        kind: GrantKind::Region {
+            va: pl011_va,
+            len: PL011_LEN,
+            pa: 0,
+        },
+    })?;
+    startup::encode(&s, out)
+}
+
 /// The shell's cspace slot holding the storage-session channel (rev1§5.1):
 /// init `cap_install`s `SESSION_B` here and the startup table names it as the
 /// `storage` grant, so the name and the install can never drift.
 const SHELL_SESSION_SLOT: u32 = 1;
 
-/// Build the init→shell startup block (rev1§5.1, C1C): the unified `b"EUS1"`
-/// named-grant table (`loader::startup`) carrying the standard names the shell
-/// holds today — `time` (the read-only page init mapped at `TIME_VA`, as a
-/// region grant carrying the VA), `storage` (the session channel at the shell's
-/// cspace slot 1), and `root` (the full-rights ref at handle 0 on that session).
-/// `stdin`/`stdout` (Design decision 4, C-M9 populates) and `tmp` (Design
-/// decision 3, no subtree today) are reserved names, deliberately not emitted.
-/// Returns the encoded length, or an `EncodeError` the caller maps to a clean
-/// boot failure (refuse-not-crash, rev1§2.7) — never a panic.
+/// Build the init→shell startup block (rev1§5.1, C1C + C-M9-B): the unified
+/// `b"EUS1"` named-grant table (`loader::startup`) carrying the standard names the
+/// shell holds — `time` (the read-only page init mapped at `TIME_VA`, as a region
+/// grant carrying the VA), `storage` (the session channel at the shell's cspace
+/// slot 1), `root` (the full-rights ref at handle 0 on that session), and
+/// `stdin`/`stdout` (C-M9-B populates the names C1 reserved — both name the one
+/// console-channel endpoint at `SHELL_CONSOLE_SLOT`). `tmp` (Design decision 3, no
+/// subtree today) stays a reserved, unemitted name. Returns the encoded length, or
+/// an `EncodeError` the caller maps to a clean boot failure (refuse-not-crash,
+/// rev1§2.7) — never a panic.
 fn build_shell_block(out: &mut [u8]) -> Result<usize, loader::startup::EncodeError> {
     use loader::startup::*;
     let mut s = Startup::new();
@@ -163,6 +222,19 @@ fn build_shell_block(out: &mut [u8]) -> Result<usize, loader::startup::EncodeErr
     s.push_grant(Grant {
         name: NAME_ROOT,
         kind: GrantKind::StorageHandle(0),
+    })?;
+    // `stdin`/`stdout` (rev1§5.1, C-M9-B populates the names C1 reserved): both
+    // name the **same** console-channel endpoint in the shell's cspace — "an
+    // interactive console is the same channel granted under both names". The
+    // shell still uses the debug scaffold for I/O until C-M9-C flips it onto
+    // this channel; in C-M9-B it merely holds the endpoint.
+    s.push_grant(Grant {
+        name: NAME_STDIN,
+        kind: GrantKind::CapSlot(SHELL_CONSOLE_SLOT),
+    })?;
+    s.push_grant(Grant {
+        name: NAME_STDOUT,
+        kind: GrantKind::CapSlot(SHELL_CONSOLE_SLOT),
     })?;
     encode(&s, out)
 }
@@ -226,6 +298,17 @@ pub extern "C" fn _start() -> ! {
     check(
         sys::retype(UNTYPED, OBJ_CHANNEL, 4, SESSION_A, SESSION_B),
         b"session chan",
+    );
+    // The console's bootstrap channel (init→console startup block) and the
+    // console↔shell channel (rev1§7's "console cap" — one bidirectional channel,
+    // granted to the shell under both stdin/stdout, C-M9-B).
+    check(
+        sys::retype(UNTYPED, OBJ_CHANNEL, 4, CON_BOOT_A, CON_BOOT_B),
+        b"console boot chan",
+    );
+    check(
+        sys::retype(UNTYPED, OBJ_CHANNEL, 4, CON_A, CON_B),
+        b"console chan",
     );
 
     // ── the time page (rev1§2.6) ────────────────────────────────────────
@@ -326,6 +409,84 @@ pub extern "C" fn _start() -> ! {
     );
     check(spawn::start(&sd, 5).map_or(-1, |_| 0), b"start storaged");
 
+    // ── the console driver (C-M9-B) ──────────────────────────────────
+    // Spawned **before** the shell (Design decision 6): the shell's first prompt
+    // needs a live console to send to. The driver owns the PL011 (its MMIO frame
+    // + IRQ cap, granted by the kernel at CONSOLE_FRAME/CONSOLE_IRQ); it delivers
+    // RX keystrokes and accepts TX bytes over the console↔shell channel.
+    let con = match spawn::prepare(CONSOLE_ELF, UNTYPED, CON_SPAWN_BASE, 8) {
+        Ok(p) => p,
+        Err(e) => {
+            sys::debug_write(b"[init] FAILED: prepare console: ");
+            match e {
+                spawn::SpawnError::Elf(_) => sys::debug_write(b"elf\n"),
+                spawn::SpawnError::Sys(_) => sys::debug_write(b"sys\n"),
+                spawn::SpawnError::TooManySegments => sys::debug_write(b"segs\n"),
+            };
+            sys::exit();
+        }
+    };
+    // The PL011 register window: a phys-capable copy, device-mapped into the
+    // driver (the storaged virtio-mmio precedent — a `PERM_DEVICE` mapping of a
+    // device frame needs the cap's PHYS right, the authority to map physical
+    // device memory, even though the driver only ever reads the registers
+    // through the VA). The VA travels in its startup block as a region grant.
+    check(
+        sys::cap_copy(CONSOLE_FRAME, CON_FRAME_COPY, RIGHTS_WITH_PHYS),
+        b"console frame copy",
+    );
+    check(
+        sys::map(
+            con.aspace_slot,
+            CON_FRAME_COPY,
+            PL011_VA,
+            PERM_DEVICE | PERM_W,
+        ),
+        b"map pl011",
+    );
+    // The console's wake notification: bound by the driver itself — `IrqBind`
+    // raises it on an RX interrupt and the IPC reactor binds the channel-readable
+    // event to the same notif — so init hands over a bare notif (no `chan_bind`).
+    check(
+        sys::retype(UNTYPED, sys::OBJ_NOTIF, 0, CON_NOTIF, 0),
+        b"console notif",
+    );
+    let mut con_block = [0u8; startup::MAX_BLOCK];
+    let con_len = match build_console_block(&mut con_block, PL011_VA) {
+        Ok(n) => n,
+        Err(_) => {
+            sys::debug_write(b"[init] FAILED: build console block\n");
+            sys::exit();
+        }
+    };
+    check(
+        sys::chan_send(CON_BOOT_A, &con_block[..con_len], None),
+        b"console startup block",
+    );
+    // The console's cspace (its `_start` reads fixed slots): 0 = bootstrap
+    // channel, 1 = the console↔shell channel, 2 = the wake notif, 3 = the PL011
+    // IRQ cap (delegated from CONSOLE_IRQ — first real-boot use of an IRQ cap).
+    check(
+        sys::cap_install(con.cspace_slot, CON_BOOT_B, 0),
+        b"console boot install",
+    );
+    check(
+        sys::cap_install(con.cspace_slot, CON_A, 1),
+        b"console chan install",
+    );
+    check(
+        sys::cap_install(con.cspace_slot, CON_NOTIF, 2),
+        b"console notif install",
+    );
+    check(
+        sys::cap_install(con.cspace_slot, CONSOLE_IRQ, 3),
+        b"console irq install",
+    );
+    // Priority 6: above storaged (5) and the shell (4), so an interrupt-driven
+    // keystroke preempts in-progress server work and reaches the shell promptly.
+    // The driver blocks on its reactor otherwise, so it cannot starve them.
+    check(spawn::start(&con, 6).map_or(-1, |_| 0), b"start console");
+
     // ── shell ───────────────────────────────────────────────────────
     // 64-slot cspace: slots 0-4 are wired below / carved by the shell,
     // slot 5 is the re-grantable time cap, and 8.. is the shell's
@@ -380,6 +541,13 @@ pub extern "C" fn _start() -> ! {
     check(
         sys::cap_install(sh.cspace_slot, UNTYPED2, 2),
         b"sh untyped install",
+    );
+    // The console-channel endpoint (rev1§7's "console cap", C-M9-B): named in the
+    // startup table as both `stdin` and `stdout`. The shell holds it from C-M9-B
+    // and moves its terminal I/O onto it in C-M9-C.
+    check(
+        sys::cap_install(sh.cspace_slot, CON_B, SHELL_CONSOLE_SLOT),
+        b"sh console install",
     );
     check(spawn::start(&sh, 4).map_or(-1, |_| 0), b"start shell");
 
@@ -469,10 +637,40 @@ mod tests {
         assert_eq!(s.grant(NAME_STORAGE), Some(GrantKind::CapSlot(1)));
         // `root`: the full-rights ref at handle 0.
         assert_eq!(s.grant(NAME_ROOT), Some(GrantKind::StorageHandle(0)));
-        // stdin/stdout (DD4) and tmp (DD3) are reserved but unpopulated in C1.
-        assert_eq!(s.grant(NAME_STDIN), None);
-        assert_eq!(s.grant(NAME_STDOUT), None);
+        // stdin/stdout (C-M9-B): both name the one console-channel endpoint
+        // (rev1§5.1 "same channel under both names"). `tmp` stays unpopulated.
+        assert_eq!(
+            s.grant(NAME_STDIN),
+            Some(GrantKind::CapSlot(SHELL_CONSOLE_SLOT))
+        );
+        assert_eq!(
+            s.grant(NAME_STDOUT),
+            Some(GrantKind::CapSlot(SHELL_CONSOLE_SLOT))
+        );
         assert_eq!(s.grant(NAME_TMP), None);
+    }
+
+    #[test]
+    fn console_block_carries_the_pl011_region() {
+        // The init→console block (C-M9-B) carries exactly the PL011 register
+        // window as a region grant — the driver builds its `MmioWindow` from the
+        // VA. Drive the real shared codec (encode here, decode via the crate).
+        let mut buf = [0u8; startup::MAX_BLOCK];
+        let n = build_console_block(&mut buf, 0xA000_0000).unwrap();
+        let s = startup::decode(&buf[..n]).unwrap();
+        assert_eq!(s.ngrants, 1);
+        assert_eq!(
+            s.grant(startup::NAME_PL011_MMIO),
+            Some(GrantKind::Region {
+                va: 0xA000_0000,
+                len: PL011_LEN,
+                pa: 0
+            })
+        );
+        // No argv/env, and no time page (the console never reads the clock).
+        assert_eq!(s.nargv, 0);
+        assert_eq!(s.nenv, 0);
+        assert_eq!(s.grant(startup::NAME_TIME), None);
     }
 
     #[test]

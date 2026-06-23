@@ -435,6 +435,11 @@ fn resolve_names_golden() {
         kind: GrantKind::StorageHandle(0),
     })
     .unwrap();
+    s.push_grant(Grant {
+        name: NAME_STDIN,
+        kind: GrantKind::CapSlot(6),
+    })
+    .unwrap();
     // Round-trip through the shared codec — what init sends, the shell decodes.
     let mut buf = [0u8; MAX_BLOCK];
     let n = encode(&s, &mut buf).unwrap();
@@ -442,6 +447,7 @@ fn resolve_names_golden() {
     assert_eq!(resolve_time_va(&dec), Some(0xA300_0000));
     assert_eq!(resolve_storage_slot(&dec), Some(1));
     assert_eq!(resolve_root_handle(&dec), Some(0));
+    assert_eq!(resolve_stdin_slot(&dec), Some(6));
 }
 
 #[test]
@@ -452,6 +458,8 @@ fn resolve_names_absent_yields_none() {
     assert_eq!(resolve_time_va(&s), None);
     assert_eq!(resolve_storage_slot(&s), None);
     assert_eq!(resolve_root_handle(&s), None);
+    // `stdin` absent → None; the runtime treats this as fatal (no fallback).
+    assert_eq!(resolve_stdin_slot(&s), None);
 }
 
 #[test]
