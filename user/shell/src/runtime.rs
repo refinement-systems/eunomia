@@ -11,7 +11,8 @@
 
 use crate::{
     fault_class, fmt_hex, fmt_num, fmt_utc, parse_path, parse_u64, prune_victims,
-    resolve_root_handle, resolve_stdin_slot, resolve_storage_slot, resolve_time_va,
+    resolve_root_handle, resolve_stdin_slot, resolve_stdout_slot, resolve_storage_slot,
+    resolve_time_va,
 };
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
@@ -88,6 +89,17 @@ static ROOT_HANDLE: AtomicU32 = AtomicU32::new(0);
 /// one-shot connect runs; the handshake overwrites it with the server's choice.
 static NEGOTIATED_VERSION: AtomicU8 = AtomicU8::new(wire::PROTO_VERSION);
 
+/// The cspace slot of the shell's `stdout` console-channel endpoint (rev1§5.1,
+/// C-M9-C). No default: `_start` resolves it from the startup table and refuses
+/// to run without it, so `out()` never runs before this is set (the sentinel
+/// would make any stray early write fail loudly on a bad slot rather than leak
+/// to a wrong channel).
+static STDOUT_SLOT: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// One console message caps at `kcore::channel::MSG_PAYLOAD` (256); `out()`
+/// chunks at this so any length streams in order.
+const STDOUT_CHUNK: usize = 256;
+
 /// The cspace slot of the storage-session channel (`storage`, rev1§5.1).
 fn store_slot() -> u32 {
     STORE_SLOT.load(Ordering::Relaxed)
@@ -103,7 +115,25 @@ fn negotiated_version() -> u8 {
     NEGOTIATED_VERSION.load(Ordering::Relaxed)
 }
 
+/// All terminal output (banner, prompt, command results, echo) crosses the
+/// `stdout` console channel (rev1§5.1, C-M9-C) — the shell does *no* ambient
+/// debug-UART output. Chunk at the message payload bound and yield on a full
+/// channel (the console driver runs at a higher priority and drains promptly).
 fn out(s: &[u8]) {
+    let slot = STDOUT_SLOT.load(Ordering::Relaxed);
+    for chunk in s.chunks(STDOUT_CHUNK) {
+        while sys::chan_send(slot, chunk, None) == sys::ERR_FULL {
+            sys::yield_now();
+        }
+    }
+}
+
+/// Pre-console / panic diagnostics: the build-gated kernel-diagnostic path
+/// (rev1§7 "kept, if at all, only for kernel-internal panic reporting"). The
+/// shell's *only* use of a debug syscall — for failures that fire before the
+/// console channel is usable, or during a panic when it may be the cause. All
+/// user-facing I/O uses `out()` (the channel).
+fn diag(s: &[u8]) {
     sys::debug_write(s);
 }
 
@@ -752,10 +782,13 @@ pub extern "C" fn _start() -> ! {
     // default to init's convention.
     let mut boot = [0u8; 256];
     let (blen, _) = sys::chan_recv(BOOT_CHAN, boot.as_mut_ptr(), None);
-    // `stdin` (C-M9-B): the console-channel endpoint the REPL reads from. Unlike
-    // the other names it has no graceful default — once the console driver owns
-    // RX there is no ambient input — so an absent grant is fatal below.
+    // `stdin`/`stdout` (C-M9-B/C): the console-channel endpoint the REPL reads
+    // keystrokes from and writes output to (one channel under both names,
+    // rev1§5.1). Unlike the other names they have no graceful default — once the
+    // console driver owns the PL011 line there is no ambient I/O path — so an
+    // absent grant is fatal below.
     let mut stdin_slot: Option<u32> = None;
+    let mut stdout_slot: Option<u32> = None;
     if let Some(s) = loader::startup::decode(&boot[..blen.max(0) as usize]) {
         if let Some(slot) = resolve_storage_slot(&s) {
             STORE_SLOT.store(slot, Ordering::Relaxed);
@@ -769,6 +802,10 @@ pub extern "C" fn _start() -> ! {
             unsafe { urt::time::attach(va as usize) };
         }
         stdin_slot = resolve_stdin_slot(&s);
+        stdout_slot = resolve_stdout_slot(&s);
+        if let Some(slot) = stdout_slot {
+            STDOUT_SLOT.store(slot, Ordering::Relaxed);
+        }
     }
 
     // Carve the two persistent spawn objects from the pool (slot 2): the
@@ -778,19 +815,25 @@ pub extern "C" fn _start() -> ! {
     if sys::retype(POOL, sys::OBJ_NOTIF, 0, EVENT_NOTIF, 0) < 0
         || sys::retype(POOL, sys::OBJ_UNTYPED, DONATION_BYTES, DONATION, 0) < 0
     {
-        out(b"[shell] FATAL: could not carve spawn objects\n");
+        diag(b"[shell] FATAL: could not carve spawn objects\n");
         sys::exit();
     }
     let mut spawner = Spawner::new();
 
-    // The console must be wired (C-M9-B): with the userspace driver owning the
-    // PL011 RX line, an unbound `stdin` means no input path at all — fail
-    // cleanly and visibly rather than silently fall back to the now-defunct
-    // ambient poll (Design decision 6's no-console control).
+    // The console must be wired (C-M9-B/C): with the userspace driver owning the
+    // PL011 line, an unbound `stdin`/`stdout` means no I/O path at all — fail
+    // cleanly and visibly on the kernel-diagnostic path rather than silently fall
+    // back to the now-removed ambient debug syscalls (Design decision 6's
+    // no-console negative control). `stdout` is stored in `STDOUT_SLOT` above;
+    // both must be present before the banner.
     let Some(stdin_slot) = stdin_slot else {
-        out(b"[shell] FATAL: stdin unbound (console not wired)\n");
+        diag(b"[shell] FATAL: stdin unbound (console not wired)\n");
         sys::exit();
     };
+    if stdout_slot.is_none() {
+        diag(b"[shell] FATAL: stdout unbound (console not wired)\n");
+        sys::exit();
+    }
     let mut stdin = Stdin::new(stdin_slot);
 
     // Connect handshake (rev1§3.5/§3.7, C3C): negotiate the storage wire version
@@ -855,7 +898,7 @@ pub extern "C" fn _start() -> ! {
             b if (0x20..0x7F).contains(&b) && len < line.len() => {
                 line[len] = b;
                 len += 1;
-                sys::debug_putc(b);
+                out(&[b]);
             }
             _ => {}
         }
@@ -864,6 +907,8 @@ pub extern "C" fn _start() -> ! {
 
 #[panic_handler]
 fn on_panic(_: &core::panic::PanicInfo) -> ! {
-    out(b"[shell] PANIC\n");
+    // A panic must not depend on the console channel (it may be the cause), so
+    // report on the kernel-diagnostic path (rev1§7), not `out()`.
+    diag(b"[shell] PANIC\n");
     sys::thread_exit(sys::STATUS_PANIC)
 }

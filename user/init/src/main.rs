@@ -225,9 +225,10 @@ fn build_shell_block(out: &mut [u8]) -> Result<usize, loader::startup::EncodeErr
     })?;
     // `stdin`/`stdout` (rev1§5.1, C-M9-B populates the names C1 reserved): both
     // name the **same** console-channel endpoint in the shell's cspace — "an
-    // interactive console is the same channel granted under both names". The
-    // shell still uses the debug scaffold for I/O until C-M9-C flips it onto
-    // this channel; in C-M9-B it merely holds the endpoint.
+    // interactive console is the same channel granted under both names". As of
+    // C-M9-C the shell does all terminal I/O over this channel (input *and*
+    // output); an absent grant is fatal in the shell (no debug-scaffold
+    // fallback — the no-console negative control).
     s.push_grant(Grant {
         name: NAME_STDIN,
         kind: GrantKind::CapSlot(SHELL_CONSOLE_SLOT),

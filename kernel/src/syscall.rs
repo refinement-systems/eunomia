@@ -193,22 +193,40 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
 /// rights checks, user-range validation, and the operation.
 unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
     match sys {
+        // DebugPutc/DebugWrite (rev1§7): the EL0 debug-print scaffold, re-scoped in
+        // C-M9-C to a disclosed *kernel-diagnostic* path behind the `debug-log`
+        // build feature (default-on for dev images). With the feature off these
+        // EL0 syscalls are inert no-ops — "gated off for EL0," the carve-out's exit
+        // condition. The decoder still produces both variants, so the arms stay;
+        // only the body is conditional. The shell no longer calls them for terminal
+        // I/O (that crosses the console channel); pre-console server diagnostics and
+        // panic reporting are the remaining users.
         Sys::DebugPutc { ch } => {
-            use core::fmt::Write;
-            let mut uart = crate::uart::Uart::new();
-            let _ = uart.write_char(ch as u8 as char);
+            #[cfg(feature = "debug-log")]
+            {
+                use core::fmt::Write;
+                let mut uart = crate::uart::Uart::new();
+                let _ = uart.write_char(ch as u8 as char);
+            }
+            #[cfg(not(feature = "debug-log"))]
+            let _ = ch;
             Some(0)
         }
         Sys::DebugWrite { ptr, len } => {
-            if !user_range_ok(ptr, len) || len > 1024 {
-                return Some(ERR_FAULT);
+            #[cfg(feature = "debug-log")]
+            {
+                if !user_range_ok(ptr, len) || len > 1024 {
+                    return Some(ERR_FAULT);
+                }
+                use core::fmt::Write;
+                let mut uart = crate::uart::Uart::new();
+                for i in 0..len {
+                    let b = ((ptr + i) as *const u8).read();
+                    let _ = uart.write_char(b as char);
+                }
             }
-            use core::fmt::Write;
-            let mut uart = crate::uart::Uart::new();
-            for i in 0..len {
-                let b = ((ptr + i) as *const u8).read();
-                let _ = uart.write_char(b as char);
-            }
+            #[cfg(not(feature = "debug-log"))]
+            let _ = (ptr, len);
             Some(0)
         }
         Sys::Yield => {
@@ -723,12 +741,6 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             }
             Some(base as i64)
         }
-        // debug_getc → byte, or ERR_EMPTY. Scaffold console input until the
-        // userspace UART driver exists (rev1§7).
-        Sys::DebugGetc => Some(match crate::uart::getc() {
-            Some(b) => b as i64,
-            None => ERR_EMPTY,
-        }),
         // thread_bind(tcb, which, notif, bits) — configure the on-exit /
         // on-fault slot (rev1§5.1). `which` is already <= 1 (decode). The notif
         // cap moves into the TCB's CDT-visible slot; notif = SLOT_NONE
