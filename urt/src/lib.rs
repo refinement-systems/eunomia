@@ -11,12 +11,11 @@
 //! sorted, pairwise-disjoint list of `(offset, len)` extents over `[0, N)`. The
 //! allocation algorithm (first-fit search, alignment round-up, split,
 //! two-sided coalesce) is therefore the **Verus-verified** `FreeList`
-//! arithmetic (rev1§6; the shared core extracted in B11A,
-//! `doc/plans/12_b11-detail.md`). The only `unsafe` left in the allocator is a
-//! three-step arena seam: `UnsafeCell` → `&mut`, `offset → *mut u8` via
-//! `base.add(off)` (in-arena by `alloc`'s `ensures`), and `*mut u8 → offset` on
-//! dealloc — the same trusted byte-region boundary the DMA-pool wrapper has,
-//! kept honest by Miri+proptest (the wrapper tier lands in B11C).
+//! arithmetic of the shared `freelist` crate (rev1§6). The only `unsafe` left in
+//! the allocator is a three-step arena seam: `UnsafeCell` → `&mut`,
+//! `offset → *mut u8` via `base.add(off)` (in-arena by `alloc`'s `ensures`), and
+//! `*mut u8 → offset` on dealloc — the same trusted byte-region boundary the
+//! DMA-pool wrapper has, kept honest by Miri+proptest.
 //!
 //! MVP simplifications, recorded:
 //!   - **Fragmentation cap `HEAP_RANGES = 1024`.** The side-stored free list is

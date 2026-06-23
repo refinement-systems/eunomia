@@ -3,7 +3,7 @@
 //! logic is pure sequential ring arithmetic over the fake's shared memory, so
 //! proptest (with a Miri replay for UB) is the load-bearing tier — there is no
 //! Verus/Loom obligation (the device is not a Rust thread; the host fake is
-//! single-threaded by `SharedMem`'s contract). See `doc/plans/2_b2-detail.md`.
+//! single-threaded by `SharedMem`'s contract).
 
 use dma_pool::host::{HostBacking, SharedMem};
 use dma_pool::DmaPool;

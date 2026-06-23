@@ -207,12 +207,10 @@ jobs:
           # the DN-10 trophy Kani OOM'd on).
           cargo verus verify -p ipc
           cargo verus verify -p urt
-          # phase B11A: freelist — the free-list allocator core, extracted from
-          # dma-pool (doc/plans/12_b11-detail.md, Design decision 2) so the
-          # two-buffer-disjointness + alignment ∀ proof is verified once and shared
-          # by dma-pool and (from B11B) the urt heap. The dma-pool gate below now
-          # re-checks that its wrapper re-points cleanly (it carries 0 obligations
-          # of its own — the proof moved here).
+          # freelist — the free-list allocator core. The two-buffer-disjointness +
+          # alignment ∀ proof is verified once here and shared by dma-pool and the
+          # urt heap. The dma-pool gate below re-checks that its wrapper delegates
+          # cleanly (it carries 0 obligations of its own — the proof lives here).
           cargo verus verify -p freelist
           cargo verus verify -p dma-pool
           # phase 7f: cas::disk superblock chokepoint — validate_geometry

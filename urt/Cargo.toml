@@ -6,11 +6,9 @@ edition.workspace = true
 [dependencies]
 ipc = { path = "../ipc" }
 
-# The verified free-list core (extracted from dma-pool in B11A). Landed here now
-# so B11B can rewire `Heap<N>` onto `freelist::FreeList` and retire the raw-`*mut
-# Block` allocator; **unused in B11A** (no behaviour change yet). It is no_std with
-# the same pinned vstd dma-pool/urt already carry, so this edge adds no new binary
-# and no cross-build risk (doc/plans/12_b11-detail.md §B11A).
+# The verified free-list core: `Heap<N>` delegates its allocation arithmetic to
+# `freelist::FreeList`. It is no_std with the same pinned vstd urt already
+# carries, so this edge adds no new binary and no cross-build risk.
 freelist = { path = "../freelist" }
 
 # vstd is the *Verus* dependency (see doc/guidelines/verus.md):

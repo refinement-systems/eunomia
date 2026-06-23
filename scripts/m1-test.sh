@@ -17,7 +17,7 @@
 #      cap signalled its notification through the real GIC + exception path,
 #      was acked, and a second interrupt was delivered (the mask-on-deliver /
 #      unmask-on-ack cycle). The line is software-pended from EL1 on the
-#      m1-test path (no real device, no stdin); see doc/results/9_b-irq-c.
+#      m1-test path (no real device, no stdin).
 #
 # Success is exactly the line "1234567M1 PASS" with no error marker
 # ("E<tag>!"), no "M1 FAIL", and no PANIC.

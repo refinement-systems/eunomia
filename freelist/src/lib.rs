@@ -1,5 +1,5 @@
-//! `freelist` — the verified free-list core, shared by `dma-pool` (rev1§2.5) and,
-//! from B11B, the `urt` heap allocator (rev1§6).
+//! `freelist` — the verified free-list core, shared by `dma-pool` (rev1§2.5) and
+//! the `urt` heap allocator (rev1§6).
 //!
 //! [`FreeList<N>`] is a sorted, pairwise-disjoint list of free extents
 //! `(offset, len)` over a pool `[0, len)`, where `N` is the fixed fragmentation
@@ -18,8 +18,8 @@
 //! `(off+align-1) & !(align-1)`: behaviourally identical, but `start % align == 0`
 //! is then pure `vstd::arithmetic` and needs no `by (bit_vector)`.
 //!
-//! Extracted verbatim from `dma-pool` in B11A (`doc/plans/12_b11-detail.md`) so the
-//! single ~1300-line proof has one home; `dma-pool` and `urt` both depend on it.
+//! This crate is the single home of that ~1300-line proof; `dma-pool` and the
+//! `urt` heap both depend on it.
 
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 

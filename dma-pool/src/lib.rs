@@ -16,9 +16,8 @@
 //! needs zero mapping operations per request.
 //!
 //! **Verified by Verus.** The free-list arithmetic is the self-contained
-//! `freelist::FreeList` — extracted from this crate in B11A
-//! (`doc/plans/12_b11-detail.md`, Design decision 2) so `dma-pool` and the `urt`
-//! heap share one proof. The [`DmaPool`] wrapper that touches the trusted hardware
+//! `freelist::FreeList`, shared so `dma-pool` and the `urt` heap have one proof.
+//! The [`DmaPool`] wrapper that touches the trusted hardware
 //! seam (`DmaBacking`, raw-pointer slices, device addresses) stays plain Rust —
 //! which is the honest line, since `dma-pool` *is* "the single place PAs are
 //! visible", so the PA/backing boundary is exactly the trusted seam. The properties
@@ -478,7 +477,7 @@ mod tests {
     // (`accessor_sanity` — the lone FreeList-only test — moved to the `freelist`
     // crate with the proof in B11A.)
 
-    // --- B4C: wrapper proptest tier + Miri UB oracle (rev1§6) ---
+    // --- wrapper proptest tier + Miri UB oracle (rev1§6) ---
     //
     // The verified `FreeList` proves the arithmetic; these properties prove the
     // wrapper drivers actually use — alloc -> bytes/read/write/read_volatile ->
@@ -486,7 +485,7 @@ mod tests {
     // Miri as the oracle for the raw slices `range_ptr` forms. Kept inline (not a
     // `tests/*.rs` file) so the private `DmaBuf.offset` and the `test`-cfg
     // `HostBacking` are both in scope, and `cargo +nightly miri test -p dma-pool`
-    // covers it directly. See doc/plans/4_b4-detail.md §B4C.
+    // covers it directly.
 
     const DEVICE_BASE: u64 = 0x4000_0000;
 

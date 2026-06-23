@@ -8,10 +8,9 @@ default = []
 std = []
 
 [dependencies]
-# The verified free-list core, extracted from this crate in B11A so `dma-pool`
-# and the `urt` heap share one proof (doc/plans/12_b11-detail.md, Design
-# decision 2). `DmaPool` now wraps `freelist::FreeList`; the move is gate-guarded
-# by `cargo verus verify -p dma-pool` staying green.
+# The verified free-list core, shared so `dma-pool` and the `urt` heap have one
+# proof. `DmaPool` wraps `freelist::FreeList` and carries no proof obligations of
+# its own; `cargo verus verify -p dma-pool` guards that it delegates cleanly.
 freelist = { path = "../freelist" }
 
 # vstd is the *Verus* dependency (see doc/guidelines/verus.md):

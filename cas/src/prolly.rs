@@ -1360,7 +1360,7 @@ pub fn encode_node_leaf(es: &Vec<RawEntry>, out: &mut Vec<u8>)
     assert(out@ =~= old(out)@ + canonical_leaf_bytes(es@));
 }
 
-// ── Node partition: the level-cutting core (B13B) ──────────────────────────
+// ── Node partition: the level-cutting core ─────────────────────────────────
 //
 // `build_level` cuts a level's item sequence into nodes at a content-defined
 // boundary or a forced cap (`MAX_NODE_ENTRIES`). The cut logic is verified here
@@ -1368,7 +1368,7 @@ pub fn encode_node_leaf(es: &Vec<RawEntry>, out: &mut Vec<u8>)
 // order** its input (no item dropped, duplicated, or reordered), to cut **only**
 // where the predicate or the cap says, and to emit non-empty ≤ MAX blocks, for
 // *any* predicate. So it holds under the real (BLAKE3) `is_boundary` without the
-// proof ever modeling BLAKE3 (rev1§4.1, detail 14_b13-detail.md Design dec. 3).
+// proof ever modeling BLAKE3 (rev1§4.1).
 
 /// Spec model of the per-item split decision — `uninterp` because its witness
 /// (`is_boundary`) is BLAKE3. The partition core needs only that this is a

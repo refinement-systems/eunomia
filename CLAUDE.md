@@ -115,8 +115,7 @@ cargo test -p cas
 # bound across the 4 cores, not gated by one pole (the cfg(miri) op/size caps
 # flattened the long tail). Driving it lower means capping more of the remaining
 # ~100-180 s tests (the crash-recovery family, chunk-boundary proptests, the
-# gc_mark corpus). See doc/results/23_miri-test-optimization.md. Because it is
-# long-running, NEVER
+# gc_mark corpus). Because it is long-running, NEVER
 # pipe it into `tail` (or any
 # buffering filter): `tail` emits nothing until the command exits, so the log
 # stays empty for the whole run and you cannot tell progress from a hang — this
