@@ -1,8 +1,8 @@
 # Eunomia OS — Development Guide
 
-Full design specification: `doc/spec/spec_rev1.md`. Read the spec before
+Full design specification: `doc/spec/spec_rev2.md`. Read the spec before
 touching any component. Section numbers below refer to that document.
-All spec references must contain the revision number, like "rev1§6" or "rev1§3.1".
+All spec references must contain the revision number, like "rev2§6" or "rev2§3.1".
 
 The trusted base is exactly the seams enumerated in
 `doc/guidelines/verus_trusted-base.md` (the ledger), kept honest by
@@ -29,12 +29,21 @@ loader/          ELF loader / program spawner (rev1§5)
 user/            Real userspace binaries (init, shell, storaged, …) — own
                  mini-workspaces, built by kernel/build.rs (rev1§5, rev1§7)
 mkfs/            Host-side disk image builder; reuses cas crate (rev1§7)
-tla/             TLA+ formal specifications (must check before M2)
+tla/             TLA+ formal specifications
 tools/tla/       Scripts: tla-check.sh (SANY), tla-model-check.sh (TLC)
 doc/spec/        Design documents
 doc/results/     Implementation and research results.
 doc/guidelines/  Additional guidelines
 ```
+
+---
+
+## Comment and documentation discipline
+
+Comments and documentation (doc/spec and doc/guidelines) describe what is, not what was, or what was removed.
+Comments may in exceptional cases document paths not taken and rationale for not taking it, if the existing implementation is surprising.
+Comments may reference doc/spec and doc/guidelines, nothing else.
+Documents in doc/plans and doc/results are considered temporary intermediate reports, and may not be referenced in comments, or in specs and guidelines.
 
 ---
 
