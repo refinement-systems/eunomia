@@ -32,7 +32,7 @@ use crate::thread::{
     bind as thread_bind, destroy_tcb, report_terminal, Report, ThreadState, BIND_EXIT, BIND_FAULT,
 };
 use crate::timer::{arm, check_expired, destroy_timer, disarm};
-use crate::untyped::{reset, retype_check, retype_install, ObjType, RetypeError};
+use crate::untyped::{reset, retype_check, retype_install, topup_carve, ObjType, RetypeError};
 use std::collections::{BTreeMap, VecDeque};
 
 // ── The concrete store ────────────────────────────────────────────────────
@@ -6346,6 +6346,75 @@ fn map_in_grow_pool_lookup_stable() {
         "first mapping stable after a new map into the grown tail"
     );
     assert_eq!(pool[l3][e], pte_encode(pa1, PERM_W));
+}
+
+// ── aspace pool top-up accounting (the B10C round trip) ─────────────────────
+//
+// The kernel `aspace_topup` shell is raw-pointer code (witnessed by the QEMU
+// smoke), but the accounting it composes is the verified, host-testable
+// `topup_carve` (abutment guard + placement) and `reset` (teardown). This pins
+// the watermark debit, the abutment-guard refusal, and the debit-then-reset
+// round trip directly, rather than by argument (rev2§2.5 "accepts top-ups").
+
+#[test]
+fn aspace_topup_accounting_roundtrip() {
+    let base = 0x4000_0000u64; // donor untyped base (1 GiB)
+    let size = 0x10_0000u64; // 1 MiB donor
+
+    // The donor's free pointer is page-aligned and abuts the pool's physical end.
+    let pool_base = 0x4001_0000u64;
+    let pool_pages = 2u64;
+    let pool_end = pool_base + pool_pages * PAGE;
+    let watermark = pool_end - base; // abutment: base + watermark == pool_end
+    let pages = 3u64;
+
+    // 1. Exact debit (abutting): the carve starts exactly at the pool end (no gap,
+    //    no rounding) and advances the watermark by exactly `pages * PAGE`.
+    let c = topup_carve(base, size, watermark, pool_end, pages).expect("abutting carve");
+    assert_eq!(c.start, pool_end, "carve abuts the pool end (no rounding)");
+    assert_eq!(c.bytes, pages * PAGE, "carved exactly `pages` tables");
+    assert_eq!(c.end - c.start, pages * PAGE);
+    let new_watermark = c.end - base;
+    assert_eq!(
+        new_watermark,
+        watermark + pages * PAGE,
+        "watermark advances by exactly the carved amount (the debit)"
+    );
+
+    // 2. Abutment guard refuses a non-abutting donor (free pointer below pool_end).
+    assert_eq!(
+        topup_carve(base, size, watermark - PAGE, pool_end, pages),
+        Err(RetypeError::BadArg),
+        "non-abutting carve is refused"
+    );
+
+    // 3. Degenerate / over-budget refused: zero pages → BadArg; a carve one table
+    //    past the donor's tail → NoMemory (carve_place's room check).
+    assert_eq!(
+        topup_carve(base, size, watermark, pool_end, 0),
+        Err(RetypeError::BadArg),
+        "zero pages is refused"
+    );
+    let over = (size - watermark) / PAGE + 1;
+    assert_eq!(
+        topup_carve(base, size, watermark, pool_end, over),
+        Err(RetypeError::NoMemory),
+        "a carve past the donor's end is refused"
+    );
+
+    // 4. Debit-then-reset round trip nets to zero: a donor carrying the post-carve
+    //    watermark, with its children revoked, resets to watermark 0 — the grown
+    //    bytes return to the donor (`check_reset` asserts Ok + watermark zeroed).
+    let mut st = ArrayStore::new(1);
+    st.slots[0] = detached(untyped_cap(base, size, new_watermark));
+    check_reset(&mut st, SlotId(0));
+    assert!(
+        matches!(
+            st.at(SlotId(0)).cap.kind,
+            CapKind::Untyped { watermark: 0, .. }
+        ),
+        "reset returns the full donor pool (watermark back to 0)"
+    );
 }
 
 // ── aspace `unmap_in`: the verified leaf-clear + TLBI effect-log ─────────────

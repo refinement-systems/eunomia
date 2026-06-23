@@ -105,10 +105,12 @@ pub unsafe fn map(
 /// caller (the `Sys::AspaceTopUp` handler) places `add` fresh
 /// tables physically abutting `pool_base + pool_pages*PAGE`; here we zero them and
 /// bump the recorded `pool_pages`, after which `pool_view`/`map` rebuild the larger
-/// slice automatically (no map-path change). Soundness — the extension preserves
-/// `pt_wf` and every existing mapping — is the verified
-/// [`kcore::aspace::lemma_grow_pool`]. Called by the `Sys::AspaceTopUp` handler
-/// via [`crate::untyped::aspace_topup`].
+/// slice automatically (no map-path change). This shell is plain Rust and *not*
+/// verified; soundness — that the extension preserves `pt_wf` and every existing
+/// mapping — is the machine-checked **justification** it relies on, the verified
+/// [`kcore::aspace::lemma_grow_pool`] (a standalone widening theorem, applied here
+/// by trust, not an exec postcondition of this function). Called by the
+/// `Sys::AspaceTopUp` handler via [`crate::untyped::aspace_topup`].
 pub unsafe fn grow_pool(this: *mut AspaceObj, add: u64) {
     let old_len = (*this).pool_pages;
     let region = (*this).pool_base + old_len * PAGE;

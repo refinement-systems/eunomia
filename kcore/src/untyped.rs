@@ -354,6 +354,66 @@ pub fn carve_place(
     Ok(Carve { start, end, bytes })
 }
 
+/// Pure accounting for the aspace pool top-up (rev2§2.5 "accepts top-ups"): given
+/// a donor untyped `(base, size, watermark)` and the aspace pool's current
+/// physical end `pool_end`, validate the contiguous-abutment contract and carve
+/// `pages` zeroed page-tables. `Ok(c)` ⇒ the donor's free pointer abuts the pool
+/// with no gap (`base + watermark == pool_end`) and `c` is the verified placement
+/// ([`carve_place`]); the trusted `kernel/` shell ([`crate::aspace::grow_pool`]
+/// via the `Sys::AspaceTopUp` handler) then advances the donor watermark to
+/// `c.end - base` and does the raw-memory extension (`ptr::write_bytes`, outside
+/// the verified surface). The abutment guard lives here, in verified host-testable
+/// code, rather than inlined in the shell — so its refusal is exercised by the
+/// `aspace_topup_accounting_roundtrip` host test, not only by argument.
+pub fn topup_carve(
+    base: u64,
+    size: u64,
+    watermark: u64,
+    pool_end: u64,
+    pages: u64,
+) -> (result: Result<Carve, RetypeError>)
+    ensures
+        match result {
+            Ok(c) => {
+                &&& base + watermark == pool_end
+                &&& c.bytes == pages * crate::aspace::PAGE
+                &&& c.end - c.start == c.bytes
+                &&& base + watermark <= c.start
+                &&& c.end <= base + size
+            }
+            Err(_) => true,
+        },
+{
+    if pages == 0 {
+        return Err(RetypeError::BadArg);
+    }
+    let bytes = match pages.checked_mul(crate::aspace::PAGE) {
+        Some(b) => b,
+        None => return Err(RetypeError::BadArg),
+    };
+    // pages >= 1 and PAGE >= 1, so the carved byte count is positive — `carve_place`'s
+    // `bytes > 0` precondition.
+    assert(bytes > 0) by (nonlinear_arith)
+        requires
+            bytes == pages * crate::aspace::PAGE,
+            pages >= 1,
+            crate::aspace::PAGE >= 1,
+    ;
+    // Abutment guard: the donor's free pointer must equal the pool's physical end,
+    // so the carved tables extend the pool with no gap and `pool_index_spec`'s
+    // single affine base stays valid. Equality also forces page-alignment, so
+    // `carve_place` rounds nothing and `c.start == pool_end`. The checked add keeps
+    // the comparison overflow-total.
+    let bpw = match base.checked_add(watermark) {
+        Some(x) => x,
+        None => return Err(RetypeError::BadArg),
+    };
+    if bpw != pool_end {
+        return Err(RetypeError::BadArg);
+    }
+    carve_place(base, size, watermark, crate::aspace::PAGE, bytes)
+}
+
 /// Pure placement arithmetic: object size from `(ty, param)`, alignment,
 /// watermark bump, bounds against `[base, base + size)`. No pointers.
 ///

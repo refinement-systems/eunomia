@@ -109,9 +109,10 @@ pub unsafe fn retype(
 /// physically abut the pool's current end out of `ut_slot`, advance the
 /// untyped's watermark — so the bytes are debited from the caller's untyped and
 /// reclaimed by the same `revoke + UntypedReset` that frees the aspace (no new
-/// cap) — then grow the pool. The abutment check is the
-/// trusted-shell discharge of [`crate::aspace::grow_pool`]'s "fresh tables
-/// contiguous at `pool_base + old_len*PAGE`" premise; soundness of the growth
+/// cap) — then grow the pool. The pages check, byte count, abutment guard, and
+/// verified placement are the host-tested [`kcore::untyped::topup_carve`]; the
+/// abutment guard is the discharge of [`crate::aspace::grow_pool`]'s "fresh tables
+/// contiguous at `pool_base + old_len*PAGE`" premise. Soundness of the growth
 /// itself is the verified [`kcore::aspace::lemma_grow_pool`].
 ///
 /// pre:  `ut_slot` is a live cap slot; `asp` points at a live AspaceObj.
@@ -132,25 +133,14 @@ pub unsafe fn aspace_topup(
     else {
         return Err(RetypeError::NotUntyped);
     };
-    if pages == 0 {
-        return Err(RetypeError::BadArg);
-    }
-    let bytes = match pages.checked_mul(PAGE) {
-        Some(b) => b,
-        None => return Err(RetypeError::BadArg),
-    };
-    // The pool's current physical end. The abutment contract:
-    // the untyped's free pointer must equal it, so the carved tables extend the
-    // pool with no gap and `pool_index_spec`'s single affine base stays valid.
-    // Equality also forces the free pointer page-aligned, so `carve_place` rounds
-    // nothing and `c.start == pool_end`.
+    // The pool's current physical end (the raw aspace reads stay in the shell).
+    // `topup_carve` does the pages check, byte count, abutment guard (the donor's
+    // free pointer must equal `pool_end`, so the carved tables extend the pool with
+    // no gap and `pool_index_spec`'s single affine base stays valid), and the
+    // verified placement + room check (NoMemory if it overruns the untyped).
+    // `c.end == pool_end + pages * PAGE`.
     let pool_end = (*asp).pool_base + (*asp).pool_pages * PAGE;
-    if base + watermark != pool_end {
-        return Err(RetypeError::BadArg);
-    }
-    // Placement + room check via the verified carve (NoMemory if it overruns the
-    // untyped). `c.end == pool_end + bytes`.
-    let c = carve_place(base, size, watermark, PAGE, bytes)?;
+    let c = topup_carve(base, size, watermark, pool_end, pages)?;
     // Advance the watermark exactly as `retype_install` would, but install no
     // cap: the pool is internal to the aspace (rev2§2.5 gives up per-table caps).
     // Only the watermark value changes — no verified cspace invariant constrains

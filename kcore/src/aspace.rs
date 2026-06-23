@@ -877,6 +877,16 @@ proof fn lemma_pool_index_widen(pool_base: u64, old_len: nat, new_len: nat, desc
 /// reason the top-up is a widening lemma, not a page-table-model rewrite. It is
 /// the machine-checked justification that the trusted shell's `grow_pool`
 /// (`kernel/src/aspace.rs`) keeps `map_in`'s `pt_wf` precondition true.
+///
+/// This is a **standalone design theorem about the contiguous widening**, not an
+/// exec postcondition: `grow_pool` is plain Rust in the trusted `kernel/` shell
+/// (its `ptr::write_bytes` tail extension sits outside the verified surface —
+/// wiring it in would need a raw-memory seam, and the trusted base stays closed),
+/// so the shell is *trusted* to apply this proven widening faithfully and this
+/// lemma has no exec call site. The concrete top-up is covered at the rev2§6
+/// baseline tier by the kcore host tests (`map_in_grow_pool_continues`,
+/// `map_in_grow_pool_lookup_stable`, `aspace_topup_accounting_roundtrip`) plus
+/// the QEMU smoke.
 pub proof fn lemma_grow_pool(
     l1: Seq<u64>,
     pool: Seq<[u64; 512]>,
