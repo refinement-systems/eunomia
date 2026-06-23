@@ -9,7 +9,13 @@ edition.workspace = true
 # wire-codec fuzz support (representative body type + oracle) — §5.4 — so it
 # implies "wire". (Mirrors storage-server's optional-serde gating.)
 [features]
-default = []
+# `debug-log` (rev1§7, C-M9-C): gates the EL0 debug-print libcalls
+# (`sys::debug_putc`/`debug_write`) — the kernel-diagnostic path for pre-console
+# server logging + panic reporting, not user-facing I/O. Default-on so every
+# server binary (all carry `ipc` with default features) keeps its diagnostics; a
+# production userspace build can drop it to emit no debug syscalls.
+default = ["debug-log"]
+debug-log = []
 std = []
 wire = ["dep:serde", "dep:postcard"]
 fuzzing = ["wire"]

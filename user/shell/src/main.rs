@@ -224,6 +224,19 @@ fn resolve_stdin_slot(s: &loader::startup::Startup) -> Option<u32> {
     }
 }
 
+/// `stdout` → the cspace slot holding the console-channel endpoint the shell
+/// writes terminal output to (rev1§5.1, C-M9-C). An interactive console is one
+/// channel granted under both `stdin` and `stdout` (init points both names at
+/// the same slot), so this resolves to the same endpoint as
+/// [`resolve_stdin_slot`]. An absent grant is fatal — with the console driver
+/// owning the UART there is no ambient `debug_write` path for user-facing I/O.
+fn resolve_stdout_slot(s: &loader::startup::Startup) -> Option<u32> {
+    match s.grant(loader::startup::NAME_STDOUT)? {
+        loader::startup::GrantKind::CapSlot(slot) => Some(slot),
+        _ => None,
+    }
+}
+
 /// `time` → the virtual address of the read-only time page (rev1§2.6).
 fn resolve_time_va(s: &loader::startup::Startup) -> Option<u64> {
     match s.grant(loader::startup::NAME_TIME)? {

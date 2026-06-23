@@ -125,10 +125,17 @@ mod imp {
 
 use imp::{syscall, syscall2, syscall3};
 
+// The EL0 debug-print scaffold (rev1§7), re-scoped in C-M9-C to a disclosed
+// kernel-diagnostic path behind the `debug-log` feature (default-on). Used by
+// pre-console server diagnostics and panic reporting — never user-facing
+// terminal I/O (that crosses the console channel). With the feature off these
+// emit no syscall (the kernel handler is gated symmetrically).
+#[cfg(feature = "debug-log")]
 pub fn debug_putc(c: u8) {
     unsafe { syscall(0, c as u64, 0, 0, 0, 0, 0) };
 }
 
+#[cfg(feature = "debug-log")]
 pub fn debug_write(msg: &[u8]) {
     unsafe { syscall(1, msg.as_ptr() as u64, msg.len() as u64, 0, 0, 0, 0) };
 }
@@ -318,10 +325,9 @@ pub fn untyped_reset(ut: u32) -> i64 {
     unsafe { syscall(23, ut as u64, 0, 0, 0, 0, 0) }
 }
 
-/// Non-blocking console byte (scaffold until the userspace UART driver).
-pub fn debug_getc() -> i64 {
-    unsafe { syscall(20, 0, 0, 0, 0, 0, 0) }
-}
+// debug_getc (opcode 20) retired in C-M9-C: the userspace console driver owns
+// the PL011 RX line, so there is no ambient console-input libcall — the shell
+// reads keystrokes from its `stdin` channel.
 
 /// Configure a thread's on-exit / on-fault binding slot (rev1§5.1). The
 /// notification cap MOVES into the TCB (duplicate first to keep access);
