@@ -34,6 +34,8 @@ tools/tla/       Scripts: tla-check.sh (SANY), tla-model-check.sh (TLC)
 doc/spec/        Design documents
 doc/results/     Implementation and research results.
 doc/guidelines/  Additional guidelines
+reference/       Reference code
+reference/vstd   Verus standard library
 ```
 
 ---
