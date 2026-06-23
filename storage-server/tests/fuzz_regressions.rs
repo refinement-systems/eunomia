@@ -41,8 +41,8 @@ fn ovl1_dispatch_write_offset_overflow_rejected() {
         offset: u64::MAX,
         data: vec![1],
     };
-    let bytes = wire::encode_request(&req).unwrap();
-    let decoded = wire::decode_request(&bytes).unwrap();
+    let bytes = wire::encode_request(&req, wire::PROTO_VERSION).unwrap();
+    let decoded = wire::decode_request(&bytes, wire::PROTO_VERSION).unwrap();
     let resp = server.handle(session, decoded, 1_000);
     assert_eq!(resp, Response::Err(ErrorCode::BadOffset));
     // The server must survive: a sane write on the same session succeeds.

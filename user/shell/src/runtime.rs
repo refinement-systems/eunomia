@@ -15,7 +15,7 @@ use crate::{
     resolve_time_va,
 };
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use ipc::{sys, Reactor, SyscallTransport};
 use storage_server::{wire, DirEnt, Request, Response};
 use urt::slots::SlotAlloc;
@@ -83,6 +83,12 @@ const FAULT_KEY: ipc::Key = 1;
 static STORE_SLOT: AtomicU32 = AtomicU32::new(STORE_CHAN);
 static ROOT_HANDLE: AtomicU32 = AtomicU32::new(0);
 
+/// The storage wire version negotiated with storaged in `_start` (rev1§3.7,
+/// C3C), stamped into every request header and validated on every response.
+/// Defaults to `wire::PROTO_VERSION` so the value is well-defined before the
+/// one-shot connect runs; the handshake overwrites it with the server's choice.
+static NEGOTIATED_VERSION: AtomicU8 = AtomicU8::new(wire::PROTO_VERSION);
+
 /// The cspace slot of the shell's `stdout` console-channel endpoint (rev1§5.1,
 /// C-M9-C). No default: `_start` resolves it from the startup table and refuses
 /// to run without it, so `out()` never runs before this is set (the sentinel
@@ -102,6 +108,11 @@ fn store_slot() -> u32 {
 /// The storage handle for the ref root (`root`, rev1§5.1).
 fn root_handle() -> u32 {
     ROOT_HANDLE.load(Ordering::Relaxed)
+}
+
+/// The wire version negotiated at session establishment (rev1§3.7, C3C).
+fn negotiated_version() -> u8 {
+    NEGOTIATED_VERSION.load(Ordering::Relaxed)
 }
 
 /// All terminal output (banner, prompt, command results, echo) crosses the
@@ -145,7 +156,8 @@ fn out_utc(ns: u64) {
 }
 
 fn request(req: &Request) -> Response {
-    let bytes = match wire::encode_request(req) {
+    let version = negotiated_version();
+    let bytes = match wire::encode_request(req, version) {
         Ok(b) => b,
         Err(_) => return Response::Err(storage_server::ErrorCode::Internal),
     };
@@ -157,7 +169,7 @@ fn request(req: &Request) -> Response {
     loop {
         let (len, _) = sys::chan_recv(store, buf.as_mut_ptr(), None);
         if len >= 0 {
-            return wire::decode_response(&buf[..len as usize])
+            return wire::decode_response(&buf[..len as usize], version)
                 .unwrap_or(Response::Err(storage_server::ErrorCode::Internal));
         }
         sys::yield_now();
@@ -823,6 +835,42 @@ pub extern "C" fn _start() -> ! {
         sys::exit();
     }
     let mut stdin = Stdin::new(stdin_slot);
+
+    // Connect handshake (rev1§3.5/§3.7, C3C): negotiate the storage wire version
+    // with storaged once, before the REPL. We offer `[PROTO_VERSION,
+    // PROTO_VERSION]` in the *storage* version namespace (`wire::PROTO_VERSION`,
+    // not `ipc::PROTOCOL_VERSION` — the connect codec's own version) and a zero
+    // bulk window (the inline path needs none yet). The request rides the raw
+    // `ipc` connect codec over the pre-wired storage channel — not a storage
+    // `Request` (which could not itself be versioned). Record the selected
+    // version to stamp on every request; a refusal means no shared version,
+    // fatal for a single-version build (rev1§3.7: refuse cleanly, never crash).
+    {
+        let store = store_slot();
+        let req = ipc::ConnectReq::new(
+            0,
+            ipc::VersionRange::new(wire::PROTO_VERSION, wire::PROTO_VERSION),
+        );
+        let bytes = req.encode();
+        while sys::chan_send(store, &bytes, None) == sys::ERR_FULL {
+            sys::yield_now();
+        }
+        let mut rbuf = [0u8; 16];
+        let ver = loop {
+            let (len, _) = sys::chan_recv(store, rbuf.as_mut_ptr(), None);
+            if len >= 0 {
+                match ipc::GrantReply::decode(&rbuf[..len.max(0) as usize]) {
+                    Some(ipc::GrantReply::Grant(_, ver)) => break ver,
+                    _ => {
+                        out(b"[shell] FATAL: storage connect refused\n");
+                        sys::exit();
+                    }
+                }
+            }
+            sys::yield_now();
+        };
+        NEGOTIATED_VERSION.store(ver, Ordering::Relaxed);
+    }
 
     out(b"\nEunomia shell - type help\n");
     let mut line = [0u8; 200];

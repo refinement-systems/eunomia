@@ -80,7 +80,10 @@ fn fresh() -> (Server<MemDev>, SessionId) {
 }
 
 fuzz_target!(|data: &[u8]| {
-    let Ok(req) = wire::decode_request(data) else {
+    // Decode at the storage wire version (rev1§3.7, C3C): the fuzzer also
+    // explores the stamped version byte, and a frame at any other version is
+    // refused cleanly (`WireError::Version`) before dispatch — never a panic.
+    let Ok(req) = wire::decode_request(data, wire::PROTO_VERSION) else {
         return;
     };
     let (mut server, session) = fresh();
