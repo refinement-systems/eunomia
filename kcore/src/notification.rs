@@ -379,9 +379,8 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
         // Proven inline rather than via `cspace::lemma_waiter_dequeue_census` (the shared map
         // lemma `remove_waiter` uses): the wake's `make_runnable` enqueue leaves this context
         // carrying the ready-queue/`p_opt` term families, so discharging that lemma's `requires`
-        // here costs *more* than the inline derivation saves — the extraction measurably
-        // regressed `signal` (rlimit +63 %) while it cut `remove_waiter` by half (§10's
-        // "small context" payoff only lands when the caller's context is already small).
+        // here costs more than the inline derivation saves (§10's "small context" payoff only
+        // lands when the caller's context is already small).
         assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o)
             == (if o == n { (cspace::obj_census(old(store), n) - 1) as nat } else {
                 cspace::obj_census(old(store), o)
@@ -714,8 +713,9 @@ pub fn destroy_notif<S: Store>(store: &mut S, n: ObjId)
 /// `signal`.
 // Carrying the ready-queue pair through the splice-walk loop invariant adds proof load
 // to an already-heavy loop body; the private resource cap (own Z3 instance) holds margin.
-// Lifting the per-object census map into `cspace::lemma_waiter_dequeue_census` halved this
-// obligation's rlimit, so the budget is reduced from its former 40M-cap value.
+// The per-object census map lives in `cspace::lemma_waiter_dequeue_census`, so this body
+// proves only the cheap local facts (the `-1` waiter delta + the changed-TCB shape) and
+// needs only a modest cap.
 #[verifier::spinoff_prover]
 #[verifier::rlimit(25)]
 pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)

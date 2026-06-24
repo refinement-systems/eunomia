@@ -773,9 +773,9 @@ proof fn lemma_destroy_tcb_aspace_clear_frame<S: Store>(
 //
 // `rlimit`: surfacing `priority` in `TcbView` adds yet another field to every `tcb_view()` term
 // this teardown carries, so the isolated body needs a raised private resource cap (it is on its
-// own Z3 instance, so no other proof is affected). Lifting each teardown phase's frame
-// re-establishment into its own keyed `proof fn` (the `lemma_destroy_tcb_*_frame` lemmas above)
-// shrank that cap from 30 to 24 — the per-phase derivations no longer share this one query.
+// own Z3 instance, so no other proof is affected). The per-phase frame re-establishment lives in
+// the keyed `lemma_destroy_tcb_*_frame` proof fns above, so this isolated body needs only a
+// modestly raised cap rather than carrying every phase's derivation in this one query.
 #[verifier::spinoff_prover]
 #[verifier::rlimit(24)]
 pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)

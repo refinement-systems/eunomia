@@ -1279,9 +1279,8 @@ pub fn send<S: Store>(
 verus! {
 
 // `recv` post-loop frame — channel `ch` stays well-formed after the head dequeue.
-// Extracted from `recv`'s inline post-loop block so the out-of-window-emptiness
-// coupling `forall` is discharged against this lemma's tightly-keyed `requires`
-// (the head/count shift + the per-ring-slot facts the two-pass loop already
+// Keys the out-of-window-emptiness coupling `forall` against this lemma's tightly-keyed
+// `requires` (the head/count shift + the per-ring-slot facts the two-pass loop already
 // established) instead of against `recv`'s full 14-clause pass-2 loop invariant +
 // `dests` forall + `slot_move` framing (verus.md §10: key the obligation tightly,
 // one lemma per post-loop conjunct).
