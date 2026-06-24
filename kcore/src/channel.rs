@@ -828,6 +828,40 @@ proof fn lemma_send_chan_wf(
     }
 }
 
+// Frame: an unchanged ring keeps its FIFO view. Both `send` and `recv` move exactly
+// one ring (`rr`) and leave the other (`1 - rr`) untouched — its cursors are fixed and
+// every message is congruent, so its whole `ring_fifo` is unchanged. The per-index
+// `requires` is keyed on the `ring_msg` congruence (a predicate application) rather than
+// a raw `ring_cap`-index frame so it composes at the call sites (verus.md §10).
+proof fn lemma_ring_fifo_frame(
+    cv0: ChanView,
+    sv0: Map<SlotId, CapSlot>,
+    cvf: ChanView,
+    svf: Map<SlotId, CapSlot>,
+    ring: int,
+)
+    requires
+        cv0.depth > 0,
+        cvf.depth == cv0.depth,
+        cvf.head[ring] == cv0.head[ring],
+        cvf.count[ring] == cv0.count[ring],
+        // congruent over the ring's valid positions — the only indices `ring_fifo` reads.
+        forall|idx: int| 0 <= idx < cv0.depth ==> #[trigger] cspace::ring_msg(cvf, svf, ring, idx)
+            == cspace::ring_msg(cv0, sv0, ring, idx),
+    ensures
+        cspace::ring_fifo(cvf, svf, ring) == cspace::ring_fifo(cv0, sv0, ring),
+{
+    assert(cspace::ring_fifo(cvf, svf, ring) =~= cspace::ring_fifo(cv0, sv0, ring)) by {
+        assert(cspace::ring_fifo(cvf, svf, ring).len() == cspace::ring_fifo(cv0, sv0, ring).len());
+        assert forall|j: int| #![trigger cspace::ring_fifo(cvf, svf, ring)[j]]
+            0 <= j < cv0.count[ring]
+            implies cspace::ring_fifo(cvf, svf, ring)[j] == cspace::ring_fifo(cv0, sv0, ring)[j] by {
+            assert((cvf.head[ring] + j) % (cvf.depth as int)
+                == (cv0.head[ring] + j) % (cv0.depth as int));
+        }
+    }
+}
+
 // `send` post-loop frame — the sending ring's FIFO grows by `Seq::push`. The
 // symmetric companion of `lemma_recv_fifo_drop_first` (verus.md §10).
 proof fn lemma_send_fifo_push(
@@ -1228,20 +1262,14 @@ pub fn send<S: Store>(
         lemma_send_chan_wf(cv0, cvf, sv0, svf, ch, rr, hh, dd, nn, ii);
         lemma_send_fifo_push(cv0, cvf, sv0, svf, ch, rr, hh, dd, nn, ii);
 
-        // The other ring is untouched: its cursors and slots are unchanged.
-        assert(cspace::ring_fifo(cvf[ch], svf, 1 - rr) =~= cspace::ring_fifo(cv0[ch], sv0, 1 - rr)) by {
-            assert(cspace::ring_fifo(cvf[ch], svf, 1 - rr).len()
-                == cspace::ring_fifo(cv0[ch], sv0, 1 - rr).len());
-            assert forall|j: int| #![trigger cspace::ring_fifo(cvf[ch], svf, 1 - rr)[j]]
-                0 <= j < cv0[ch].count[1 - rr]
-                implies cspace::ring_fifo(cvf[ch], svf, 1 - rr)[j]
-                    == cspace::ring_fifo(cv0[ch], sv0, 1 - rr)[j] by {
-                assert((cvf[ch].head[1 - rr] + j) % (cvf[ch].depth as int)
-                    == (cv0[ch].head[1 - rr] + j) % (cv0[ch].depth as int));
-                cspace::lemma_ring_msg_eq(cvf[ch], svf, cv0[ch], sv0, 1 - rr,
-                    (cv0[ch].head[1 - rr] + j) % (cv0[ch].depth as int));
-            }
+        // The other ring is untouched: its cursors and slots are unchanged, so every
+        // message is congruent and its whole FIFO view rides through (lemma_ring_fifo_frame).
+        assert forall|idx: int| 0 <= idx < cv0[ch].depth
+            implies #[trigger] cspace::ring_msg(cvf[ch], svf, 1 - rr, idx)
+                == cspace::ring_msg(cv0[ch], sv0, 1 - rr, idx) by {
+            cspace::lemma_ring_msg_eq(cvf[ch], svf, cv0[ch], sv0, 1 - rr, idx);
         }
+        lemma_ring_fifo_frame(cv0[ch], sv0, cvf[ch], svf, 1 - rr);
     }
     Ok(())
 }
@@ -1847,20 +1875,14 @@ pub fn recv<S: Store>(
         lemma_recv_chan_wf(cv0, cvf, sv0, svf, ch, rr, hh, dd, nn);
         lemma_recv_fifo_drop_first(cv0, cvf, sv0, svf, ch, rr, hh, dd, nn);
 
-        // The other ring is untouched.
-        assert(cspace::ring_fifo(cvf[ch], svf, 1 - rr) =~= cspace::ring_fifo(cv0[ch], sv0, 1 - rr)) by {
-            assert(cspace::ring_fifo(cvf[ch], svf, 1 - rr).len()
-                == cspace::ring_fifo(cv0[ch], sv0, 1 - rr).len());
-            assert forall|j: int| #![trigger cspace::ring_fifo(cvf[ch], svf, 1 - rr)[j]]
-                0 <= j < cv0[ch].count[1 - rr]
-                implies cspace::ring_fifo(cvf[ch], svf, 1 - rr)[j]
-                    == cspace::ring_fifo(cv0[ch], sv0, 1 - rr)[j] by {
-                assert((cvf[ch].head[1 - rr] + j) % (cvf[ch].depth as int)
-                    == (cv0[ch].head[1 - rr] + j) % (cv0[ch].depth as int));
-                cspace::lemma_ring_msg_eq(cvf[ch], svf, cv0[ch], sv0, 1 - rr,
-                    (cv0[ch].head[1 - rr] + j) % (cv0[ch].depth as int));
-            }
+        // The other ring is untouched: every message is congruent, so its whole FIFO
+        // view rides through (lemma_ring_fifo_frame).
+        assert forall|idx: int| 0 <= idx < cv0[ch].depth
+            implies #[trigger] cspace::ring_msg(cvf[ch], svf, 1 - rr, idx)
+                == cspace::ring_msg(cv0[ch], sv0, 1 - rr, idx) by {
+            cspace::lemma_ring_msg_eq(cvf[ch], svf, cv0[ch], sv0, 1 - rr, idx);
         }
+        lemma_ring_fifo_frame(cv0[ch], sv0, cvf[ch], svf, 1 - rr);
 
         // ── export the receive-half of move semantics ──
         // The dequeue ops + fire frame slot_view (svf == sv_loop above), so the pass-2

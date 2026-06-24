@@ -431,6 +431,34 @@ verus! {
 // The lemmas defer to the same `cspace::lemma_*` composition machinery the inline blocks used;
 // the in-tree precedent is `cspace::destroy_cspace`'s per-iteration `lemma_*_trans` frame calls.
 
+// Compose the four running cross-object frames over two adjacent edges `(a, b)` + `(b, c)`
+// into `(a, c)` in one call. Every teardown phase re-establishes the same four frames against
+// the running `st0`, so each phase's four `cspace::lemma_*_trans` calls fold into a single
+// citation. Scoped to `destroy_tcb` — cspace's trans lemmas are not co-grouped elsewhere.
+proof fn lemma_running_frame_trans<S: Store>(a: &S, b: &S, c: &S)
+    requires
+        cspace::unhomed_frozen_free(a, b),
+        cspace::unhomed_frozen_free(b, c),
+        cspace::home_views_frozen(a, b),
+        cspace::home_views_frozen(b, c),
+        cspace::emptied_via_dead_home_free(a, b),
+        cspace::emptied_via_dead_home_free(b, c),
+        cspace::refs_death_persist(a, b),
+        cspace::refs_death_persist(b, c),
+        a.slot_view().dom() == b.slot_view().dom(),
+        b.slot_view().dom() == c.slot_view().dom(),
+    ensures
+        cspace::unhomed_frozen_free(a, c),
+        cspace::home_views_frozen(a, c),
+        cspace::emptied_via_dead_home_free(a, c),
+        cspace::refs_death_persist(a, c),
+{
+    cspace::lemma_unhomed_frozen_free_trans(a, b, c);
+    cspace::lemma_home_views_frozen_trans(a, b, c);
+    cspace::lemma_emptied_via_dead_home_free_trans(a, b, c);
+    cspace::lemma_refs_death_persist_trans(a, b, c);
+}
+
 // Halt: clearing `t`'s queue/wait links and marking it `Halted` makes `t` dead + queue-detached.
 // Given the post-detach `st_detach` invariants and the halt edit (only `tcb[t]`'s
 // `qnext`/`wait_notif`/`state` move, every other view frozen), re-establish the system invariants
@@ -519,16 +547,13 @@ proof fn lemma_destroy_tcb_halt_frame<S: Store>(st0: &S, st_detach: &S, store: &
     cspace::lemma_dead_tcb_frozen_except_single_t(st_detach, store, t);
     cspace::lemma_dead_tcb_frozen_to_except(st0, st_detach, t);
     cspace::lemma_dead_tcb_frozen_except_trans(st0, st_detach, store, t);
-    // The halt frames `slot_view` (free) and the home maps; compose onto `st0`.
+    // The halt frames `slot_view` (free + emptied refl) and the home + refs maps; export the
+    // `st_detach → store` edge frames, then compose all four running frames onto `st0` in one call.
     cspace::lemma_unhomed_frozen_free_from_slot_eq(st_detach, store);
     assert(cspace::home_views_frozen(st_detach, store));
-    cspace::lemma_unhomed_frozen_free_trans(st0, st_detach, store);
-    cspace::lemma_home_views_frozen_trans(st0, st_detach, store);
-    // Dual: the halt frames `slot_view` (free refl) and `refs` (death-persist refl); compose.
     cspace::lemma_emptied_via_dead_home_free_from_slot_eq(st_detach, store);
     cspace::lemma_refs_death_persist_from_refs_eq(st_detach, store);
-    cspace::lemma_emptied_via_dead_home_free_trans(st0, st_detach, store);
-    cspace::lemma_refs_death_persist_trans(st0, st_detach, store);
+    lemma_running_frame_trans(st0, st_detach, store);
 }
 
 // Clear-before-unref (cspace): clearing `t`'s `cspace` field opens the `census_off_by_one(cs)`
@@ -614,16 +639,13 @@ proof fn lemma_destroy_tcb_cspace_clear_frame<S: Store>(
     assert(cspace::end_caps_sound(store));          // clear frames chan + slot
     cspace::lemma_dead_tcb_frozen_except_single_t(st_pre_cs, store, t);
     cspace::lemma_dead_tcb_frozen_except_trans(st0, st_pre_cs, store, t);
-    // The clear frames `slot_view` (free) and the home maps; compose onto `st0`.
+    // The clear frames `slot_view` (free + emptied refl) and the home + refs maps; export the
+    // `st_pre_cs → store` edge frames, then compose all four running frames onto `st0` in one call.
     cspace::lemma_unhomed_frozen_free_from_slot_eq(st_pre_cs, store);
     assert(cspace::home_views_frozen(st_pre_cs, store));
-    cspace::lemma_unhomed_frozen_free_trans(st0, st_pre_cs, store);
-    cspace::lemma_home_views_frozen_trans(st0, st_pre_cs, store);
-    // Dual: the clear frames `slot_view` (free refl) and `refs` (death-persist refl); compose.
     cspace::lemma_emptied_via_dead_home_free_from_slot_eq(st_pre_cs, store);
     cspace::lemma_refs_death_persist_from_refs_eq(st_pre_cs, store);
-    cspace::lemma_emptied_via_dead_home_free_trans(st0, st_pre_cs, store);
-    cspace::lemma_refs_death_persist_trans(st0, st_pre_cs, store);
+    lemma_running_frame_trans(st0, st_pre_cs, store);
 }
 
 // Clear-before-unref (aspace): the twin of the cspace clear — clearing `t`'s `aspace` field opens
@@ -702,14 +724,12 @@ proof fn lemma_destroy_tcb_aspace_clear_frame<S: Store>(
     assert(cspace::end_caps_sound(store));
     cspace::lemma_dead_tcb_frozen_except_single_t(st_pre_as, store, t);
     cspace::lemma_dead_tcb_frozen_except_trans(st0, st_pre_as, store, t);
+    // export the `st_pre_as → store` edge frames, then compose all four running frames onto `st0`.
     cspace::lemma_unhomed_frozen_free_from_slot_eq(st_pre_as, store);
     assert(cspace::home_views_frozen(st_pre_as, store));
-    cspace::lemma_unhomed_frozen_free_trans(st0, st_pre_as, store);
-    cspace::lemma_home_views_frozen_trans(st0, st_pre_as, store);
     cspace::lemma_emptied_via_dead_home_free_from_slot_eq(st_pre_as, store);
     cspace::lemma_refs_death_persist_from_refs_eq(st_pre_as, store);
-    cspace::lemma_emptied_via_dead_home_free_trans(st0, st_pre_as, store);
-    cspace::lemma_refs_death_persist_trans(st0, st_pre_as, store);
+    lemma_running_frame_trans(st0, st_pre_as, store);
 }
 
 /// pre:  refs == 0 (last cap gone).
@@ -1072,12 +1092,8 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
     }
     let ghost st_d0 = *store;
     proof {
-        // Compose the bind-slot-0 delete onto the running `st0` frame.
-        cspace::lemma_unhomed_frozen_free_trans(&st0, &st_halt, &st_d0);
-        cspace::lemma_home_views_frozen_trans(&st0, &st_halt, &st_d0);
-        // Dual: compose the bind-slot-0 delete's frame onto the running `st0` frame.
-        cspace::lemma_emptied_via_dead_home_free_trans(&st0, &st_halt, &st_d0);
-        cspace::lemma_refs_death_persist_trans(&st0, &st_halt, &st_d0);
+        // Compose the bind-slot-0 delete onto the running `st0` frame (all four frames).
+        lemma_running_frame_trans(&st0, &st_halt, &st_d0);
         assert(cspace::dead_tcb_frozen(&st_halt, &st_d0));
         // `t` (dead + detached at `st_halt`) is frozen across the first delete, so it is still in
         // `tcb.dom()` with its `bind_slots` intact; `bs1` is still a live slot (delete preserves
@@ -1116,12 +1132,8 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         }
     }
     proof {
-        // Compose the bind-slot-1 delete onto the running `st0` frame.
-        cspace::lemma_unhomed_frozen_free_trans(&st0, &st_d0, store);
-        cspace::lemma_home_views_frozen_trans(&st0, &st_d0, store);
-        // Dual: compose the bind-slot-1 delete's frame onto the running `st0` frame.
-        cspace::lemma_emptied_via_dead_home_free_trans(&st0, &st_d0, store);
-        cspace::lemma_refs_death_persist_trans(&st0, &st_d0, store);
+        // Compose the bind-slot-1 delete onto the running `st0` frame (all four frames).
+        lemma_running_frame_trans(&st0, &st_d0, store);
         cspace::lemma_dead_tcb_frozen_trans(&st_halt, &st_d0, store);
         // `t` survived both deletes (dead + detached at `st_halt` ⇒ `dead_tcb_frozen_at` fixes it),
         // and both bind slots ended empty (each delete empties, `only_empties` keeps the other).
@@ -1174,12 +1186,8 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
             assert(cspace::dead_tcb_frozen_at(&st_csclear, store, t));
             cspace::lemma_dead_tcb_frozen_to_except(&st_csclear, store, t);
             cspace::lemma_dead_tcb_frozen_except_trans(&st0, &st_csclear, store, t);
-            // `unref_cspace` exports the free + home frames; compose onto `st0`.
-            cspace::lemma_unhomed_frozen_free_trans(&st0, &st_csclear, store);
-            cspace::lemma_home_views_frozen_trans(&st0, &st_csclear, store);
-            // Dual: `unref_cspace` exports the free + death-persist frames; compose onto `st0`.
-            cspace::lemma_emptied_via_dead_home_free_trans(&st0, &st_csclear, store);
-            cspace::lemma_refs_death_persist_trans(&st0, &st_csclear, store);
+            // `unref_cspace` exports all four running frames; compose onto `st0`.
+            lemma_running_frame_trans(&st0, &st_csclear, store);
         }
     }
     proof {
@@ -1214,11 +1222,8 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
             // `unref_aspace` frames `slot_view` + every object view — free + home refl; compose.
             cspace::lemma_unhomed_frozen_free_from_slot_eq(&st_asclear, store);
             cspace::lemma_home_views_frozen_refl(&st_asclear, store);
-            cspace::lemma_unhomed_frozen_free_trans(&st0, &st_asclear, store);
-            cspace::lemma_home_views_frozen_trans(&st0, &st_asclear, store);
-            // Dual: `unref_aspace` exports the free + death-persist frames; compose onto `st0`.
-            cspace::lemma_emptied_via_dead_home_free_trans(&st0, &st_asclear, store);
-            cspace::lemma_refs_death_persist_trans(&st0, &st_asclear, store);
+            // compose all four running frames onto `st0` (emptied/refs `(b, c)` from `unref_aspace`).
+            lemma_running_frame_trans(&st0, &st_asclear, store);
         }
     }
 }
