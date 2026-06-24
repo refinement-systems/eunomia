@@ -38,6 +38,8 @@ if command -v unzip >/dev/null 2>&1 && ! unzip -l "$DEST" >/dev/null 2>&1; then
   exit 1
 fi
 
-shasum "$DEST" | tee "$DEST.sha1"
+# Record the digest with a relative filename so `shasum -c tla2tools.jar.sha1`
+# verifies the vendored jar from inside tools/tla/ on any machine.
+( cd "$HERE" && shasum "$(basename "$DEST")" | tee "$(basename "$DEST").sha1" )
 echo "Vendored: $DEST"
 echo "You can now uninstall the TLA+ Toolbox; the scripts use this jar."
