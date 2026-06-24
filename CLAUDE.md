@@ -224,6 +224,31 @@ the slowest functions (`scripts/verus-baseline.sh [crate...]`, output under
 `target/verus-baseline/`). Run it before a proof-perf change to establish a
 baseline, and after to see what moved.
 
+**Performance discipline — measure every proof change, correctness first.**
+Verified code is held to a proof-checking-cost budget, but **correctness and
+thoroughness always outrank checker speed**: never weaken a spec, drop or skip an
+obligation, loosen an `ensures`, or narrow input coverage to make the prover
+faster — a slower proof that proves *more* is correct, a faster one that proves
+*less* is a regression. Within that bound, every change touching `verus!{}` code
+measures its effect on verification cost with the profiling tools above. There is
+no committed baseline (`target/verus-baseline/` is local and gitignored), so
+re-derive the before-number freshly from the base of your work rather than
+trusting a saved one: run `scripts/verus-baseline.sh` on the pre-change tree — or
+temporarily rewind (`git stash` your edits, or check out the base / merge-base
+commit), measure, and return — then re-run on your changed tree and diff. A merge
+or rebase moves that base, so re-establish the before-number on the merged code;
+never compare against numbers from a stale tree. Judge by deterministic `rlimit`
+on cold (`cargo clean`) runs against byte-identical controls, per
+`doc/guidelines/verus.md` §10 — wall-clock ms is noisy and machine-dependent, so
+advisory only. Keep a perf-motivated change only if it measurably helps (or at
+least does not regress the crate's `rlimit` total), and revert measured
+regressions; extraction around quantified/existential predicates is a known
+backfire. The technique itself — decomposition into tightly-keyed lemmas,
+projection triggers over whole-aggregate triggers, extracting recurring
+`by (bit_vector)` identities, `rlimit` right-sizing, and the bounded dead-ends —
+lives in `doc/guidelines/verus.md` §10 and the §13 decision map; reach for those
+before guessing.
+
 ### Formatting — run `cargo fmt` before every commit
 
 The tree is kept rustfmt-clean **per change**: run `cargo fmt` before committing
