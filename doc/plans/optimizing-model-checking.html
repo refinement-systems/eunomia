@@ -1,0 +1,749 @@
+
+<!DOCTYPE html>
+
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="generator" content="Docutils 0.17.1: http://docutils.sourceforge.net/" />
+
+    <title>Optimizing Model Checking &#8212; Learn TLA+</title>
+    <link rel="stylesheet" type="text/css" href="../_static/pygments.css" />
+    <link rel="stylesheet" type="text/css" href="../_static/custom.css" />
+    <link rel="stylesheet" type="text/css" href="../_static/graphviz.css" />
+    <script data-url_root="../" id="documentation_options" src="../_static/documentation_options.js"></script>
+    <script src="../_static/jquery.js"></script>
+    <script src="../_static/underscore.js"></script>
+    <script src="../_static/doctools.js"></script>
+    <script async="async" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <script src="../_static/js/theme.js"></script>
+    <script src="../_static/js/petite-vue.js"></script>
+    <link rel="index" title="Index" href="../genindex.html" />
+    <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Modelling Message Queues" href="message-queues.html" />
+    <link rel="prev" title="Handling Unbound Models" href="unbound-models.html" /> 
+  </head><body data-dark_mode_code_blocks="true">
+
+<div id="top_nav">
+    
+
+    <nav>
+        
+            
+        
+
+        <p id="toggle_sidebar">
+            <a href="#" title="Toggle sidebar">|||</a>
+        </p>
+        <h1><a href="../index.html" title="Go to homepage">Learn TLA+</a></h1>
+
+        <a id="mode_toggle" href="#" @click.prevent="handleClick" :title="mode">
+    <template v-if="mode == 'light'">
+        <svg width="100%" height="100%" viewBox="0 0 79 80" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;"><g id="mode_light"><rect id="Bounds" x="0" y="-0" width="78.623" height="79.049" style="fill:none;"/><circle cx="39.311" cy="39.524" r="15.734" style="fill:#fff;"/><g id="beams"><g id="beam"><path id="beam1" serif:id="beam" d="M44.212,4.901c0,-2.705 -2.196,-4.901 -4.901,-4.901c-2.704,-0 -4.9,2.196 -4.9,4.901l-0,9.614c-0,2.705 2.196,4.901 4.9,4.901c2.705,0 4.901,-2.196 4.901,-4.901l0,-9.614Z" style="fill:#fff;"/></g><g id="beam2" serif:id="beam"><path id="beam3" serif:id="beam" d="M67.48,18.073c1.913,-1.912 1.913,-5.018 0,-6.931c-1.912,-1.912 -5.018,-1.912 -6.931,0l-6.798,6.799c-1.912,1.912 -1.912,5.018 0,6.931c1.913,1.912 5.018,1.912 6.931,-0l6.798,-6.799Z" style="fill:#fff;"/></g><g id="beam4" serif:id="beam"><path id="beam5" serif:id="beam" d="M25.728,61.108c1.912,-1.913 1.912,-5.018 -0,-6.931c-1.913,-1.913 -5.019,-1.913 -6.931,-0l-6.799,6.798c-1.912,1.913 -1.912,5.019 0,6.931c1.913,1.913 5.019,1.913 6.931,0l6.799,-6.798Z" style="fill:#fff;"/></g><g id="beam6" serif:id="beam"><path id="beam7" serif:id="beam" d="M60.682,54.177c-1.913,-1.913 -5.018,-1.913 -6.931,-0c-1.912,1.913 -1.912,5.018 0,6.931l6.798,6.798c1.913,1.913 5.019,1.913 6.931,0c1.913,-1.912 1.913,-5.018 0,-6.931l-6.798,-6.798Z" style="fill:#fff;"/></g><g id="beam8" serif:id="beam"><path id="beam9" serif:id="beam" d="M4.901,34.623c-2.705,0 -4.901,2.196 -4.901,4.901c0,2.705 2.196,4.901 4.901,4.901l9.614,0c2.705,0 4.901,-2.196 4.901,-4.901c0,-2.705 -2.196,-4.901 -4.901,-4.901l-9.614,0Z" style="fill:#fff;"/></g><g id="beam10" serif:id="beam"><path id="beam11" serif:id="beam" d="M44.212,64.534c0,-2.705 -2.196,-4.901 -4.901,-4.901c-2.704,-0 -4.9,2.196 -4.9,4.901l-0,9.614c-0,2.705 2.196,4.901 4.9,4.901c2.705,-0 4.901,-2.196 4.901,-4.901l0,-9.614Z" style="fill:#fff;"/></g><g id="beam12" serif:id="beam"><path id="beam13" serif:id="beam" d="M18.929,11.142c-1.912,-1.912 -5.018,-1.912 -6.931,0c-1.912,1.913 -1.912,5.019 0,6.931l6.799,6.799c1.912,1.912 5.018,1.912 6.931,-0c1.912,-1.913 1.912,-5.019 -0,-6.931l-6.799,-6.799Z" style="fill:#fff;"/></g><g id="beam14" serif:id="beam"><path id="beam15" serif:id="beam" d="M64.108,34.623c-2.705,0 -4.901,2.196 -4.901,4.901c-0,2.705 2.196,4.901 4.901,4.901l9.614,0c2.705,0 4.901,-2.196 4.901,-4.901c-0,-2.705 -2.196,-4.901 -4.901,-4.901l-9.614,0Z" style="fill:#fff;"/></g></g></g></svg>
+    </template>
+
+    <template v-if="mode == 'dark'">
+        <svg width="100%" height="100%" viewBox="0 0 79 80" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;"><g id="mode_dark"><rect id="Bounds" x="0" y="-0" width="78.623" height="79.049" style="fill:none;"/><circle cx="39.311" cy="39.524" r="15.734" style="fill:#fff;"/><g id="beams"><g id="beam"><path id="beam1" serif:id="beam" d="M44.212,14.515c0,-2.705 -2.196,-4.901 -4.901,-4.901c-2.704,0 -4.901,2.196 -4.901,4.901c0,2.705 2.197,4.901 4.901,4.901c2.705,0 4.901,-2.196 4.901,-4.901Z" style="fill:#fff;"/></g><g id="beam2" serif:id="beam"><path id="beam3" serif:id="beam" d="M60.662,24.892c1.902,-1.902 1.902,-4.99 0,-6.892l-0.04,-0.039c-1.901,-1.902 -4.989,-1.902 -6.891,-0c-1.901,1.901 -1.901,4.989 0,6.891l0.04,0.04c1.902,1.901 4.989,1.901 6.891,-0Z" style="fill:#fff;"/></g><g id="beam4" serif:id="beam"><path id="beam5" serif:id="beam" d="M25.732,61.103c1.91,-1.91 1.91,-5.011 0,-6.921l-0.009,-0.01c-1.91,-1.91 -5.012,-1.91 -6.921,-0c-1.91,1.91 -1.91,5.011 -0,6.921l0.01,0.01c1.909,1.91 5.011,1.91 6.92,-0Z" style="fill:#fff;"/></g><g id="beam6" serif:id="beam"><path id="beam7" serif:id="beam" d="M60.672,54.167c-1.907,-1.907 -5.004,-1.907 -6.911,0l-0.02,0.02c-1.907,1.907 -1.907,5.004 0,6.911c1.907,1.907 5.004,1.907 6.911,-0l0.02,-0.02c1.907,-1.907 1.907,-5.004 0,-6.911Z" style="fill:#fff;"/></g><g id="beam8" serif:id="beam"><path id="beam9" serif:id="beam" d="M14.52,34.623c-2.702,0 -4.896,2.194 -4.896,4.896l0,0.01c0,2.702 2.194,4.896 4.896,4.896c2.702,0 4.896,-2.194 4.896,-4.896l-0,-0.01c-0,-2.702 -2.194,-4.896 -4.896,-4.896Z" style="fill:#fff;"/></g><g id="beam10" serif:id="beam"><path id="beam11" serif:id="beam" d="M44.212,64.534c0,-2.705 -2.196,-4.901 -4.901,-4.901c-2.704,-0 -4.901,2.196 -4.901,4.901c0,2.704 2.197,4.9 4.901,4.9c2.705,0 4.901,-2.196 4.901,-4.9Z" style="fill:#fff;"/></g><g id="beam12" serif:id="beam"><path id="beam13" serif:id="beam" d="M25.73,17.943c-1.911,-1.911 -5.015,-1.911 -6.926,0l-0.005,0.005c-1.911,1.911 -1.911,5.015 0,6.926c1.911,1.911 5.015,1.911 6.926,0l0.005,-0.005c1.911,-1.911 1.911,-5.014 -0,-6.926Z" style="fill:#fff;"/></g><g id="beam14" serif:id="beam"><path id="beam15" serif:id="beam" d="M64.098,34.623c-2.699,0 -4.891,2.192 -4.891,4.892l-0,0.019c-0,2.699 2.192,4.891 4.891,4.891c2.7,0 4.892,-2.192 4.892,-4.891l0,-0.019c0,-2.7 -2.192,-4.892 -4.892,-4.892Z" style="fill:#fff;"/></g></g></g></svg>
+    </template>
+
+    <template v-if="mode == 'darkest'">
+        <svg width="100%" height="100%" viewBox="0 0 79 80" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;"><g id="mode_darkest"><rect id="Bounds" x="0" y="-0" width="78.623" height="79.049" style="fill:none;"/><path d="M39.315,23.791c8.684,-0 15.734,7.05 15.734,15.733c0,8.684 -7.05,15.734 -15.734,15.734c-8.683,0 -15.733,-7.05 -15.733,-15.734c-0,-8.683 7.05,-15.733 15.733,-15.733Zm0,4.737c6.069,0 10.997,4.927 10.997,10.996c-0,6.069 -4.928,10.996 -10.997,10.996c-6.068,0 -10.996,-4.927 -10.996,-10.996c0,-6.069 4.928,-10.996 10.996,-10.996Z" style="fill:#fff;"/><g id="beams"><g id="beam"><path id="beam1" serif:id="beam" d="M44.216,14.515c0,-2.705 -2.196,-4.901 -4.901,-4.901c-2.704,0 -4.9,2.196 -4.9,4.901c-0,2.705 2.196,4.901 4.9,4.901c2.705,0 4.901,-2.196 4.901,-4.901Z" style="fill:#fff;"/></g><g id="beam2" serif:id="beam"><path id="beam3" serif:id="beam" d="M60.666,24.892c1.902,-1.902 1.902,-4.99 0,-6.892l-0.04,-0.039c-1.901,-1.902 -4.989,-1.902 -6.891,-0c-1.901,1.901 -1.901,4.989 0,6.891l0.04,0.04c1.902,1.901 4.99,1.901 6.891,-0Z" style="fill:#fff;"/></g><g id="beam4" serif:id="beam"><path id="beam5" serif:id="beam" d="M25.737,61.103c1.909,-1.91 1.909,-5.011 -0,-6.921l-0.01,-0.01c-1.91,-1.91 -5.011,-1.91 -6.921,-0c-1.91,1.91 -1.91,5.011 -0,6.921l0.01,0.01c1.91,1.91 5.011,1.91 6.921,-0Z" style="fill:#fff;"/></g><g id="beam6" serif:id="beam"><path id="beam7" serif:id="beam" d="M60.676,54.167c-1.907,-1.907 -5.004,-1.907 -6.911,0l-0.02,0.02c-1.907,1.907 -1.907,5.004 0,6.911c1.907,1.907 5.004,1.907 6.911,-0l0.02,-0.02c1.907,-1.907 1.907,-5.004 0,-6.911Z" style="fill:#fff;"/></g><g id="beam8" serif:id="beam"><path id="beam9" serif:id="beam" d="M14.524,34.623c-2.702,0 -4.896,2.194 -4.896,4.896l0,0.01c0,2.702 2.194,4.896 4.896,4.896c2.702,0 4.896,-2.194 4.896,-4.896l0,-0.01c0,-2.702 -2.194,-4.896 -4.896,-4.896Z" style="fill:#fff;"/></g><g id="beam10" serif:id="beam"><path id="beam11" serif:id="beam" d="M44.216,64.534c0,-2.705 -2.196,-4.901 -4.901,-4.901c-2.704,-0 -4.9,2.196 -4.9,4.901c-0,2.704 2.196,4.9 4.9,4.9c2.705,0 4.901,-2.196 4.901,-4.9Z" style="fill:#fff;"/></g><g id="beam12" serif:id="beam"><path id="beam13" serif:id="beam" d="M25.734,17.943c-1.911,-1.911 -5.015,-1.911 -6.926,0l-0.005,0.005c-1.911,1.911 -1.911,5.015 0,6.926c1.911,1.911 5.015,1.911 6.926,0l0.005,-0.005c1.911,-1.911 1.911,-5.014 0,-6.926Z" style="fill:#fff;"/></g><g id="beam14" serif:id="beam"><path id="beam15" serif:id="beam" d="M64.103,34.623c-2.7,0 -4.892,2.192 -4.892,4.892l-0,0.019c-0,2.699 2.192,4.891 4.892,4.891c2.699,0 4.891,-2.192 4.891,-4.891l0,-0.019c0,-2.7 -2.192,-4.892 -4.891,-4.892Z" style="fill:#fff;"/></g></g></g></svg>
+    </template>
+</a>
+
+<script>
+(function() {
+    const LOCAL_STORAGE_KEY = 'piccoloThemeMode'
+
+    var initialMode = localStorage.getItem(LOCAL_STORAGE_KEY)
+
+    if (initialMode) {
+        // Make sure the value in local storage is valid
+        if (['light', 'dark', 'darkest'].indexOf(initialMode) == -1) {
+            initialMode = 'light'
+            localStorage.setItem(LOCAL_STORAGE_KEY, initialMode)
+        }
+    } else {
+        // Check if the client prefers dark mode
+        if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+            initialMode = 'dark'
+        } else {
+            initialMode = 'light'
+        }
+        localStorage.setItem(LOCAL_STORAGE_KEY, initialMode)
+    }
+
+    document.documentElement.dataset.mode = initialMode
+
+    PetiteVue.createApp({
+        'mode': initialMode,
+        handleClick() {
+            let currentMode = this.mode
+
+            if (currentMode == 'light') {
+                this.mode = 'dark'
+            } else if (currentMode == 'dark') {
+                this.mode = 'darkest'
+            } else if (currentMode == 'darkest') {
+                this.mode = 'light'
+            }
+
+            document.documentElement.dataset.mode = this.mode
+            localStorage.setItem(LOCAL_STORAGE_KEY, this.mode)
+
+            console.log(this.mode)
+        }
+    }).mount('#mode_toggle')
+})()
+</script>
+            <p class="mobile_search_link">
+                <a href="../search.html" title="Search">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 65 64" fill-rule="evenodd" stroke-linejoin="round" stroke-miterlimit="2">
+                        <path d="M14.873 40.009c-2.315-3.943-3.642-8.532-3.642-13.429C11.231 11.91 23.141 0 37.811 0s26.58 11.91 26.58 26.58-11.91 26.58-26.58 26.58a26.44 26.44 0 0 1-14.277-4.161L9.739 62.794a3.12 3.12 0 0 1-4.413 0L.913 58.382c-1.217-1.218-1.217-3.196 0-4.413l13.96-13.96zM37.811 8.054c10.225 0 18.526 8.301 18.526 18.526s-8.301 18.526-18.526 18.526-18.526-8.301-18.526-18.526S27.586 8.054 37.811 8.054z" fill="#fff" />
+                    </svg>
+                </a>
+            </p>
+        
+
+        <div class="searchbox_wrapper">
+            
+<div id="searchbox" style="display: none" role="search">
+  <h3 id="searchlabel">Quick search</h3>
+    <div class="searchformwrapper">
+    <form class="search" action="../search.html" method="get">
+      <input type="text" name="q" aria-labelledby="searchlabel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"/>
+      <input type="submit" value="Go" />
+    </form>
+    </div>
+</div>
+<script>$('#searchbox').show(0);</script>
+        </div>
+    </nav>
+</div>
+
+    
+      <div class="sphinxsidebar" role="navigation" aria-label="main navigation">
+        <div class="sphinxsidebarwrapper">
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../index.html">Intro</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../intro/faq.html">FAQ</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../whatsnew.html">What’s New</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../intro/conceptual-overview.html">Conceptual Overview</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">TLA+</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../core/index.html">Core</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="index.html">Topics</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="tips.html">General Tips</a></li>
+<li class="toctree-l2"><a class="reference internal" href="toolbox.html">Using the Toolbox</a></li>
+<li class="toctree-l2"><a class="reference internal" href="cli.html">Beyond the Toolbox</a></li>
+<li class="toctree-l2"><a class="reference internal" href="aux-vars.html">Auxiliary Variables</a></li>
+<li class="toctree-l2"><a class="reference internal" href="refinement.html">Refinement</a></li>
+<li class="toctree-l2"><a class="reference internal" href="unbound-models.html">Handling Unbound Models</a></li>
+<li class="toctree-l2 current"><a class="current reference internal" href="#">Optimizing Model Checking</a></li>
+<li class="toctree-l2"><a class="reference internal" href="message-queues.html">Message Queues</a></li>
+<li class="toctree-l2"><a class="reference internal" href="state-machines.html">Finite State Machines</a></li>
+</ul>
+</li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Examples</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../examples/index.html">Operators</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../examples/index.html#pluscal-specs">PlusCal Specs</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../reference/glossary.html">Glossary</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../reference/standard-library.html">Standard Modules</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../reference/other-resources.html">Other Resources</a></li>
+</ul>
+
+<ul>
+  <li class="toctree-l1"><a href= "../genindex.html">Index</a></li>
+</ul>
+        </div>
+      </div>
+
+
+
+    <div class="document">
+      <div class="documentwrapper">
+        <div class="bodywrapper">
+          <div class="body" role="main">
+            
+  <section id="optimizing-model-checking">
+<span id="topic-optimization"></span><h1>Optimizing Model Checking<a class="headerlink" href="#optimizing-model-checking" title="Permalink to this headline">¶</a></h1>
+<p>You’ve written your model, and you run it. Three days later, it’s still running. How do you make it faster?</p>
+<p>Optimizing models is more an art than a science. It’s a skill you have to develop over time, and every model is optimized differently. This is just a collection of basic heuristics that I find broadly useful.</p>
+<section id="before-you-begin">
+<h2>Before you begin<a class="headerlink" href="#before-you-begin" title="Permalink to this headline">¶</a></h2>
+<p>Some things you should check before you start optimizating:</p>
+<p class="rubric">1. Make sure your model is <a class="reference internal" href="unbound-models.html#topic-unbound-models"><span class="std std-ref">bounded</span></a></p>
+<p>Maybe the problem isn’t “your spec is too big” but instead “your spec will never terminate”.</p>
+<p class="rubric">2. Check your runtime parameters</p>
+<p>By default, the toolbox uses 25% of your computer RAM and one worker thread per CPU core. If you instead run TLA+ from the <a class="reference internal" href="cli.html#topic-cli"><span class="std std-ref">command line</span></a>, it will default to using 25% RAM and <em>exactly one</em> worker. So make sure you pass in a <code class="docutils literal notranslate"><span class="pre">-workers</span></code> flag!</p>
+<p class="rubric">3. Check your hardware</p>
+<p>Model checking is both CPU- and memory-intensive. At times, it’s even <em>single-core</em> intensive, as the liveness checking algorithm for TLC is single-threaded. Sometimes getting a bigger machine is the best thing you can do.</p>
+</section>
+<section id="overview">
+<h2>Overview<a class="headerlink" href="#overview" title="Permalink to this headline">¶</a></h2>
+<section id="the-spec">
+<h3>The Spec<a class="headerlink" href="#the-spec" title="Permalink to this headline">¶</a></h3>
+<p>To discuss optimizations, we’ll use the following:</p>
+<div class="literal-block-wrapper docutils container" id="id2">
+<div class="highlight-tla notranslate"><div class="highlight"><pre><span></span><span class="c c-PreProc">----</span> <span class="c c-PreProc">MODULE</span> <span class="c c-PreProc">optimization</span> <span class="c c-PreProc">----</span>
+<span class="kn">EXTENDS</span> <span class="n">Integers</span><span class="p">,</span> <span class="n">Sequences</span><span class="p">,</span> <span class="n">TLC</span>
+<span class="kn">CONSTANTS</span> <span class="n">MaxNum</span><span class="p">,</span> <span class="n">Workers</span>
+
+
+<span class="nf">(*--algorithm alg</span>
+<span class="n">variables</span>
+  <span class="n">i</span> <span class="o">=</span> <span class="m">1</span><span class="p">;</span>
+  <span class="n">to_process</span> <span class="o">=</span> <span class="p">[</span><span class="n">w</span> <span class="s">\in</span> <span class="n">Workers</span> <span class="o">|-&gt;</span> <span class="n">{}</span><span class="p">];</span>
+
+<span class="nt">process</span> <span class="n">writer</span> <span class="o">=</span> <span class="s">&quot;writer&quot;</span>
+<span class="nf">begin</span> 
+<span class="nt">  Write:</span>
+    <span class="k">while</span> <span class="n">i</span> <span class="o">&lt;=</span> <span class="n">MaxNum</span> <span class="k">do</span>
+      <span class="k">with</span> <span class="n">w</span> <span class="s">\in</span> <span class="n">Workers</span> <span class="k">do</span>
+        <span class="n">to_process</span><span class="p">[</span><span class="n">w</span><span class="p">]</span> <span class="o">:=</span> <span class="o">@</span> <span class="nb">\union</span> <span class="n">{i}</span><span class="p">;</span>
+        <span class="n">i</span> <span class="o">:=</span> <span class="n">i</span> <span class="o">+</span> <span class="m">1</span><span class="p">;</span>
+      <span class="k">end</span> <span class="k">with</span><span class="p">;</span>
+    <span class="k">end</span> <span class="k">while</span><span class="p">;</span>
+<span class="nf">end process</span><span class="p">;</span>
+
+<span class="nt">process</span> <span class="n">worker</span> <span class="s">\in</span> <span class="n">Workers</span>
+<span class="n">variable</span> <span class="n">total</span> <span class="o">=</span> <span class="m">0</span><span class="p">;</span>
+<span class="n">local</span> <span class="o">=</span> <span class="m">0</span><span class="p">;</span>
+<span class="nf">begin</span>
+<span class="nt">  Read:</span>
+    <span class="k">with</span> <span class="n">x</span> <span class="s">\in</span> <span class="n">to_process</span><span class="p">[</span><span class="n">self</span><span class="p">]</span> <span class="k">do</span>
+      <span class="n">local</span> <span class="o">:=</span> <span class="n">x</span><span class="p">;</span>
+      <span class="n">to_process</span><span class="p">[</span><span class="n">self</span><span class="p">]</span> <span class="o">:=</span> <span class="o">@</span> <span class="o">\</span> <span class="n">{local}</span><span class="p">;</span>
+    <span class="k">end</span> <span class="k">with</span><span class="p">;</span>
+<span class="nt">    Update:</span>
+      <span class="n">total</span> <span class="o">:=</span> <span class="n">total</span> <span class="o">+</span> <span class="n">local</span><span class="p">;</span>
+      <span class="k">goto</span> <span class="n">Read</span><span class="p">;</span>
+<span class="nf">end process</span><span class="p">;</span>
+
+<span class="nf">end algorithm; *)</span>
+<span class="c c-PreProc">====</span>
+</pre></div>
+</div>
+<div class="code-block-caption"><span class="caption-text"><span>28351303 states / 8241961 distinct</span> <a class="reference download internal" download="" href="../_downloads/198e8642b2cd1d3cad2f9db4fe91e4be/optimization.tla"><code class="xref download docutils literal notranslate"><span class="pre">spec</span></code></a></span><a class="headerlink" href="#id2" title="Permalink to this code">¶</a></div>
+</div>
+<p>Run with <code class="docutils literal notranslate"><span class="pre">MaxNum</span> <span class="pre">=</span> <span class="pre">7</span></code>, <code class="docutils literal notranslate"><span class="pre">Workers</span> <span class="pre">=</span> <span class="pre">{w1,</span> <span class="pre">w2,</span> <span class="pre">w3}</span></code>, and no deadlock checking. You should get 28,351,303 (28M) states. I’ll be showing optimizations one-at-a-time as changes to this base model, and undo them before showing the next optimization.</p>
+<div class="admonition tip">
+<p class="admonition-title">Tip</p>
+<p>The spec can take up to 28 seconds to run on my computer. To test optimizations out faster, I’ll use a trick to iterate more quickly. <a class="reference internal" href="../reference/standard-library.html#tlcget"><span class="std std-ref">TLCGet</span></a> lets us query the current depth of the model checking with <code class="docutils literal notranslate"><span class="pre">TLCGet(&quot;level&quot;)</span></code>. I’ll add the <a class="reference internal" href="toolbox.html#state-constraint"><span class="std std-ref">constraint</span></a> <code class="docutils literal notranslate"><span class="pre">TLCGet(&quot;level&quot;)</span> <span class="pre">&lt;</span> <span class="pre">12</span></code> to my spec.</p>
+<div class="literal-block-wrapper docutils container" id="id3">
+<div class="highlight-udiff notranslate"><div class="highlight"><pre><span></span><span class="w"> </span>EXTENDS Integers, Sequences, TLC<span class="w"></span>
+<span class="w"> </span>CONSTANTS MaxNum, Workers<span class="w"></span>
+<span class="w"> </span>
+<span class="gi">+Constraint == TLCGet(&quot;level&quot;) &lt; 11</span><span class="w"></span>
+<span class="w"> </span>
+<span class="w"> </span>(*--algorithm alg<span class="w"></span>
+<span class="w"> </span>variables<span class="w"></span>
+</pre></div>
+</div>
+<div class="code-block-caption"><span class="caption-text"><span>872224 states / 146056 distinct</span> <a class="reference download internal" download="" href="../_downloads/d5b6b256acaf5432878c685238ae09af/optimization.tla"><code class="xref download docutils literal notranslate"><span class="pre">spec</span></code></a></span><a class="headerlink" href="#id3" title="Permalink to this code">¶</a></div>
+</div>
+<p>This reduces the state space by 97% percent, making it easier for me to try out different optimizations. When I’m done I’ll remove the constraint and see how much my optimizations help with the whole spec.</p>
+</div>
+</section>
+<section id="the-basics">
+<h3>The Basics<a class="headerlink" href="#the-basics" title="Permalink to this headline">¶</a></h3>
+<p>Generally, model checking time depends on two things:</p>
+<ol class="arabic simple">
+<li><p>The time it takes to generate each state.</p></li>
+<li><p>The number of states it needs to generate.</p></li>
+</ol>
+<p>In my experience, (2) dominates and deserves the most attention. Sometimes I’ll be able to optimize generation time by 5-10%. Quite often I’ll work with a model and find an improvement that reduces the state space by a factor of 10.</p>
+</section>
+<section id="estimating-the-state-space">
+<h3>Estimating the state space<a class="headerlink" href="#estimating-the-state-space" title="Permalink to this headline">¶</a></h3>
+<p>Before we start optimizing, it’s a good idea to get a handle on where the “complexity” is. Most of these estimates will be inaccurate, but they’ll give us an idea on where to start.</p>
+<p>First, let’s start with the <code class="docutils literal notranslate"><span class="pre">writer</span></code>. There are <span class="math notranslate nohighlight">\(3^7 = 2187\)</span> possible ways to assign 7 numbers to one of three workers. Adding one more worker would octuple the number of possible assignments, while adding one more number would only triple it. So <em>right now</em>, the number of workers is having more impact on the state space than <code class="docutils literal notranslate"><span class="pre">MaxNum</span></code>. On the other hand, if we had seven workers and <code class="docutils literal notranslate"><span class="pre">MaxNum</span> <span class="pre">=</span> <span class="pre">3</span></code>, incrementing <code class="docutils literal notranslate"><span class="pre">MaxNum</span></code> would do more than adding an eighth worker.</p>
+<p>As a quick test, try making both constants smaller. Reducing <code class="docutils literal notranslate"><span class="pre">MaxInt</span></code> by 1 reduces the statespace to only 3.2M states, while removing a worker drops the state space to 1.3M.</p>
+<section id="set-sizes">
+<h4>Set Sizes<a class="headerlink" href="#set-sizes" title="Permalink to this headline">¶</a></h4>
+<p>As we’ll see later, <code class="docutils literal notranslate"><span class="pre">writer</span></code> is essentially an inefficient means of picking a function from the <a class="reference internal" href="../core/functions.html#function-set"><span class="std std-ref">function set</span></a> <code class="docutils literal notranslate"><span class="pre">[1..MaxNum</span> <span class="pre">-&gt;</span> <span class="pre">Worker]</span></code>. When estimating state spaces, it’s useful to know some how big some collection types get. In the below table, <code class="docutils literal notranslate"><span class="pre">|S|</span> <span class="pre">=</span> <span class="pre">Cardinality(S)</span></code>.</p>
+<table class="docutils align-default" id="id1">
+<caption><span class="caption-text">Set Sizes</span><a class="headerlink" href="#id1" title="Permalink to this table">¶</a></caption>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr class="row-odd"><th class="head"><p>Set</p></th>
+<th class="head"><p>Num Elements</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>S</p></td>
+<td><p><span class="math notranslate nohighlight">\(|S|\)</span></p></td>
+</tr>
+<tr class="row-odd"><td><p>SUBSET S</p></td>
+<td><p><span class="math notranslate nohighlight">\(2^{|S|}\)</span></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">S</span> <span class="pre">\X</span> <span class="pre">T</span></code> (tuple)</p></td>
+<td><p><span class="math notranslate nohighlight">\(|S|*|T|\)</span></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">[s:</span> <span class="pre">S,</span> <span class="pre">t:</span> <span class="pre">T]</span></code> (<a class="reference internal" href="../core/functions.html#struct-set"><span class="std std-ref">struct set</span></a>)</p></td>
+<td><p><span class="math notranslate nohighlight">\(|S|*|T|\)</span></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">[S</span> <span class="pre">-&gt;</span> <span class="pre">T]</span></code></p></td>
+<td><p><span class="math notranslate nohighlight">\(|T|^{|S|}\)</span></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">[1..n</span> <span class="pre">-&gt;</span> <span class="pre">S]</span></code> (<a class="reference internal" href="../core/functions.html#function-set"><span class="std std-ref">sequence set</span></a>)</p></td>
+<td><p><span class="math notranslate nohighlight">\(|S|^n\)</span></p></td>
+</tr>
+</tbody>
+</table>
+<p>These stack; if you have something like <code class="docutils literal notranslate"><span class="pre">[A</span> <span class="pre">\X</span> <span class="pre">B</span> <span class="pre">-&gt;</span> <span class="pre">SUBSET</span> <span class="pre">C]</span></code> in your spec that’s probably the source of your woes.</p>
+</section>
+<section id="concurrency">
+<h4>Concurrency<a class="headerlink" href="#concurrency" title="Permalink to this headline">¶</a></h4>
+<p>There are <code class="docutils literal notranslate"><span class="pre">3^6</span></code> ways to assign six numbers to three workers and <code class="docutils literal notranslate"><span class="pre">3^7</span></code> ways to assign seven, a factor of… 3 difference. So why does <code class="docutils literal notranslate"><span class="pre">MaxNum=7</span></code> increase the statespace <em>ninefold</em>?</p>
+<p>Because concurrency is against us, too! Imagine we’ve assigned the first six numbers and none of the workers have run yet. There are <em>nine</em> possible things that can happen:</p>
+<ul class="simple">
+<li><p>1-3: The writer assigns <code class="docutils literal notranslate"><span class="pre">7</span></code> to <code class="docutils literal notranslate"><span class="pre">w1</span></code>, <code class="docutils literal notranslate"><span class="pre">w2</span></code>, or <code class="docutils literal notranslate"><span class="pre">w3</span></code></p></li>
+<li><p>4-5: <code class="docutils literal notranslate"><span class="pre">w1</span></code> calls read on <em>either</em> of its two numbers</p></li>
+<li><p>6-9: either <code class="docutils literal notranslate"><span class="pre">w2</span></code> or <code class="docutils literal notranslate"><span class="pre">w3</span></code> calls read on its two numbers.</p></li>
+</ul>
+<p>Then if <code class="docutils literal notranslate"><span class="pre">w1</span></code> runs, there are eight possible next steps from <em>that</em>: the writer and the other workers can do their original actions, or <code class="docutils literal notranslate"><span class="pre">w1</span></code> can do <code class="docutils literal notranslate"><span class="pre">Update</span></code>. Concurrency gets messy very very quickly.</p>
+<p>In any case, we can see that the concurrency in the system is contributing about as much as the constants are, so we’ll need to reduce both to improve the state space.</p>
+</section>
+</section>
+</section>
+<section id="model-changes">
+<h2>Model changes<a class="headerlink" href="#model-changes" title="Permalink to this headline">¶</a></h2>
+<section id="use-smaller-constants">
+<h3>Use smaller constants<a class="headerlink" href="#use-smaller-constants" title="Permalink to this headline">¶</a></h3>
+<p>As we’ve already seen, using fewer workers and a lower <code class="docutils literal notranslate"><span class="pre">MaxNum</span></code> can each shrink the state space tenfold. This is usually the first recourse. Most bugs appear with small state spaces anyway, so there’s not much benefit to using enormous constant inputs. If you <em>do</em> need to model check very large constants, use a separate model config with small constants for fast iterations, and only check the larger model when the small one is passing.</p>
+<p>For this particular spec, reducing constants is enough to make the model checking tolerable. But that’s not always true, so the other techniques are still important.</p>
+</section>
+<section id="use-symmetry-sets">
+<h3>Use symmetry sets<a class="headerlink" href="#use-symmetry-sets" title="Permalink to this headline">¶</a></h3>
+<p>As a very rough rule of thumb, if you take an n-element set of model values and make it a <a class="reference internal" href="../core/constants.html#symmetry-set"><span class="std std-ref">Symmetry sets</span></a>, you’ll decrease the state space by a factor of about <span class="math notranslate nohighlight">\(n!\)</span>. In this case, making <code class="docutils literal notranslate"><span class="pre">Workers</span></code> a symmetry set reduces the state space to 4.7M states, a reduction of about 6.</p>
+<p>Note that if you’re using the cli, you’ll have to define the symmetry relaton in the model, like this:</p>
+<div class="literal-block-wrapper docutils container" id="id4">
+<div class="highlight-udiff notranslate"><div class="highlight"><pre><span></span><span class="w"> </span>CONSTANTS MaxNum, Workers<span class="w"></span>
+<span class="w"> </span>
+<span class="w"> </span>Constraint == TLCGet(&quot;level&quot;) &lt; 11<span class="w"></span>
+<span class="gi">+Symmetry == Permutations(Workers)</span><span class="w"></span>
+<span class="w"> </span>
+<span class="w"> </span>(*--algorithm alg<span class="w"></span>
+<span class="w"> </span>variables<span class="w"></span>
+</pre></div>
+</div>
+<div class="code-block-caption"><span class="caption-text"><span>4728962 states / 1374882 distinct</span> <a class="reference download internal" download="" href="../_downloads/dae3194928cea724846c1b9c1b7c9416/optimization.tla"><code class="xref download docutils literal notranslate"><span class="pre">spec</span></code></a></span><a class="headerlink" href="#id4" title="Permalink to this code">¶</a></div>
+</div>
+<p>Then put <code class="docutils literal notranslate"><span class="pre">SYMMETRY</span> <span class="pre">Symmetry</span></code> in your config file.</p>
+</section>
+<section id="separate-safety-and-liveness">
+<h3>Separate safety and liveness<a class="headerlink" href="#separate-safety-and-liveness" title="Permalink to this headline">¶</a></h3>
+<p>This isn’t an issue with this spec, but you should always have separate models for checking safety properties (invariants and <a class="reference internal" href="../core/action-properties.html#id2"><span class="std std-ref">action properties</span></a>) and liveness (everything else). Liveness checking is a <em>lot</em> slower than safety and it prevents symmetry set optimizations. Use smaller constants for your liveness checking.</p>
+</section>
+</section>
+<section id="reducing-concurrency">
+<h2>Reducing concurrency<a class="headerlink" href="#reducing-concurrency" title="Permalink to this headline">¶</a></h2>
+<section id="remove-loader-processes">
+<h3>Remove “loader” processes<a class="headerlink" href="#remove-loader-processes" title="Permalink to this headline">¶</a></h3>
+<p>The writer is what I call a “loader” process: all it does is manually set up <code class="docutils literal notranslate"><span class="pre">to_process</span></code>. While it can interleave with the workers, the interleaving doesn’t change the spec behavior. So we can replace the entire worker by figuring out all the possible end values of <code class="docutils literal notranslate"><span class="pre">to_process</span></code> and making it <em>start</em> <a class="reference internal" href="../core/pluscal.html#multiple-starting-states"><span class="std std-ref">as one of those values</span></a>.</p>
+<p>The writer assigns each number to exactly one worker, so by the end <code class="docutils literal notranslate"><span class="pre">to_process</span></code> will map each worker to disjoint <a class="reference internal" href="../core/operators.html#subset"><span class="std std-ref">subsets</span></a> of numbers. We can decompose that into two logical statements:</p>
+<ol class="arabic simple">
+<li><p>For each number, there’s a worker it belongs to, and</p></li>
+<li><p>It doesn’t belong to any other worker.</p></li>
+</ol>
+<div class="literal-block-wrapper docutils container" id="id5">
+<div class="highlight-udiff notranslate"><div class="highlight"><pre><span></span><span class="w"> </span>
+<span class="w"> </span>(*--algorithm alg<span class="w"></span>
+<span class="w"> </span>variables<span class="w"></span>
+<span class="gd">-  i = 1;</span><span class="w"></span>
+<span class="gd">-  to_process = [w \in Workers |-&gt; {}];</span><span class="w"></span>
+<span class="gi">+  to_process \in {</span><span class="w"></span>
+<span class="gi">+    tp \in [Workers -&gt; SUBSET (1..MaxNum)]:</span><span class="w"></span>
+<span class="gi">+      \A x \in 1..MaxNum:</span><span class="w"></span>
+<span class="gi">+        \E w \in Workers:</span><span class="w"></span>
+<span class="gi">+          /\ x \in tp[w]</span><span class="w"></span>
+<span class="gi">+          /\ \A w2 \in Workers \ {w}:</span><span class="w"></span>
+<span class="gi">+            x \notin tp[w2]</span><span class="w"></span>
+<span class="gi">+    }</span><span class="w"></span>
+<span class="w"> </span>
+<span class="gd">-process writer = &quot;writer&quot;</span><span class="w"></span>
+<span class="gd">-begin </span><span class="w"></span>
+<span class="gd">-  Write:</span><span class="w"></span>
+<span class="gd">-    while i &lt;= MaxNum do</span><span class="w"></span>
+<span class="gd">-      with w \in Workers do</span><span class="w"></span>
+<span class="gd">-        to_process[w] := @ \union {i};</span><span class="w"></span>
+<span class="gd">-        i := i + 1;</span><span class="w"></span>
+<span class="gd">-      end with;</span><span class="w"></span>
+<span class="gd">-    end while;</span><span class="w"></span>
+<span class="gd">-end process;</span><span class="w"></span>
+<span class="gi">+</span><span class="w"></span>
+<span class="w"> </span>
+<span class="w"> </span>process worker \in Workers<span class="w"></span>
+<span class="w"> </span>variable total = 0;<span class="w"></span>
+</pre></div>
+</div>
+<div class="code-block-caption"><span class="caption-text"><span>10794312 states / 3856467 distinct</span> <a class="reference download internal" download="" href="../_downloads/c3de009bbed549128087c8dfefb91985/optimization.tla"><code class="xref download docutils literal notranslate"><span class="pre">spec</span></code></a></span><a class="headerlink" href="#id5" title="Permalink to this code">¶</a></div>
+</div>
+<p>This change leads to a 3x reduction in states. That said, it also makes initializing states take a lot longer than it should. We’ll cover why <a class="reference internal" href="#construct-dont-filter"><span class="std std-ref">later</span></a>.</p>
+</section>
+<section id="do-more-in-each-action">
+<h3>Do more in each action<a class="headerlink" href="#do-more-in-each-action" title="Permalink to this headline">¶</a></h3>
+<p>Currently each worker takes two actions to process one number: one to pull a number from <code class="docutils literal notranslate"><span class="pre">to_process</span></code> and one to add it to <code class="docutils literal notranslate"><span class="pre">total</span></code>. This creates a place where another worker (or <code class="docutils literal notranslate"><span class="pre">writer</span></code>) can interrupt.</p>
+<p>Here’s a trick to estimate how much overhead this adds: let’s assume each worker has exactly one number in its <code class="docutils literal notranslate"><span class="pre">to_process</span></code>, so each of the three workers does exactly two steps in sequence. While each worker has to do the two steps in order, the workers are independent of each other. Then there will be</p>
+<blockquote>
+<div><div class="math notranslate nohighlight">
+\[\frac{\left(2+2+2\right)!}{2! \cdot 2!\cdot 2!} = 90\]</div>
+</div></blockquote>
+<p>possible behaviors, and <span class="math notranslate nohighlight">\(6 \cdot 90 = 540\)</span> new states.</p>
+<p>If we fuse the two labels into one, like this:</p>
+<div class="literal-block-wrapper docutils container" id="id6">
+<div class="highlight-udiff notranslate"><div class="highlight"><pre><span></span><span class="w"> </span>begin<span class="w"></span>
+<span class="w"> </span>  Read:<span class="w"></span>
+<span class="w"> </span>    with x \in to_process[self] do<span class="w"></span>
+<span class="gd">-      local := x;</span><span class="w"></span>
+<span class="gd">-      to_process[self] := @ \ {local};</span><span class="w"></span>
+<span class="gi">+      total := total + x;</span><span class="w"></span>
+<span class="gi">+      to_process[self] := @ \ {x};</span><span class="w"></span>
+<span class="w"> </span>    end with;<span class="w"></span>
+<span class="gd">-    Update:</span><span class="w"></span>
+<span class="gd">-      total := total + local;</span><span class="w"></span>
+<span class="gd">-      goto Read;</span><span class="w"></span>
+<span class="gi">+    goto Read;</span><span class="w"></span>
+<span class="w"> </span>end process;<span class="w"></span>
+<span class="w"> </span>
+<span class="w"> </span>end algorithm; *)<span class="w"></span>
+</pre></div>
+</div>
+<div class="code-block-caption"><span class="caption-text"><span>2353282 states / 534330 distinct</span> <a class="reference download internal" download="" href="../_downloads/344af0130b36a59bcf1d235b6c35bc5d/optimization.tla"><code class="xref download docutils literal notranslate"><span class="pre">spec</span></code></a></span><a class="headerlink" href="#id6" title="Permalink to this code">¶</a></div>
+</div>
+<p>Then we reduce the state space to just 2.4 million states!</p>
+<p>Fusing actions isn’t something you should do blindly. Remember, the point of writing a model in the first place is to find concurrency-based system flaws! You have to consciously think about the <em class="dfn">grain of atomicity</em> of your spec: how much you let be atomic and how much you let be interruptable. Choosing too coarse a grain might hide legitimate errors, while choosing too fine a grain might make model checking take too long.</p>
+</section>
+<section id="reduce-unintentional-nondeterminism">
+<h3>Reduce Unintentional Nondeterminism<a class="headerlink" href="#reduce-unintentional-nondeterminism" title="Permalink to this headline">¶</a></h3>
+<p>The <code class="docutils literal notranslate"><span class="pre">Read</span></code>, the worker is allowed to pull <em>any</em> number in its pool for processing. This makes the model robust against ordering: it works no matter <em>which</em> order we process items. But often we don’t care about <em>any</em> order, we care about a <em>specific</em> order! Maybe we process things in the order they were received, or we process the lowest items first, or something like that. So the spec is more nondeterministic than we actually need it to be.</p>
+<p>In this case, the algorithm is commutative and it doesn’t matter which order we use. So I’ll pick a completely arbitrary order via <code class="docutils literal notranslate"><span class="pre">CHOOSE</span></code>:</p>
+<div class="literal-block-wrapper docutils container" id="id7">
+<div class="highlight-udiff notranslate"><div class="highlight"><pre><span></span><span class="w"> </span>local = 0;<span class="w"></span>
+<span class="w"> </span>begin<span class="w"></span>
+<span class="w"> </span>  Read:<span class="w"></span>
+<span class="gd">-    with x \in to_process[self] do</span><span class="w"></span>
+<span class="gi">+    await to_process[self] # {};</span><span class="w"></span>
+<span class="gi">+    with x = CHOOSE x \in to_process[self]: TRUE do</span><span class="w"></span>
+<span class="w"> </span>      local := x;<span class="w"></span>
+<span class="w"> </span>      to_process[self] := @ \ {local};<span class="w"></span>
+<span class="w"> </span>    end with;<span class="w"></span>
+</pre></div>
+</div>
+<div class="code-block-caption"><span class="caption-text"><span>2052493 states / 651349 distinct</span> <a class="reference download internal" download="" href="../_downloads/21d5cef674d707d9c640d9ee3d733a13/optimization.tla"><code class="xref download docutils literal notranslate"><span class="pre">spec</span></code></a></span><a class="headerlink" href="#id7" title="Permalink to this code">¶</a></div>
+</div>
+<div class="admonition warning">
+<p class="admonition-title">Warning</p>
+<p>This is one of the rare cases where I’m comfortable with a <code class="docutils literal notranslate"><span class="pre">CHOOSE</span> <span class="pre">x</span> <span class="pre">\in</span> <span class="pre">set:</span> <span class="pre">TRUE</span></code>. Otherwise it’s <a class="reference internal" href="../core/operators.html#choose"><span class="std std-ref">deterministic</span></a>, which a lot of people don’t expect!</p>
+</div>
+<p>This reduces the state space to just 2.1 million states, our biggest reduction yet! This surprised me, but makes sense in retrospect. If the writer assigns every item to a single worker, it can pull the items out in <span class="math notranslate nohighlight">\(7! = 5040\)</span> different orders.</p>
+</section>
+<section id="use-bags-instead-of-sequences">
+<h3>Use Bags instead of Sequences<a class="headerlink" href="#use-bags-instead-of-sequences" title="Permalink to this headline">¶</a></h3>
+<p>What if the writer could send the same number twice? Then using a set for <code class="docutils literal notranslate"><span class="pre">to_process</span></code> would be a bug, since it’d remove the duplicate element. The easiest fix would be to replace it with a sequence:</p>
+<div class="highlight-tla notranslate"><div class="highlight"><pre><span></span><span class="n">to_process</span> <span class="o">=</span> <span class="p">[</span><span class="n">w</span> <span class="s">\in</span> <span class="n">Workers</span> <span class="o">|-&gt;</span> <span class="o">&lt;&lt;&gt;&gt;</span><span class="p">]</span>
+</pre></div>
+</div>
+<p>The problem with using a sequence is that it doesn’t just add redundancy, it adds <em>ordering</em>. <code class="docutils literal notranslate"><span class="pre">&lt;&lt;a,</span> <span class="pre">b,</span> <span class="pre">a&gt;&gt;</span></code> is a different sequence than <code class="docutils literal notranslate"><span class="pre">&lt;&lt;a,</span> <span class="pre">a,</span> <span class="pre">b&gt;&gt;</span></code>, leading to different states!</p>
+<p>If you want redundancy <em>without</em> ordering, use a <a class="reference internal" href="../reference/standard-library.html#bag"><span class="std std-ref">bag</span></a> instead:</p>
+<div class="highlight-tla notranslate"><div class="highlight"><pre><span></span><span class="n">to_process</span> <span class="o">=</span> <span class="p">[</span><span class="n">w</span> <span class="s">\in</span> <span class="n">Workers</span> <span class="o">|-&gt;</span> <span class="n">EmptyBag</span><span class="p">]</span>
+</pre></div>
+</div>
+<p>Then the bag <code class="docutils literal notranslate"><span class="pre">[a</span> <span class="pre">|-&gt;</span> <span class="pre">2,</span> <span class="pre">b</span> <span class="pre">|-&gt;</span> <span class="pre">1]</span></code> is unique.</p>
+</section>
+<section id="use-views">
+<h3>Use Views<a class="headerlink" href="#use-views" title="Permalink to this headline">¶</a></h3>
+<p>This is an advanced technique and should only be used with caution. To set it up, let’s say we add an auxiliary variable to track the last process run:</p>
+<div class="literal-block-wrapper docutils container" id="id8">
+<div class="highlight-udiff notranslate"><div class="highlight"><pre><span></span><span class="w"> </span>
+<span class="w"> </span>Constraint == TLCGet(&quot;level&quot;) &lt; 11<span class="w"></span>
+<span class="w"> </span>Symmetry == Permutations(Workers)<span class="w"></span>
+<span class="gd">-</span><span class="w"></span>
+<span class="w"> </span>(*--algorithm alg<span class="w"></span>
+<span class="w"> </span>variables<span class="w"></span>
+<span class="w"> </span>  i = 1;<span class="w"></span>
+<span class="w"> </span>  to_process = [w \in Workers |-&gt; {}];<span class="w"></span>
+<span class="gi">+  aux_last_run = &quot;none&quot;;</span><span class="w"></span>
+<span class="w"> </span>
+<span class="w"> </span>process writer = &quot;writer&quot;<span class="w"></span>
+<span class="w"> </span>begin <span class="w"></span>
+<span class="gu">@@ -18,6 +18,7 @@</span><span class="w"></span>
+<span class="w"> </span>        to_process[w] := @ \union {i};<span class="w"></span>
+<span class="w"> </span>        i := i + 1;<span class="w"></span>
+<span class="w"> </span>      end with;<span class="w"></span>
+<span class="gi">+      aux_last_run := &quot;writer&quot;;</span><span class="w"></span>
+<span class="w"> </span>    end while;<span class="w"></span>
+<span class="w"> </span>end process;<span class="w"></span>
+<span class="w"> </span>
+<span class="gu">@@ -30,8 +31,10 @@</span><span class="w"></span>
+<span class="w"> </span>      local := x;<span class="w"></span>
+<span class="w"> </span>      to_process[self] := @ \ {local};<span class="w"></span>
+<span class="w"> </span>    end with;<span class="w"></span>
+<span class="gi">+    aux_last_run := self;</span><span class="w"></span>
+<span class="w"> </span>    Update:<span class="w"></span>
+<span class="w"> </span>      total := total + local;<span class="w"></span>
+<span class="gi">+      aux_last_run := self;</span><span class="w"></span>
+<span class="w"> </span>      goto Read;<span class="w"></span>
+<span class="w"> </span>end process;<span class="w"></span>
+<span class="w"> </span>
+</pre></div>
+</div>
+<div class="code-block-caption"><span class="caption-text"><span>80081623 states / 23582803 distinct</span> <a class="reference download internal" download="" href="../_downloads/4e579a67ea20b6324340b022aa43181b/optimization.tla"><code class="xref download docutils literal notranslate"><span class="pre">spec</span></code></a></span><a class="headerlink" href="#id8" title="Permalink to this code">¶</a></div>
+</div>
+<p>This balloons the state space to 80M states! Behaviors that used to lead to the same state now lead to different states. But the difference is only in an auxiliary variable and shouldn’t affect the behavior of our spec.</p>
+<p>To determine if two states are distinct, TLC compares their values for <code class="docutils literal notranslate"><span class="pre">&lt;&lt;i,</span> <span class="pre">pc,</span> <span class="pre">to_process,</span> <span class="pre">aux_last_run&gt;&gt;</span></code>. If we want, we can tell TLC instead compare them with <code class="docutils literal notranslate"><span class="pre">&lt;&lt;i,</span> <span class="pre">pc,</span> <span class="pre">to_process&gt;&gt;</span></code> and ignore <code class="docutils literal notranslate"><span class="pre">aux_last_run</span></code> entirely. This called setting a <a class="reference internal" href="toolbox.html#view"><span class="std std-ref">view</span></a>. First we add an operator corresponding to our view:</p>
+<div class="literal-block-wrapper docutils container" id="id9">
+<div class="highlight-udiff notranslate"><div class="highlight"><pre><span></span><span class="w"> </span>  i = 1;<span class="w"></span>
+<span class="w"> </span>  to_process = [w \in Workers |-&gt; {}];<span class="w"></span>
+<span class="w"> </span>  aux_last_run = &quot;none&quot;;<span class="w"></span>
+<span class="gi">+</span><span class="w"></span>
+<span class="gi">+define</span><span class="w"></span>
+<span class="gi">+  view == &lt;&lt;i, to_process, pc, total&gt;&gt;</span><span class="w"></span>
+<span class="gi">+end define;</span><span class="w"></span>
+<span class="w"> </span>
+<span class="w"> </span>process writer = &quot;writer&quot;<span class="w"></span>
+<span class="w"> </span>begin <span class="w"></span>
+</pre></div>
+</div>
+<div class="code-block-caption"><span class="caption-text"><span>1018176 states / 206964 distinct</span> <a class="reference download internal" download="" href="../_downloads/dc7de9ce233b6df9c7d3fbc20a10084e/optimization.tla"><code class="xref download docutils literal notranslate"><span class="pre">spec</span></code></a></span><a class="headerlink" href="#id9" title="Permalink to this code">¶</a></div>
+</div>
+<p>Then we tell TLC to use <code class="docutils literal notranslate"><span class="pre">view</span></code> as our view. In the Toolbox that’s under <code class="docutils literal notranslate"><span class="pre">TLC</span> <span class="pre">Options</span> <span class="pre">&gt;</span> <span class="pre">Checking</span> <span class="pre">ode</span> <span class="pre">&gt;</span> <span class="pre">View</span></code>. In the <a class="reference internal" href="cli.html#topic-cli"><span class="std std-ref">cli</span></a> add  <code class="docutils literal notranslate"><span class="pre">VIEW</span> <span class="pre">view</span></code> to the config.</p>
+<p>Adding the new view reduces our state space to just one million states… <em>less</em> than the amount in our basic spec. I forgot that each writer has <code class="docutils literal notranslate"><span class="pre">total</span></code> and <code class="docutils literal notranslate"><span class="pre">local</span></code> variables, too, which needs to be part of our view. Since that’s local to the process we can’t reference it in a <code class="docutils literal notranslate"><span class="pre">define</span></code> block and need to put the whole thing below our translation.</p>
+<div class="literal-block-wrapper docutils container" id="id10">
+<div class="highlight-udiff notranslate"><div class="highlight"><pre><span></span><span class="w"> </span>  i = 1;<span class="w"></span>
+<span class="w"> </span>  to_process = [w \in Workers |-&gt; {}];<span class="w"></span>
+<span class="w"> </span>  aux_last_run = &quot;none&quot;;<span class="w"></span>
+<span class="gd">-</span><span class="w"></span>
+<span class="gd">-define</span><span class="w"></span>
+<span class="gd">-  view == &lt;&lt;i, to_process, pc, total&gt;&gt;</span><span class="w"></span>
+<span class="gd">-end define;</span><span class="w"></span>
+<span class="w"> </span>
+<span class="w"> </span>process writer = &quot;writer&quot;<span class="w"></span>
+<span class="w"> </span>begin <span class="w"></span>
+<span class="gu">@@ -43,4 +39,7 @@</span><span class="w"></span>
+<span class="w"> </span>end process;<span class="w"></span>
+<span class="w"> </span>
+<span class="w"> </span>end algorithm; *)<span class="w"></span>
+<span class="gi">+\* under the translation</span><span class="w"></span>
+<span class="gi">+view == &lt;&lt;i, to_process, pc, total, local&gt;&gt;</span><span class="w"></span>
+<span class="gi">+</span><span class="w"></span>
+<span class="w"> </span>====<span class="w"></span>
+</pre></div>
+</div>
+<div class="code-block-caption"><span class="caption-text"><span>28351303 states / 8241961 distinct</span> <a class="reference download internal" download="" href="../_downloads/bb2453a610e94f5373d3a6e35102fa52/optimization.tla"><code class="xref download docutils literal notranslate"><span class="pre">spec</span></code></a></span><a class="headerlink" href="#id10" title="Permalink to this code">¶</a></div>
+</div>
+<p>Views can nullify the state-space impact of adding an aux variable, but it’s also really easy to remove valid states, too, so be very careful when you use them.</p>
+</section>
+<section id="reduce-spec-detail">
+<h3>Reduce Spec Detail<a class="headerlink" href="#reduce-spec-detail" title="Permalink to this headline">¶</a></h3>
+<p>Finally, notice everything we’re <em>not</em> modeling. We’re not modeling how workers are discovered. We’re not modeling the connection protocol. We’re not modeling any kind of transient errors, or any detail about the payload besides a single number.</p>
+<p>This is the most important heuristic about state space optimization: <strong>the more detailed your model, the more states you will have</strong>. I often see beginners model things like <code class="docutils literal notranslate"><span class="pre">load</span> <span class="pre">\in</span> <span class="pre">[Server</span> <span class="pre">-&gt;</span> <span class="pre">0..100]</span></code>. A more experienced modeller would instead write something like <code class="docutils literal notranslate"><span class="pre">load</span> <span class="pre">\in</span> <span class="pre">[Server</span> <span class="pre">-&gt;</span> <span class="pre">0..3]</span></code>. Or, if they could get away with it, <code class="docutils literal notranslate"><span class="pre">overloaded</span> <span class="pre">\in</span> <span class="pre">[Server</span> <span class="pre">-&gt;</span> <span class="pre">BOOLEAN]</span></code>.</p>
+<p>Get in the habit of modeling only what matters to your system, and you’ll have a better experience.</p>
+<div class="admonition tip">
+<p class="admonition-title">Tip</p>
+<p>If you <em>do</em> need to model a detailed system, it’s often best to first write a simple, high-level specification and then put the detailed system in a <a class="reference internal" href="refinement.html#topic-refinement"><span class="std std-ref">refinement</span></a>.</p>
+</div>
+</section>
+</section>
+<section id="checking-states-faster">
+<h2>Checking States Faster<a class="headerlink" href="#checking-states-faster" title="Permalink to this headline">¶</a></h2>
+<p>It’s easier to reduce the state space than it is to get the model checker to crunch more states a second. Nonetheless, there’s a few things you can do to improve the latter.</p>
+<section id="use-the-profiler">
+<h3>Use the profiler<a class="headerlink" href="#use-the-profiler" title="Permalink to this headline">¶</a></h3>
+<p>The TLA+ Toolbox comes with a profiler. You can find it under the “TLC options” page:</p>
+<a class="reference external image-reference" href="../_images/optimization_enable_profiler.png"><img alt="../_images/optimization_enable_profiler.png" src="../_images/optimization_enable_profiler.png" /></a>
+<p>Here’s the profiler on one of our prior optimizations, where we replaced the writer with a function set:</p>
+<a class="reference external image-reference" href="../_images/optimization_use_profiler.png"><img alt="../_images/optimization_use_profiler.png" src="../_images/optimization_use_profiler.png" /></a>
+<p>On the left I have the number of invocations per expression and on the right the “cost” per expression, an abstract measure of how much it contributed to model checking time. The profiler can also show how many new and distinct states each action generated. Note that while we’re profiling a PlusCal spec, the metrics are only for the translated TLA+.</p>
+<p>Notice something interesting about this? The two biggest costs are the <code class="docutils literal notranslate"><span class="pre">Update(self)</span></code> action and the function set inside <code class="docutils literal notranslate"><span class="pre">Init</span></code>. But <code class="docutils literal notranslate"><span class="pre">Update</span></code> is invoked millions of times while the function set is invoked <em>once</em>. If we did something similar in an action, we’d expect it to significantly slow down our model checking.</p>
+<p>So what <em>specifically</em> is wrong with it?</p>
+</section>
+<section id="construct-don-t-filter">
+<span id="construct-dont-filter"></span><h3>Construct, don’t Filter<a class="headerlink" href="#construct-don-t-filter" title="Permalink to this headline">¶</a></h3>
+<p>Here’s how we computed <code class="docutils literal notranslate"><span class="pre">to_process</span></code>:</p>
+<div class="highlight-tla notranslate"><div class="highlight"><pre><span></span><span class="n">to_process</span> <span class="s">\in</span> <span class="n">{</span>
+ <span class="n">tp</span> <span class="s">\in</span> <span class="p">[</span><span class="n">Workers</span> <span class="o">-&gt;</span> <span class="n">SUBSET</span> <span class="m">1</span><span class="o">..</span><span class="n">MaxNum</span><span class="p">]:</span>
+   <span class="s">\A</span> <span class="n">x</span> <span class="s">\in</span> <span class="m">1</span><span class="o">..</span><span class="n">MaxNum</span><span class="p">:</span>
+     <span class="s">\E</span> <span class="n">w</span> <span class="s">\in</span> <span class="n">Workers</span><span class="p">:</span>
+       <span class="o">/\</span> <span class="n">x</span> <span class="s">\in</span> <span class="n">tp</span><span class="p">[</span><span class="n">w</span><span class="p">]</span>
+       <span class="o">/\</span> <span class="s">\A</span> <span class="n">w2</span> <span class="s">\in</span> <span class="n">Workers</span> <span class="o">\</span> <span class="n">{w}</span><span class="p">:</span>
+         <span class="n">x</span> <span class="s">\notin</span> <span class="n">tp</span><span class="p">[</span><span class="n">w2</span><span class="p">]</span>
+ <span class="n">}</span>
+</pre></div>
+</div>
+<p>Remember <a class="reference internal" href="#id1"><span class="std std-ref">from our description earlier</span></a> that a function set <code class="docutils literal notranslate"><span class="pre">[A</span> <span class="pre">-&gt;</span> <span class="pre">B]</span></code> has <span class="math notranslate nohighlight">\(|B|^{|A|}\)</span> elements, and the power set <code class="docutils literal notranslate"><span class="pre">SUBSET</span> <span class="pre">B</span></code> has <code class="docutils literal notranslate"><span class="pre">2^|B|</span></code> elements. Putting these together, <code class="docutils literal notranslate"><span class="pre">[Workers</span> <span class="pre">-&gt;</span> <span class="pre">SUBSET</span> <span class="pre">1..MaxNum]</span></code> has <span class="math notranslate nohighlight">\((2^7)^3 = 2.1e6\)</span> elements. We know from earlier that there’s only about 2000 valid configurations, so we’re throwing out 99.98% of the set anyway.</p>
+<p>Instead of generating a big set and filtering it to a smaller set, it’s more efficient to try generating the small set directly. In this case, our system stores a map of workers to items, but it guarantees that each number is mapped to exactly one worker. Let’s get</p>
+<div class="highlight-tla notranslate"><div class="highlight"><pre><span></span><span class="n">to_process</span> <span class="s">\in</span> <span class="k k-Conditional">LET</span>
+  <span class="n">i_to_worker</span> <span class="o">==</span> <span class="p">[</span><span class="m">1</span><span class="o">..</span><span class="n">MaxNum</span> <span class="o">-&gt;</span> <span class="n">Workers</span><span class="p">]</span> <span class="c">\* Map of items to workers</span>
+<span class="n">IN</span>
+  <span class="n">{</span> <span class="p">[</span><span class="n">w</span> <span class="s">\in</span> <span class="n">Workers</span> <span class="o">|-&gt;</span>  <span class="c">\* Each worker is mapped to</span>
+      <span class="n">{x</span> <span class="s">\in</span> <span class="m">1</span><span class="o">..</span><span class="n">MaxNum</span><span class="p">:</span> <span class="c">\* the set of items which</span>
+      <span class="n">itw</span><span class="p">[</span><span class="n">x</span><span class="p">]</span> <span class="o">=</span> <span class="n">w}</span><span class="p">]:</span>     <span class="c">\* itw maps to that worker</span>
+    <span class="n">itw</span> <span class="s">\in</span> <span class="n">i_to_worker}</span>
+</pre></div>
+</div>
+<p>This doesn’t change the number of states generated but nonetheless makes the spec complete more quickly.</p>
+</section>
+<section id="don-t-write-doubly-recursive-function-definitions">
+<h3>Don’t write doubly-recursive function definitions<a class="headerlink" href="#don-t-write-doubly-recursive-function-definitions" title="Permalink to this headline">¶</a></h3>
+<p>Self-explanatory.</p>
+</section>
+<section id="use-overrides">
+<h3>Use Overrides<a class="headerlink" href="#use-overrides" title="Permalink to this headline">¶</a></h3>
+<p>The TLC module <em>defines</em> <code class="docutils literal notranslate"><span class="pre">SortSeq</span></code> and <code class="docutils literal notranslate"><span class="pre">Permutations</span></code> as</p>
+<div class="highlight-tla notranslate"><div class="highlight"><pre><span></span><span class="n">Permutations</span><span class="p">(</span><span class="n">S</span><span class="p">)</span> <span class="o">==</span>
+   <span class="n">{f</span> <span class="s">\in</span> <span class="p">[</span><span class="n">S</span> <span class="o">-&gt;</span> <span class="n">S</span><span class="p">]</span> <span class="p">:</span> <span class="s">\A</span> <span class="n">w</span> <span class="s">\in</span> <span class="n">S</span> <span class="p">:</span> <span class="s">\E</span> <span class="n">v</span> <span class="s">\in</span> <span class="n">S</span> <span class="p">:</span> <span class="n">f</span><span class="p">[</span><span class="n">v</span><span class="p">]</span><span class="o">=</span><span class="n">w}</span>
+
+<span class="n">SortSeq</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">Op</span><span class="p">(</span><span class="n">_</span><span class="p">,</span> <span class="n">_</span><span class="p">))</span> <span class="o">==</span>
+    <span class="k k-Conditional">LET</span> <span class="n">Perm</span> <span class="o">==</span> <span class="s">CHOOSE</span> <span class="n">p</span> <span class="s">\in</span> <span class="n">Permutations</span><span class="p">(</span><span class="m">1</span> <span class="o">..</span> <span class="n">Len</span><span class="p">(</span><span class="n">s</span><span class="p">))</span> <span class="p">:</span>
+      <span class="c">\* etc</span>
+</pre></div>
+</div>
+<p>So to sort a ten item list, you’d first generate a <span class="math notranslate nohighlight">\(10^{10}\)</span> element function set, then filter that down to <span class="math notranslate nohighlight">\(10!\)</span> items, <em>then</em> iterate over those 3-odd million elements to find the sorted sequence. That’s insane, and so the model checker much-more-reasonably <a class="reference external" href="insertion_sort">does an insertion sort</a> at the Java level. If you know Java you can override any operator with a faster implementation. It’s not something I’ve ever done, but to my understanding you can see some examples of overridden implementations <a class="reference external" href="https://github.com/tlaplus/CommunityModules/tree/master/modules/tlc2/overrides">here</a>.</p>
+</section>
+<section id="use-refactor-properties">
+<h3>Use Refactor Properties<a class="headerlink" href="#use-refactor-properties" title="Permalink to this headline">¶</a></h3>
+<p>See <a class="reference internal" href="tips.html#action-refactoring"><span class="std std-ref">here</span></a>. This is a good way to check if your optimizations aren’t changing the state space.</p>
+</section>
+</section>
+<section id="misc">
+<h2>Misc<a class="headerlink" href="#misc" title="Permalink to this headline">¶</a></h2>
+<section id="reduce-memory-allocation">
+<h3>Reduce Memory Allocation<a class="headerlink" href="#reduce-memory-allocation" title="Permalink to this headline">¶</a></h3>
+<p>If you’re running a small model with a lot of RAM, the JVM can waste a lot of time preallocating memory you won’t use. It’s usually not a big deal but on very large machines with 500+gb I’ve seen this take several minutes for a 20-second spec. In these specific cases, reducing the ram allocated can make a very big difference.</p>
+</section>
+<section id="ignore-part-of-the-state-space">
+<h3>Ignore part of the state space<a class="headerlink" href="#ignore-part-of-the-state-space" title="Permalink to this headline">¶</a></h3>
+<p>This is easier to do in raw TLA+ than it is in PlusCal. By adding additional constraints onto Init and Next, you can artificially constraint TLC to the part of the state space you’re most interested in. I recommend doing this as separate operators, like so:</p>
+<div class="highlight-tla notranslate"><div class="highlight"><pre><span></span><span class="n">Init</span> <span class="o">==</span>
+  <span class="n">x</span> <span class="s">\in</span> <span class="m">1</span><span class="o">..</span><span class="m">10</span>
+
+<span class="n">FastInit</span> <span class="o">==</span>
+  <span class="o">/\</span> <span class="n">Init</span>
+  <span class="o">/\</span> <span class="n">x</span> <span class="o">=</span> <span class="m">3</span>
+
+<span class="n">Next</span> <span class="o">==</span>
+  <span class="o">\/</span> <span class="n">IncX</span>
+  <span class="o">\/</span> <span class="n">DecX</span>
+
+<span class="n">FastNext</span> <span class="o">==</span>
+  <span class="o">/\</span> <span class="n">Next</span>
+  <span class="o">/\</span> <span class="n">IncX</span> <span class="o">=&gt;</span> <span class="n">x&#39;</span> <span class="o">&lt;</span> <span class="m">5</span>
+
+<span class="n">FastSpec</span> <span class="o">==</span> <span class="n">FastInit</span> <span class="o">/\</span> <span class="ni">[]</span><span class="p">[</span><span class="n">FastNext</span><span class="p">]</span><span class="n">_vars</span>
+</pre></div>
+</div>
+<p>You can also do this with <a class="reference internal" href="toolbox.html#state-constraint"><span class="std std-ref">state</span></a> and <a class="reference internal" href="toolbox.html#action-constraint"><span class="std std-ref">action</span></a> constraints, but I prefer writing a new spec. Couldn’t tell you why.</p>
+</section>
+<section id="try-apalache">
+<h3>Try Apalache<a class="headerlink" href="#try-apalache" title="Permalink to this headline">¶</a></h3>
+<p><a class="reference external" href="https://apalache-mc.org/">Apalache</a> is an alternative model checker for TLA+. It doesn’t <a class="reference external" href="https://apalache-mc.org/docs/apalache/features.html">support the full language yet</a> but I’ve heard that it’s faster on some kinds of specs. It also has a <a class="reference external" href="https://apalache-mc.org/docs/tutorials/snowcat-tutorial.html">type system</a>!</p>
+</section>
+<section id="fiddle-with-jvm-arguments">
+<h3>Fiddle with JVM Arguments<a class="headerlink" href="#fiddle-with-jvm-arguments" title="Permalink to this headline">¶</a></h3>
+<p>I have no idea how the JVM works and would welcome any suggestions how to tweak it to model check better.</p>
+</section>
+</section>
+</section>
+
+
+            <div class="clearer"></div>
+          </div>
+        </div>
+      </div>
+    
+        <div id="show_right_sidebar">
+            <p><a class="toggle_right_sidebar" href="#"><span class="icon">&lt;</span><span>Page contents</span></a></p>
+        </div>
+
+        <div id="right_sidebar">
+            <p><a class="toggle_right_sidebar" href="#"><span class="icon">&gt;</span><span>Page contents:</span></a></p>
+            <div class="page_toc">
+                <ul>
+<li><a class="reference internal" href="#">Optimizing Model Checking</a><ul>
+<li><a class="reference internal" href="#before-you-begin">Before you begin</a></li>
+<li><a class="reference internal" href="#overview">Overview</a><ul>
+<li><a class="reference internal" href="#the-spec">The Spec</a></li>
+<li><a class="reference internal" href="#the-basics">The Basics</a></li>
+<li><a class="reference internal" href="#estimating-the-state-space">Estimating the state space</a><ul>
+<li><a class="reference internal" href="#set-sizes">Set Sizes</a></li>
+<li><a class="reference internal" href="#concurrency">Concurrency</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li><a class="reference internal" href="#model-changes">Model changes</a><ul>
+<li><a class="reference internal" href="#use-smaller-constants">Use smaller constants</a></li>
+<li><a class="reference internal" href="#use-symmetry-sets">Use symmetry sets</a></li>
+<li><a class="reference internal" href="#separate-safety-and-liveness">Separate safety and liveness</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#reducing-concurrency">Reducing concurrency</a><ul>
+<li><a class="reference internal" href="#remove-loader-processes">Remove “loader” processes</a></li>
+<li><a class="reference internal" href="#do-more-in-each-action">Do more in each action</a></li>
+<li><a class="reference internal" href="#reduce-unintentional-nondeterminism">Reduce Unintentional Nondeterminism</a></li>
+<li><a class="reference internal" href="#use-bags-instead-of-sequences">Use Bags instead of Sequences</a></li>
+<li><a class="reference internal" href="#use-views">Use Views</a></li>
+<li><a class="reference internal" href="#reduce-spec-detail">Reduce Spec Detail</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#checking-states-faster">Checking States Faster</a><ul>
+<li><a class="reference internal" href="#use-the-profiler">Use the profiler</a></li>
+<li><a class="reference internal" href="#construct-don-t-filter">Construct, don’t Filter</a></li>
+<li><a class="reference internal" href="#don-t-write-doubly-recursive-function-definitions">Don’t write doubly-recursive function definitions</a></li>
+<li><a class="reference internal" href="#use-overrides">Use Overrides</a></li>
+<li><a class="reference internal" href="#use-refactor-properties">Use Refactor Properties</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#misc">Misc</a><ul>
+<li><a class="reference internal" href="#reduce-memory-allocation">Reduce Memory Allocation</a></li>
+<li><a class="reference internal" href="#ignore-part-of-the-state-space">Ignore part of the state space</a></li>
+<li><a class="reference internal" href="#try-apalache">Try Apalache</a></li>
+<li><a class="reference internal" href="#fiddle-with-jvm-arguments">Fiddle with JVM Arguments</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+            </div>
+        </div>
+    
+
+      <div class="clearer"></div>
+    </div>
+    <div class="button_nav_wrapper">
+        <div class="button_nav">
+            <div class="left">
+                
+                <a href="unbound-models.html">
+                    <span class="icon">&lt;</span><span>Handling Unbound Models</span></a>
+                
+            </div>
+
+            <div class="right">
+                
+                    <a href="message-queues.html"><span>Modelling Message Queues</span><span class="icon">&gt;</span></a>
+                
+            </div>
+        </div>
+    </div>
+
+
+    <div class="footer" role="contentinfo">
+        &#169; Copyright 2022, Hillel Wayne.
+      Created using <a href="https://www.sphinx-doc.org/">Sphinx</a> 4.4.0.
+    </div>
+
+<p id="theme_credit">Styled using the <a href="https://github.com/piccolo-orm/piccolo_theme">Piccolo Theme</a></p>
+  </body>
+</html>
