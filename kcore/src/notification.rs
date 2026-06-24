@@ -375,6 +375,13 @@ pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
         // `lemma_thread_hold_frame`; `waiter_refs(o)` for `o != n` via `lemma_waiter_refs_frame`;
         // slot/chan/timer by the view frames). `census_delta_frozen`, `census_off_by_one`
         // preservation, and `census_dom_complete` preservation all derive from this.
+        //
+        // Proven inline rather than via `cspace::lemma_waiter_dequeue_census` (the shared map
+        // lemma `remove_waiter` uses): the wake's `make_runnable` enqueue leaves this context
+        // carrying the ready-queue/`p_opt` term families, so discharging that lemma's `requires`
+        // here costs *more* than the inline derivation saves — the extraction measurably
+        // regressed `signal` (rlimit +63 %) while it cut `remove_waiter` by half (§10's
+        // "small context" payoff only lands when the caller's context is already small).
         assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o)
             == (if o == n { (cspace::obj_census(old(store), n) - 1) as nat } else {
                 cspace::obj_census(old(store), o)
@@ -619,8 +626,10 @@ pub fn wait<S: Store>(store: &mut S, n: ObjId, cur: ObjId) -> (res: Option<u64>)
         assert(cspace::waiter_refs(nv0, tv0, n) == ws0.len());
         assert(cspace::waiter_refs(nvf, tvf, n) == pws.len());
         assert(pws.len() == ws0.len() + 1);
-        // `wait_notif` is written for `cur` alone (the tail set touches only `qnext`); and the
-        // only non-`cur` TCB written is the old tail, which keeps its on-`n`-chain `wait_notif`.
+        // `wait_notif` is written for `cur` alone (None → Some(n); the tail set touches only
+        // `qnext`); the only non-`cur` TCB written is the old tail, which keeps its on-`n`-chain
+        // `wait_notif == Some(n)`. So every changed TCB names `n` (or was detached) in both
+        // states — the shared shape `lemma_waiter_enqueue_census` keys on.
         assert forall|k: ObjId| #[trigger] tvf[k] != tv0[k] && k != cur implies
             old_tail == Some(k) by {}
         assert(old_tail matches Some(tl) ==> tv0[tl].wait_notif == Some(n)) by {
@@ -632,27 +641,20 @@ pub fn wait<S: Store>(store: &mut S, n: ObjId, cur: ObjId) -> (res: Option<u64>)
             }
         }
         assert(tvf.dom() == tv0.dom());
+        assert(nvf == nv0.insert(n, nvf[n]));
         assert forall|k: ObjId| #[trigger] tvf[k].cspace == tv0[k].cspace by {}
         assert forall|k: ObjId| #[trigger] tvf[k].aspace == tv0[k].aspace by {}
-        assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o)
-            == (if o == n { (cspace::obj_census(old(store), n) + 1) as nat } else {
-                cspace::obj_census(old(store), o)
-            }) by {
-            cspace::lemma_thread_hold_frame(tv0, tvf, o);
-            if o != n {
-                assert(nvf[o] == nv0[o]);
-                assert forall|k: ObjId| #[trigger] tvf[k] != tv0[k]
-                    implies tv0[k].wait_notif != Some(o) && tvf[k].wait_notif != Some(o) by {
-                    if k == cur {
-                        assert(tv0[cur].wait_notif is None);
-                    } else {
-                        assert(old_tail == Some(k));
-                        assert(tvf[k].wait_notif == tv0[k].wait_notif);
-                    }
-                }
-                cspace::lemma_waiter_refs_frame(nv0, tv0, nvf, tvf, n, o);
+        assert forall|k: ObjId| #[trigger] tvf[k] != tv0[k]
+            implies (tv0[k].wait_notif is None || tv0[k].wait_notif == Some(n))
+                && (tvf[k].wait_notif is None || tvf[k].wait_notif == Some(n)) by {
+            if k == cur {
+                assert(tv0[cur].wait_notif is None);
+            } else {
+                assert(old_tail == Some(k));
+                assert(tvf[k].wait_notif == tv0[k].wait_notif);
             }
         }
+        cspace::lemma_waiter_enqueue_census(old(store), store, n);
         assert(cspace::census_delta_frozen(old(store), store));
         if cspace::refcount_sound(old(store)) {
             cspace::lemma_refcount_sound_from_frozen(old(store), store);
@@ -712,8 +714,10 @@ pub fn destroy_notif<S: Store>(store: &mut S, n: ObjId)
 /// `signal`.
 // Carrying the ready-queue pair through the splice-walk loop invariant adds proof load
 // to an already-heavy loop body; the private resource cap (own Z3 instance) holds margin.
+// Lifting the per-object census map into `cspace::lemma_waiter_dequeue_census` halved this
+// obligation's rlimit, so the budget is reduced from its former 40M-cap value.
 #[verifier::spinoff_prover]
-#[verifier::rlimit(40)]
+#[verifier::rlimit(25)]
 pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
     requires
         old(store).notif_view().dom().contains(n),
@@ -932,38 +936,33 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
                 cspace::lemma_waiter_chain_unique(nvf, tvf, n,
                     cspace::waiter_seq(nvf, tvf, n), ws0.remove(k));
                 assert(cspace::notif_wf(nvf, tvf, n));
-                // census_delta_frozen: `refs[n]` dropped by one, matched by `waiter_refs(n)`
-                // losing `t` (`waiter_seq(n) == ws0.remove(k)`, one shorter); every other
-                // object's census is framed. Only `t` and its chain predecessor moved, both
-                // chain nodes naming `n`, so for `x != n` no node of `x`'s chain changed;
-                // cspace/aspace untouched everywhere. So `refs[x] - census(x)` is frozen.
+                // The splice dequeues exactly one waiter (`t`) from `n`: `refs[n]` drops by one,
+                // matched by `waiter_seq(n)` losing `t`, and every other census term is framed.
+                // The per-object census map (`cspace::lemma_waiter_dequeue_census`) yields the
+                // frozen delta — and below, `census_dom_complete`-preservation; the body proves
+                // only the cheap local facts it keys on (§10).
                 ws0.remove_ensures(k);
                 assert(cspace::waiter_refs(nv0, tv0, n) == ws0.len());
                 assert(cspace::waiter_refs(nvf, tvf, n) == ws0.remove(k).len());
-                assert forall|kk: ObjId| #[trigger] tvf[kk] != tv0[kk]
-                    implies tv0[kk].wait_notif == Some(n) by {
-                    if tvf[kk] != tv0[kk] {
-                        assert(tvf[kk].qnext != tv0[kk].qnext || tvf[kk].wait_notif != tv0[kk].wait_notif);
-                    }
-                }
                 assert(store.refs_view().dom() == old(store).refs_view().dom());
-                assert forall|x: ObjId| old(store).refs_view().dom().contains(x) implies
-                    store.refs_view()[x] + cspace::obj_census(old(store), x)
-                        == old(store).refs_view()[x] + #[trigger] cspace::obj_census(store, x) by {
-                    cspace::lemma_thread_hold_frame(tv0, tvf, x);
-                    if x != n {
-                        assert forall|kk: ObjId| #[trigger] tvf[kk] != tv0[kk]
-                            implies tv0[kk].wait_notif != Some(x)
-                                && tvf[kk].wait_notif != Some(x) by {
-                            if tvf[kk] != tv0[kk] {
-                                assert(tv0[kk].wait_notif == Some(n));
-                            }
-                        }
-                        cspace::lemma_waiter_refs_frame(nv0, tv0, nvf, tvf, n, x);
+                assert(store.refs_view()
+                    == old(store).refs_view().insert(n, (old(store).refs_view()[n] - 1) as nat));
+                assert(nvf == nv0.insert(n, nvf[n]));
+                assert forall|kk: ObjId| #[trigger] tvf[kk].cspace == tv0[kk].cspace by {}
+                assert forall|kk: ObjId| #[trigger] tvf[kk].aspace == tv0[kk].aspace by {}
+                // Only `t` and its chain predecessor moved, both naming `n`: `wait_notif` is
+                // `Some(n)` before, and `Some(n)` or `None` (only `t` clears it) after.
+                assert forall|kk: ObjId| #[trigger] tvf[kk] != tv0[kk]
+                    implies (tv0[kk].wait_notif is None || tv0[kk].wait_notif == Some(n))
+                        && (tvf[kk].wait_notif is None || tvf[kk].wait_notif == Some(n)) by {
+                    assert(tvf[kk].qnext != tv0[kk].qnext || tvf[kk].wait_notif != tv0[kk].wait_notif);
+                    assert(tv0[kk].wait_notif == Some(n));
+                    if kk != t {
+                        assert(tvf[kk].wait_notif == tv0[kk].wait_notif);
                     }
                 }
-                // refcount_sound (conditional): the frozen delta just established
-                // bridges it.
+                cspace::lemma_waiter_dequeue_census(old(store), store, n);
+                // refcount_sound (conditional): the frozen delta the map yields bridges it.
                 assert(cspace::census_delta_frozen(old(store), store));
                 if cspace::refcount_sound(old(store)) {
                     cspace::lemma_refcount_sound_from_frozen(old(store), store);
@@ -1012,26 +1011,12 @@ pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
                     assert(cspace::end_caps_sound(store));
                 }
                 if cspace::census_dom_complete(old(store)) {
-                    // Every census term is framed for `o != n`; `n`'s waiter term dropped one.
-                    // So `census(store,o) <= census(old,o)` everywhere, and the refs domain is
-                    // unchanged (line above), so the coverage carries.
-                    assert forall|o: ObjId| o != n implies #[trigger] cspace::obj_census(store, o)
-                        == cspace::obj_census(old(store), o) by {
-                        cspace::lemma_thread_hold_frame(tv0, tvf, o);
-                        assert forall|kk: ObjId| #[trigger] tvf[kk] != tv0[kk]
-                            implies tv0[kk].wait_notif != Some(o) && tvf[kk].wait_notif != Some(o) by {
-                            if tvf[kk] != tv0[kk] { assert(tv0[kk].wait_notif == Some(n)); }
-                        }
-                        cspace::lemma_waiter_refs_frame(nv0, tv0, nvf, tvf, n, o);
-                    }
-                    assert(cspace::obj_census(store, n) + 1 == cspace::obj_census(old(store), n)) by {
-                        cspace::lemma_thread_hold_frame(tv0, tvf, n);
-                    }
+                    // The map gives `census(store,o) <= census(old,o)` everywhere, so a positive
+                    // post-census `o` had a positive pre-census ⇒ it was covered; the refs domain
+                    // is unchanged, so the coverage carries.
                     assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o) >= 1
                         implies store.refs_view().dom().contains(o) by {
-                        if o != n {
-                            assert(cspace::obj_census(old(store), o) == cspace::obj_census(store, o));
-                        }
+                        assert(cspace::obj_census(old(store), o) >= 1);
                         cspace::lemma_in_refs_from_census(old(store), o);
                     }
                 }
