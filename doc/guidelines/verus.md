@@ -430,6 +430,25 @@ Practical refinements:
   lemma whose conclusion never reads it — that manufactures a spurious obligation at
   every call site (and can blow rlimit) while proving nothing.
 
+**Align and label parallel `wf`-re-establishment proofs — a zero-cost clarity win.**
+When a predicate has several named clauses and multiple lemmas each re-prove a subset
+after different edits, give them one uniform shape and put a `// (clause-name)`
+comment above each `assert forall` sub-block naming the clause it discharges; a lemma
+touching only some clauses says so in its header and labels only those sub-blocks,
+noting the rest as immediate. Comments and blank-line changes leave the SMT
+obligation byte-identical, so this is provably free. Do **not** instead split a
+closed `wf` into sub-predicates (`wf_b1`/`wf_b2`) merely to label its clauses — that
+changes a closed spec's auto-unfold behaviour for no speed benefit. (Splitting the
+*proof* per conjunct into lemmas is the right move when an obligation is over budget —
+§10 — but that splits the proof, not the closed spec.)
+
+```rust
+// Re-establish pt_wf clause by clause; this edit writes a leaf PTE, so only
+// (b2) inner→leaf and (c2) injectivity need re-proof; (a), (b1), (c1) immediate.
+assert forall|..| .. implies /* (b2) */ .. by { /* ... */ }
+assert forall|..| .. implies /* (c2) */ .. by { /* ... */ }
+```
+
 **Layer well-formedness.** Split a heavy invariant into a **structural fragment**
 (first-order, total, ∀ — domain/link/consistency) and separately-layered
 properties (acyclicity, full refcount soundness) that are harder to preserve;
@@ -711,6 +730,49 @@ let pad   = (align - off % align) % align;
 let start = off + pad;                 // start % align == 0, from vstd::arithmetic::div_mod
 ```
 
+**Discharge concrete-value and constant-nonlinear obligations by computation.** When
+a recursive `spec fn` won't reduce at a concrete argument under default fuel, or Z3
+refuses to simplify a product of static constants, run Verus's interpreter:
+`assert(e) by (compute)` reduces `e` internally and hands the rest to Z3 (it also
+assumes the original `e`, so it composes even when simplification is only partial),
+while `assert(e) by (compute_only)` requires `e` to reduce all the way to `true` with
+no reliance on solver heuristics — making it a *stability* tool, since a proof that
+holds under `compute_only` does not depend on heuristics that may drift across
+versions. The interpreter runs **in isolation**: outer `let` bindings and ambient
+facts are not in scope, so move a known `let` inside the asserted expression
+(`assert({ let x = 2; pow(2, x) == 4 }) by (compute_only)`) or fall back to
+`by (compute)`. For a property over a generic value in a concrete range, prove it
+over the whole range with `vstd::compute::RangeAll::all_spec` (over `int`, wrapped in
+a closure) then apply the closure to the specific value to fire the quantifier. The
+interpreter does not cache by argument value; annotate the rare
+overlapping-subproblem `spec fn` (naive Fibonacci) with `#[verifier::memoize]`, and
+note it is bounded by `--rlimit` and is itself recursive, so a deeply nested
+expression can exhaust the process stack.
+
+```rust
+assert(pow(2, 8) == 256) by (compute);        // interpret, then hand the rest to Z3
+assert(pow(2, 8) == 256) by (compute_only);   // must reduce fully to true; no Z3 heuristics
+```
+
+**For a transitive `==`/`<=`/`<` proved through a chain of rewrites, reach for
+`calc!`.** Each intermediate expression is named once and its justification lives in
+a per-step block whose context is restricted to that single step, so step proofs
+cannot pollute each other or the surrounding context, which sees only the end-to-end
+fact. Steps may carry a tighter intermediate relation (`x; (==) {} y; (<) {} z;`)
+that the macro checks composes into the top-level one. Use `calc!` for an in-line
+transitive rewrite chain where a lemma per step would be heavier than the proof
+itself; use extracted `proof fn`s when a step is reused or genuinely heavy.
+
+```rust
+calc! {
+    (<=)
+    lo;     (==) { /* lo == max(a.min, b.min) */ }
+    max_lo; (<)  { /* max_lo < mid by the guard   */ }
+    mid;         { /* mid <= hi                    */ }
+    hi;
+}
+```
+
 **Relating two divisions (the division-hoist recipe).** Proving a decomposed
 computation equals a single division — `secs*N + frac == (delta*N)/f` where `secs =
 delta/f` — is the classic step a bounded checker can't take with a symbolic
@@ -827,6 +889,49 @@ proof fn lemma_set_bit(x: u64, k: u64) by (bit_vector)
     ensures (x | (1u64 << k)) & (1u64 << k) != 0,
             (x & !(1u64 << k)) & (1u64 << k) == 0;
 ```
+
+State a bit-identity lemma `by (bit_vector)` on its **signature** with an **empty
+body**, listing every write direction as a plain *unconditional* `ensures` — never
+carry a runtime selector (a `bool` flag) and prove each direction with a guarded
+inline `assert ... by (bit_vector)`. Each direction is unconditionally true, so the
+selector adds no proof value; one signature-level query collapses several guarded
+sub-obligations into one, cheaper and clearer. The calling exec branch (`if cond {
+word | bit } else { word & !bit }`) selects which ensured direction it needs, so the
+lemmas stay unconditional. Migrating *to* this recipe from a selector/guarded-inline
+shape is itself a measurable optimization (it can halve the worst lemma's `rlimit`
+and drop the crate's obligation count, since the inline asserts were separate
+obligations). For other-bits-untouched, prefer the **mask-equal** form `(x | (1<<k))
+& (1<<m) == x & (1<<m)` over the weaker boolean-equivalence `((x | (1<<k)) & (1<<m)
+!= 0) == (x & (1<<m) != 0)`: the mask equality propagates through the `& mask != 0`
+test a call site runs and reads more directly.
+
+**Extract a recurring inline bit identity into one shared `by (bit_vector)` lemma.**
+Bit-vector goals are discharged by bit-blasting into a SAT query, so re-spelling the
+same fixed-width identity inline at N call sites pays the full bit-blast N times;
+citing one shared empty-bodied lemma bit-blasts it once and merely references the
+result. Write the lemma's `ensures` byte-identical to the inline assert it replaces
+so a call delivers exactly the fact the surrounding proof needs with no bridging
+assert (the trailing `=~=` line that closes a codec proof stays at the call site
+verbatim); put construction facts in `requires`, the clean shift/mask identities in
+`ensures`, body empty. This both deduplicates and measurably speeds the callers —
+inline `by (bit_vector)` sub-obligations inflate the caller's context, and the win
+scales with the operand width and the number of inline asserts (a 64-bit
+little-endian reader benefits far more than a 16-bit one). Collapsing M inline
+asserts into K lemmas *lowers* the crate's verified-item count by M − K (each inline
+assert is its own obligation; each lemma signature counts once), so estimates
+expecting the count to rise are wrong on the sign.
+
+```rust
+// name a width's split/reassemble identities once; call them everywhere:
+proof fn lemma_u64_le_bytes(v: u64, b0: u8, /* ... */ b7: u8) by (bit_vector)
+    requires v == (b0 as u64) | ((b1 as u64) << 8) | /* ... */ | ((b7 as u64) << 56),
+    ensures (v >> 0) as u8 == b0, /* ... */ (v >> 56) as u8 == b7;
+// reader body: proof { lemma_u64_le_bytes(v, b0, /* ... */ b7); } assert(v =~= u64_le(v));
+```
+
+Call such a verified-only helper by its **full path from inside a `proof fn`**, not
+via a top-level `use` (a named `use` of a `verus!{}`-only item is a real import that
+survives erasure and breaks the plain `cargo build`; see §12).
 
 **A bitwise operator cannot be a trigger.** `&`/`<<`/`|` are not valid trigger
 terms, so a `forall|j| #![trigger x & (1<<j)] …` that quantifies a bit-scan over
@@ -1014,6 +1119,20 @@ which blocks both reasoning and **construction** inside `verus!{}` ("constructor
 for an opaque datatype"). Keep crypto entirely off the proof surface; three
 reusable moves.
 
+**Pass a just-mutated value into a loop-step lemma by value; do not reconstruct it in
+spec context.** When lifting a loop step's proof into a separate lemma and the element
+pushed/inserted carries a non-trivial owned field (`Vec`, `String`, …), take the
+already-built value as a by-value parameter and state the post-state as `r ==
+prev.push(new)`. Reconstructing it inside the lemma forces that heap-bearing type to
+appear on the proof surface; passing it in keeps it off.
+
+```rust
+proof fn lemma_push_preserves_rec_ok(prev: Seq<RecMeta>, r: Seq<RecMeta>, new: RecMeta)
+    requires r == prev.push(new),   // take the built value; its Vec field never enters spec context
+    ensures forall|k| 0 <= k < r.len() ==> rec_ok(r, k)
+{ /* ... */ }
+```
+
 **Feed the proof a `Hash`-free image.** Define a parallel `Raw*` struct replacing
 every `Hash` field with its decoded bytes — `[u8; 32]` for a digest, `Vec<u8>` for
 an inline payload. A fixed array and a byte vector *round-trip inside the proof*
@@ -1067,6 +1186,12 @@ the verifier recovers.
 
 ## 10. Proof scaling: small contexts and trigger economy
 
+SMT solver time grows **superlinearly** in the number of facts in scope: each added
+fact multiplies the search paths rather than adding to them. So halving a query's
+context can cut solver time by far more than half and can flip a timeout into a fast
+success — which is why decomposition, not a bigger budget, is the first move for a
+slow or timing-out obligation.
+
 A solver query discharges fast only when its context is small. **Decomposition is
 the default fix; `rlimit` and `spinoff_prover` are last resorts.** When a query
 blows the resource limit, extract the heaviest sub-step into its own `proof fn`
@@ -1100,6 +1225,222 @@ that one body. **Nonlocal cost:** adding a *field* to a widely-referenced ghost
 view enlarges every SMT term mentioning it and can push an unrelated borderline
 proof past budget — budget the isolation ladder whenever you grow a shared view.
 
+**Walk `rlimit` back down after a context-shrinking change.** An
+`#[verifier::rlimit(N)]` sized for a monolithic query is a misleading "this proof is
+hard" signal once the work is decomposed, spun off, or otherwise made cheaper. After
+any change that removes work from a body, re-tighten its budget to a small notch above
+the new consumption — bisect to the smallest passing cap, then add a modest margin
+(the resource unit is version-specific). A trimmed cap keeps the next regression
+visible as a failure instead of silently consuming slack, and an honest budget
+documents that the proof is no longer expensive. Removing the annotation entirely is
+correct whenever the body now verifies at the default. Lowering a cap cannot change
+the work a passing proof does, so the SMT cost is unaffected — `rlimit` *consumption*
+is the deterministic work a fixed proof performs, independent of the cap, which is
+only a ceiling.
+
+```rust
+// after decomposition removed the heavy inline step, restore an honest budget:
+#[verifier::rlimit(10)]   // small honest cap: the lemma's draw sits just under it
+proof fn lemma_unlink_merge(/* ... */) { /* ... */ }
+```
+
+To find a crate's true floors after the proofs stabilize, remove every budget at once
+and run the crate cold: an over-tight function surfaces as a named `Resource limit
+(rlimit) exceeded` error pinpointing it, and any function with no error verifies at
+the default and should drop the annotation.
+
+**Measure proof-perf by deterministic `rlimit`, not wall-clock milliseconds.** Verus
+reproduces the exact same per-function `rlimit` (resource units) for identical source
+across cold runs, while SMT milliseconds wobble run-to-run by double-digit percent. So
+`rlimit` is the trustworthy signal for whether a refactor genuinely shrank a query: a
+large `rlimit` drop is a real proof-size reduction even when the ms figures are flat
+or noisy, and a small ms move with byte-identical `rlimit` is pure jitter that proves
+no change. Read it from a per-function cold-run breakdown (`--time-expanded
+--output-json`; clean the crate first per Part A, or a cached run reports no timing at
+all). The protocol that makes a before/after comparison conclusive:
+
+- **Run cold** so nothing is served from stale cache (a cached run can false-green
+  with no `verification results::` line — Part A).
+- **Keep controls.** Pick obligations the change does not touch; confirm their
+  `rlimit` is byte-identical before and after. Byte-identical controls prove any
+  measured delta is the change, not solver scheduling noise, and let you attribute a
+  crate-total shift to specific functions. When a single before/after pair *looks*
+  like a regression, controls plus a median over a few cold runs settle it.
+- **A clear order-of-magnitude `rlimit` win on the targeted obligation is decisive on
+  one cold run** — it dwarfs the noise band, so a median-of-three is unnecessary.
+  Reserve repeated runs for borderline deltas inside the noise.
+- **Charge the new lemma's cost against the op before claiming a win.** Compare
+  crate-own figures (clean only the single crate so `vstd` stays cached); a full cold
+  closure is dominated by `vstd` re-verifying and will mislead.
+
+**Keep an optimization only if it measurably helps.** An extraction or refactor that
+leaves the target obligation within noise must be reverted even though it verifies
+cleanly and reads acceptably — a change that does not speed verification (and is not a
+distinct clarity win) is not worth its added surface and module-wide ripple (below).
+
+**Decomposition pays off in more shapes than the per-conjunct split — and the win is
+often larger than intuition predicts.** The cause of a hot obligation is frequently
+not the heavy inline step itself but the *host function's surrounding context* (loop
+invariants, recursive-predicate term families, `choose` witnesses) poisoning the
+query; the inlined step pays for everything in scope even though it references none of
+it. Lifting that step into a `proof fn` keyed only on the facts it needs gives it a
+fresh small context and can cut its `rlimit` far more than a "slice of the cost"
+estimate suggests. Recurring profitable shapes, all instances of the same default fix:
+
+- **A tag-dispatched `match` ladder** → a thin top-level dispatcher (tag guard +
+  dispatch only) plus one named helper per arm, each with a self-contained round-trip
+  contract; the spec side mirrors the exec side (exec twins each ensuring equality
+  with their spec helper, bounds discharged at the call site from the tag read). Each
+  arm then discharges against a small context instead of one query carrying every arm
+  at once.
+- **A multi-arm content branch inside a hot codec function** → extract the branch
+  keyed tightly (`requires` = the cheap local facts the body proves, `ensures` = the
+  heavy round-trip equality), and scope its axiom group *inside the helper* with
+  `broadcast use` so the related facts land only in the small sub-query.
+- **A heavy end-of-op `assert(P) by { ... }`** → its conclusion escapes but its proof
+  still runs against the whole op's loop invariant, quantifiers, and framing residue;
+  a `by {}` block does **not** shrink the inner query's context. Lift `P` into a lemma
+  keyed on the few cheap shape facts it needs.
+- **A per-iteration loop-step proof** (re-establishing an invariant after each
+  `Vec::push`/insert) → extract it so the work is discharged once in a small context
+  instead of re-derived against the whole loop query every iteration. This is worth
+  doing for the `rlimit` headroom and the self-documenting contract even when
+  wall-clock time is flat (the lemma absorbs roughly the work the hot obligation
+  sheds).
+- **A linear multi-phase op** (each phase = one edit + an inline frame re-proof) → one
+  private frame lemma per phase. Shape each phase's edit description (e.g. a single
+  `Map::insert`) to match, term-for-term, the trigger of the downstream composition
+  lemma it feeds, so the edit-shape obligation collapses to one equality.
+- **A repeated multi-lemma transitivity composition** (the same cluster composing
+  per-edge frames `(a,b)+(b,c)` into `(a,c)` at many sites) → fold the cluster into
+  one composite lemma whose `requires` is the union of the per-edge preconditions and
+  `ensures` is the composed frames; each site makes a single tightly-keyed call. (This
+  is the composition counterpart to the predicate-application framing below — name the
+  frame, then compose the named frames.)
+
+```rust
+// the same per-key map-equality split costs far less in a fresh context:
+proof fn lemma_unlink_merge(/* slot roles + splice steps as Map::insert eqs */)
+    requires /* exactly the cheap local facts the op already proves */
+    ensures  mfin =~= unlinked(m0, slot, last)
+{ /* the former inline per-key split, now with no loop/recursion in scope */ }
+```
+
+**Deduplicating an identical inline proof block across sibling call sites is itself
+both a clarity and a speed win.** When two (or more) functions carry a byte-for-byte
+identical inline proof block, extract it into one named `proof fn` whose `requires`
+are the cheap local facts each site already proves and whose `ensures` states the
+property — the same tight-keying recipe that splits one heavy obligation. The named
+lemma's tight context replaces a large inline block re-elaborated in every caller, and
+its `ensures` carries the identical `#[trigger]` term the next-iteration invariant
+needs, so nothing is re-keyed. (This is the *deduplication* use of the recipe; the
+split use isolates one heavy obligation. The speed payoff scales with the inlined
+block's original cost — see §13 for the bound.)
+
+**Decompose a *linear* derivation into a pipeline of stage-lemmas.** The per-conjunct
+split fits a goal that is a conjunction of independent facts; a straight-line
+derivation `A → B → C`, where each step depends on the prior, fits a sequential split
+instead. Stage 1's `requires` are the function's `requires` and its `ensures`
+summarize its first block; each later stage's `requires` match the previous stage's
+`ensures`; stage n's `ensures` are the function's. The body becomes a sequence of
+stage calls threading the intermediate values forward. Factor each repeated boundary
+predicate into a shared `spec fn` so the matching `ensures`/`requires` are written
+once.
+
+```rust
+spec fn mid1(x: u64, y: int) -> bool { /* boundary predicate, written once */ }
+proof fn part1(x: u64) -> (y: int) requires r(x) ensures mid1(x, y) { /* P1 */ }
+proof fn part2(x: u64, y: int) requires mid1(x, y) ensures e(x) { /* P2 */ }
+proof fn whole(x: u64) requires r(x) ensures e(x) { let y = part1(x); part2(x, y); }
+```
+
+**After extracting any subproof, prune its hint steps.** Intermediate `assert`s and
+helper calls that were forced by the host's bloated context are often unnecessary once
+the lemma's context is just its `requires`, parameters, and `ensures`. Treat
+extraction as lift-then-prune: move the block, delete its now-redundant annotation,
+and re-verify to find the minimal proof. (The deleted hints are not wrong — they
+compensated for context size, so they return if the lemma is re-inlined.)
+
+**When decomposition backfires — four bounded failure modes.** Extraction is the
+default fix, but it is *not* unconditional. Measure the target obligation *and the
+crate total* before keeping any of these:
+
+- **The caller's context must already be small.** A tightly-keyed lemma that halves
+  one op's `rlimit` can *regress* a structurally-similar sibling whose context still
+  carries extra live term families (e.g. a wake path that ran a queue manipulation,
+  leaving ready-queue terms live): discharging the lemma's `requires` against the
+  larger context, then firing its `ensures` across it, costs more than the inline
+  derivation saved. Before reusing a winning extraction on a sibling, check whether
+  that sibling's context is comparably narrow; if not, keep the inline form.
+- **The inline block's intermediates may be load-bearing downstream.** If a block's
+  inline `assert`s (single-field equalities, snapshot bridges, `m[dst] == ...`) are
+  reused by the function's *later* obligations, extracting only the block's quantified
+  conclusion strips them, forcing the later blocks to re-derive — so the function's
+  own cost *rises*. Check whether the block's intermediates are consumed downstream;
+  if so, leave it inline or have the lemma also `ensure` them.
+- **Sharing one generic helper across callers with divergent post-conditions regresses
+  the one whose need is stronger.** A helper whose `ensures` is weaker than a caller
+  needs forces that caller to re-prove the gap as a single quantifier over *all*
+  elements at once — work the inline loop paid cheaply, one isolated per-iteration
+  fact at a time. Share scaffolding only when both callers genuinely need the *same*
+  post-condition shape (identical per-iteration facts, not merely identical syntax).
+  Otherwise keep the loop inline or give the helper the caller's exact post-condition.
+  (Even a *single*-caller loop extraction earns a fresh-context speedup on its own —
+  the dead end is the *sharing*, not the extraction.)
+- **Wrapping the establishment of a quantified/existential predicate in `assert(P) by
+  { ... }` when lemmas already produce `P`** forces the solver to re-derive the
+  quantifier/witness as a standalone goal and then re-consume it — far costlier than
+  letting the lemma outputs flow into the tail (re-deriving an existential witness is
+  especially expensive). Likewise, scoping a function's *terminal* block with `assert
+  ... by` yields nothing: there is no later obligation to shield. Reserve `assert ...
+  by` scoping for *intermediate* heavy blocks whose facts would otherwise pollute
+  later obligations.
+
+When a tried extraction measurably regresses, revert to the inline form and leave a
+short present-tense comment for the reason it stays inline (the context carries extra
+term families the lemma would re-pay), so a future reader does not re-attempt the dead
+end — and only where the inline form would otherwise look surprising, per the
+project's comment discipline.
+
+**Single-site extraction is rarely a clarity win, and adding a function ripples the
+whole module.** Extracting a single-use block whose facts live only as local `let
+ghost` bindings duplicates those bindings into the lemma's `requires` (the contract
+restates the construction instead of hiding it), often netting more lines.
+Extraction-for-clarity pays only for genuine multi-site deduplication. And inserting
+*any* function — exec or proof — perturbs the term families the solver sees
+module-wide, so neighbours' `rlimit` shift in both directions; the
+directly-attributable per-function deltas can sum to less than the crate-total change.
+Judge by the crate total, not just the touched functions.
+
+**A named frame predicate can compose yet still cost more in heavy consumers.** §3's
+named-predicate frames compose where index triggers don't — but folding an
+already-composing inline frame behind an `open spec fn` predicate is not free, despite
+the intuition that an open spec auto-unfolds to byte-identical terms. The cost is
+asymmetric: where the predicate is *established* (the leaf op that proves the
+conjuncts and folds them in) it is flat or cheaper, but where it is *consumed* — a
+heavy caller that previously received the op's postcondition as N ground frame facts
+now receives one predicate application Verus must auto-unfold inside its own
+already-large, quantifier-dense query — it can roughly double that caller's proof.
+Teardown/destructor paths thick with `wf`/reachability/census `forall`s are the worst
+consumers. Folding the predicate into a *loop invariant* carries the same risk, since
+the invariant is a consuming context re-evaluated each iteration. Measure the
+consumers, not just the edited leaf, before keeping such a refactor. Two further
+checks before extracting a shared frame helper at all: it pays only if the
+**intersection** of what every site needs is most of each site's frame (when sites pin
+overlapping-but-different view sets, the common core may be a small fraction and each
+site still spells out the remainder); and where a per-view frame line is the
+**grep-able completeness checklist** for a view-addition audit discipline (§3), keep
+the lines spelled out inline — the explicit conjunction *is* the audit anchor, and a
+predicate that lives in one module while siblings keep frames inline reads
+inconsistently.
+
+**`spinoff_prover` is redundant after a clean extraction.** Once a heavy step is
+extracted into a self-contained lemma that is already a small isolated query,
+additionally marking it `#[verifier::spinoff_prover]` buys nothing — a separate solver
+instance helps only when the body still shares the caller's bloated context. Reach for
+`spinoff_prover` when you *cannot* extract (the heavy reasoning is genuinely entangled
+with the caller), not after extraction has already given it a fresh context.
+
 **Triage a red obligation: is a callee lemma the cause?** When a proof error
 looks unrelated to your change, check whether a lemma the function *calls* is
 itself failing — a red callee lemma poisons the caller's later,
@@ -1122,6 +1463,32 @@ proof fn lemma_remove(s: S, k: int) ensures wf(remove(s, k)) { /* ... */ }
 // pop calls lemma_remove(s, 0); splice calls lemma_remove(s, k). pop IS k == 0.
 ```
 
+**`assert(F) by { P }` scopes a local proof's byproducts in place.** Only `F`
+survives into the surrounding context; every other fact `P` introduces is discarded at
+the closing brace, so a modest proof that drags in heavy or universally-quantified
+lemma facts does not bloat the rest of the function (where they slow later, unrelated
+obligations). Encoded to the solver, `lemma_A(); assert(F) by { lemma_B(); };
+assert(G);` is roughly `(A && B ==> F) && (A ==> G)` — `B` is available only while
+proving `F`. This is the lightweight middle rung between an inline proof (pollutes the
+whole function) and a full extracted lemma (clean context but a signature plus
+threaded `requires`): prefer `assert ... by` when the only goal is context isolation
+and the proof is single-use; extract a lemma when the proof is reused or heavy enough
+to warrant its own solver instance. (Reserve it for *intermediate* blocks — see the
+dead-end note above: scoping a terminal block, or re-establishing facts that already
+flow from lemma `ensures`, does not help.)
+
+**`closed`/`open` and `opaque` are distinct tools — and `opaque` earns its keep only
+on a *recursive* spec.** `closed`/`open` choose whether a `spec fn` body crosses a
+*module* boundary (modularity, abstraction); `opaque` is purely a
+verification-performance lever, hiding the body even inside its defining module (where
+a `closed` body still unfolds transparently for the solver). Reserve it for a
+**recursive** definition whose auto-unfolding floods an in-module query (the "Control
+what enters the context" paragraph below), `reveal`-ing it only in the proof blocks
+that need it. On a **non-recursive** spec it is typically net-negative: the body would
+have unfolded to a small fixed term anyway, so hiding it only forces explicit
+`reveal`s that cost more than they save — and a missed `reveal` fails verification at
+every use site, a wide blast radius for no payoff.
+
 **Control what enters the context.** Keep heavy definitions out of queries that
 don't need them: make a recursive `spec fn` `closed`/`opaque` and `reveal` it only
 where used — a `closed` recursive spec does *not* auto-unfold at a symbolic
@@ -1132,8 +1499,47 @@ is needed with `broadcast use` (`vstd::slice::group_slice_axioms`;
 than globally — the related facts land in one query without flooding the unrelated
 ones.
 
+**Find the over-firing quantifier with the quantifier profiler — don't guess from
+source.** When a query times out or is slow and trigger over-firing is suspected, run
+the prover's quantifier profiler instead of eyeballing the triggers: `--profile` for a
+query that already fails, `--profile-all` (optionally `--verify-function fn`) for one
+that verifies but is slow, combined with `--rlimit 1` so the prover stops early and
+emits a small log. Read it by *two* numbers, not one: raw instantiation count, and a
+**cost** metric that weights a quantifier by how many further expensive instantiations
+its own provoke. The highest-cost quantifier is the trigger-loop source; a quantifier
+with an equally high count but low cost is an innocent bystander that merely co-fires —
+don't "fix" it. If every quantifier shows only a small count, quantifier
+instantiation is probably not the bottleneck — look to a nonlinear/bit-blasted goal
+(§5/§6) or a genuine logical gap (the "an rlimit blowup hides a real gap" path above).
+This pairs with the per-function SMT-time profiling (`--time-expanded`, which ranks
+*functions* by time): use that to find the worst function, then the quantifier
+profiler to rank *quantifiers* within its query.
+
+```sh
+cargo verus verify -p crate -- --profile --rlimit 1                       # diagnose a timeout
+cargo verus verify -p crate -- --profile-all --verify-function slow_fn    # profile a slow pass
+```
+
 **Trigger economy is the dominant scaling hazard.** Concrete traps:
 
+- **A whole-aggregate trigger on a neighbour-relating `forall` self-perpetuates a
+  matching loop.** When a `forall` quantifies over a sequence/map of tuples or structs
+  but its body reads only certain fields, trigger on those projections (`#![trigger
+  s@[k].0, s@[k].1]`), not on the whole element (`#![trigger s@[k]]`). A
+  whole-aggregate trigger re-matches when the body relates a neighbour of the same
+  shape (`s@[k+1]`): each instantiation produces a fresh term that re-matches the
+  trigger, flooding the context. The risk is highest in
+  sortedness/adjacency/monotonicity invariants where the body mentions both element `k`
+  and `k±1`. A one-line projection trigger can roughly halve a crate's SMT time with no
+  proof-body change. Keep the trigger shape **uniform across sibling conjuncts** of the
+  same `wf`/invariant: a lone conjunct triggering on the whole aggregate where its
+  siblings project is both the performance hazard and a clarity wart.
+  ```rust
+  // BAD: whole-tuple trigger re-matches every reintroduced sibling → matching loop
+  //   forall|k: int| #![trigger s@[k]] 0 <= k < n-1 ==> s@[k].0 + s@[k].1 < s@[k+1].0
+  // GOOD: project onto exactly the fields the body reads
+  forall|k: int| #![trigger s@[k].0, s@[k].1] 0 <= k < n-1 ==> s@[k].0 + s@[k].1 < s@[k+1].0
+  ```
 - **`Seq::no_duplicates` carries an O(n²) trigger** (`forall i,j. self[i] !=
   self[j]`); extract it into its own lemma mentioning only the relevant sequences.
 - **Prefer a single `Map::insert` equality over a broad frame `forall`.** `m2 ==
@@ -1175,6 +1581,20 @@ ones.
   //   conjunct: forall|level: int| 0 <= level < N as int ==> P(level)
   assert forall|level: int| 0 <= level < N as int implies P(level) by { /* ... */ };
   ```
+- **Silence a persistent low-confidence auto-trigger note by naming the trigger Verus
+  already infers.** When the prover prints `automatically chose triggers … low
+  confidence` on a quantifier every run, read which term it reports selecting and
+  annotate the binder with that exact term (`#![trigger self.free@[k].0]`). This
+  documents the trigger already in use, adds no new term, and leaves the SMT work
+  unchanged — a pure readability win removing recurring noise. (Distinct from the case
+  where auto-inference *fails* and you must pick a *different* trigger to make the proof
+  go through; here the inferred trigger is correct and you are only making it explicit.)
+- **Match a helper `assert forall`'s range to the supporting per-index lemma's
+  `requires`, not only to the target conjunct.** When a frame is discharged per index
+  from an ambient fact that holds only over valid positions, bound the quantifier to
+  exactly that valid range (`0 <= idx < depth`); an unbounded `forall` fails the inner
+  lemma's precondition with a precondition-not-satisfied error rather than a trigger
+  miss.
 
 **Loops cut the proof context — re-pin everything.** Entering a `while`/`for`,
 Verus discards all context except the loop invariant. This is the single
@@ -1204,6 +1624,46 @@ prove the body produces exactly that target by per-slot case analysis — separa
 (mechanical). And track straight-line writes as a **ghost-snapshot chain** (one
 `Map::insert` per write, asserting `store.view() =~= m_i` after each step) so the
 solver's map model stays concrete.
+
+**Reach for the decomposed shape from the start, not as a rescue.** The
+per-step/per-conjunct discipline is the idiomatic *starting* structure for any
+multi-step structural operation, not only a fix for a monolith that timed out:
+
+- **Establish per-iteration / per-phase frame lemmas up front** for any structural
+  teardown, rebuild, or relabel — mirroring how a loop-based destroy already calls a
+  per-iteration transitivity frame lemma. A linear unrolled sequence should reuse the
+  same per-step frame discipline a loop version would, so each step is a stated,
+  independently-checkable unit. Triage which phases earn a lemma: extract single-setter
+  drop-ins with a clear shared composition lemma first; *defer* phases that branch into
+  several distinct exec edit shapes (a design spike, not a mechanical relocation) and
+  phases whose inline compositions carry no measurable cost.
+- **Standardize one split idiom per file** — a thin dispatcher plus named per-case
+  helpers, each `spec fn` paired with an exec twin that `ensures` equality with it —
+  and model a new extraction on an existing sibling that already verifies cheaply in
+  isolation. Per-case field layouts and contracts then live in each helper's
+  doc-comment instead of one overview block. Grow a coherent named-lemma *family*
+  around one operation (one lemma per invariant conjunct / sub-step), and for symmetric
+  add/remove or producer/consumer ops write **mirror-pair** lemmas with identical
+  off-key framing and only the delta flipped (`lemma_enqueue_census` `+1` vs
+  `lemma_dequeue_census` `-1`; a "drop-head/shrink-window" set vs a
+  "push-tail/grow-window" set) — the symmetric contracts read as obvious duals.
+
+**Decomposition is a clarity win even when it adds lines.** Replacing a long inline
+derivation with "do the edit, call the named phase lemma" turns an opaque block into a
+sequence of independently-checkable units with explicit contracts; the extra lines are
+the lemma `requires`/`ensures`, which *document* the obligation rather than obscure it.
+The clarity metric is whether each step becomes a named contract, not the raw line
+delta.
+
+**Predict the verified-count delta as a correctness check on a decomposition.** Each
+new `proof fn` adds exactly one to the verified count; a non-recursive `spec fn` adds
+zero (it carries no obligation); each new exec fn with `ensures` adds one. So
+extracting three `match` arms into bare spec helpers plus three exec twins raises the
+count by exactly three. A delta matching the lemmas added (and nothing else) is
+positive evidence the change did only what was intended and added no hidden seam.
+(Verus also counts each `while`-loop as an obligation, so replacing two inline loops
+with one helper containing one loop can leave the tally flat — read the *presence* of
+the `verification results::` line, not the count, as proof of a real run.)
 
 ## 11. Trusted seams, kept honest by host tests
 
@@ -1502,6 +1962,93 @@ with opaque errors:
 - **Gate unsupported constructs (`asm!`) out with `cfg`, not annotations** — code
   outside `verus!{}` is external by default under `cargo-verus`, so partial adoption
   needs no per-item `#[verifier::external]`.
+
+## 13. Proof-performance tuning: a decision map
+
+This section maps §§5–12 for tuning proof performance: which techniques reliably pay,
+which are bounded dead ends, what the idiomatic starting shape already gets right, and
+which tools to keep in mind. It cross-references the detail rather than repeating it.
+One rule underpins everything: **judge by deterministic `rlimit`, on cold runs,
+against byte-identical controls, and keep a change only if it measurably helps** (§10).
+
+**Techniques that carry the wins.** Almost every real reduction comes from *shrinking
+a solver query's context*, because SMT cost grows superlinearly in the facts in scope
+(§10):
+
+- **Decomposition into tightly-keyed lemmas** — `requires` = the cheap local facts the
+  op proves, `ensures` = the heavy result. It pays across many shapes: tag-dispatch
+  `match` ladders, multi-arm codec branches, heavy end-of-op `by {}` blocks (whose
+  context is *not* shrunk by the brace), per-iteration loop steps, linear multi-phase
+  ops, and repeated transitivity clusters folded into one composite lemma (§10). The
+  realized win often exceeds intuition, because the *host context*, not the inlined
+  step, is usually the cost driver. Sequential derivations decompose into a *pipeline*
+  of stage-lemmas; after any extraction, **prune** the hint steps the bloated context
+  had forced (§10).
+- **Deduplicating an identical inline block** across sibling sites into one shared
+  lemma — both clarity and speed (§10).
+- **Extracting a recurring `by (bit_vector)` identity** into one empty-bodied
+  signature-level lemma, cited everywhere: the identity bit-blasts once instead of per
+  site, and the win scales with operand width and the number of inline asserts (§6).
+- **`bit_vector` recipe migration** — unconditional both-direction `ensures`, no
+  runtime selector, mask-equal form (§6).
+- **Right-sizing `rlimit` down** after a context-shrinking change, and silencing the
+  low-confidence auto-trigger note by naming the inferred trigger — honesty/clarity
+  wins that are SMT-neutral (§10).
+- **Projection triggers over whole-aggregate triggers**, which break a
+  self-perpetuating matching loop and can roughly halve a crate's SMT time with a
+  one-line change (§10).
+
+**Dead ends, and the context that bounds each.** A technique that misses in one
+setting is not useless in general — each fails for a stateable structural reason and
+still pays in the opposite situation (all §10 unless noted):
+
+- **Extraction regresses** when the caller's context is still large (the lemma's
+  `requires`/`ensures` pay against the big context), when the inline block's
+  intermediates are load-bearing for later obligations (they vanish from the lemma's
+  `ensures`), or when a *shared* helper's weaker post-condition forces a strong-needs
+  caller to re-prove the gap as one whole-quantifier. It still wins where the context
+  is small, the block is a self-contained dead end, and both callers need the same
+  post-condition shape.
+- **`assert(P) by { ... }` around a quantified/existential establishment** that lemmas
+  already produce, or around a *terminal* block, costs more than it saves; the scoping
+  idiom helps only for *intermediate* heavy blocks that pollute later obligations.
+- **A named `open spec fn` frame predicate** can compose yet still ~double a heavy
+  *consuming* caller's proof (the establish-vs-consume asymmetry); it pays where
+  consumers are small/few, where the shared intersection is most of each site's frame,
+  and where the inline frame lines are not themselves a grep-able audit checklist (§3).
+- **`opaque` on a *non-recursive* spec** is typically net-negative (the body would
+  unfold to a small fixed term anyway); it earns its keep only on a recursive
+  definition whose auto-unfolding floods an in-module query (§10).
+- **`spinoff_prover` after a clean extraction** is redundant — it is the tool for
+  heavy steps you *cannot* extract.
+- **Extraction of an already-trivial block** is clarity-only, never a speed lever; the
+  payoff scales with the inlined block's original cost. **Single-site extraction onto
+  local `let ghost` bindings** is usually a clarity *loss* (the `requires` restate the
+  construction). **Splitting a closed `wf` into sub-predicates** to label clauses
+  changes auto-unfold for no benefit — use clause-naming comments (§3).
+- Adding *any* function ripples the whole module's `rlimit`; judge by the crate total.
+
+**Patterns the idiomatic starting shape already gets right.** Reach for these from the
+start, not as a rescue: per-step/per-phase frame lemmas for every multi-step structural
+op; one standardized split idiom per file (thin dispatcher + named per-case helpers,
+`spec` paired with an exec twin); coherent named-lemma families with mirror-pair
+contracts for symmetric ops; aligned, clause-labeled parallel `wf`-re-establishment
+proofs; passing a just-mutated heap-bearing value into a loop-step lemma *by value* to
+keep it off the proof surface (§9); and predicting the verified-count delta as a
+correctness check (§10). Decomposition is a clarity win even when it adds lines — each
+step becomes a named contract.
+
+**Tools to keep in mind.** Reach for these when the situation calls for it, though the
+patterns above cover the common cases: the **quantifier profiler**
+(`--profile`/`--profile-all` + `--rlimit 1`) to locate an over-firing quantifier by
+*cost*, not guesswork — paired with `--time-expanded`, which ranks functions while the
+quantifier profiler ranks quantifiers within the worst one (§10); **`assert(F) by { P
+}`** to scope a local proof's byproducts without a full lemma (§10); **`by
+(compute)`/`by (compute_only)`** for concrete-value and constant-nonlinear obligations,
+with `compute_only` as a heuristic-independence stability check (§5); **`calc!`** for a
+transitive rewrite chain with per-step localized contexts (§5); and **`opaque` vs
+`closed`** chosen by whether you need in-module hiding (performance, recursive specs)
+or only cross-module hiding (abstraction) (§10).
 
 ---
 
