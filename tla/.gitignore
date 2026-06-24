@@ -2,3 +2,5 @@
 states/
 *_TTrace_*.tla
 *_TTrace_*.bin
+# scripts/tla-baseline.sh --no-symmetry writes a SYMMETRY-stripped temp sibling
+*_nosym_tmp.cfg

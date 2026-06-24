@@ -455,6 +455,31 @@ NextNoGuard ==
 
 SpecNoGuard == Init /\ [][NextNoGuard]_vars /\ Fairness
 
+\* SYMMETRY-soundness control (injected ASYMMETRIC bug): leak a ghost-revoked
+\* (dead) cap into a SPECIFIC non-InitProc process's cspace — a genuine
+\* DeadNowhere violation that singles out one model value, so it BREAKS the
+\* Procs-symmetry premise and its reachable path crosses states the quotient
+\* collapses. Reachable only after a real revoke produces a revoked cap. Run
+\* under SYMMETRY ProcSymmetry (CapRevocation_AsymBug.cfg) the quotient must
+\* STILL report it: unlike the symmetric SpecBad guard — a symmetric bug is
+\* present in every orbit member and survives even a wrong quotient — this
+\* catches an OVER-BROAD symmetry that merged an asymmetric violating state with
+\* a non-violating one, the exact risk the asymmetric InitProc CHOOSE seed
+\* carries. (Mechanism: TLC checks each invariant on the generated
+\* orbit-representative before the seen-test, and DeadNowhere is symmetric, so a
+\* violating orbit is never silently canonicalised away.)
+LeakRevokedAsym ==
+    /\ revoked /= {}
+    /\ LET q == CHOOSE p \in Procs : p /= InitProc
+           d == CHOOSE c \in revoked : TRUE
+       IN cspaces' = [cspaces EXCEPT ![q] = @ \cup {d}]
+    /\ UNCHANGED <<live, parent, queues, bindings, treport, revoked, revoking,
+                   nlive, ncaps, pcbind, eopen>>
+
+NextAsymBad == Next \/ LeakRevokedAsym
+
+SpecAsymBad == Init /\ [][NextAsymBad]_vars
+
 \* =======================================================================
 \* Channel whole-object teardown and peer-closed firing (rev2§3.3) — TSpec
 \* =======================================================================
