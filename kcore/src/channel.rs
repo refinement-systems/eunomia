@@ -744,6 +744,158 @@ pub fn bind<S: Store>(
     }
 }
 
+// `send` post-loop frame — channel `ch` stays well-formed after the tail enqueue.
+// The symmetric companion of `lemma_recv_chan_wf`: here the live window *grows* by
+// the new tail slot `ii` (head unchanged), so an out-of-(new-)window slot is also
+// out-of-old and not at (rr, ii), hence framed to its (empty) sv0 value. Proved
+// against these tight `requires` rather than against `send`'s full pass-2 loop query
+// (verus.md §10: key the obligation tightly, one lemma per post-loop conjunct).
+proof fn lemma_send_chan_wf(
+    cv0: Map<ObjId, ChanView>,
+    cvf: Map<ObjId, ChanView>,
+    sv0: Map<SlotId, CapSlot>,
+    svf: Map<SlotId, CapSlot>,
+    ch: ObjId,
+    rr: int,
+    hh: int,
+    dd: int,
+    nn: int,
+    ii: int,
+)
+    requires
+        cspace::chan_wf(cv0, sv0, ch),
+        0 <= rr < 2,
+        hh == cv0[ch].head[rr],
+        nn == cv0[ch].count[rr],
+        nn < dd,
+        dd == cv0[ch].depth,
+        ii == (hh + nn) % dd,
+        cvf.dom().contains(ch),
+        cvf[ch].depth == cv0[ch].depth,
+        cvf[ch].end_caps.len() == cv0[ch].end_caps.len(),
+        cvf[ch].head == cv0[ch].head,
+        cvf[ch].count.len() == 2,
+        cvf[ch].count[rr] == nn + 1,
+        cvf[ch].count[1 - rr] == cv0[ch].count[1 - rr],
+        cvf[ch].ring_cap == cv0[ch].ring_cap,
+        cvf[ch].msg_len.dom() == cv0[ch].msg_len.dom(),
+        cvf[ch].bindings.dom() == cv0[ch].bindings.dom(),
+        svf.dom() == sv0.dom(),
+        // the new tail ii is in the grown window.
+        cspace::in_live_window(cvf[ch], rr, ii),
+        // every ring slot other than the new tail (rr, ii) is untouched.
+        forall|r: int, i: int, c: int| #![trigger cv0[ch].ring_cap[(r, i, c)]]
+            (0 <= r < 2 && 0 <= i < dd && 0 <= c < 4 && (r != rr || i != ii))
+                ==> svf[cv0[ch].ring_cap[(r, i, c)]].cap == sv0[cv0[ch].ring_cap[(r, i, c)]].cap,
+    ensures
+        cspace::chan_wf(cvf, svf, ch),
+{
+    // FIFO cursors stay in range: head unchanged; ring rr's count grew by one (still
+    // <= depth since nn < depth), the other ring unchanged.
+    assert forall|r: int| #![trigger cvf[ch].head[r]] 0 <= r < 2
+        implies cvf[ch].head[r] < cvf[ch].depth by {
+        assert(cvf[ch].head[r] == cv0[ch].head[r]);
+        assert(cv0[ch].head[r] < cv0[ch].depth);
+    }
+    assert forall|r: int| #![trigger cvf[ch].count[r]] 0 <= r < 2
+        implies cvf[ch].count[r] <= cvf[ch].depth by {
+        if r != rr {
+            assert(r == 1 - rr);
+            assert(cv0[ch].count[1 - rr] <= cv0[ch].depth);
+        }
+    }
+    // The coupling: out-of-(new-)window ring slots are empty.
+    assert forall|r2: int, idx2: int, c2: int|
+        (0 <= r2 < 2 && 0 <= idx2 < cvf[ch].depth && 0 <= c2 < 4
+            && !cspace::in_live_window(cvf[ch], r2, idx2))
+        implies cspace::is_empty_cap(svf[#[trigger] cvf[ch].ring_cap[(r2, idx2, c2)]].cap) by {
+        assert(cvf[ch].ring_cap[(r2, idx2, c2)] == cv0[ch].ring_cap[(r2, idx2, c2)]);
+        // (r2,idx2) != (rr,ii): ii is in-window, idx2 is not.
+        assert(r2 != rr || idx2 != ii);
+        // out-of-new ⟹ out-of-old: the old window's witness j (< nn) also witnesses
+        // the new window (< nn+1), so old-window ⊆ new-window.
+        if cspace::in_live_window(cv0[ch], r2, idx2) {
+            let j = choose|j: int| #![trigger (cv0[ch].head[r2] + j) % (cv0[ch].depth as int)]
+                0 <= j < cv0[ch].count[r2] && idx2 == (cv0[ch].head[r2] + j) % (cv0[ch].depth as int);
+            assert(0 <= j < cvf[ch].count[r2]) by {
+                if r2 != rr {
+                    assert(r2 == 1 - rr);
+                }
+            }
+            assert(idx2 == (cvf[ch].head[r2] + j) % (cvf[ch].depth as int));
+        }
+        assert(!cspace::in_live_window(cv0[ch], r2, idx2));
+    }
+}
+
+// `send` post-loop frame — the sending ring's FIFO grows by `Seq::push`. The
+// symmetric companion of `lemma_recv_fifo_drop_first` (verus.md §10).
+proof fn lemma_send_fifo_push(
+    cv0: Map<ObjId, ChanView>,
+    cvf: Map<ObjId, ChanView>,
+    sv0: Map<SlotId, CapSlot>,
+    svf: Map<SlotId, CapSlot>,
+    ch: ObjId,
+    rr: int,
+    hh: int,
+    dd: int,
+    nn: int,
+    ii: int,
+)
+    requires
+        cspace::chan_wf(cv0, sv0, ch),
+        0 <= rr < 2,
+        hh == cv0[ch].head[rr],
+        nn == cv0[ch].count[rr],
+        nn < dd,
+        dd == cv0[ch].depth,
+        ii == (hh + nn) % dd,
+        cvf[ch].depth == cv0[ch].depth,
+        cvf[ch].head == cv0[ch].head,
+        cvf[ch].count[rr] == nn + 1,
+        cvf[ch].ring_cap == cv0[ch].ring_cap,
+        // the enqueue wrote only the new tail slot's msg_len.
+        forall|idx: int| #![trigger cvf[ch].msg_len[(rr, idx)]]
+            idx != ii ==> cvf[ch].msg_len[(rr, idx)] == cv0[ch].msg_len[(rr, idx)],
+        // every ring slot other than the new tail (rr, ii) is untouched.
+        forall|r: int, i: int, c: int| #![trigger cv0[ch].ring_cap[(r, i, c)]]
+            (0 <= r < 2 && 0 <= i < dd && 0 <= c < 4 && (r != rr || i != ii))
+                ==> svf[cv0[ch].ring_cap[(r, i, c)]].cap == sv0[cv0[ch].ring_cap[(r, i, c)]].cap,
+    ensures
+        cspace::ring_fifo(cvf[ch], svf, rr)
+            == cspace::ring_fifo(cv0[ch], sv0, rr).push(cspace::ring_msg(cvf[ch], svf, rr, ii)),
+{
+    assert(cv0[ch].head[rr] < cv0[ch].depth);
+    assert(cspace::ring_fifo(cvf[ch], svf, rr)
+        =~= cspace::ring_fifo(cv0[ch], sv0, rr).push(cspace::ring_msg(cvf[ch], svf, rr, ii))) by {
+        assert(cspace::ring_fifo(cvf[ch], svf, rr).len() == nn + 1);
+        assert(cspace::ring_fifo(cv0[ch], sv0, rr).push(cspace::ring_msg(cvf[ch], svf, rr, ii)).len()
+            == nn + 1);
+        assert forall|j: int| 0 <= j < nn + 1
+            implies cspace::ring_fifo(cvf[ch], svf, rr)[j]
+                == cspace::ring_fifo(cv0[ch], sv0, rr).push(cspace::ring_msg(cvf[ch], svf, rr, ii))[j] by {
+            if j < nn {
+                // in-window message j unchanged: its index (hh+j)%dd != ii, so its
+                // msg_len and ring caps are framed to sv0.
+                cspace::lemma_window_index_distinct(hh, dd, j, nn);
+                assert((hh + j) % dd != ii);
+                assert((cvf[ch].head[rr] + j) % (cvf[ch].depth as int) == (hh + j) % dd);
+                assert(cvf[ch].msg_len[(rr, (hh + j) % dd)] == cv0[ch].msg_len[(rr, (hh + j) % dd)]);
+                assert forall|c: int| #![trigger cv0[ch].ring_cap[(rr, (hh + j) % dd, c)]]
+                    0 <= c < 4 implies
+                    svf[cvf[ch].ring_cap[(rr, (hh + j) % dd, c)]].cap
+                        == sv0[cv0[ch].ring_cap[(rr, (hh + j) % dd, c)]].cap by {
+                    assert(cvf[ch].ring_cap[(rr, (hh + j) % dd, c)]
+                        == cv0[ch].ring_cap[(rr, (hh + j) % dd, c)]);
+                }
+                cspace::lemma_ring_msg_eq(cvf[ch], svf, cv0[ch], sv0, rr, (hh + j) % dd);
+            } else {
+                assert((cvf[ch].head[rr] + j) % (cvf[ch].depth as int) == ii);
+            }
+        }
+    }
+}
+
 /// Send: copy the payload into the ring and move caps from the sender's
 /// slots into the message's CDT-visible slots (rev2§3.4 move semantics).
 ///
@@ -1038,11 +1190,23 @@ pub fn send<S: Store>(
         let svf = store.slot_view();
         let cvf = store.chan_view();
         assert(cvf == cv2);
+        // Shape of the enqueued channel view vs entry: ring rr's count grew by one,
+        // head and the other ring untouched, ring caps fixed, only the new tail
+        // slot's msg_len written.
         assert(cvf[ch].count[rr] == nn + 1);
+        assert(cvf[ch].count[1 - rr] == cv0[ch].count[1 - rr]);
         assert(cvf[ch].head == cv0[ch].head);
         assert(cvf[ch].depth == cv0[ch].depth);
+        assert(cvf[ch].end_caps.len() == cv0[ch].end_caps.len());
+        assert(cvf[ch].count.len() == 2);
         assert(cvf[ch].ring_cap == cv0[ch].ring_cap);
+        assert(cv0[ch].msg_len.dom().contains((rr, ii)));
+        assert(cvf[ch].msg_len.dom() == cv0[ch].msg_len.dom());
+        assert(cvf[ch].bindings.dom() == cv0[ch].bindings.dom());
+        assert(svf.dom() == sv0.dom());
         assert(nn < dd);
+        assert forall|idx: int| #![trigger cvf[ch].msg_len[(rr, idx)]]
+            idx != ii implies cvf[ch].msg_len[(rr, idx)] == cv0[ch].msg_len[(rr, idx)] by {}
 
         // ii is the nn-th window position of the *new* window, hence in it.
         assert(cspace::in_live_window(cvf[ch], rr, ii)) by {
@@ -1050,48 +1214,19 @@ pub fn send<S: Store>(
             assert(0 <= nn < cvf[ch].count[rr]);
         }
 
-        // chan_wf(cvf, svf, ch). The windowing coupling is the only nontrivial
-        // clause: an out-of-(new)window ring slot is out-of-old-window too (the
-        // window only grew by ii) and not at (rr,ii), so the frame keeps it at its
-        // sv0 value, which was empty.
-        assert(cspace::chan_wf(cvf, svf, ch)) by {
-            assert forall|r2: int, idx2: int, c2: int|
-                (0 <= r2 < 2 && 0 <= idx2 < cvf[ch].depth && 0 <= c2 < 4
-                    && !cspace::in_live_window(cvf[ch], r2, idx2))
-                implies cspace::is_empty_cap(svf[#[trigger] cvf[ch].ring_cap[(r2, idx2, c2)]].cap) by {
-                // (r2,idx2) != (rr,ii): ii is in-window, idx2 is not.
-                assert(r2 != rr || idx2 != ii);
-                // out-of-new ⟹ out-of-old: the old window's witness j (< nn) also
-                // witnesses the new window (< nn+1), so old-window ⊆ new-window.
-                if cspace::in_live_window(cv0[ch], r2, idx2) {
-                    let j = choose|j: int| #![trigger (cv0[ch].head[r2] + j) % (cv0[ch].depth as int)]
-                        0 <= j < cv0[ch].count[r2] && idx2 == (cv0[ch].head[r2] + j) % (cv0[ch].depth as int);
-                    assert(0 <= j < cvf[ch].count[r2]
-                        && idx2 == (cvf[ch].head[r2] + j) % (cvf[ch].depth as int));
-                }
-                assert(!cspace::in_live_window(cv0[ch], r2, idx2));
-            }
-        }
+        // The cap-move loop emptied no other ring slot (loop invariant @ c == 4),
+        // carried through the enqueue + fire — the per-slot facts the two post-loop
+        // lemmas consume.
+        assert forall|r2: int, idx2: int, c2: int| #![trigger cv0[ch].ring_cap[(r2, idx2, c2)]]
+            (0 <= r2 < 2 && 0 <= idx2 < dd && 0 <= c2 < 4 && (r2 != rr || idx2 != ii))
+            implies svf[cv0[ch].ring_cap[(r2, idx2, c2)]].cap
+                == sv0[cv0[ch].ring_cap[(r2, idx2, c2)]].cap by {}
 
-        // FIFO append on the sending ring: ring_fifo grows by Seq::push.
-        let new_msg = cspace::ring_msg(cvf[ch], svf, rr, ii);
-        assert(cspace::ring_fifo(cvf[ch], svf, rr) =~= cspace::ring_fifo(cv0[ch], sv0, rr).push(new_msg)) by {
-            assert(cspace::ring_fifo(cvf[ch], svf, rr).len() == nn + 1);
-            assert(cspace::ring_fifo(cv0[ch], sv0, rr).push(new_msg).len() == nn + 1);
-            assert forall|j: int| 0 <= j < nn + 1
-                implies cspace::ring_fifo(cvf[ch], svf, rr)[j]
-                    == cspace::ring_fifo(cv0[ch], sv0, rr).push(new_msg)[j] by {
-                if j < nn {
-                    // in-window message j unchanged: its index (hh+j)%dd != ii, so
-                    // its msg_len and ring caps are framed to sv0.
-                    cspace::lemma_window_index_distinct(hh, dd, j, nn);
-                    assert((cvf[ch].head[rr] + j) % (cvf[ch].depth as int) == (hh + j) % dd);
-                    cspace::lemma_ring_msg_eq(cvf[ch], svf, cv0[ch], sv0, rr, (hh + j) % dd);
-                } else {
-                    assert((cvf[ch].head[rr] + j) % (cvf[ch].depth as int) == ii);
-                }
-            }
-        }
+        // chan_wf and the sending-ring FIFO append (push), each proved against the
+        // tight facts above in its own solver context rather than send's full pass-2
+        // loop query (verus.md §10: one lemma per post-loop conjunct).
+        lemma_send_chan_wf(cv0, cvf, sv0, svf, ch, rr, hh, dd, nn, ii);
+        lemma_send_fifo_push(cv0, cvf, sv0, svf, ch, rr, hh, dd, nn, ii);
 
         // The other ring is untouched: its cursors and slots are unchanged.
         assert(cspace::ring_fifo(cvf[ch], svf, 1 - rr) =~= cspace::ring_fifo(cv0[ch], sv0, 1 - rr)) by {
@@ -1114,6 +1249,177 @@ pub fn send<S: Store>(
 } // verus!
 
 verus! {
+
+// `recv` post-loop frame — channel `ch` stays well-formed after the head dequeue.
+// Extracted from `recv`'s inline post-loop block so the out-of-window-emptiness
+// coupling `forall` is discharged against this lemma's tightly-keyed `requires`
+// (the head/count shift + the per-ring-slot facts the two-pass loop already
+// established) instead of against `recv`'s full 14-clause pass-2 loop invariant +
+// `dests` forall + `slot_move` framing (verus.md §10: key the obligation tightly,
+// one lemma per post-loop conjunct).
+proof fn lemma_recv_chan_wf(
+    cv0: Map<ObjId, ChanView>,
+    cvf: Map<ObjId, ChanView>,
+    sv0: Map<SlotId, CapSlot>,
+    svf: Map<SlotId, CapSlot>,
+    ch: ObjId,
+    rr: int,
+    hh: int,
+    dd: int,
+    nn: int,
+)
+    requires
+        cspace::chan_wf(cv0, sv0, ch),
+        0 <= rr < 2,
+        hh == cv0[ch].head[rr],
+        nn == cv0[ch].count[rr],
+        nn >= 1,
+        dd == cv0[ch].depth,
+        cvf.dom().contains(ch),
+        cvf[ch].depth == cv0[ch].depth,
+        cvf[ch].end_caps.len() == cv0[ch].end_caps.len(),
+        cvf[ch].head.len() == 2,
+        cvf[ch].count.len() == 2,
+        cvf[ch].head[rr] == (hh + 1) % dd,
+        cvf[ch].head[rr] < cvf[ch].depth,
+        cvf[ch].count[rr] == nn - 1,
+        cvf[ch].head[1 - rr] == cv0[ch].head[1 - rr],
+        cvf[ch].count[1 - rr] == cv0[ch].count[1 - rr],
+        cvf[ch].ring_cap == cv0[ch].ring_cap,
+        cvf[ch].msg_len.dom() == cv0[ch].msg_len.dom(),
+        cvf[ch].bindings.dom() == cv0[ch].bindings.dom(),
+        svf.dom() == sv0.dom(),
+        // pass 2 emptied the dequeued head's caps.
+        forall|c: int| #![trigger cv0[ch].ring_cap[(rr, hh, c)]]
+            0 <= c < 4 ==> cspace::is_empty_cap(svf[cv0[ch].ring_cap[(rr, hh, c)]].cap),
+        // every ring slot other than the dequeued head is untouched.
+        forall|r: int, i: int, c: int| #![trigger cv0[ch].ring_cap[(r, i, c)]]
+            (0 <= r < 2 && 0 <= i < dd && 0 <= c < 4 && (r != rr || i != hh))
+                ==> svf[cv0[ch].ring_cap[(r, i, c)]].cap == sv0[cv0[ch].ring_cap[(r, i, c)]].cap,
+    ensures
+        cspace::chan_wf(cvf, svf, ch),
+{
+    assert(0 <= hh < dd) by {
+        assert(cv0[ch].head[rr] < cv0[ch].depth);
+    }
+    // FIFO cursors stay in range: ring rr's head shifted one slot (mod depth) and
+    // its count dropped by one; the other ring is unchanged.
+    assert forall|r: int| #![trigger cvf[ch].head[r]] 0 <= r < 2
+        implies cvf[ch].head[r] < cvf[ch].depth by {
+        if r != rr {
+            assert(r == 1 - rr);
+            assert(cv0[ch].head[1 - rr] < cv0[ch].depth);
+        }
+    }
+    assert forall|r: int| #![trigger cvf[ch].count[r]] 0 <= r < 2
+        implies cvf[ch].count[r] <= cvf[ch].depth by {
+        if r == rr {
+            assert(cv0[ch].count[rr] <= cv0[ch].depth);
+        } else {
+            assert(r == 1 - rr);
+            assert(cv0[ch].count[1 - rr] <= cv0[ch].depth);
+        }
+    }
+    // The coupling: out-of-(new-)window ring slots are empty. The new window is the
+    // old minus the dequeued head index hh; the head slot is now empty (pass 2), and
+    // every other out-of-window slot was out-of-old-window and is unchanged.
+    assert forall|r2: int, idx2: int, c3: int|
+        (0 <= r2 < 2 && 0 <= idx2 < cvf[ch].depth && 0 <= c3 < 4
+            && !cspace::in_live_window(cvf[ch], r2, idx2))
+        implies cspace::is_empty_cap(svf[#[trigger] cvf[ch].ring_cap[(r2, idx2, c3)]].cap) by {
+        assert(cvf[ch].ring_cap[(r2, idx2, c3)] == cv0[ch].ring_cap[(r2, idx2, c3)]);
+        if r2 == rr && idx2 == hh {
+            // head slot: every cap emptied in pass 2 (c3 < 4).
+            assert(cv0[ch].ring_cap[(rr, hh, c3)] == cv0[ch].ring_cap[(r2, idx2, c3)]);
+        } else {
+            // out-of-new ⟹ out-of-old (new window = old minus head hh).
+            if cspace::in_live_window(cv0[ch], r2, idx2) {
+                let j = choose|j: int| #![trigger (cv0[ch].head[r2] + j) % (cv0[ch].depth as int)]
+                    0 <= j < cv0[ch].count[r2] && idx2 == (cv0[ch].head[r2] + j) % (cv0[ch].depth as int);
+                if r2 == rr {
+                    // idx2 != hh == head, so the witness j is not 0; shift to j-1.
+                    assert(cv0[ch].head[r2] == hh);
+                    assert(j >= 1) by {
+                        if j == 0 {
+                            cspace::lemma_self_mod(hh, dd);
+                        }
+                    }
+                    cspace::lemma_mod_shift_head(cv0[ch].head[r2] as int, dd, j - 1);
+                    assert(0 <= j - 1 < cvf[ch].count[r2]);
+                    assert(idx2 == (cvf[ch].head[r2] + (j - 1)) % (cvf[ch].depth as int));
+                } else {
+                    // other ring: head/count unchanged, witness j stands.
+                    assert(r2 == 1 - rr);
+                    assert(0 <= j < cvf[ch].count[r2]);
+                    assert(idx2 == (cvf[ch].head[r2] + j) % (cvf[ch].depth as int));
+                }
+            }
+            assert(!cspace::in_live_window(cv0[ch], r2, idx2));
+        }
+    }
+}
+
+// `recv` post-loop frame — the receiving ring's FIFO loses its head. Companion to
+// `lemma_recv_chan_wf` for the second post-loop conjunct (verus.md §10).
+proof fn lemma_recv_fifo_drop_first(
+    cv0: Map<ObjId, ChanView>,
+    cvf: Map<ObjId, ChanView>,
+    sv0: Map<SlotId, CapSlot>,
+    svf: Map<SlotId, CapSlot>,
+    ch: ObjId,
+    rr: int,
+    hh: int,
+    dd: int,
+    nn: int,
+)
+    requires
+        cspace::chan_wf(cv0, sv0, ch),
+        0 <= rr < 2,
+        hh == cv0[ch].head[rr],
+        nn == cv0[ch].count[rr],
+        nn >= 1,
+        dd == cv0[ch].depth,
+        cvf[ch].depth == cv0[ch].depth,
+        cvf[ch].head[rr] == (hh + 1) % dd,
+        cvf[ch].count[rr] == nn - 1,
+        cvf[ch].ring_cap == cv0[ch].ring_cap,
+        cvf[ch].msg_len == cv0[ch].msg_len.insert((rr, hh), 0),
+        forall|r: int, i: int, c: int| #![trigger cv0[ch].ring_cap[(r, i, c)]]
+            (0 <= r < 2 && 0 <= i < dd && 0 <= c < 4 && (r != rr || i != hh))
+                ==> svf[cv0[ch].ring_cap[(r, i, c)]].cap == sv0[cv0[ch].ring_cap[(r, i, c)]].cap,
+    ensures
+        cspace::ring_fifo(cvf[ch], svf, rr) == cspace::ring_fifo(cv0[ch], sv0, rr).drop_first(),
+{
+    assert(cv0[ch].head[rr] < cv0[ch].depth);
+    assert(cv0[ch].count[rr] <= cv0[ch].depth);
+    assert(cspace::ring_fifo(cvf[ch], svf, rr) =~= cspace::ring_fifo(cv0[ch], sv0, rr).drop_first()) by {
+        assert(cspace::ring_fifo(cvf[ch], svf, rr).len() == nn - 1);
+        assert(cspace::ring_fifo(cv0[ch], sv0, rr).drop_first().len() == nn - 1);
+        assert forall|j: int| 0 <= j < nn - 1
+            implies cspace::ring_fifo(cvf[ch], svf, rr)[j]
+                == cspace::ring_fifo(cv0[ch], sv0, rr).drop_first()[j] by {
+            // after-index ((hh+1)%dd + j)%dd == (hh + (j+1))%dd (old position j+1),
+            // which is not the head hh (lemma_window_index_distinct(hh,dd,0,j+1)).
+            cspace::lemma_mod_shift_head(hh, dd, j);
+            assert((cvf[ch].head[rr] + j) % (cvf[ch].depth as int) == (hh + (j + 1)) % dd);
+            cspace::lemma_window_index_distinct(hh, dd, 0, j + 1);
+            cspace::lemma_self_mod(hh, dd);
+            assert((hh + (j + 1)) % dd != hh);
+            // idx = (hh+(j+1))%dd is a non-head window position, so its msg_len and
+            // ring caps survived the dequeue.
+            assert(cvf[ch].msg_len[(rr, (hh + (j + 1)) % dd)]
+                == cv0[ch].msg_len[(rr, (hh + (j + 1)) % dd)]);
+            assert forall|c: int| #![trigger cv0[ch].ring_cap[(rr, (hh + (j + 1)) % dd, c)]]
+                0 <= c < 4 implies
+                svf[cvf[ch].ring_cap[(rr, (hh + (j + 1)) % dd, c)]].cap
+                    == sv0[cv0[ch].ring_cap[(rr, (hh + (j + 1)) % dd, c)]].cap by {
+                assert(cvf[ch].ring_cap[(rr, (hh + (j + 1)) % dd, c)]
+                    == cv0[ch].ring_cap[(rr, (hh + (j + 1)) % dd, c)]);
+            }
+            cspace::lemma_ring_msg_eq(cvf[ch], svf, cv0[ch], sv0, rr, (hh + (j + 1)) % dd);
+        }
+    }
+}
 
 /// Receive into `buf`, installing caps into `dests`. If any arriving cap
 /// has no free destination the receive fails and the message stays queued
@@ -1506,73 +1812,40 @@ pub fn recv<S: Store>(
         let svf = store.slot_view();
         let cvf = store.chan_view();
         assert(cvf == cv2);
+        assert(svf == sv_loop);
+        // Shape of the dequeued channel view vs entry: ring rr's head advanced one
+        // slot (mod depth) and its count dropped by one, the other ring untouched,
+        // ring caps / msg-len domain / bindings domain all fixed.
         assert(cvf[ch].count[rr] == nn - 1);
         assert(cvf[ch].head[rr] == (hh + 1) % dd);
+        assert(cvf[ch].head[rr] < cvf[ch].depth);
+        assert(cvf[ch].head[1 - rr] == cv0[ch].head[1 - rr]);
+        assert(cvf[ch].count[1 - rr] == cv0[ch].count[1 - rr]);
         assert(cvf[ch].depth == cv0[ch].depth);
+        assert(cvf[ch].end_caps.len() == cv0[ch].end_caps.len());
+        assert(cvf[ch].head.len() == 2);
+        assert(cvf[ch].count.len() == 2);
         assert(cvf[ch].ring_cap == cv0[ch].ring_cap);
         assert(cvf[ch].msg_len == cv0[ch].msg_len.insert((rr, hh), 0));
+        assert(cv0[ch].msg_len.dom().contains((rr, hh)));
+        assert(cvf[ch].msg_len.dom() == cv0[ch].msg_len.dom());
+        assert(cvf[ch].bindings.dom() == cv0[ch].bindings.dom());
+        assert(svf.dom() == sv0.dom());
+        // Pass 2 emptied the dequeued head's caps and left every other ring slot
+        // untouched (loop invariants @ c2 == 4, carried through the dequeue + fire by
+        // svf == sv_loop) — the per-slot facts the two post-loop lemmas consume.
+        assert forall|c: int| #![trigger cv0[ch].ring_cap[(rr, hh, c)]]
+            0 <= c < 4 implies cspace::is_empty_cap(svf[cv0[ch].ring_cap[(rr, hh, c)]].cap) by {}
+        assert forall|r2: int, idx2: int, c3: int| #![trigger cv0[ch].ring_cap[(r2, idx2, c3)]]
+            (0 <= r2 < 2 && 0 <= idx2 < dd && 0 <= c3 < 4 && (r2 != rr || idx2 != hh))
+            implies svf[cv0[ch].ring_cap[(r2, idx2, c3)]].cap
+                == sv0[cv0[ch].ring_cap[(r2, idx2, c3)]].cap by {}
 
-        // chan_wf(cvf, svf, ch): out-of-(new)window ring slots are empty. The new
-        // window is the old minus the head index hh; the head slot is now empty
-        // (all its caps moved out / already empty), and every other out-of-window
-        // slot was out-of-old-window and is unchanged.
-        assert(cspace::chan_wf(cvf, svf, ch)) by {
-            assert forall|r2: int, idx2: int, c3: int|
-                (0 <= r2 < 2 && 0 <= idx2 < cvf[ch].depth && 0 <= c3 < 4
-                    && !cspace::in_live_window(cvf[ch], r2, idx2))
-                implies cspace::is_empty_cap(svf[#[trigger] cvf[ch].ring_cap[(r2, idx2, c3)]].cap) by {
-                if r2 == rr && idx2 == hh {
-                    // head slot: every cap emptied in pass 2 (cc < 4).
-                } else {
-                    // out-of-new ⟹ out-of-old (new window = old minus head hh).
-                    if cspace::in_live_window(cv0[ch], r2, idx2) {
-                        let j = choose|j: int| #![trigger (cv0[ch].head[r2] + j) % (cv0[ch].depth as int)]
-                            0 <= j < cv0[ch].count[r2] && idx2 == (cv0[ch].head[r2] + j) % (cv0[ch].depth as int);
-                        if r2 == rr {
-                            // idx2 != hh == head, so the witness j is not 0; shift to j-1.
-                            assert(cv0[ch].head[r2] == hh);
-                            assert(j >= 1) by {
-                                if j == 0 {
-                                    cspace::lemma_self_mod(hh, dd);
-                                    assert(idx2 == hh);
-                                }
-                            }
-                            cspace::lemma_mod_shift_head(cv0[ch].head[r2] as int, dd, j - 1);
-                            assert(0 <= j - 1 < cvf[ch].count[r2]);
-                            assert(idx2 == (cvf[ch].head[r2] + (j - 1)) % (cvf[ch].depth as int));
-                        } else {
-                            // other ring: head/count unchanged, witness j stands.
-                            assert(0 <= j < cvf[ch].count[r2]);
-                            assert(idx2 == (cvf[ch].head[r2] + j) % (cvf[ch].depth as int));
-                        }
-                    }
-                    assert(!cspace::in_live_window(cv0[ch], r2, idx2));
-                }
-            }
-        }
-
-        // FIFO pop on the receiving ring: ring_fifo loses its head (drop_first).
-        assert(cspace::ring_fifo(cvf[ch], svf, rr) =~= cspace::ring_fifo(cv0[ch], sv0, rr).drop_first()) by {
-            assert(cspace::ring_fifo(cvf[ch], svf, rr).len() == nn - 1);
-            assert(cspace::ring_fifo(cv0[ch], sv0, rr).drop_first().len() == nn - 1);
-            assert forall|j: int| 0 <= j < nn - 1
-                implies cspace::ring_fifo(cvf[ch], svf, rr)[j]
-                    == cspace::ring_fifo(cv0[ch], sv0, rr).drop_first()[j] by {
-                // after-index ((hh+1)%dd + j)%dd == (hh + (j+1))%dd (old position j+1),
-                // which is not the head hh (lemma_window_index_distinct(hh,dd,0,j+1)).
-                cspace::lemma_mod_shift_head(hh, dd, j);
-                assert(cvf[ch].head[rr] == (hh + 1) % dd);
-                assert((cvf[ch].head[rr] + j) % (cvf[ch].depth as int) == (hh + (j + 1)) % dd);
-                // idx = (hh+(j+1))%dd is a non-head window position, so its msg_len
-                // and ring caps survived the dequeue.
-                cspace::lemma_window_index_distinct(hh, dd, 0, j + 1);
-                cspace::lemma_self_mod(hh, dd);
-                assert((hh + (j + 1)) % dd != hh);
-                assert(cvf[ch].msg_len[(rr, (hh + (j + 1)) % dd)]
-                    == cv0[ch].msg_len[(rr, (hh + (j + 1)) % dd)]);
-                cspace::lemma_ring_msg_eq(cvf[ch], svf, cv0[ch], sv0, rr, (hh + (j + 1)) % dd);
-            }
-        }
+        // chan_wf and the receiving-ring FIFO pop (drop_first), each proved against
+        // the tight facts above in its own solver context rather than recv's full
+        // pass-2 loop query (verus.md §10: one lemma per post-loop conjunct).
+        lemma_recv_chan_wf(cv0, cvf, sv0, svf, ch, rr, hh, dd, nn);
+        lemma_recv_fifo_drop_first(cv0, cvf, sv0, svf, ch, rr, hh, dd, nn);
 
         // The other ring is untouched.
         assert(cspace::ring_fifo(cvf[ch], svf, 1 - rr) =~= cspace::ring_fifo(cv0[ch], sv0, 1 - rr)) by {
@@ -1590,9 +1863,9 @@ pub fn recv<S: Store>(
         }
 
         // ── export the receive-half of move semantics ──
-        // The dequeue ops + fire frame slot_view, so the pass-2 installation rides to
-        // `final`; the c2==4 loop invariants then yield ensures (B) and (C) directly.
-        assert(svf == sv_loop);
+        // The dequeue ops + fire frame slot_view (svf == sv_loop above), so the pass-2
+        // installation rides to `final`; the c2==4 loop invariants then yield ensures
+        // (B) and (C) directly.
         // (C) every dequeued-head ring slot is empty (loop invariant "processed emptied").
         assert forall|c: int| #![trigger cv0[ch].ring_cap[(rr, hh, c)]]
             0 <= c < 4 implies cspace::is_empty_cap(svf[cv0[ch].ring_cap[(rr, hh, c)]].cap) by {}
