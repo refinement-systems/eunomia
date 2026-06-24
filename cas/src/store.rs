@@ -1389,6 +1389,57 @@ proof fn lemma_forall_laid_out(wal: Seq<u8>, records: Seq<RecMeta>, k: int)
     }
 }
 
+/// Pushing one freshly-framed record preserves the per-record `rec_ok` invariant.
+/// `r == prev.push(new)` is the post-`Vec::push` snapshot: the new last record frames
+/// as itself (the `frame_at`/`content_ok_spec`/`seq < MAX` facts `decode_frame` and
+/// `wal_content_ok` established), and the previous last record gains its contiguity
+/// clause from the cursor sitting just past it (the `off`/`seq` requires — the loop's
+/// own invariants). `new` is passed by value rather than reconstructed so the
+/// `Vec<u8>` `ref_name` literal never appears in spec context.
+proof fn lemma_push_preserves_rec_ok(
+    wal: Seq<u8>,
+    prev: Seq<RecMeta>,
+    r: Seq<RecMeta>,
+    new: RecMeta,
+    rlen: nat,
+)
+    requires
+        forall|j: int| 0 <= j < prev.len() ==> rec_ok(wal, prev, j),
+        r == prev.push(new),
+        frame_at(wal, new.off as int) == Some((new.seq, rlen)),
+        new.seq < u64::MAX,
+        content_ok_spec(wal.subrange(new.off as int, new.off as int + rlen)),
+        prev.len() > 0 ==> new.off as int == prev[prev.len() - 1].off as int
+            + frame_rlen(wal, prev[prev.len() - 1].off as int),
+        prev.len() > 0 ==> new.seq as int == prev[prev.len() - 1].seq as int + 1,
+    ensures
+        forall|k: int| 0 <= k < r.len() ==> rec_ok(wal, r, k),
+{
+    let n = prev.len() as int;
+    assert(r.len() == n + 1);
+    assert(r[n] == new);
+    assert forall|k: int| 0 <= k < r.len() implies rec_ok(wal, r, k) by {
+        if k < n {
+            // Unchanged records keep their framing/content; only the previous last
+            // record (k == n - 1) gains a contiguity clause, discharged by the cursor
+            // requires (the new record's off / seq sit just past record n - 1).
+            assert(r[k] == prev[k]);
+            assert(rec_ok(wal, prev, k));
+            if k + 1 == r.len() - 1 {
+                assert(r[k + 1] == new);
+                assert(new.off as int == prev[k].off as int + frame_rlen(wal, prev[k].off as int));
+                assert(new.seq as int == prev[k].seq as int + 1);
+            } else if k + 1 < n {
+                assert(r[k + 1] == prev[k + 1]);
+            }
+        } else {
+            // k == n: the freshly pushed record frames and is content-valid; its
+            // contiguity clause is vacuous (it is last).
+            assert(r[k] == new);
+        }
+    }
+}
+
 /// The recovery span plus the rebuilt record skeleton. `records` is the maximal
 /// seq-continuous, content-valid run from the head with `seq < u64::MAX` — the
 /// records `mount` replays — and is *proven* `laid_out`. `forged_max` flags an
@@ -1494,32 +1545,14 @@ fn recover_records(wal: &[u8], wal_head: u64, wal_next_seq: u64) -> (r: Recovere
         records.push(RecMeta { seq, off: off as u64, ref_name: Vec::new(), flushed: false });
         proof {
             let r = records@;
-            let n = prev.len() as int;
-            assert(r.len() == n + 1);
-            assert(r[n].off == off as u64 && r[n].seq == seq && !r[n].flushed);
+            let new = r[prev.len() as int];
             // decode_frame tied the exec frame to frame_at; wal_content_ok tied the
             // accept to content_ok_spec — the facts the new last record needs.
+            assert(new.off as int == off as int && new.seq == seq && !new.flushed);
             assert(frame_at(wal@, off as int) == Some((frame.seq, frame.rlen as nat)));
             assert(content_ok_spec(wal@.subrange(off as int, off as int + frame.rlen as nat)));
-            assert forall|k: int| 0 <= k < r.len() implies rec_ok(wal@, r, k) by {
-                if k < n {
-                    // Unchanged records keep their framing/content; only the previous
-                    // last record (k == n - 1) gains a contiguity clause, discharged
-                    // by the cursor invariant (off / seq sit just past record n - 1).
-                    assert(r[k] == prev[k]);
-                    assert(rec_ok(wal@, prev, k));
-                    if k + 1 == r.len() - 1 {
-                        assert(r[k + 1] == r[n]);
-                        assert(off as int == prev[k].off as int + frame_rlen(wal@, prev[k].off as int));
-                    } else if k + 1 < n {
-                        assert(r[k + 1] == prev[k + 1]);
-                    }
-                } else {
-                    // k == n: the freshly pushed record frames and is content-valid;
-                    // its contiguity clause is vacuous (it is last).
-                    assert(r[k] == r[n]);
-                }
-            }
+            assert(r == prev.push(new));
+            lemma_push_preserves_rec_ok(wal@, prev, r, new, frame.rlen as nat);
         }
         off = off + frame.rlen;
         seq = seq + 1;
