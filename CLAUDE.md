@@ -207,6 +207,23 @@ cargo clean -p kcore && cargo verus verify -p kcore   # results line present == 
 This bites hardest after editing a shared spec/predicate, where a scoped recheck
 of the edited function alone reports nothing. When in doubt, clean.
 
+**Profiling proof time.** Forward `--time-expanded` (with `--output-json` for a
+machine-readable form) to the prover for a per-module / per-function timing
+breakdown — the JSON's `times-ms.smt.smt-run-module-times[].function-breakdown[]`
+ranks each function's SMT `time`/`rlimit`, the data you need to find the
+expensive obligation behind a slow crate or an rlimit blowup:
+
+```sh
+cargo clean -p kcore   # a real run; a cached one reports no timing at all
+cargo verus verify -p kcore -- --time-expanded --output-json
+```
+
+`scripts/verus-baseline.sh` automates this across the whole gate: it cleans then
+verifies each crate, captures the per-crate JSON, and prints a summary table plus
+the slowest functions (`scripts/verus-baseline.sh [crate...]`, output under
+`target/verus-baseline/`). Run it before a proof-perf change to establish a
+baseline, and after to see what moved.
+
 ### Formatting — run `cargo fmt` before every commit
 
 The tree is kept rustfmt-clean **per change**: run `cargo fmt` before committing
