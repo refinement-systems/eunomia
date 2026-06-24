@@ -185,6 +185,10 @@ Copy(p, src, dst) ==
 
 \* Send: caps move from the sender's cspace into a queue slot (rev2§3.4).
 \* Non-blocking; disabled (FULL) when the queue is at capacity (rev2§3.3).
+\* cs is a set of the sender's own caps: the cs \subseteq cspaces[p] conjunct
+\* is the move guard, so Next enables Send by quantifying cs over
+\* SUBSET cspaces[p] — exactly the sets that can pass that guard — rather than
+\* over the whole SUBSET CapIds and discarding the rest.
 Send(p, ch, cs) ==
     /\ cs /= {}
     /\ cs \subseteq cspaces[p]
@@ -291,7 +295,7 @@ Retype(p, c) ==
 
 Next ==
     /\ \/ \E p \in Procs, s, d \in CapIds : Copy(p, s, d)
-       \/ \E p \in Procs, ch \in Channels, cs \in (SUBSET CapIds) : Send(p, ch, cs)
+       \/ \E p \in Procs : \E ch \in Channels, cs \in SUBSET cspaces[p] : Send(p, ch, cs)
        \/ \E p \in Procs, ch \in Channels : Receive(p, ch)
        \/ \E p \in Procs, t \in Threads, k \in BindKinds, c \in CapIds : Bind(p, t, k, c)
        \/ \E t \in Threads : ThreadExit(t)
@@ -397,7 +401,7 @@ RevokeStepBad(c) ==
 
 NextBad ==
     /\ \/ \E p \in Procs, s, d \in CapIds : Copy(p, s, d)
-       \/ \E p \in Procs, ch \in Channels, cs \in (SUBSET CapIds) : Send(p, ch, cs)
+       \/ \E p \in Procs : \E ch \in Channels, cs \in SUBSET cspaces[p] : Send(p, ch, cs)
        \/ \E p \in Procs, ch \in Channels : Receive(p, ch)
        \/ \E p \in Procs, t \in Threads, k \in BindKinds, c \in CapIds : Bind(p, t, k, c)
        \/ \E t \in Threads : ThreadExit(t)
@@ -425,7 +429,7 @@ CopyNoGuard(p, src, dst) ==
 
 NextNoGuard ==
     /\ \/ \E p \in Procs, s, d \in CapIds : CopyNoGuard(p, s, d)
-       \/ \E p \in Procs, ch \in Channels, cs \in (SUBSET CapIds) : Send(p, ch, cs)
+       \/ \E p \in Procs : \E ch \in Channels, cs \in SUBSET cspaces[p] : Send(p, ch, cs)
        \/ \E p \in Procs, ch \in Channels : Receive(p, ch)
        \/ \E p \in Procs, t \in Threads, k \in BindKinds, c \in CapIds : Bind(p, t, k, c)
        \/ \E t \in Threads : ThreadExit(t)
