@@ -64,6 +64,37 @@ jobs:
       - name: Negative controls must fail as designed
         run: bash scripts/tla-neg-controls.sh
 
+  # The safety-only arm of the CapRevocation model (rev2§2.2/§3 CDT revocation),
+  # a SEPARATE job so it runs in PARALLEL with `model` — total model-checking
+  # wall-clock is then the max of the two arms, not their sum. It drops the
+  # EventuallyRevoked liveness property (checked by `model` above), and that
+  # tableau is what forces the liveness arm down to its constant floor; without
+  # it the same safety invariants run at the larger residence constants the
+  # liveness arm trims (Threads=2, QueueDepth=2): ~12.2M reachable states vs the
+  # liveness arm's 503k, so MoveSemantics/LiveParent/FireSafe/etc. now hold
+  # across a second TCB's bind/exit/fault interleavings and a depth-2 channel
+  # ring. Same vendored-jar pin and TLC_WORKERS as `model`.
+  model-safety:
+    runs-on: ubuntu-latest
+    # ~5 min at 4 workers; the cap is margin — a constants bump that explodes the
+    # state space should fail fast here, not hang.
+    timeout-minutes: 15
+    env:
+      JAVA: java
+      TLA_TOOLS: ${{ github.workspace }}/tools/tla/tla2tools.jar
+      TLC_WORKERS: "4"
+      TLA_JAVA_OPTS: -Xmx4g
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Verify the vendored tla2tools.jar matches its pin
+        run: cd tools/tla && shasum -c tla2tools.jar.sha1
+      - name: Model-check CapRevocation safety invariants at larger constants
+        run: bash tools/tla/tla-model-check.sh tla/cap_revocation/CapRevocation.tla CapRevocation_Safety.cfg
+
   # The §5.1 exit criterion: boot the real system under QEMU and drive the
   # shell through the burn regression (spawn/wait/reclaim 100x), status
   # propagation, the wild-pointer fault demo + re-spawn, the panic path,
