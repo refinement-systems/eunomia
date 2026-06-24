@@ -32,7 +32,9 @@ rewriting.
   `rustup default nightly && rustup component add rust-src`
 - **QEMU** ≥ 7.x with `qemu-system-aarch64`
 - (optional) **Java** for the TLA+ model checker, **`cargo +nightly miri`**
-  for the UB checks
+  for the UB checks, and **Verus** (pinned binary `0.2026.06.07.cd03505`
+  with Rust toolchain `1.95.0`) for the deductive-verification gate —
+  unzip the matching release and put its `cargo-verus` on `PATH`
 
 Everything runs on a stock macOS or Linux host; no cross-toolchain or
 LLVM fork is needed.
@@ -176,6 +178,40 @@ A/B-superblock commit/recovery protocol (including partial flushes —
 the crash-injection proptest in `cas/src/store.rs` mirrors its headline
 invariant against real bytes) and capability revocation including caps
 queued in in-flight messages.
+
+### Deductive verification (Verus)
+
+The `kcore` object model and the host chokepoints (`ipc`, `urt`,
+`freelist`, `dma-pool`, and the `cas` superblock codecs) are proven with
+Verus for all inputs. Verus ships no crates.io binary; install the pinned
+release (see Prerequisites) and check it matches before trusting a result:
+
+```sh
+verus --version   # Version: 0.2026.06.07.cd03505, Toolchain: 1.95.0-...
+```
+
+Run the full gate from a clean build — `cargo clean` first so nothing is
+served from stale verification cache, then one `cargo verus verify` per
+crate (this is exactly what CI does):
+
+```sh
+cargo clean
+cargo verus verify -p kcore
+cargo verus verify -p ipc
+cargo verus verify -p urt
+cargo verus verify -p freelist
+cargo verus verify -p dma-pool
+cargo verus verify -p cas --no-default-features   # feature-agnostic codecs
+```
+
+Verus caches verification per build, so a re-run over an unchanged
+`target/` can exit 0 **without re-verifying** — a stale-cache false green.
+A real run prints a `verification results:: N verified, 0 errors` line per
+crate; if that line is missing, the result came from cache. Before
+re-verifying, clean the relevant crate first (`cargo clean -p kcore`), or
+`cargo clean` for the whole gate. See `doc/guidelines/verus.md` for the
+full discipline and `doc/guidelines/verus_trusted-base.md` for the
+trusted base and expected per-crate counts.
 
 ## Repository layout
 
