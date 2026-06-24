@@ -419,6 +419,299 @@ pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<S
 
 verus! {
 
+// ── `destroy_tcb` per-phase frame lemmas (rev2§6, doc/guidelines/verus.md §10). ──
+//
+// `destroy_tcb` tears a dead TCB down in phases (detach → halt → bind-slot `delete`s →
+// clear-before-unref cspace/aspace), each re-establishing the running cross-object frame on the
+// entry snapshot `st0`. §10's decomposition recipe keys each heavy phase to its own `proof fn`:
+// `requires` are the cheap local facts the phase already has in hand (the prior snapshot's
+// invariants + the single touched-object edit shape), `ensures` are the global frames composed
+// onto `st0`. The op body then proves only the local edit and calls the lemma, so neither the
+// phase derivation nor the six quantified `pub open spec` frames flood the one isolated query.
+// The lemmas defer to the same `cspace::lemma_*` composition machinery the inline blocks used;
+// the in-tree precedent is `cspace::destroy_cspace`'s per-iteration `lemma_*_trans` frame calls.
+
+// Halt: clearing `t`'s queue/wait links and marking it `Halted` makes `t` dead + queue-detached.
+// Given the post-detach `st_detach` invariants and the halt edit (only `tcb[t]`'s
+// `qnext`/`wait_notif`/`state` move, every other view frozen), re-establish the system invariants
+// + ready pair at `store` and compose the running frames `st0 → store`.
+proof fn lemma_destroy_tcb_halt_frame<S: Store>(st0: &S, st_detach: &S, store: &S, t: ObjId)
+    requires
+        // ── `st_detach` invariant bundle (the detach phase left these in hand) ──
+        cspace::cspace_wf(st_detach.slot_view()),
+        st_detach.slot_view().dom().finite(),
+        cspace::refcount_sound(st_detach),
+        cspace::caps_consistent(st_detach),
+        cspace::end_caps_sound(st_detach),
+        cspace::census_dom_complete(st_detach),
+        cspace::ready_wf(st_detach.ready_view(), st_detach.tcb_view()),
+        cspace::ready_complete_except(st_detach.ready_view(), st_detach.tcb_view(), t),
+        st_detach.tcb_view().dom().contains(t),
+        st_detach.refs_view().dom().contains(t),
+        st_detach.refs_view()[t] == 0,
+        forall|level: int|
+            0 <= level < crate::sysabi::NUM_PRIOS as int ==> !(#[trigger] cspace::ready_seq(
+                st_detach.ready_view(),
+                st_detach.tcb_view(),
+                level,
+            )).contains(t),
+        forall|o: ObjId, ws: Seq<ObjId>|
+            cspace::waiter_chain(st_detach.notif_view(), st_detach.tcb_view(), o, ws)
+                ==> !ws.contains(t),
+        // running frames composed onto `st0` at `st_detach`
+        cspace::dead_tcb_frozen(st0, st_detach),
+        cspace::home_views_frozen(st0, st_detach),
+        cspace::unhomed_frozen_free(st0, st_detach),
+        cspace::emptied_via_dead_home_free(st0, st_detach),
+        cspace::refs_death_persist(st0, st_detach),
+        st0.slot_view() == st_detach.slot_view(),
+        // ── the halt edit: `store == st_detach` with only `tcb[t]`'s queue/wait/state moved ──
+        store.slot_view() == st_detach.slot_view(),
+        store.cspace_view() == st_detach.cspace_view(),
+        store.chan_view() == st_detach.chan_view(),
+        store.notif_view() == st_detach.notif_view(),
+        store.timer_view() == st_detach.timer_view(),
+        store.timer_head_view() == st_detach.timer_head_view(),
+        store.irq_view() == st_detach.irq_view(),
+        store.ready_view() == st_detach.ready_view(),
+        store.refs_view() == st_detach.refs_view(),
+        store.tcb_view().dom() == st_detach.tcb_view().dom(),
+        forall|x: ObjId| x != t ==> #[trigger] store.tcb_view()[x] == st_detach.tcb_view()[x],
+        store.tcb_view()[t].state == ThreadState::Halted,
+        store.tcb_view()[t].qnext is None,
+        store.tcb_view()[t].wait_notif is None,
+        store.tcb_view()[t].cspace == st_detach.tcb_view()[t].cspace,
+        store.tcb_view()[t].aspace == st_detach.tcb_view()[t].aspace,
+        store.tcb_view()[t].bind_slots == st_detach.tcb_view()[t].bind_slots,
+    ensures
+        cspace::cspace_wf(store.slot_view()),
+        cspace::refcount_sound(store),
+        cspace::caps_consistent(store),
+        cspace::end_caps_sound(store),
+        cspace::census_dom_complete(store),
+        cspace::ready_wf(store.ready_view(), store.tcb_view()),
+        cspace::ready_complete(store.ready_view(), store.tcb_view()),
+        forall|x: ObjId| x != t ==> #[trigger] cspace::dead_tcb_frozen_at(st0, store, x),
+        cspace::home_views_frozen(st0, store),
+        cspace::unhomed_frozen_free(st0, store),
+        cspace::emptied_via_dead_home_free(st0, store),
+        cspace::refs_death_persist(st0, store),
+        forall|o: ObjId, ws: Seq<ObjId>|
+            cspace::waiter_chain(store.notif_view(), store.tcb_view(), o, ws) ==> !ws.contains(t),
+{
+    // `t` off all chains: at `st_detach` (carried from the detach branches) and at `store` (now
+    // Halted ⇒ not BlockedNotif). The halt promotes `ready_complete_except(t)` → full completeness.
+    cspace::lemma_ready_complete_halt_promote(st_detach, store, t);
+    cspace::lemma_thread_off_all_chains(store, t);
+    // census frozen (only `t` moved, `refs` fixed) ⇒ `refcount_sound`/`census_dom_complete` ride;
+    // `caps_consistent` rides the halt-clear frame (`refs[t] == 0` ⇒ no live `Thread(t)` cap).
+    cspace::lemma_census_frame_thread_halt(st_detach, store, t);
+    cspace::lemma_refcount_sound_from_census_eq(st_detach, store);
+    cspace::lemma_no_live_thread_cap_from_dead(st_detach, t);
+    cspace::lemma_caps_consistent_frame_thread_halt_clear(st_detach, store, t);
+    assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o) >= 1 implies
+        store.refs_view().dom().contains(o) by {
+        assert(cspace::obj_census(st_detach, o) == cspace::obj_census(store, o));
+        cspace::lemma_in_refs_from_census(st_detach, o);
+    }
+    assert(cspace::end_caps_sound(store));
+    // except-`t` dead-frame of the halt (only `t` moved); compose with the detach's onto `st0`.
+    cspace::lemma_dead_tcb_frozen_except_single_t(st_detach, store, t);
+    cspace::lemma_dead_tcb_frozen_to_except(st0, st_detach, t);
+    cspace::lemma_dead_tcb_frozen_except_trans(st0, st_detach, store, t);
+    // The halt frames `slot_view` (free) and the home maps; compose onto `st0`.
+    cspace::lemma_unhomed_frozen_free_from_slot_eq(st_detach, store);
+    assert(cspace::home_views_frozen(st_detach, store));
+    cspace::lemma_unhomed_frozen_free_trans(st0, st_detach, store);
+    cspace::lemma_home_views_frozen_trans(st0, st_detach, store);
+    // Dual: the halt frames `slot_view` (free refl) and `refs` (death-persist refl); compose.
+    cspace::lemma_emptied_via_dead_home_free_from_slot_eq(st_detach, store);
+    cspace::lemma_refs_death_persist_from_refs_eq(st_detach, store);
+    cspace::lemma_emptied_via_dead_home_free_trans(st0, st_detach, store);
+    cspace::lemma_refs_death_persist_trans(st0, st_detach, store);
+}
+
+// Clear-before-unref (cspace): clearing `t`'s `cspace` field opens the `census_off_by_one(cs)`
+// window `unref_cspace` consumes. Given the running `st_pre_cs` invariants and the single-field
+// clear (only `tcb[t].cspace → None`, every other view frozen), re-establish the invariants
+// `unref_cspace` needs at `store` and carry the running frames `st0 → store`. The `set_tcb_cspace`
+// post is exactly the `.insert(t, TcbView { cspace: None, .. })` shape `lemma_census_after_hold_clear`
+// keys on, so the caller satisfies the edit shape directly.
+proof fn lemma_destroy_tcb_cspace_clear_frame<S: Store>(
+    st0: &S,
+    st_pre_cs: &S,
+    store: &S,
+    t: ObjId,
+    cs: ObjId,
+)
+    requires
+        // ── `st_pre_cs` running-invariant bundle (the post-bind-delete state) ──
+        cspace::cspace_wf(st_pre_cs.slot_view()),
+        st_pre_cs.tcb_view().dom().finite(),
+        cspace::refcount_sound(st_pre_cs),
+        cspace::caps_consistent(st_pre_cs),
+        cspace::end_caps_sound(st_pre_cs),
+        cspace::census_dom_complete(st_pre_cs),
+        cspace::ready_wf(st_pre_cs.ready_view(), st_pre_cs.tcb_view()),
+        cspace::ready_complete(st_pre_cs.ready_view(), st_pre_cs.tcb_view()),
+        cspace::cspace_resident_wf(st_pre_cs, cs),
+        st_pre_cs.tcb_view().dom().contains(t),
+        st_pre_cs.refs_view().dom().contains(t),
+        st_pre_cs.refs_view()[t] == 0,
+        st_pre_cs.tcb_view()[t].state == ThreadState::Halted,
+        st_pre_cs.tcb_view()[t].cspace == Some(cs),
+        forall|o: ObjId, ws: Seq<ObjId>|
+            cspace::waiter_chain(st_pre_cs.notif_view(), st_pre_cs.tcb_view(), o, ws)
+                ==> !ws.contains(t),
+        // running frames composed onto `st0` at `st_pre_cs`
+        forall|x: ObjId| x != t ==> #[trigger] cspace::dead_tcb_frozen_at(st0, st_pre_cs, x),
+        cspace::home_views_frozen(st0, st_pre_cs),
+        cspace::unhomed_frozen_free(st0, st_pre_cs),
+        cspace::emptied_via_dead_home_free(st0, st_pre_cs),
+        cspace::refs_death_persist(st0, st_pre_cs),
+        st0.slot_view().dom() == st_pre_cs.slot_view().dom(),
+        // ── the field clear: `store == st_pre_cs` with only `tcb[t].cspace → None` ──
+        store.tcb_view() == st_pre_cs.tcb_view().insert(
+            t,
+            TcbView { cspace: None, ..st_pre_cs.tcb_view()[t] },
+        ),
+        store.slot_view() == st_pre_cs.slot_view(),
+        store.refs_view() == st_pre_cs.refs_view(),
+        store.chan_view() == st_pre_cs.chan_view(),
+        store.notif_view() == st_pre_cs.notif_view(),
+        store.timer_view() == st_pre_cs.timer_view(),
+        store.timer_head_view() == st_pre_cs.timer_head_view(),
+        store.ready_view() == st_pre_cs.ready_view(),
+        store.cspace_view() == st_pre_cs.cspace_view(),
+        store.irq_view() == st_pre_cs.irq_view(),
+    ensures
+        cspace::cspace_wf(store.slot_view()),
+        cspace::cspace_resident_wf(store, cs),
+        cspace::census_off_by_one(store, cs),
+        cspace::census_dom_complete(store),
+        cspace::caps_consistent(store),
+        cspace::end_caps_sound(store),
+        cspace::ready_wf(store.ready_view(), store.tcb_view()),
+        cspace::ready_complete(store.ready_view(), store.tcb_view()),
+        forall|x: ObjId| x != t ==> #[trigger] cspace::dead_tcb_frozen_at(st0, store, x),
+        cspace::home_views_frozen(st0, store),
+        cspace::unhomed_frozen_free(st0, store),
+        cspace::emptied_via_dead_home_free(st0, store),
+        cspace::refs_death_persist(st0, store),
+        forall|o: ObjId, ws: Seq<ObjId>|
+            cspace::waiter_chain(store.notif_view(), store.tcb_view(), o, ws) ==> !ws.contains(t),
+{
+    // `t` is already in the TCB domain, so re-inserting it leaves the domain unchanged.
+    assert(store.tcb_view().dom() =~= st_pre_cs.tcb_view().dom());
+    cspace::lemma_thread_off_all_chains(st_pre_cs, t);
+    cspace::lemma_thread_off_all_chains(store, t);
+    // The clear preserves state/priority/qnext/wait_notif and frames `ready_view`.
+    cspace::lemma_ready_inv_frame_fields(st_pre_cs, store);
+    cspace::lemma_census_after_hold_clear(st_pre_cs, store, t, cs);
+    cspace::lemma_no_live_thread_cap_from_dead(st_pre_cs, t);
+    cspace::lemma_caps_consistent_frame_thread_halt_clear(st_pre_cs, store, t);
+    assert(cspace::cspace_resident_wf(store, cs));  // clear frames cspace_view + slot
+    assert(cspace::end_caps_sound(store));          // clear frames chan + slot
+    cspace::lemma_dead_tcb_frozen_except_single_t(st_pre_cs, store, t);
+    cspace::lemma_dead_tcb_frozen_except_trans(st0, st_pre_cs, store, t);
+    // The clear frames `slot_view` (free) and the home maps; compose onto `st0`.
+    cspace::lemma_unhomed_frozen_free_from_slot_eq(st_pre_cs, store);
+    assert(cspace::home_views_frozen(st_pre_cs, store));
+    cspace::lemma_unhomed_frozen_free_trans(st0, st_pre_cs, store);
+    cspace::lemma_home_views_frozen_trans(st0, st_pre_cs, store);
+    // Dual: the clear frames `slot_view` (free refl) and `refs` (death-persist refl); compose.
+    cspace::lemma_emptied_via_dead_home_free_from_slot_eq(st_pre_cs, store);
+    cspace::lemma_refs_death_persist_from_refs_eq(st_pre_cs, store);
+    cspace::lemma_emptied_via_dead_home_free_trans(st0, st_pre_cs, store);
+    cspace::lemma_refs_death_persist_trans(st0, st_pre_cs, store);
+}
+
+// Clear-before-unref (aspace): the twin of the cspace clear — clearing `t`'s `aspace` field opens
+// the `census_off_by_one(a)` window `unref_aspace` consumes. The aspace hold has no residency-wf
+// analog, so this is the cspace lemma minus the `cspace_resident_wf` carry, over the aspace census.
+proof fn lemma_destroy_tcb_aspace_clear_frame<S: Store>(
+    st0: &S,
+    st_pre_as: &S,
+    store: &S,
+    t: ObjId,
+    a: ObjId,
+)
+    requires
+        // ── `st_pre_as` running-invariant bundle (the post-cspace-release state) ──
+        cspace::cspace_wf(st_pre_as.slot_view()),
+        st_pre_as.tcb_view().dom().finite(),
+        cspace::refcount_sound(st_pre_as),
+        cspace::caps_consistent(st_pre_as),
+        cspace::end_caps_sound(st_pre_as),
+        cspace::census_dom_complete(st_pre_as),
+        cspace::ready_wf(st_pre_as.ready_view(), st_pre_as.tcb_view()),
+        cspace::ready_complete(st_pre_as.ready_view(), st_pre_as.tcb_view()),
+        st_pre_as.tcb_view().dom().contains(t),
+        st_pre_as.refs_view().dom().contains(t),
+        st_pre_as.refs_view()[t] == 0,
+        st_pre_as.tcb_view()[t].state == ThreadState::Halted,
+        st_pre_as.tcb_view()[t].aspace == Some(a),
+        forall|o: ObjId, ws: Seq<ObjId>|
+            cspace::waiter_chain(st_pre_as.notif_view(), st_pre_as.tcb_view(), o, ws)
+                ==> !ws.contains(t),
+        // running frames composed onto `st0` at `st_pre_as`
+        forall|x: ObjId| x != t ==> #[trigger] cspace::dead_tcb_frozen_at(st0, st_pre_as, x),
+        cspace::home_views_frozen(st0, st_pre_as),
+        cspace::unhomed_frozen_free(st0, st_pre_as),
+        cspace::emptied_via_dead_home_free(st0, st_pre_as),
+        cspace::refs_death_persist(st0, st_pre_as),
+        st0.slot_view().dom() == st_pre_as.slot_view().dom(),
+        // ── the field clear: `store == st_pre_as` with only `tcb[t].aspace → None` ──
+        store.tcb_view() == st_pre_as.tcb_view().insert(
+            t,
+            TcbView { aspace: None, ..st_pre_as.tcb_view()[t] },
+        ),
+        store.slot_view() == st_pre_as.slot_view(),
+        store.refs_view() == st_pre_as.refs_view(),
+        store.chan_view() == st_pre_as.chan_view(),
+        store.notif_view() == st_pre_as.notif_view(),
+        store.timer_view() == st_pre_as.timer_view(),
+        store.timer_head_view() == st_pre_as.timer_head_view(),
+        store.ready_view() == st_pre_as.ready_view(),
+        store.cspace_view() == st_pre_as.cspace_view(),
+        store.irq_view() == st_pre_as.irq_view(),
+    ensures
+        cspace::cspace_wf(store.slot_view()),
+        cspace::census_off_by_one(store, a),
+        cspace::census_dom_complete(store),
+        cspace::caps_consistent(store),
+        cspace::end_caps_sound(store),
+        cspace::ready_wf(store.ready_view(), store.tcb_view()),
+        cspace::ready_complete(store.ready_view(), store.tcb_view()),
+        forall|x: ObjId| x != t ==> #[trigger] cspace::dead_tcb_frozen_at(st0, store, x),
+        cspace::home_views_frozen(st0, store),
+        cspace::unhomed_frozen_free(st0, store),
+        cspace::emptied_via_dead_home_free(st0, store),
+        cspace::refs_death_persist(st0, store),
+        forall|o: ObjId, ws: Seq<ObjId>|
+            cspace::waiter_chain(store.notif_view(), store.tcb_view(), o, ws) ==> !ws.contains(t),
+{
+    // `t` is already in the TCB domain, so re-inserting it leaves the domain unchanged.
+    assert(store.tcb_view().dom() =~= st_pre_as.tcb_view().dom());
+    cspace::lemma_thread_off_all_chains(st_pre_as, t);
+    cspace::lemma_thread_off_all_chains(store, t);
+    cspace::lemma_ready_inv_frame_fields(st_pre_as, store);
+    cspace::lemma_census_after_hold_clear_aspace(st_pre_as, store, t, a);
+    cspace::lemma_no_live_thread_cap_from_dead(st_pre_as, t);
+    cspace::lemma_caps_consistent_frame_thread_halt_clear(st_pre_as, store, t);
+    assert(cspace::end_caps_sound(store));
+    cspace::lemma_dead_tcb_frozen_except_single_t(st_pre_as, store, t);
+    cspace::lemma_dead_tcb_frozen_except_trans(st0, st_pre_as, store, t);
+    cspace::lemma_unhomed_frozen_free_from_slot_eq(st_pre_as, store);
+    assert(cspace::home_views_frozen(st_pre_as, store));
+    cspace::lemma_unhomed_frozen_free_trans(st0, st_pre_as, store);
+    cspace::lemma_home_views_frozen_trans(st0, st_pre_as, store);
+    cspace::lemma_emptied_via_dead_home_free_from_slot_eq(st_pre_as, store);
+    cspace::lemma_refs_death_persist_from_refs_eq(st_pre_as, store);
+    cspace::lemma_emptied_via_dead_home_free_trans(st0, st_pre_as, store);
+    cspace::lemma_refs_death_persist_trans(st0, st_pre_as, store);
+}
+
 /// pre:  refs == 0 (last cap gone).
 /// post: t off every queue and never scheduled again. If t is CURRENT the
 ///       exception exit path will switch away; the TCB memory stays valid
@@ -459,11 +752,12 @@ verus! {
 // own Z3 instance is the standard Verus headroom fix.
 //
 // `rlimit`: surfacing `priority` in `TcbView` adds yet another field to every `tcb_view()` term
-// this teardown carries, pushing the isolated body just past the default 10s budget on some
-// platforms. Raising its private resource cap (it is already on its own Z3 instance, so no other
-// proof is affected) restores the margin — the proof itself is unchanged.
+// this teardown carries, so the isolated body needs a raised private resource cap (it is on its
+// own Z3 instance, so no other proof is affected). Lifting each teardown phase's frame
+// re-establishment into its own keyed `proof fn` (the `lemma_destroy_tcb_*_frame` lemmas above)
+// shrank that cap from 30 to 24 — the per-phase derivations no longer share this one query.
 #[verifier::spinoff_prover]
-#[verifier::rlimit(30)]
+#[verifier::rlimit(24)]
 pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
     requires
         cspace::cspace_wf(old(store).slot_view()),
@@ -731,55 +1025,11 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
     store.set_tcb_state(t, ThreadState::Halted);
     let ghost st_halt = *store;
     proof {
-        // `t` is off every waiter chain (Halted ⇒ not BlockedNotif), so the halt edit froze the
-        // census (`lemma_census_frame_thread_halt`) — hence `refcount_sound`/`census_dom_complete`
-        // ride it — and `caps_consistent` rides via the halt-clear frame (`refs[t] == 0` ⇒ no
-        // live `Thread(t)` cap; `t` off all chains both sides).
-        // The three `set_tcb_*` setters re-insert the in-domain key `t`, so the tcb domain is
-        // unchanged (the dom precondition the halt-frame lemmas need).
-        assert(st_detach.tcb_view().dom().contains(t));
+        // The three `set_tcb_*` setters frame every view but `tcb`, touch only `tcb[t]`'s
+        // queue/wait/state, and re-insert the in-domain key `t` — exactly the halt-frame lemma's
+        // edit shape (the TCB domain equality needs the extensional hint).
         assert(store.tcb_view().dom() =~= st_detach.tcb_view().dom());
-        // The halt promotes `ready_complete_except(t)` → full `ready_complete` —
-        // `t` is now Halted (non-Runnable) and off every ready chain, and the `set_tcb_*` edits
-        // touch only `t` and frame `ready_view`, so `ready_wf` rides too.
-        assert(store.ready_view() == st_detach.ready_view());
-        assert(forall|x: ObjId| x != t
-            ==> #[trigger] store.tcb_view()[x] == st_detach.tcb_view()[x]);
-        cspace::lemma_ready_complete_halt_promote(&st_detach, store, t);
-        // `t` off all chains: at `st_detach` (carried from the detach branches), and at `st_halt`
-        // (now Halted ⇒ not BlockedNotif).
-        cspace::lemma_thread_off_all_chains(store, t);
-        cspace::lemma_census_frame_thread_halt(&st_detach, store, t);
-        cspace::lemma_refcount_sound_from_census_eq(&st_detach, store);
-        cspace::lemma_no_live_thread_cap_from_dead(&st_detach, t);
-        cspace::lemma_caps_consistent_frame_thread_halt_clear(&st_detach, store, t);
-        // `census_dom_complete`/`end_caps_sound` ride the halt (census frozen + `refs` fixed; the
-        // endpoint census reads only the framed chan/slot views).
-        assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o) >= 1
-            implies store.refs_view().dom().contains(o) by {
-            assert(cspace::obj_census(&st_detach, o) == cspace::obj_census(store, o));
-            cspace::lemma_in_refs_from_census(&st_detach, o);
-        }
-        assert(cspace::end_caps_sound(store));
-        // except-`t` dead-frame of the halt (only `t` moved, `refs` fixed).
-        cspace::lemma_dead_tcb_frozen_except_single_t(&st_detach, store, t);
-        // and the detach's except-`t` frame (full ⇒ except-`t`), composed to `st0 → st_halt`.
-        cspace::lemma_dead_tcb_frozen_to_except(&st0, &st_detach, t);
-        cspace::lemma_dead_tcb_frozen_except_trans(&st0, &st_detach, store, t);
-        // The halt frames `slot_view` (free) and the home maps (the `set_tcb_*` setters keep
-        // `cspace_view`/`chan_view` and the TCB domain + `bind_slots`); compose onto `st0`.
-        assert(store.slot_view() == st_detach.slot_view());
-        cspace::lemma_unhomed_frozen_free_from_slot_eq(&st_detach, store);
-        assert(cspace::home_views_frozen(&st_detach, store));
-        cspace::lemma_unhomed_frozen_free_trans(&st0, &st_detach, store);
-        cspace::lemma_home_views_frozen_trans(&st0, &st_detach, store);
-        // Dual: the halt frames `slot_view` (free refl) and `refs` (death-persist refl, the
-        // `set_tcb_*` setters never touch `refs`); compose onto `st0`.
-        assert(store.refs_view() == st_detach.refs_view());
-        cspace::lemma_emptied_via_dead_home_free_from_slot_eq(&st_detach, store);
-        cspace::lemma_refs_death_persist_from_refs_eq(&st_detach, store);
-        cspace::lemma_emptied_via_dead_home_free_trans(&st0, &st_detach, store);
-        cspace::lemma_refs_death_persist_trans(&st0, &st_detach, store);
+        lemma_destroy_tcb_halt_frame(&st0, &st_detach, store, t);
     }
 
     // ── 3. Delete the two binding caps (they die with the TCB by ordinary CDT cleanup, exactly
@@ -909,38 +1159,14 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         store.set_tcb_cspace(t, None);
         let ghost st_csclear = *store;
         proof {
-            assert(st_pre_cs.tcb_view().dom().contains(t));
-            assert(store.tcb_view().dom() =~= st_pre_cs.tcb_view().dom());
-            cspace::lemma_thread_off_all_chains(&st_pre_cs, t);
-            cspace::lemma_thread_off_all_chains(store, t);
-            // The cspace-field clear preserves state/priority/qnext/wait_notif and
-            // frames `ready_view`, so the ready pair carries to feed `unref_cspace`'s requires.
-            cspace::lemma_ready_inv_frame_fields(&st_pre_cs, store);
-            cspace::lemma_census_after_hold_clear(&st_pre_cs, store, t, cs);
-            cspace::lemma_no_live_thread_cap_from_dead(&st_pre_cs, t);
-            cspace::lemma_caps_consistent_frame_thread_halt_clear(&st_pre_cs, store, t);
-            assert(cspace::cspace_resident_wf(store, cs));   // clear frames cspace_view + slot
-            assert(cspace::end_caps_sound(store));           // clear frames chan + slot
-            cspace::lemma_dead_tcb_frozen_except_single_t(&st_pre_cs, store, t);
-            cspace::lemma_dead_tcb_frozen_except_trans(&st0, &st_pre_cs, store, t);
-            // `t`'s report/state/qnext survive the single-field clear.
+            // `set_tcb_cspace(t, None)` frames every view but `tcb` and rewrites only `tcb[t].cspace`
+            // — exactly the clear-frame lemma's edit shape.
+            lemma_destroy_tcb_cspace_clear_frame(&st0, &st_pre_cs, store, t, cs);
+            // `t`'s report/state/qnext survive the single-field clear (setter post), fed downstream.
             assert(store.tcb_view()[t].state == ThreadState::Halted);
             assert(store.tcb_view()[t].qnext is None);
             assert(store.tcb_view()[t].report == report0);
             assert(store.refs_view()[t] == 0);
-            // The cspace-field clear frames `slot_view` (free) and the home maps; compose.
-            assert(store.slot_view() == st_pre_cs.slot_view());
-            cspace::lemma_unhomed_frozen_free_from_slot_eq(&st_pre_cs, store);
-            assert(cspace::home_views_frozen(&st_pre_cs, store));
-            cspace::lemma_unhomed_frozen_free_trans(&st0, &st_pre_cs, store);
-            cspace::lemma_home_views_frozen_trans(&st0, &st_pre_cs, store);
-            // Dual: the cspace-field clear frames `slot_view` (free refl) and `refs`
-            // (death-persist refl, `set_tcb_cspace` never touches `refs`); compose onto `st0`.
-            assert(store.refs_view() == st_pre_cs.refs_view());
-            cspace::lemma_emptied_via_dead_home_free_from_slot_eq(&st_pre_cs, store);
-            cspace::lemma_refs_death_persist_from_refs_eq(&st_pre_cs, store);
-            cspace::lemma_emptied_via_dead_home_free_trans(&st0, &st_pre_cs, store);
-            cspace::lemma_refs_death_persist_trans(&st0, &st_pre_cs, store);
         }
         crate::cspace::unref_cspace(store, cs);
         proof {
@@ -968,35 +1194,14 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         store.set_tcb_aspace(t, None);
         let ghost st_asclear = *store;
         proof {
-            assert(st_pre_as.tcb_view().dom().contains(t));
-            assert(store.tcb_view().dom() =~= st_pre_as.tcb_view().dom());
-            cspace::lemma_thread_off_all_chains(&st_pre_as, t);
-            cspace::lemma_thread_off_all_chains(store, t);
-            // The aspace-field clear preserves the ready fields + frames `ready_view`.
-            cspace::lemma_ready_inv_frame_fields(&st_pre_as, store);
-            cspace::lemma_census_after_hold_clear_aspace(&st_pre_as, store, t, a);
-            cspace::lemma_no_live_thread_cap_from_dead(&st_pre_as, t);
-            cspace::lemma_caps_consistent_frame_thread_halt_clear(&st_pre_as, store, t);
-            assert(cspace::end_caps_sound(store));
-            cspace::lemma_dead_tcb_frozen_except_single_t(&st_pre_as, store, t);
-            cspace::lemma_dead_tcb_frozen_except_trans(&st0, &st_pre_as, store, t);
+            // `set_tcb_aspace(t, None)` frames every view but `tcb` and rewrites only `tcb[t].aspace`
+            // — exactly the aspace clear-frame lemma's edit shape.
+            lemma_destroy_tcb_aspace_clear_frame(&st0, &st_pre_as, store, t, a);
+            // `t`'s report/state/qnext survive the single-field clear (setter post), fed downstream.
             assert(store.tcb_view()[t].state == ThreadState::Halted);
             assert(store.tcb_view()[t].qnext is None);
             assert(store.tcb_view()[t].report == report0);
             assert(store.refs_view()[t] == 0);
-            // The aspace-field clear frames `slot_view` (free) and the home maps; compose.
-            assert(store.slot_view() == st_pre_as.slot_view());
-            cspace::lemma_unhomed_frozen_free_from_slot_eq(&st_pre_as, store);
-            assert(cspace::home_views_frozen(&st_pre_as, store));
-            cspace::lemma_unhomed_frozen_free_trans(&st0, &st_pre_as, store);
-            cspace::lemma_home_views_frozen_trans(&st0, &st_pre_as, store);
-            // Dual: the aspace-field clear frames `slot_view` (free refl) and `refs`
-            // (death-persist refl); compose onto `st0`.
-            assert(store.refs_view() == st_pre_as.refs_view());
-            cspace::lemma_emptied_via_dead_home_free_from_slot_eq(&st_pre_as, store);
-            cspace::lemma_refs_death_persist_from_refs_eq(&st_pre_as, store);
-            cspace::lemma_emptied_via_dead_home_free_trans(&st0, &st_pre_as, store);
-            cspace::lemma_refs_death_persist_trans(&st0, &st_pre_as, store);
         }
         crate::cspace::unref_aspace(store, a);
         proof {
