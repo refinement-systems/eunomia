@@ -42,6 +42,9 @@ extern crate std;
 
 pub mod endpoint;
 pub mod header;
+// Little-endian split/reassemble bit identities shared by the `header` and
+// `session` codec lemmas; crate-internal proof helpers, not part of the surface.
+pub(crate) mod le_bytes;
 pub mod reactor;
 pub mod session;
 pub mod sys;

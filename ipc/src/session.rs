@@ -498,9 +498,7 @@ pub proof fn lemma_req_decode_encode(r: ConnectReq)
     let s = req_encode(r);
     assert(s.len() == REQ_LEN);
     let rw = r.requested_window;
-    assert(((rw & 0xff) as u8 as u32) | (((rw >> 8) & 0xff) as u8 as u32) << 8
-        | (((rw >> 16) & 0xff) as u8 as u32) << 16 | (((rw >> 24) & 0xff) as u8 as u32) << 24
-        == rw) by (bit_vector);
+    crate::le_bytes::lemma_u32_le_reassemble(rw);
 }
 
 /// `encode`∘`decode` is the identity on accepted request bytes. With
@@ -514,14 +512,7 @@ pub proof fn lemma_req_encode_decode(s: Seq<u8>)
         req_encode(req_decode(s)->Some_0) == s,
 {
     let s1 = s[1]; let s2 = s[2]; let s3 = s[3]; let s4 = s[4];
-    assert((((s1 as u32) | ((s2 as u32) << 8) | ((s3 as u32) << 16) | ((s4 as u32) << 24))
-        & 0xff) as u8 == s1) by (bit_vector);
-    assert(((((s1 as u32) | ((s2 as u32) << 8) | ((s3 as u32) << 16) | ((s4 as u32) << 24))
-        >> 8) & 0xff) as u8 == s2) by (bit_vector);
-    assert(((((s1 as u32) | ((s2 as u32) << 8) | ((s3 as u32) << 16) | ((s4 as u32) << 24))
-        >> 16) & 0xff) as u8 == s3) by (bit_vector);
-    assert(((((s1 as u32) | ((s2 as u32) << 8) | ((s3 as u32) << 16) | ((s4 as u32) << 24))
-        >> 24) & 0xff) as u8 == s4) by (bit_vector);
+    crate::le_bytes::lemma_u32_le_split_bytes(s1, s2, s3, s4);
     // s[5], s[6] (the version bytes) are reproduced directly; extensionality closes it.
     assert(req_encode(req_decode(s)->Some_0) =~= s);
 }
@@ -536,12 +527,8 @@ pub proof fn lemma_grant_decode_encode(g: GrantReply)
     match g {
         GrantReply::Grant(w, _ver) => {
             let win = w.window; let sz = w.size;
-            assert(((win & 0xff) as u8 as u32) | (((win >> 8) & 0xff) as u8 as u32) << 8
-                | (((win >> 16) & 0xff) as u8 as u32) << 16
-                | (((win >> 24) & 0xff) as u8 as u32) << 24 == win) by (bit_vector);
-            assert(((sz & 0xff) as u8 as u32) | (((sz >> 8) & 0xff) as u8 as u32) << 8
-                | (((sz >> 16) & 0xff) as u8 as u32) << 16
-                | (((sz >> 24) & 0xff) as u8 as u32) << 24 == sz) by (bit_vector);
+            crate::le_bytes::lemma_u32_le_reassemble(win);
+            crate::le_bytes::lemma_u32_le_reassemble(sz);
         }
         GrantReply::Refused => {}
     }
@@ -559,22 +546,8 @@ pub proof fn lemma_grant_encode_decode(s: Seq<u8>)
     if s.len() == GRANT_LEN && s[0] == TAG_GRANT {
         let s1 = s[1]; let s2 = s[2]; let s3 = s[3]; let s4 = s[4];
         let s5 = s[5]; let s6 = s[6]; let s7 = s[7]; let s8 = s[8];
-        assert((((s1 as u32) | ((s2 as u32) << 8) | ((s3 as u32) << 16) | ((s4 as u32) << 24))
-            & 0xff) as u8 == s1) by (bit_vector);
-        assert(((((s1 as u32) | ((s2 as u32) << 8) | ((s3 as u32) << 16) | ((s4 as u32) << 24))
-            >> 8) & 0xff) as u8 == s2) by (bit_vector);
-        assert(((((s1 as u32) | ((s2 as u32) << 8) | ((s3 as u32) << 16) | ((s4 as u32) << 24))
-            >> 16) & 0xff) as u8 == s3) by (bit_vector);
-        assert(((((s1 as u32) | ((s2 as u32) << 8) | ((s3 as u32) << 16) | ((s4 as u32) << 24))
-            >> 24) & 0xff) as u8 == s4) by (bit_vector);
-        assert((((s5 as u32) | ((s6 as u32) << 8) | ((s7 as u32) << 16) | ((s8 as u32) << 24))
-            & 0xff) as u8 == s5) by (bit_vector);
-        assert(((((s5 as u32) | ((s6 as u32) << 8) | ((s7 as u32) << 16) | ((s8 as u32) << 24))
-            >> 8) & 0xff) as u8 == s6) by (bit_vector);
-        assert(((((s5 as u32) | ((s6 as u32) << 8) | ((s7 as u32) << 16) | ((s8 as u32) << 24))
-            >> 16) & 0xff) as u8 == s7) by (bit_vector);
-        assert(((((s5 as u32) | ((s6 as u32) << 8) | ((s7 as u32) << 16) | ((s8 as u32) << 24))
-            >> 24) & 0xff) as u8 == s8) by (bit_vector);
+        crate::le_bytes::lemma_u32_le_split_bytes(s1, s2, s3, s4);
+        crate::le_bytes::lemma_u32_le_split_bytes(s5, s6, s7, s8);
         assert(grant_encode(grant_decode(s)->Some_0) =~= s);
     } else {
         assert(s.len() == REFUSED_LEN && s[0] == TAG_REFUSED);
