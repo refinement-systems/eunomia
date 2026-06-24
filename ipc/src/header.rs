@@ -140,15 +140,9 @@ pub proof fn lemma_decode_encode(h: Header)
     // bit_vector reasons over plain fixed-width vars, not struct field projections.
     let op = h.opcode; let fl = h.flags; let bl = h.body_len;
     // Each multi-byte field reassembles from its split bytes (low | high<<k).
-    assert(((op & 0xff) as u8 as u16) | (((op >> 8) & 0xff) as u8 as u16) << 8 == op)
-        by (bit_vector);
-    assert(((fl & 0xff) as u8 as u16) | (((fl >> 8) & 0xff) as u8 as u16) << 8 == fl)
-        by (bit_vector);
-    assert(((bl & 0xff) as u8 as u32)
-        | (((bl >> 8) & 0xff) as u8 as u32) << 8
-        | (((bl >> 16) & 0xff) as u8 as u32) << 16
-        | (((bl >> 24) & 0xff) as u8 as u32) << 24
-        == bl) by (bit_vector);
+    crate::le_bytes::lemma_u16_le_reassemble(op);
+    crate::le_bytes::lemma_u16_le_reassemble(fl);
+    crate::le_bytes::lemma_u32_le_reassemble(bl);
 }
 
 /// `encode`∘`decode` is the identity on `HEADER_SIZE`-byte strings: decoding any
@@ -165,20 +159,9 @@ pub proof fn lemma_encode_decode(s: Seq<u8>)
     let s4 = s[4]; let s5 = s[5];
     let s6 = s[6]; let s7 = s[7]; let s8 = s[8]; let s9 = s[9];
     // The split of a reassembled field recovers the original bytes.
-    assert((((s2 as u16) | ((s3 as u16) << 8)) & 0xff) as u8 == s2) by (bit_vector);
-    assert(((((s2 as u16) | ((s3 as u16) << 8)) >> 8) & 0xff) as u8 == s3) by (bit_vector);
-    assert((((s4 as u16) | ((s5 as u16) << 8)) & 0xff) as u8 == s4) by (bit_vector);
-    assert(((((s4 as u16) | ((s5 as u16) << 8)) >> 8) & 0xff) as u8 == s5) by (bit_vector);
-    // bit_vector sees only the variables in the asserted expression (not the
-    // surrounding `let`), so the reassembly is written inline here.
-    assert((((s6 as u32) | ((s7 as u32) << 8) | ((s8 as u32) << 16) | ((s9 as u32) << 24))
-        & 0xff) as u8 == s6) by (bit_vector);
-    assert(((((s6 as u32) | ((s7 as u32) << 8) | ((s8 as u32) << 16) | ((s9 as u32) << 24))
-        >> 8) & 0xff) as u8 == s7) by (bit_vector);
-    assert(((((s6 as u32) | ((s7 as u32) << 8) | ((s8 as u32) << 16) | ((s9 as u32) << 24))
-        >> 16) & 0xff) as u8 == s8) by (bit_vector);
-    assert(((((s6 as u32) | ((s7 as u32) << 8) | ((s8 as u32) << 16) | ((s9 as u32) << 24))
-        >> 24) & 0xff) as u8 == s9) by (bit_vector);
+    crate::le_bytes::lemma_u16_le_split_bytes(s2, s3);
+    crate::le_bytes::lemma_u16_le_split_bytes(s4, s5);
+    crate::le_bytes::lemma_u32_le_split_bytes(s6, s7, s8, s9);
     assert(spec_encode(spec_decode(s)->Ok_0) =~= s);
 }
 
