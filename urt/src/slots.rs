@@ -139,13 +139,13 @@ impl<const WORDS: usize> SlotAlloc<WORDS> {
         proof {
             // The written word now reads `free` at bit `bi`, and every other
             // bit of that word is untouched; words other than `w` are untouched.
-            lemma_set_bit(old_word, bi, free);
+            lemma_set_bit(old_word, bi);
             assert forall|j: int| 0 <= j < old(self).cap && j != i as int implies
                 self.is_free_spec(j) == old(self).is_free_spec(j) by {
                 lemma_index_split(j as usize, WORDS);
                 if j / 64 == w as int {
                     // same word, different bit position
-                    lemma_bit_other(old_word, bi, (j % 64) as u64, free);
+                    lemma_bit_other(old_word, bi, (j % 64) as u64);
                 } // else: a different word, untouched by the assignment
             }
         }
@@ -390,32 +390,26 @@ proof fn lemma_index_split(i: usize, words: usize)
         requires i < words * 64;
 }
 
-/// Writing bit `k` of `x` (set when `free`, clear otherwise) reads back as `free`.
-proof fn lemma_set_bit(x: u64, k: u64, free: bool)
+/// Writing bit `k` of `x` reads back set when ORed in, clear when masked out.
+proof fn lemma_set_bit(x: u64, k: u64) by (bit_vector)
     requires
         k < 64,
     ensures
-        free ==> (x | (1u64 << k)) & (1u64 << k) != 0,
-        !free ==> (x & !(1u64 << k)) & (1u64 << k) == 0,
+        (x | (1u64 << k)) & (1u64 << k) != 0,
+        (x & !(1u64 << k)) & (1u64 << k) == 0,
 {
-    assert((x | (1u64 << k)) & (1u64 << k) != 0) by (bit_vector) requires k < 64;
-    assert((x & !(1u64 << k)) & (1u64 << k) == 0) by (bit_vector) requires k < 64;
 }
 
 /// Writing bit `k` of `x` leaves every other bit `m != k` of the word untouched.
-proof fn lemma_bit_other(x: u64, k: u64, m: u64, free: bool)
+proof fn lemma_bit_other(x: u64, k: u64, m: u64) by (bit_vector)
     requires
         k < 64,
         m < 64,
         k != m,
     ensures
-        free ==> (((x | (1u64 << k)) & (1u64 << m)) != 0) == ((x & (1u64 << m)) != 0),
-        !free ==> (((x & !(1u64 << k)) & (1u64 << m)) != 0) == ((x & (1u64 << m)) != 0),
+        (x | (1u64 << k)) & (1u64 << m) == x & (1u64 << m),
+        (x & !(1u64 << k)) & (1u64 << m) == x & (1u64 << m),
 {
-    assert((x | (1u64 << k)) & (1u64 << m) == x & (1u64 << m)) by (bit_vector)
-        requires k < 64, m < 64, k != m;
-    assert((x & !(1u64 << k)) & (1u64 << m) == x & (1u64 << m)) by (bit_vector)
-        requires k < 64, m < 64, k != m;
 }
 
 } // verus!
