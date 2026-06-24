@@ -724,7 +724,12 @@ proof fn lemma_link_l1(
     // Every present descriptor's target is `< pu` (closure), so `pu` is fresh.
     lemma_desc_tag(0);
     assert(!leaves.contains(pu));  // leaves ⊆ [0, pu)
+    // Re-establish `pt_wf_leveled` clause by clause (the (a)/(b1)/(b2)/(c1)/(c2)
+    // structure of its definition above): the L1 update touches (b1)/(c1), the
+    // fresh empty L2 table touches (b2)/(c2); (a) accounting is immediate.
     assert(pt_wf_leveled(l1n, pooln, pool_base, pun, pl, leaves)) by {
+        // (b1) L1 → inner: the updated slot `i0` holds `desc` (→ the fresh `pu`);
+        // every other slot is unchanged, so the old (b1) fires on `l1[i]`.
         assert forall|i: int| #![trigger l1n[i]]
             0 <= i < 512 && l1n[i] & DESC_TABLE == DESC_TABLE implies {
                 &&& pool_index_spec(pool_base, pl, l1n[i]) is Some
@@ -737,6 +742,8 @@ proof fn lemma_link_l1(
                 assert(l1n[i] == l1[i]);  // old (b1) fires on l1[i]
             }
         }
+        // (b2) inner → leaf: the fresh table `pu` is all-zero (antecedent false);
+        // every old inner table is unchanged, so the old (b2) fires on `pool[t][e]`.
         assert forall|t: int, e: int| #![trigger pooln[t][e]]
             0 <= t < pun && !leaves.contains(t as nat) && 0 <= e < 512
                 && pooln[t][e] & DESC_TABLE == DESC_TABLE implies {
@@ -752,6 +759,8 @@ proof fn lemma_link_l1(
                 assert(pooln[t][e] == pool[t][e]);  // old (b2) fires on pool[t][e]
             }
         }
+        // (c1) L1 injective: the new `desc` targets `pu`, which no old descriptor
+        // reaches (their targets are `< pu`); off-`i0` pairs are the old (c1).
         assert forall|i: int, j: int| #![trigger l1n[i], l1n[j]]
             0 <= i < 512 && 0 <= j < 512 && i != j
                 && l1n[i] & DESC_TABLE == DESC_TABLE && l1n[j] & DESC_TABLE == DESC_TABLE
@@ -764,6 +773,8 @@ proof fn lemma_link_l1(
                 assert(l1n[i] == l1[i] && l1n[j] == l1[j]);  // old (c1)
             }
         }
+        // (c2) inner descriptors injective: the fresh table `pu` is all-zero
+        // (antecedent false); off-`pu` pairs are the old (c2).
         assert forall|t1: int, e1: int, t2: int, e2: int| #![trigger pooln[t1][e1], pooln[t2][e2]]
             0 <= t1 < pun && !leaves.contains(t1 as nat) && 0 <= e1 < 512
                 && 0 <= t2 < pun && !leaves.contains(t2 as nat) && 0 <= e2 < 512
@@ -907,8 +918,12 @@ pub proof fn lemma_grow_pool(
             pt_lookup(l1, grown, pool_base, w) == pt_lookup(l1, pool, pool_base, w),
 {
     let leaves = choose|lv: Set<nat>| pt_wf_leveled(l1, pool, pool_base, pool_used, old_len, lv);
-    // The old (a) clause gives `pool_used <= old_len`, so every table the live tree
-    // touches lies in the unchanged prefix `grown[t] == pool[t]` (t < pool_used).
+    // Re-establish `pt_wf_leveled` clause by clause (the (a)/(b1)/(b2)/(c1)/(c2)
+    // structure of its definition above): widening the pool leaves `l1`/`pool`
+    // untouched, so each clause's targets only need their index re-resolved against
+    // the longer pool. The old (a) clause gives `pool_used <= old_len`, so every
+    // table the live tree touches lies in the unchanged prefix `grown[t] == pool[t]`
+    // (t < pool_used); accounting (a) itself is immediate.
     assert(pt_wf_leveled(l1, grown, pool_base, pool_used, new_len, leaves)) by {
         // (b1) L1 → inner: same descriptor (l1 unchanged), index widened.
         assert forall|i: int| #![trigger l1[i]]
@@ -1054,7 +1069,13 @@ proof fn lemma_link_l2(
     let leavesn = leaves.insert(pu);
     let pun = (pu + 1) as nat;
     assert(!leaves.contains(pu));  // leaves ⊆ [0, pu)
+    // Re-establish `pt_wf_leveled` clause by clause (the (a)/(b1)/(b2)/(c1)/(c2)
+    // structure of its definition above): writing `desc` into the inner slot
+    // `(t1, e1)` and marking the fresh table `pu` a leaf touches (b2)/(c2); `l1` is
+    // unchanged, so (b1)/(c1) are the old facts; accounting (a) is immediate.
     assert(pt_wf_leveled(l1, pooln, pool_base, pun, pl, leavesn)) by {
+        // (b1) L1 → inner: `l1` unchanged, and each target is an old inner index
+        // `< pu`, so it survives `pu` joining `leavesn` and the `pun` bump.
         assert forall|i: int| #![trigger l1[i]]
             0 <= i < 512 && l1[i] & DESC_TABLE == DESC_TABLE implies {
                 &&& pool_index_spec(pool_base, pl, l1[i]) is Some
@@ -1064,6 +1085,8 @@ proof fn lemma_link_l2(
             // L1 target is an old inner index `< pu`, so it is `!= pu` and stays inner.
             assert(pool_index_spec(pool_base, pl, l1[i]).unwrap() < pu);
         }
+        // (b2) inner → leaf: the written slot `(t1, e1)` holds `desc` (→ the fresh
+        // leaf `pu ∈ leavesn`); every other inner entry is the old (b2).
         assert forall|t: int, e: int| #![trigger pooln[t][e]]
             0 <= t < pun && !leavesn.contains(t as nat) && 0 <= e < 512
                 && pooln[t][e] & DESC_TABLE == DESC_TABLE implies {
@@ -1082,12 +1105,16 @@ proof fn lemma_link_l2(
                 assert(pooln[t][e] == pool[t][e]);
             }
         }
+        // (c1) L1 injective: `l1` is unchanged, so this is verbatim the old (c1).
         assert forall|i: int, j: int| #![trigger l1[i], l1[j]]
             0 <= i < 512 && 0 <= j < 512 && i != j
                 && l1[i] & DESC_TABLE == DESC_TABLE && l1[j] & DESC_TABLE == DESC_TABLE
             implies pool_index_spec(pool_base, pl, l1[i]) != pool_index_spec(pool_base, pl, l1[j]) by {
             // l1 unchanged → old (c1).
         }
+        // (c2) inner descriptors injective: the one new descriptor (at `(t1, e1)`)
+        // targets the fresh `pu`, which no old inner entry reaches (their targets are
+        // leaves `< pu`); off-`(t1, e1)` pairs are the old (c2).
         assert forall|ta: int, ea: int, tb: int, eb: int| #![trigger pooln[ta][ea], pooln[tb][eb]]
             0 <= ta < pun && !leavesn.contains(ta as nat) && 0 <= ea < 512
                 && 0 <= tb < pun && !leavesn.contains(tb as nat) && 0 <= eb < 512
@@ -1217,9 +1244,14 @@ proof fn lemma_leaf_write(
                 && pt_leaf_slot(l1, pool, pool_base, w) != Some((l3, e)))
                 ==> pt_lookup(l1, pooln, pool_base, w) == pt_lookup(l1, pool, pool_base, w),
 {
-    // (1) pt_wf preserved with the same `leaves` — `l3 ∈ leaves` excludes it from
-    // (b2)/(c2), so writing a frame PTE there breaks nothing.
+    // (1) Re-establish `pt_wf_leveled` with the same `leaves` (the (a)/(b1)/(b2)/
+    // (c1)/(c2) structure of its definition above): the write lands in the leaf
+    // table `l3 ∈ leaves`, which only (b2)/(c2) quantify over inner tables —
+    // excluding `l3` — so those two are the only clauses to re-prove. `l1` and the
+    // inner tables are byte-unchanged, so (b1)/(c1) and accounting (a) are immediate.
     assert(pt_wf_leveled(l1, pooln, pool_base, pu, pl, leaves)) by {
+        // (b2) inner → leaf: every inner table `t != l3` is unchanged, so the write
+        // is invisible here and each entry is the old (b2).
         assert forall|t: int, e2: int| #![trigger pooln[t][e2]]
             0 <= t < pu && !leaves.contains(t as nat) && 0 <= e2 < 512
                 && pooln[t][e2] & DESC_TABLE == DESC_TABLE implies {
@@ -1231,6 +1263,8 @@ proof fn lemma_leaf_write(
             assert(pooln[t] == pool[t]);
             assert(pooln[t][e2] == pool[t][e2]);  // old (b2)
         }
+        // (c2) inner descriptors injective: both inner tables `t1, t2 != l3` are
+        // unchanged, so this is verbatim the old (c2).
         assert forall|t1: int, e1: int, t2: int, e2: int| #![trigger pooln[t1][e1], pooln[t2][e2]]
             0 <= t1 < pu && !leaves.contains(t1 as nat) && 0 <= e1 < 512
                 && 0 <= t2 < pu && !leaves.contains(t2 as nat) && 0 <= e2 < 512
