@@ -7972,6 +7972,22 @@ proof fn lemma_child_on_chain(m: Map<SlotId, CapSlot>, src: SlotId, k: SlotId, s
     }
 }
 
+// Per-iteration peel for the children re-parent walk (`cdt_unlink` / `slot_move`):
+// advancing the cursor from a child `cur` to its `next_sib` `nn` leaves sibling
+// reachability unchanged for every other node. For `x != cur`,
+// `next_reach(m0, cur, x, srk)` unfolds one step through `m0[cur].next_sib == Some(nn)`,
+// and `srk[nn] < srk[cur]` collapses the rank guard, leaving `next_reach(m0, nn, x, srk)`.
+proof fn lemma_children_walk_peel(m0: Map<SlotId, CapSlot>, cur: SlotId, nn: SlotId, srk: Map<SlotId, nat>)
+    requires
+        m0[cur].next_sib == Some(nn),
+        srk[nn] < srk[cur],
+    ensures
+        forall|x: SlotId| x != cur ==> #[trigger] next_reach(m0, cur, x, srk) == next_reach(m0, nn, x, srk),
+{
+    assert forall|x: SlotId| x != cur
+        implies #[trigger] next_reach(m0, cur, x, srk) == next_reach(m0, nn, x, srk) by {}
+}
+
 // Replacing a slot's empty cap with another empty cap of the *same links* is
 // invisible to `cspace_wf` (which reads only link structure + `is_empty_cap`).
 // `slot_move` clears `src` to `CapSlot::empty` where the transposition leaves
@@ -9770,8 +9786,7 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
                     if next_reach(m0, nn, cur, srk) {
                         lemma_next_reach_sr(m0, nn, cur, srk);
                     }
-                    assert forall|x: SlotId| x != cur
-                        implies #[trigger] next_reach(m0, cur, x, srk) == next_reach(m0, nn, x, srk) by {}
+                    lemma_children_walk_peel(m0, cur, nn, srk);
                 }
                 None => {
                     assert(m0[cur].next_sib is None);
@@ -10238,8 +10253,7 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
                         lemma_next_reach_sr(m0, nn, cur, srk);
                     }
                     // Peel: for x != cur, reach(cur,x) ⟺ reach(nn,x).
-                    assert forall|x: SlotId| x != cur
-                        implies #[trigger] next_reach(m0, cur, x, srk) == next_reach(m0, nn, x, srk) by {}
+                    lemma_children_walk_peel(m0, cur, nn, srk);
                 }
                 None => {
                     // reach(cur,x) for x != cur needs cur.next == Some(..); it is None.
