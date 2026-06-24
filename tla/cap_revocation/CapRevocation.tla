@@ -385,6 +385,19 @@ ReportMonotone ==
 EventuallyRevoked ==
     \A c \in CapIds : (c \in revoking) ~> (Descendants(c) = {})
 
+\* --- Symmetry (invariant-only cfgs only) -------------------------------
+\* The processes in Procs are interchangeable model values: every action and
+\* invariant treats them uniformly, and the only initial asymmetry — the
+\* arbitrary CHOOSE that picks which process holds the root cap (InitProc) — is
+\* itself symmetric, since any process serves equally. So permuting Procs
+\* carries every behaviour to an equivalent one, and SYMMETRY collapses each
+\* permutation-orbit to a single representative: a sound state-space quotient
+\* that checks the same behaviours in fewer states. Sound ONLY when no temporal
+\* property is checked — TLC's symmetry reduction is unsound under liveness — so
+\* this is named by the invariant-only CapRevocation_Safety.cfg (and its
+\* symmetric negative control), NEVER by the liveness CapRevocation.cfg.
+ProcSymmetry == Permutations(Procs)
+
 \* --- Negative controls (committed) -------------------------------------
 \* Each control action is the real action MINUS exactly one load-bearing
 \* conjunct; a passing main model plus a failing control proves that
@@ -553,6 +566,13 @@ TNext ==
     /\ UNCHANGED crVars
 
 TSpec == Init /\ [][TNext]_vars
+
+\* Symmetry set for the teardown arm: the notification objects in Notifs are
+\* interchangeable model values — no TSpec action or invariant names a specific
+\* one, and Init seeds them symmetrically (nlive={}, ncaps all 0) — so
+\* Permutations(Notifs) is a sound quotient. Named by CapRevocation_Teardown.cfg
+\* only; TSpec checks no liveness property. See ProcSymmetry for the rationale.
+NotifSymmetry == Permutations(Notifs)
 
 \* --- TSpec invariants --------------------------------------------------
 
