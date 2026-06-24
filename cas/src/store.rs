@@ -736,93 +736,108 @@ spec fn s_path(pay: Seq<u8>, pos: int, count: int) -> Option<int>
 
 /// The payload region structurally decodes and is *exactly* consumed — the
 /// interpreted mirror of `WalOp::decode_payload`: a tag byte (1 = Write,
-/// 2 = Unlink, 3 = Rename), then for Write `ref_name`/`path`/`offset`/`mtime`/
-/// `data` (the data length a `u32`), for Unlink `ref_name`/`path`/`mtime`, for
-/// Rename `ref_name`/`from`/`to`/`mtime` (two paths), with the final cursor at
-/// the end (`Reader::done`). Verified-equal to the exec walk by [`wal_struct_ok`],
-/// so it stays out of the trusted base.
+/// 2 = Unlink, 3 = Rename) dispatching to the matching per-arm decoder, with the
+/// final cursor at the end (`Reader::done`). Verified-equal to the exec walk by
+/// [`wal_struct_ok`], so it stays out of the trusted base.
 spec fn s_payload_ok(pay: Seq<u8>) -> bool {
     match s_take(pay, 0, 1) {
         None => false,
         Some(p_tag) => {
             let tag = pay[0];
             if tag == 1u8 {
-                // Write: rl·ref_name, path, offset u64, mtime u64, dl u32·data.
-                match s_take(pay, p_tag, 1) {
-                    None => false,
-                    Some(p_rl) => match s_take(pay, p_rl, pay[p_tag] as int) {
-                        None => false,
-                        Some(p_ref) => match s_take(pay, p_ref, 1) {
-                            None => false,
-                            Some(p_pc) => match s_path(pay, p_pc, pay[p_ref] as int) {
-                                None => false,
-                                Some(p_path) => match s_take(pay, p_path, 8) {
-                                    None => false,
-                                    Some(p_off) => match s_take(pay, p_off, 8) {
-                                        None => false,
-                                        Some(p_mt) => match s_take(pay, p_mt, 4) {
-                                            None => false,
-                                            Some(p_dl) => match s_take(
-                                                pay,
-                                                p_dl,
-                                                disk::spec_u32_le(pay, p_mt) as int,
-                                            ) {
-                                                None => false,
-                                                Some(p_data) => p_data == pay.len(),
-                                            },
-                                        },
-                                    },
-                                },
-                            },
-                        },
-                    },
-                }
+                s_payload_write_ok(pay, p_tag)
             } else if tag == 2u8 {
-                // Unlink: rl·ref_name, path, mtime u64.
-                match s_take(pay, p_tag, 1) {
-                    None => false,
-                    Some(p_rl) => match s_take(pay, p_rl, pay[p_tag] as int) {
-                        None => false,
-                        Some(p_ref) => match s_take(pay, p_ref, 1) {
-                            None => false,
-                            Some(p_pc) => match s_path(pay, p_pc, pay[p_ref] as int) {
-                                None => false,
-                                Some(p_path) => match s_take(pay, p_path, 8) {
-                                    None => false,
-                                    Some(p_mt) => p_mt == pay.len(),
-                                },
-                            },
-                        },
-                    },
-                }
+                s_payload_unlink_ok(pay, p_tag)
             } else if tag == 3u8 {
-                // Rename: rl·ref_name, from path, to path, mtime u64.
-                match s_take(pay, p_tag, 1) {
-                    None => false,
-                    Some(p_rl) => match s_take(pay, p_rl, pay[p_tag] as int) {
-                        None => false,
-                        Some(p_ref) => match s_take(pay, p_ref, 1) {
-                            None => false,
-                            Some(p_fc) => match s_path(pay, p_fc, pay[p_ref] as int) {
-                                None => false,
-                                Some(p_from) => match s_take(pay, p_from, 1) {
-                                    None => false,
-                                    Some(p_tc) => match s_path(pay, p_tc, pay[p_from] as int) {
-                                        None => false,
-                                        Some(p_to) => match s_take(pay, p_to, 8) {
-                                            None => false,
-                                            Some(p_mt) => p_mt == pay.len(),
-                                        },
-                                    },
-                                },
-                            },
-                        },
-                    },
-                }
+                s_payload_rename_ok(pay, p_tag)
             } else {
                 false
             }
         }
+    }
+}
+
+/// The Write arm of [`s_payload_ok`] (tag `1`), from the post-tag cursor `p_tag`:
+/// `rl·ref_name`, `path`, `offset` u64, `mtime` u64, then `dl` u32·`data` (the
+/// data length a `u32`), with the final cursor at the payload end.
+spec fn s_payload_write_ok(pay: Seq<u8>, p_tag: int) -> bool {
+    match s_take(pay, p_tag, 1) {
+        None => false,
+        Some(p_rl) => match s_take(pay, p_rl, pay[p_tag] as int) {
+            None => false,
+            Some(p_ref) => match s_take(pay, p_ref, 1) {
+                None => false,
+                Some(p_pc) => match s_path(pay, p_pc, pay[p_ref] as int) {
+                    None => false,
+                    Some(p_path) => match s_take(pay, p_path, 8) {
+                        None => false,
+                        Some(p_off) => match s_take(pay, p_off, 8) {
+                            None => false,
+                            Some(p_mt) => match s_take(pay, p_mt, 4) {
+                                None => false,
+                                Some(p_dl) => match s_take(
+                                    pay,
+                                    p_dl,
+                                    disk::spec_u32_le(pay, p_mt) as int,
+                                ) {
+                                    None => false,
+                                    Some(p_data) => p_data == pay.len(),
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    }
+}
+
+/// The Unlink arm of [`s_payload_ok`] (tag `2`), from the post-tag cursor `p_tag`:
+/// `rl·ref_name`, `path`, `mtime` u64, with the final cursor at the payload end.
+spec fn s_payload_unlink_ok(pay: Seq<u8>, p_tag: int) -> bool {
+    match s_take(pay, p_tag, 1) {
+        None => false,
+        Some(p_rl) => match s_take(pay, p_rl, pay[p_tag] as int) {
+            None => false,
+            Some(p_ref) => match s_take(pay, p_ref, 1) {
+                None => false,
+                Some(p_pc) => match s_path(pay, p_pc, pay[p_ref] as int) {
+                    None => false,
+                    Some(p_path) => match s_take(pay, p_path, 8) {
+                        None => false,
+                        Some(p_mt) => p_mt == pay.len(),
+                    },
+                },
+            },
+        },
+    }
+}
+
+/// The Rename arm of [`s_payload_ok`] (tag `3`), from the post-tag cursor `p_tag`:
+/// `rl·ref_name`, `from` path, `to` path, `mtime` u64, with the final cursor at
+/// the payload end.
+spec fn s_payload_rename_ok(pay: Seq<u8>, p_tag: int) -> bool {
+    match s_take(pay, p_tag, 1) {
+        None => false,
+        Some(p_rl) => match s_take(pay, p_rl, pay[p_tag] as int) {
+            None => false,
+            Some(p_ref) => match s_take(pay, p_ref, 1) {
+                None => false,
+                Some(p_fc) => match s_path(pay, p_fc, pay[p_ref] as int) {
+                    None => false,
+                    Some(p_from) => match s_take(pay, p_from, 1) {
+                        None => false,
+                        Some(p_tc) => match s_path(pay, p_tc, pay[p_from] as int) {
+                            None => false,
+                            Some(p_to) => match s_take(pay, p_to, 8) {
+                                None => false,
+                                Some(p_mt) => p_mt == pay.len(),
+                            },
+                        },
+                    },
+                },
+            },
+        },
     }
 }
 
@@ -900,9 +915,10 @@ fn e_path(pay: &[u8], pos: usize, count: usize) -> (r: Option<usize>)
 
 /// Exec twin of [`s_payload_ok`]: the structural payload walk as a verified
 /// `bool`, proven equal to the spec ∀ bytes (the totality + correctness theorem
-/// for the structural half of the record seam, rev2§3.7). Mirrors
-/// `WalOp::decode_payload` byte-for-byte but returns acceptance instead of
-/// building the `Vec`s (that stays the plain-Rust applier's job, rev2§6.1(e)).
+/// for the structural half of the record seam, rev2§3.7). Reads the tag byte and
+/// dispatches to the matching per-arm exec twin; each mirrors `WalOp::decode_payload`
+/// byte-for-byte but returns acceptance instead of building the `Vec`s (that stays
+/// the plain-Rust applier's job, rev2§6.1(e)).
 fn e_payload_ok(pay: &[u8]) -> (r: bool)
     ensures
         r == s_payload_ok(pay@),
@@ -914,102 +930,139 @@ fn e_payload_ok(pay: &[u8]) -> (r: bool)
     };
     let tag = pay[0];
     if tag == 1u8 {
-        let p_rl = match e_take(pay, p_tag, 1) {
-            None => return false,
-            Some(p) => p,
-        };
-        let rl = pay[p_tag] as usize;
-        let p_ref = match e_take(pay, p_rl, rl) {
-            None => return false,
-            Some(p) => p,
-        };
-        let p_pc = match e_take(pay, p_ref, 1) {
-            None => return false,
-            Some(p) => p,
-        };
-        let pc = pay[p_ref] as usize;
-        let p_path = match e_path(pay, p_pc, pc) {
-            None => return false,
-            Some(p) => p,
-        };
-        let p_off = match e_take(pay, p_path, 8) {
-            None => return false,
-            Some(p) => p,
-        };
-        let p_mt = match e_take(pay, p_off, 8) {
-            None => return false,
-            Some(p) => p,
-        };
-        let p_dl = match e_take(pay, p_mt, 4) {
-            None => return false,
-            Some(p) => p,
-        };
-        let dl = read_u32_le(pay, p_mt) as usize;
-        let p_data = match e_take(pay, p_dl, dl) {
-            None => return false,
-            Some(p) => p,
-        };
-        p_data == pay.len()
+        e_payload_write_ok(pay, p_tag)
     } else if tag == 2u8 {
-        let p_rl = match e_take(pay, p_tag, 1) {
-            None => return false,
-            Some(p) => p,
-        };
-        let rl = pay[p_tag] as usize;
-        let p_ref = match e_take(pay, p_rl, rl) {
-            None => return false,
-            Some(p) => p,
-        };
-        let p_pc = match e_take(pay, p_ref, 1) {
-            None => return false,
-            Some(p) => p,
-        };
-        let pc = pay[p_ref] as usize;
-        let p_path = match e_path(pay, p_pc, pc) {
-            None => return false,
-            Some(p) => p,
-        };
-        let p_mt = match e_take(pay, p_path, 8) {
-            None => return false,
-            Some(p) => p,
-        };
-        p_mt == pay.len()
+        e_payload_unlink_ok(pay, p_tag)
     } else if tag == 3u8 {
-        let p_rl = match e_take(pay, p_tag, 1) {
-            None => return false,
-            Some(p) => p,
-        };
-        let rl = pay[p_tag] as usize;
-        let p_ref = match e_take(pay, p_rl, rl) {
-            None => return false,
-            Some(p) => p,
-        };
-        let p_fc = match e_take(pay, p_ref, 1) {
-            None => return false,
-            Some(p) => p,
-        };
-        let fc = pay[p_ref] as usize;
-        let p_from = match e_path(pay, p_fc, fc) {
-            None => return false,
-            Some(p) => p,
-        };
-        let p_tc = match e_take(pay, p_from, 1) {
-            None => return false,
-            Some(p) => p,
-        };
-        let tc = pay[p_from] as usize;
-        let p_to = match e_path(pay, p_tc, tc) {
-            None => return false,
-            Some(p) => p,
-        };
-        let p_mt = match e_take(pay, p_to, 8) {
-            None => return false,
-            Some(p) => p,
-        };
-        p_mt == pay.len()
+        e_payload_rename_ok(pay, p_tag)
     } else {
         false
     }
+}
+
+/// Exec twin of [`s_payload_write_ok`] (tag `1`): the Write arm's structural walk,
+/// proven equal to the spec arm ∀ bytes. `p_tag <= pay@.len()` (the tag-byte
+/// `e_take`'s `Some`) feeds the first inner `e_take`.
+fn e_payload_write_ok(pay: &[u8], p_tag: usize) -> (r: bool)
+    requires
+        p_tag <= pay@.len(),
+    ensures
+        r == s_payload_write_ok(pay@, p_tag as int),
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    let p_rl = match e_take(pay, p_tag, 1) {
+        None => return false,
+        Some(p) => p,
+    };
+    let rl = pay[p_tag] as usize;
+    let p_ref = match e_take(pay, p_rl, rl) {
+        None => return false,
+        Some(p) => p,
+    };
+    let p_pc = match e_take(pay, p_ref, 1) {
+        None => return false,
+        Some(p) => p,
+    };
+    let pc = pay[p_ref] as usize;
+    let p_path = match e_path(pay, p_pc, pc) {
+        None => return false,
+        Some(p) => p,
+    };
+    let p_off = match e_take(pay, p_path, 8) {
+        None => return false,
+        Some(p) => p,
+    };
+    let p_mt = match e_take(pay, p_off, 8) {
+        None => return false,
+        Some(p) => p,
+    };
+    let p_dl = match e_take(pay, p_mt, 4) {
+        None => return false,
+        Some(p) => p,
+    };
+    let dl = read_u32_le(pay, p_mt) as usize;
+    let p_data = match e_take(pay, p_dl, dl) {
+        None => return false,
+        Some(p) => p,
+    };
+    p_data == pay.len()
+}
+
+/// Exec twin of [`s_payload_unlink_ok`] (tag `2`): the Unlink arm's structural
+/// walk, proven equal to the spec arm ∀ bytes.
+fn e_payload_unlink_ok(pay: &[u8], p_tag: usize) -> (r: bool)
+    requires
+        p_tag <= pay@.len(),
+    ensures
+        r == s_payload_unlink_ok(pay@, p_tag as int),
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    let p_rl = match e_take(pay, p_tag, 1) {
+        None => return false,
+        Some(p) => p,
+    };
+    let rl = pay[p_tag] as usize;
+    let p_ref = match e_take(pay, p_rl, rl) {
+        None => return false,
+        Some(p) => p,
+    };
+    let p_pc = match e_take(pay, p_ref, 1) {
+        None => return false,
+        Some(p) => p,
+    };
+    let pc = pay[p_ref] as usize;
+    let p_path = match e_path(pay, p_pc, pc) {
+        None => return false,
+        Some(p) => p,
+    };
+    let p_mt = match e_take(pay, p_path, 8) {
+        None => return false,
+        Some(p) => p,
+    };
+    p_mt == pay.len()
+}
+
+/// Exec twin of [`s_payload_rename_ok`] (tag `3`): the Rename arm's structural
+/// walk (two paths), proven equal to the spec arm ∀ bytes.
+fn e_payload_rename_ok(pay: &[u8], p_tag: usize) -> (r: bool)
+    requires
+        p_tag <= pay@.len(),
+    ensures
+        r == s_payload_rename_ok(pay@, p_tag as int),
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    let p_rl = match e_take(pay, p_tag, 1) {
+        None => return false,
+        Some(p) => p,
+    };
+    let rl = pay[p_tag] as usize;
+    let p_ref = match e_take(pay, p_rl, rl) {
+        None => return false,
+        Some(p) => p,
+    };
+    let p_fc = match e_take(pay, p_ref, 1) {
+        None => return false,
+        Some(p) => p,
+    };
+    let fc = pay[p_ref] as usize;
+    let p_from = match e_path(pay, p_fc, fc) {
+        None => return false,
+        Some(p) => p,
+    };
+    let p_tc = match e_take(pay, p_from, 1) {
+        None => return false,
+        Some(p) => p,
+    };
+    let tc = pay[p_from] as usize;
+    let p_to = match e_path(pay, p_tc, tc) {
+        None => return false,
+        Some(p) => p,
+    };
+    let p_mt = match e_take(pay, p_to, 8) {
+        None => return false,
+        Some(p) => p,
+    };
+    p_mt == pay.len()
 }
 
 /// The **verified** structural half of the record seam: does the record's
