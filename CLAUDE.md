@@ -157,6 +157,56 @@ MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri nextest run -p cas -j4
 #   MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri nextest run -p urt -j4
 ```
 
+### Verus verification — the deductive-verification gate
+
+The discipline lives in `doc/guidelines/verus.md` (Part A); the trusted base it
+gates is `doc/guidelines/verus_trusted-base.md`. `cargo verus verify` runs the
+prover. Verus has **no crates.io binary** and is pinned as one unit (binary
+`0.2026.06.07.cd03505`, its `vstd` companion, and Rust toolchain `1.95.0` — see
+`.github/workflows/ci.yml`'s `verus` job); a local install just unzips the
+matching release and puts its `cargo-verus`/`verus`/`z3` directory on `PATH`.
+Confirm the binary matches the pin before trusting any result:
+
+```sh
+verus --version   # must print Version: 0.2026.06.07.cd03505, Toolchain: 1.95.0-...
+```
+
+**From a fresh build (after `cargo clean`).** `cargo clean` wipes the workspace
+`target/`, so the next run re-verifies every obligation from scratch — this is
+the authoritative, no-stale-cache run, exactly what the CI job does. Verify each
+gated crate, one `-p` per crate, **no per-proof filter** (a new `verus!{}`
+obligation auto-gates):
+
+```sh
+cargo clean
+cargo verus verify -p kcore
+cargo verus verify -p ipc
+cargo verus verify -p urt
+cargo verus verify -p freelist
+cargo verus verify -p dma-pool
+cargo verus verify -p cas --no-default-features   # cas is Vec-heavy; the
+                                                  # feature-agnostic codecs verify
+                                                  # in the no_std+alloc variant
+```
+
+A real run ends each crate with a `verification results:: N verified, 0 errors`
+line; expected counts per crate are in the trusted-base ledger.
+
+**Making sure the cache is clean before another verification.** Verus caches
+verification per build, so re-running over an unchanged `target/` (or a
+`--verify-function`/`--verify-only-module`-scoped run) can exit 0 **from stale
+cache without re-verifying** — a false green. The tell is the *missing*
+`verification results::` line: present == a real run, absent == cached. To force
+an authoritative re-verify of one crate, clean just that crate first; for the
+whole gate, `cargo clean` first as above:
+
+```sh
+cargo clean -p kcore && cargo verus verify -p kcore   # results line present == real run
+```
+
+This bites hardest after editing a shared spec/predicate, where a scoped recheck
+of the edited function alone reports nothing. When in doubt, clean.
+
 ### Formatting — run `cargo fmt` before every commit
 
 The tree is kept rustfmt-clean **per change**: run `cargo fmt` before committing
