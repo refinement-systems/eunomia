@@ -293,17 +293,28 @@ Retype(p, c) ==
     /\ revoked' = revoked \cup {c}
     /\ UNCHANGED <<queues, bindings, treport, revoking>>
 
+\* The eight action disjuncts shared verbatim by Next and its negative-control
+\* twins NextBad / NextNoGuard. Each twin swaps exactly one of the two varying
+\* disjuncts (RevokeStep -> RevokeStepBad, or Copy -> CopyNoGuard) and reuses
+\* these unchanged, so an action added here lands in all three in lock-step —
+\* the property that gives the negative controls their value: a control is only
+\* a proof that a guard has teeth if it is otherwise identical to Next.
+CommonActions ==
+    \/ \E p \in Procs : \E ch \in Channels, cs \in SUBSET cspaces[p] : Send(p, ch, cs)
+    \/ \E p \in Procs, ch \in Channels : Receive(p, ch)
+    \/ \E p \in Procs, t \in Threads, k \in BindKinds, c \in CapIds : Bind(p, t, k, c)
+    \/ \E t \in Threads : ThreadExit(t)
+    \/ \E t \in Threads : ThreadFault(t)
+    \/ \E c \in CapIds : RevokeBegin(c)
+    \/ \E c \in CapIds : RevokeEnd(c)
+    \/ \E p \in Procs, c \in CapIds : Retype(p, c)
+
+\* The main next-state relation: real Copy + real RevokeStep + CommonActions.
+\* Its two negative-control twins each swap one of the first two disjuncts.
 Next ==
     /\ \/ \E p \in Procs, s, d \in CapIds : Copy(p, s, d)
-       \/ \E p \in Procs : \E ch \in Channels, cs \in SUBSET cspaces[p] : Send(p, ch, cs)
-       \/ \E p \in Procs, ch \in Channels : Receive(p, ch)
-       \/ \E p \in Procs, t \in Threads, k \in BindKinds, c \in CapIds : Bind(p, t, k, c)
-       \/ \E t \in Threads : ThreadExit(t)
-       \/ \E t \in Threads : ThreadFault(t)
-       \/ \E c \in CapIds : RevokeBegin(c)
        \/ \E c \in CapIds : RevokeStep(c)
-       \/ \E c \in CapIds : RevokeEnd(c)
-       \/ \E p \in Procs, c \in CapIds : Retype(p, c)
+       \/ CommonActions
     /\ UNCHANGED tdVars
 
 \* Weak fairness on RevokeStep: a marked root's subtree is eventually
@@ -433,17 +444,11 @@ RevokeStepBad(c) ==
     /\ c \in revoking
     /\ \E l \in Descendants(c) : DeleteOne(l)
 
+\* = Next with RevokeStep replaced by RevokeStepBad (the one swapped disjunct).
 NextBad ==
     /\ \/ \E p \in Procs, s, d \in CapIds : Copy(p, s, d)
-       \/ \E p \in Procs : \E ch \in Channels, cs \in SUBSET cspaces[p] : Send(p, ch, cs)
-       \/ \E p \in Procs, ch \in Channels : Receive(p, ch)
-       \/ \E p \in Procs, t \in Threads, k \in BindKinds, c \in CapIds : Bind(p, t, k, c)
-       \/ \E t \in Threads : ThreadExit(t)
-       \/ \E t \in Threads : ThreadFault(t)
-       \/ \E c \in CapIds : RevokeBegin(c)
        \/ \E c \in CapIds : RevokeStepBad(c)
-       \/ \E c \in CapIds : RevokeEnd(c)
-       \/ \E p \in Procs, c \in CapIds : Retype(p, c)
+       \/ CommonActions
     /\ UNCHANGED tdVars
 
 SpecBad == Init /\ [][NextBad]_vars
@@ -461,17 +466,11 @@ CopyNoGuard(p, src, dst) ==
     /\ revoked' = revoked \ {dst}
     /\ UNCHANGED <<queues, bindings, treport, revoking>>
 
+\* = Next with Copy replaced by CopyNoGuard (the one swapped disjunct).
 NextNoGuard ==
     /\ \/ \E p \in Procs, s, d \in CapIds : CopyNoGuard(p, s, d)
-       \/ \E p \in Procs : \E ch \in Channels, cs \in SUBSET cspaces[p] : Send(p, ch, cs)
-       \/ \E p \in Procs, ch \in Channels : Receive(p, ch)
-       \/ \E p \in Procs, t \in Threads, k \in BindKinds, c \in CapIds : Bind(p, t, k, c)
-       \/ \E t \in Threads : ThreadExit(t)
-       \/ \E t \in Threads : ThreadFault(t)
-       \/ \E c \in CapIds : RevokeBegin(c)
        \/ \E c \in CapIds : RevokeStep(c)
-       \/ \E c \in CapIds : RevokeEnd(c)
-       \/ \E p \in Procs, c \in CapIds : Retype(p, c)
+       \/ CommonActions
     /\ UNCHANGED tdVars
 
 SpecNoGuard == Init /\ [][NextNoGuard]_vars /\ Fairness
