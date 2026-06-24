@@ -190,3 +190,106 @@ anticipated ~2× because B2's larger constants enlarged the proc-symmetric regio
   `Procs`/`Notifs` case with the exact guard methodology B4 needs (exact-factor
   check + symmetric negative control + injected asymmetric bug).
 - **D1** hygiene (stray `*_TTrace_*` scratch in `tla/`) remains unrelated.
+
+---
+
+## Appendix — validating a `SYMMETRY` declaration (the controls used, verbatim)
+
+TLC never checks that a declared `SYMMETRY` is sound; a mis-scoped one silently
+*hides* states and so hides bugs. The standing soundness monitor is therefore a
+*negative control* — a deliberately-broken spec the symmetry must still catch.
+This attempt used **two** kinds, recorded here verbatim so they can be re-run,
+re-added permanently, or lifted into a future TLA+ guideline as the worked
+example of "how to prove a symmetry has teeth." The general recipe:
+
+1. **Symmetric negative control** — the *real* bad spec, at the *same constants
+   and the same `SYMMETRY`* as the arm being guarded, asserting the same
+   violation. If the quotient ever silently drops the violating orbit, this stops
+   tripping. Cheap (reuses an existing bad spec), so **commit it**.
+2. **Injected asymmetric bug** — a bug that singles out one model value and so
+   *breaks* the symmetry premise, reachable deep enough that its path crosses
+   states the quotient collapses. The quotient must still report it. This is the
+   direct probe of an asymmetric `CHOOSE` seed. Spec-surface cost, so it was run
+   as a **throwaway** here (below) rather than committed.
+
+### 1. The committed symmetric control (in-tree)
+
+`CapRevocation_Safety_NegControl.cfg` — `SpecBad` (interior-delete →
+`LiveParent`) at the safety-arm constants under `SYMMETRY ProcSymmetry`, wired
+into `scripts/tla-neg-controls.sh`. It is the permanent guard; see the diff. The
+two patterns below were **not** committed.
+
+### 2. Throwaway: injected asymmetric bug (`SpecAsymBad`)
+
+Temporarily added to `CapRevocation.tla` (after `SpecNoGuard`), then reverted:
+
+```tla
+\* Injected-asymmetric-bug probe: a genuine DeadNowhere violation that singles
+\* out one model value — leak a ghost-revoked (dead) cap into a SPECIFIC
+\* non-init process's cspace. Reachable only after a real revoke produces a
+\* revoked cap, so the path traverses states the Procs quotient collapses.
+LeakRevokedAsym ==
+    /\ revoked /= {}
+    /\ LET q == CHOOSE p \in Procs : p /= InitProc
+           d == CHOOSE c \in revoked : TRUE
+       IN cspaces' = [cspaces EXCEPT ![q] = @ \cup {d}]
+    /\ UNCHANGED <<live, parent, queues, bindings, treport, revoked, revoking,
+                   nlive, ncaps, pcbind, eopen>>
+
+NextAsymBad == Next \/ LeakRevokedAsym
+
+SpecAsymBad == Init /\ [][NextAsymBad]_vars
+```
+
+Two throwaway cfgs drove it. With symmetry
+(`tla/cap_revocation/CapRevocation_AsymBug_Sym_TMP.cfg`):
+
+```
+SPECIFICATION SpecAsymBad
+CHECK_DEADLOCK FALSE
+CONSTANTS
+    CapIds = {c0, c1, c2, c3}
+    Procs  = {p0, p1}
+    Channels = {ch0}
+    Threads = {t0, t1}
+    Notifs = {nf0, nf1}
+    QueueDepth = 2
+    NULL = NULL
+SYMMETRY ProcSymmetry
+INVARIANT TypeOK
+INVARIANT DeadNowhere
+```
+
+The control variant (`..._NoSym_TMP.cfg`) is byte-identical **minus the
+`SYMMETRY ProcSymmetry` line** — it proves the bug is genuinely reachable, so a
+"violated" verdict under symmetry means *caught*, not *absent*. Run both:
+
+```sh
+for v in NoSym Sym; do
+  TLC_WORKERS=1 TLC_FLAGS="-fp 0 -fpmem 0.5" \
+    bash tools/tla/tla-model-check.sh tla/cap_revocation/CapRevocation.tla \
+      CapRevocation_AsymBug_${v}_TMP.cfg
+done
+```
+
+Both report `Invariant DeadNowhere is violated` (NoSym 104 distinct, Sym 103) —
+the quotient does not hide the asymmetric violation. The key mechanism a
+guideline should state: **TLC checks each invariant on the generated
+orbit-representative *before* the seen-test, and a symmetric invariant
+(`DeadNowhere`) cannot evaluate differently across an orbit — so a violating
+orbit is never silently canonicalised away.** The probe confirms this holds in
+practice despite the asymmetric `InitProc == CHOOSE` seed.
+
+### 3. Throwaway: clean before-number re-derivation
+
+`scripts/tla-baseline.sh` asserts a single pinned count per cfg, so re-deriving
+a *pre-symmetry* before-number after the cfg already carries `SYMMETRY` needs a
+no-symmetry copy. `tla/cap_revocation/CapRevocation_Teardown_NoSym_TMP.cfg` was
+`CapRevocation_Teardown.cfg` minus its `SYMMETRY NotifSymmetry` line; running it
+reproduced 252 / diameter 8 (the pre-quotient count). Deleted after use. A future
+harness could fold this in (e.g. a `--no-symmetry` mode that strips the line) so
+the before/after of a symmetry change is a one-flag re-run rather than a manual
+copy.
+
+All three artifacts were removed before commit; only the committed control in §1
+remains in-tree.
