@@ -9004,6 +9004,121 @@ proof fn lemma_unlink_preserves_cspace_wf(m: Map<SlotId, CapSlot>, slot: SlotId,
     lemma_unlink_sib(m, slot, last);
 }
 
+// The closed-form merge: the spliced arena `mfin` equals `unlinked(m0, slot, last)`.
+// Keyed tightly to the straight-line splice chain (rev2§6, doc/guidelines/verus.md §10):
+// the per-key case split is the heaviest sub-step of `cdt_unlink`, so it runs here in its
+// own solver context, off the children walk's `next_reach`/`valid_srank` quantifiers and
+// the `valid_srank` `choose` witness — none of which the merge needs. `requires` are the
+// cheap local facts the op already has in hand (the slot-role bindings, the four single
+// `Map::insert` splice steps, and `slot`'s untouched-then-cleared entry); `ensures` is the
+// closed form. Isomorphic to `lemma_unlink_children`, which verifies cheaply isolated.
+proof fn lemma_unlink_merge(
+    m0: Map<SlotId, CapSlot>,
+    mw: Map<SlotId, CapSlot>,
+    ma: Map<SlotId, CapSlot>,
+    mb: Map<SlotId, CapSlot>,
+    mc: Map<SlotId, CapSlot>,
+    md: Map<SlotId, CapSlot>,
+    mfin: Map<SlotId, CapSlot>,
+    slot: SlotId,
+    last: Option<SlotId>,
+    parent: Option<SlotId>,
+    prev: Option<SlotId>,
+    next: Option<SlotId>,
+    first: Option<SlotId>,
+    head: Option<SlotId>,
+)
+    requires
+        cspace_wf(m0),
+        m0.dom().finite(),
+        m0.dom().contains(slot),
+        last_wf(m0, slot, last),
+        // The option locals name `slot`'s own links.
+        parent == m0[slot].parent,
+        prev == m0[slot].prev_sib,
+        next == m0[slot].next_sib,
+        first == m0[slot].first_child,
+        head == (if first is None { next } else { first }),
+        // The all-children-re-parented arena (the children walk's postcondition).
+        mw == Map::<SlotId, CapSlot>::new(
+            |k: SlotId| m0.dom().contains(k),
+            |k: SlotId| if m0[k].parent == Some(slot) { set_parent(m0[k], parent) } else { m0[k] },
+        ),
+        // The four straight-line splice steps (one `Map::insert` each, §10).
+        ma == match prev {
+            Some(pv) => mw.insert(pv, set_next_sib(mw[pv], head)),
+            None => match parent {
+                Some(pa) => mw.insert(pa, set_first_child(mw[pa], head)),
+                None => mw,
+            },
+        },
+        mb == match head {
+            Some(h) => ma.insert(h, set_prev_sib(ma[h], prev)),
+            None => ma,
+        },
+        mc == match first {
+            Some(_) => mb.insert(last->0, set_next_sib(mb[last->0], next)),
+            None => mb,
+        },
+        md == match first {
+            Some(_) => match next {
+                Some(nx) => mc.insert(nx, set_prev_sib(mc[nx], last)),
+                None => mc,
+            },
+            None => mc,
+        },
+        // `slot` rode every splice untouched; the clear lands the detached empty-links entry.
+        md[slot] == m0[slot],
+        mfin =~= md.insert(slot, mfin[slot]),
+        mfin[slot] == (CapSlot {
+            cap: m0[slot].cap,
+            parent: None,
+            first_child: None,
+            next_sib: None,
+            prev_sib: None,
+            revoking: m0[slot].revoking,
+        }),
+    ensures
+        mfin =~= unlinked(m0, slot, last),
+{
+    lemma_unlink_roles(m0, slot);
+    let un = unlinked(m0, slot, last);
+    assert forall|k: SlotId| m0.dom().contains(k) implies mfin[k] == un[k] by {
+        if k == slot {
+        } else if m0[k].parent == Some(slot) {
+            // ── a child: re-parented; first child gains prev=pv, tail next=nx ──
+            assert(m0[k].parent != Some(slot) == false);
+            assert(first is Some && head == first);   // slot has children
+            // k is none of the non-child / slot fixup targets.
+            assert(k != slot);
+            // k == first ⟺ k has no prev; k is the tail ⟺ k has no next.
+            assert((first == Some(k)) <==> (m0[k].prev_sib is None)) by {
+                if m0[k].prev_sib is None {
+                    assert(head_is_first_child(m0));
+                }
+                if first == Some(k) {
+                    assert(first_child_parent_agree(m0));
+                }
+            }
+            assert((last == Some(k)) <==> (m0[k].next_sib is None));
+        } else {
+            // ── a non-child (≠ slot): apply the matching neighbour fixup ──
+            if m0[k].next_sib == Some(slot) {
+                assert(prev == Some(k));               // k == slot's prev
+            } else if m0[k].prev_sib == Some(slot) {
+                assert(next == Some(k));               // k == slot's next
+                assert(m0[slot].next_sib == Some(k));  // doubly
+            } else if m0[k].first_child == Some(slot) {
+                assert(m0[slot].parent == Some(k));    // k == grandparent
+                assert(m0[slot].prev_sib is None);     // slot is k's first child
+                assert(prev is None);
+            } else {
+                // untouched: no link names slot.
+            }
+        }
+    }
+}
+
 // Two nodes reachable from a common start are comparable along the chain — the
 // `next_sib` graph is functional, so the walks cannot branch.
 proof fn lemma_reach_comparable(m: Map<SlotId, CapSlot>, a: SlotId, x: SlotId, y: SlotId, s: Map<SlotId, nat>)
@@ -9523,7 +9638,7 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_
 // macOS. Isolate it in its own solver (`spinoff_prover`) with headroom — the same
 // treatment the other heavy cspace bodies already use.
 #[verifier::spinoff_prover]
-#[verifier::rlimit(60)]
+#[verifier::rlimit(10)]
 pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
     requires
         cspace_wf(old(store).slot_view()),
@@ -9788,44 +9903,9 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
         // so its cap rode through; the clear lands the detached empty-links slot.
         assert(md[slot] == m0[slot]);
         assert(mfin =~= md.insert(slot, mfin[slot]));
-        // The final arena is exactly the closed-form merge `unlinked`.
-        assert(mfin =~= unlinked(m0, slot, last)) by {
-            let un = unlinked(m0, slot, last);
-            assert forall|k: SlotId| m0.dom().contains(k) implies mfin[k] == un[k] by {
-                if k == slot {
-                } else if m0[k].parent == Some(slot) {
-                    // ── a child: re-parented; first child gains prev=pv, tail next=nx ──
-                    assert(m0[k].parent != Some(slot) == false);
-                    assert(first is Some && head == first);   // slot has children
-                    // k is none of the non-child / slot fixup targets.
-                    assert(k != slot);
-                    // k == first ⟺ k has no prev; k is the tail ⟺ k has no next.
-                    assert((first == Some(k)) <==> (m0[k].prev_sib is None)) by {
-                        if m0[k].prev_sib is None {
-                            assert(head_is_first_child(m0));
-                        }
-                        if first == Some(k) {
-                            assert(first_child_parent_agree(m0));
-                        }
-                    }
-                    assert((last == Some(k)) <==> (m0[k].next_sib is None));
-                } else {
-                    // ── a non-child (≠ slot): apply the matching neighbour fixup ──
-                    if m0[k].next_sib == Some(slot) {
-                        assert(prev == Some(k));               // k == slot's prev
-                    } else if m0[k].prev_sib == Some(slot) {
-                        assert(next == Some(k));               // k == slot's next
-                        assert(m0[slot].next_sib == Some(k));  // doubly
-                    } else if m0[k].first_child == Some(slot) {
-                        assert(m0[slot].parent == Some(k));    // k == grandparent
-                        assert(m0[slot].prev_sib is None);     // slot is k's first child
-                        assert(prev is None);
-                    } else {
-                        // untouched: no link names slot.
-                    }
-                }
-            }
-        }
+        // The final arena is exactly the closed-form merge `unlinked` — the per-key
+        // case split is keyed to the splice chain in `lemma_unlink_merge`.
+        lemma_unlink_merge(m0, mw, ma, mb, mc, md, mfin, slot, last, parent, prev, next, first, head);
         // Every slot's cap rode through: `mfin == unlinked`, and `unlinked` rebuilds
         // each entry's `.cap` from `m0` (the cap-frame `delete`'s "only empties" rests on).
         assert forall|x: SlotId| m0.dom().contains(x) implies #[trigger] mfin[x].cap
