@@ -921,18 +921,13 @@ fn push_u64_le(out: &mut Vec<u8>, x: u64)
     assert(out@ =~= old(out)@ + u64_le(x));
 }
 
-/// Serialize one entry to its canonical TLV, appended to `out`. The exec
-/// `Vec`-building encoder, proven to produce exactly `canonical_bytes`.
-pub fn encode_raw(e: &RawEntry, out: &mut Vec<u8>)
+// Encode the content section (tag byte + payload). Split out of `encode_raw` so
+// the 3-arm match verifies against a small context (doc/guidelines/verus.md §10).
+fn encode_content(out: &mut Vec<u8>, c: &RawContent)
     ensures
-        final(out)@ == old(out)@ + canonical_bytes(*e),
+        final(out)@ == old(out)@ + content_bytes(*c),
 {
-    out.push(e.name.len() as u8);
-    extend_bytes(out, e.name.as_slice());
-    out.push(e.kind);
-    push_u64_le(out, e.size);
-    push_u64_le(out, e.mtime);
-    match &e.content {
+    match c {
         RawContent::Inline(b) => {
             out.push(0u8);
             push_u16_le(out, b.len() as u16);
@@ -947,6 +942,21 @@ pub fn encode_raw(e: &RawEntry, out: &mut Vec<u8>)
             push_arr32(out, h);
         }
     }
+    assert(out@ =~= old(out)@ + content_bytes(*c));
+}
+
+/// Serialize one entry to its canonical TLV, appended to `out`. The exec
+/// `Vec`-building encoder, proven to produce exactly `canonical_bytes`.
+pub fn encode_raw(e: &RawEntry, out: &mut Vec<u8>)
+    ensures
+        final(out)@ == old(out)@ + canonical_bytes(*e),
+{
+    out.push(e.name.len() as u8);
+    extend_bytes(out, e.name.as_slice());
+    out.push(e.kind);
+    push_u64_le(out, e.size);
+    push_u64_le(out, e.mtime);
+    encode_content(out, &e.content);
     if e.flags != 0 {
         push_u16_le(out, 7);
         out.push(OPT_TAG_FLAGS);
@@ -976,6 +986,74 @@ fn fits(pos: usize, n: usize, end: usize) -> (b: bool)
         b <==> pos + n <= end,
 {
     n <= end && pos <= end - n
+}
+
+// Decode the content section (tag byte + payload) beginning at `p_ctag`. Split
+// out of `decode_raw` so the 3-arm tag dispatch verifies against a small context
+// (doc/guidelines/verus.md §10). The spec image of the content begins at the tag
+// byte, so it is buf[p_ctag, end].
+fn decode_content(buf: &[u8], p_ctag: usize) -> (r: Result<(RawContent, usize), TlvErr>)
+    requires
+        p_ctag < buf@.len(),
+    ensures
+        r matches Ok((c, end)) ==> p_ctag < end <= buf@.len()
+            && content_bytes(c) == buf@.subrange(p_ctag as int, end as int),
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    let len = buf.len();
+    let ctag = buf[p_ctag];
+    let ghost gp_content = p_ctag as int;
+    let p_content = p_ctag + 1;
+    if ctag == 0 {
+        if !fits(p_content, 2, len) {
+            return Err(TlvErr::Truncated);
+        }
+        let ilen_u16 = read_u16_le(buf, p_content);
+        let ilen = ilen_u16 as usize;
+        let p_inline = p_content + 2;
+        if !fits(p_inline, ilen, len) {
+            return Err(TlvErr::Truncated);
+        }
+        let ib = copy_range(buf, p_inline, ilen);
+        let end = p_inline + ilen;
+        let content = RawContent::Inline(ib);
+        proof {
+            // [0] + u16_le(ilen) + inline-bytes == buf[p_ctag, end]
+            lemma_cat(buf@, gp_content, gp_content + 1, gp_content + 3);
+            lemma_cat(buf@, gp_content, gp_content + 3, end as int);
+        }
+        assert(buf@.subrange(gp_content, gp_content + 1) =~= seq![0u8]);
+        assert(content_bytes(content) == buf@.subrange(gp_content, end as int));
+        Ok((content, end))
+    } else if ctag == 1 {
+        if !fits(p_content, 32, len) {
+            return Err(TlvErr::Truncated);
+        }
+        let h = read_arr32(buf, p_content);
+        let end = p_content + 32;
+        let content = RawContent::ChunkList(h);
+        proof {
+            lemma_cat(buf@, gp_content, gp_content + 1, end as int);
+        }
+        assert(buf@.subrange(gp_content, gp_content + 1) =~= seq![1u8]);
+        assert(content_bytes(content) == buf@.subrange(gp_content, end as int));
+        Ok((content, end))
+    } else if ctag == 2 {
+        if !fits(p_content, 32, len) {
+            return Err(TlvErr::Truncated);
+        }
+        let h = read_arr32(buf, p_content);
+        let end = p_content + 32;
+        let content = RawContent::DirRoot(h);
+        proof {
+            lemma_cat(buf@, gp_content, gp_content + 1, end as int);
+        }
+        assert(buf@.subrange(gp_content, gp_content + 1) =~= seq![2u8]);
+        assert(content_bytes(content) == buf@.subrange(gp_content, end as int));
+        Ok((content, end))
+    } else {
+        Err(TlvErr::BadEntry("bad content tag"))
+    }
 }
 
 /// Parse one entry's `RawEntry` plus the byte count consumed, or reject.
@@ -1030,64 +1108,12 @@ pub fn decode_raw(buf: &[u8], start: usize) -> (r: Result<(RawEntry, usize), Tlv
     if !fits(p_ctag, 1, len) {
         return Err(TlvErr::Truncated);
     }
-    let ctag = buf[p_ctag];
+    let (content, p_optlen) = decode_content(buf, p_ctag)?;
     // content_bytes (the spec image) begins at the tag byte, so the content
-    // segment is buf[p_ctag, p_optlen].
+    // segment is buf[p_ctag, p_optlen] (decode_content's postcondition).
     let ghost gp_content = p_ctag as int;
-    let p_content = p_ctag + 1;
-    let content: RawContent;
-    let p_optlen: usize;
-    if ctag == 0 {
-        if !fits(p_content, 2, len) {
-            return Err(TlvErr::Truncated);
-        }
-        let ilen_u16 = read_u16_le(buf, p_content);
-        let ilen = ilen_u16 as usize;
-        let p_inline = p_content + 2;
-        if !fits(p_inline, ilen, len) {
-            return Err(TlvErr::Truncated);
-        }
-        let ib = copy_range(buf, p_inline, ilen);
-        let end = p_inline + ilen;
-        content = RawContent::Inline(ib);
-        proof {
-            // [0] + u16_le(ilen) + inline-bytes == buf[p_ctag, end]
-            lemma_cat(buf@, gp_content, gp_content + 1, gp_content + 3);
-            lemma_cat(buf@, gp_content, gp_content + 3, end as int);
-        }
-        assert(buf@.subrange(gp_content, gp_content + 1) =~= seq![0u8]);
-        assert(content_bytes(content) == buf@.subrange(gp_content, end as int));
-        p_optlen = end;
-    } else if ctag == 1 {
-        if !fits(p_content, 32, len) {
-            return Err(TlvErr::Truncated);
-        }
-        let h = read_arr32(buf, p_content);
-        let end = p_content + 32;
-        content = RawContent::ChunkList(h);
-        proof {
-            lemma_cat(buf@, gp_content, gp_content + 1, end as int);
-        }
-        assert(buf@.subrange(gp_content, gp_content + 1) =~= seq![1u8]);
-        assert(content_bytes(content) == buf@.subrange(gp_content, end as int));
-        p_optlen = end;
-    } else if ctag == 2 {
-        if !fits(p_content, 32, len) {
-            return Err(TlvErr::Truncated);
-        }
-        let h = read_arr32(buf, p_content);
-        let end = p_content + 32;
-        content = RawContent::DirRoot(h);
-        proof {
-            lemma_cat(buf@, gp_content, gp_content + 1, end as int);
-        }
-        assert(buf@.subrange(gp_content, gp_content + 1) =~= seq![2u8]);
-        assert(content_bytes(content) == buf@.subrange(gp_content, end as int));
-        p_optlen = end;
-    } else {
-        return Err(TlvErr::BadEntry("bad content tag"));
-    }
     let ghost gp_optlen = p_optlen as int;
+    assert(content_bytes(content) == buf@.subrange(gp_content, gp_optlen));
 
     // opt_len (u16) + optional section
     if !fits(p_optlen, 2, len) {
