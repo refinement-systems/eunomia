@@ -6953,6 +6953,105 @@ pub proof fn lemma_census_frame_thread_halt<S: Store>(s0: &S, s1: &S, t: ObjId)
     }
 }
 
+// A wake/splice that dequeues exactly one waiter from notification `n`: only `n`'s notif view
+// moved, and every changed TCB names `n` (or is detached), so `waiter_refs(n)` drops by one while
+// every other census term is framed. The per-object census map below is the heavy
+// `assert forall|o| obj_census(...)` that put `remove_waiter` among the gate's largest
+// obligations; lifting it into its own `proof fn` gives it a small solver context (`verus.md`
+// §10), keyed on `obj_census(s1, o)` so it stays out of census-agnostic callers. `remove_waiter`'s
+// present path proves only the cheap local facts (the `-1` waiter delta + the changed-TCB shape)
+// then reads `census_delta_frozen`, `refcount_sound`, and `census_dom_complete`-preservation off
+// the map plus its own `refs[n] -= 1`. `notification::signal`'s wake path has the same edit shape
+// but proves the map inline — its `make_runnable` enqueue leaves a context too large for the
+// lemma's `requires` to discharge cheaply there (the extraction measurably regressed it). The
+// `+1` enqueue twin is `lemma_waiter_enqueue_census`; the no-delta twin is
+// `lemma_census_frame_thread_halt`; the cspace-clear analog is `lemma_census_after_hold_clear`.
+pub proof fn lemma_waiter_dequeue_census<S: Store>(s0: &S, s1: &S, n: ObjId)
+    requires
+        s1.slot_view() == s0.slot_view(),
+        s1.chan_view() == s0.chan_view(),
+        s1.timer_view() == s0.timer_view(),
+        s1.irq_view() == s0.irq_view(),
+        // only `n`'s notif view moved — a single `insert` equality (§10), not a broad frame.
+        s1.notif_view() == s0.notif_view().insert(n, s1.notif_view()[n]),
+        s1.tcb_view().dom() == s0.tcb_view().dom(),
+        // cspace/aspace fixed everywhere ⇒ `thread_hold_refs` is framed.
+        forall|k: ObjId| #[trigger] s1.tcb_view()[k].cspace == s0.tcb_view()[k].cspace,
+        forall|k: ObjId| #[trigger] s1.tcb_view()[k].aspace == s0.tcb_view()[k].aspace,
+        // every changed TCB's `wait_notif` is "about `n`" (`Some(n)` or `None`) in BOTH states —
+        // so for any `o != n` no changed node names `o`, the antecedent `lemma_waiter_refs_frame`
+        // needs (the GLB across `signal`, whose changed Runnable ready-tail has `wait_notif None`,
+        // and `remove_waiter`, whose changed nodes all name `n`).
+        forall|k: ObjId| #[trigger] s1.tcb_view()[k] != s0.tcb_view()[k]
+            ==> (s0.tcb_view()[k].wait_notif is None || s0.tcb_view()[k].wait_notif == Some(n))
+                && (s1.tcb_view()[k].wait_notif is None || s1.tcb_view()[k].wait_notif == Some(n)),
+        // exactly one waiter left `n`'s chain.
+        waiter_refs(s1.notif_view(), s1.tcb_view(), n) + 1
+            == waiter_refs(s0.notif_view(), s0.tcb_view(), n),
+    ensures
+        forall|o: ObjId| #[trigger] obj_census(s1, o)
+            == (if o == n { (obj_census(s0, o) - 1) as nat } else { obj_census(s0, o) }),
+{
+    let nv0 = s0.notif_view();
+    let tv0 = s0.tcb_view();
+    let nvf = s1.notif_view();
+    let tvf = s1.tcb_view();
+    assert forall|o: ObjId| #[trigger] obj_census(s1, o)
+        == (if o == n { (obj_census(s0, o) - 1) as nat } else { obj_census(s0, o) }) by {
+        // thread-hold term framed everywhere (cspace/aspace fixed); the four non-tcb terms ride
+        // the view equalities; `waiter_refs` rides `lemma_waiter_refs_frame` off `n` and the
+        // `-1` delta at `n`.
+        lemma_thread_hold_frame(tv0, tvf, o);
+        if o != n {
+            assert(nvf[o] == nv0[o]);
+            assert forall|k: ObjId| #[trigger] tvf[k] != tv0[k]
+                implies tv0[k].wait_notif != Some(o) && tvf[k].wait_notif != Some(o) by {}
+            lemma_waiter_refs_frame(nv0, tv0, nvf, tvf, n, o);
+        }
+    }
+}
+
+// The `+1` twin of `lemma_waiter_dequeue_census`: a block that enqueues exactly one waiter onto
+// notification `n` (`notification::wait`'s block path), where `waiter_refs(n)` grows by one and
+// every other census term is framed identically. The off-`n` frame is the same; only the delta at
+// `n` flips. `wait` proves the cheap local facts then reads `census_delta_frozen` (and conditional
+// `refcount_sound`) off this map plus its own `refs[n] += 1`.
+pub proof fn lemma_waiter_enqueue_census<S: Store>(s0: &S, s1: &S, n: ObjId)
+    requires
+        s1.slot_view() == s0.slot_view(),
+        s1.chan_view() == s0.chan_view(),
+        s1.timer_view() == s0.timer_view(),
+        s1.irq_view() == s0.irq_view(),
+        s1.notif_view() == s0.notif_view().insert(n, s1.notif_view()[n]),
+        s1.tcb_view().dom() == s0.tcb_view().dom(),
+        forall|k: ObjId| #[trigger] s1.tcb_view()[k].cspace == s0.tcb_view()[k].cspace,
+        forall|k: ObjId| #[trigger] s1.tcb_view()[k].aspace == s0.tcb_view()[k].aspace,
+        forall|k: ObjId| #[trigger] s1.tcb_view()[k] != s0.tcb_view()[k]
+            ==> (s0.tcb_view()[k].wait_notif is None || s0.tcb_view()[k].wait_notif == Some(n))
+                && (s1.tcb_view()[k].wait_notif is None || s1.tcb_view()[k].wait_notif == Some(n)),
+        // exactly one waiter joined `n`'s chain.
+        waiter_refs(s1.notif_view(), s1.tcb_view(), n)
+            == waiter_refs(s0.notif_view(), s0.tcb_view(), n) + 1,
+    ensures
+        forall|o: ObjId| #[trigger] obj_census(s1, o)
+            == (if o == n { (obj_census(s0, o) + 1) as nat } else { obj_census(s0, o) }),
+{
+    let nv0 = s0.notif_view();
+    let tv0 = s0.tcb_view();
+    let nvf = s1.notif_view();
+    let tvf = s1.tcb_view();
+    assert forall|o: ObjId| #[trigger] obj_census(s1, o)
+        == (if o == n { (obj_census(s0, o) + 1) as nat } else { obj_census(s0, o) }) by {
+        lemma_thread_hold_frame(tv0, tvf, o);
+        if o != n {
+            assert(nvf[o] == nv0[o]);
+            assert forall|k: ObjId| #[trigger] tvf[k] != tv0[k]
+                implies tv0[k].wait_notif != Some(o) && tvf[k].wait_notif != Some(o) by {}
+            lemma_waiter_refs_frame(nv0, tv0, nvf, tvf, n, o);
+        }
+    }
+}
+
 // ── `delete`'s frame-unmap-branch census lemma. ──
 //
 // `delete` clears a deleted cap's slot (`cspace.rs`'s `s.cap = EMPTY; set_slot`)
