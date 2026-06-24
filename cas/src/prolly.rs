@@ -707,8 +707,67 @@ pub open spec fn canonical_leaf_bytes(es: Seq<RawEntry>) -> Seq<u8> {
     seq![0u8] + u32_le(es.len() as u32) + entries_bytes(es)
 }
 
-// ── Exec byte readers (explicit index + shift, not
-//    `from_le_bytes`/`try_into`), each carrying its `*_le` round-trip ───────
+// ── Little-endian byte-split identities (cited by the exec readers below) ────
+//
+// The readers build `v = b0 | (b1<<8) | …` (bit-construction form) but the
+// `u*_le` spec extracts `v as u8`, `(v >> 8) as u8`, … (shift form); the two
+// agree only by `bit_vector`. Each lemma takes the constructed `v` plus its
+// source bytes (the construction fed in via `requires`) and states the per-byte
+// `(v >> 8k) as u8 == bk` extraction. Following the `doc/guidelines/verus.md` §6
+// recipe — `by (bit_vector)` on the signature, the facts as `ensures`, empty
+// body — keeps the readers free of inline `bit_vector` queries.
+
+/// `v == b0 | b1<<8` splits back into its little-endian bytes `b0`, `b1`.
+proof fn lemma_u16_le_bytes(v: u16, b0: u8, b1: u8) by (bit_vector)
+    requires
+        v == (b0 as u16) | ((b1 as u16) << 8),
+    ensures
+        v as u8 == b0,
+        (v >> 8) as u8 == b1,
+{
+}
+
+/// `v == b0 | b1<<8 | b2<<16 | b3<<24` splits back into its bytes `b0..b3`.
+proof fn lemma_u32_le_bytes(v: u32, b0: u8, b1: u8, b2: u8, b3: u8) by (bit_vector)
+    requires
+        v == (b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16) | ((b3 as u32) << 24),
+    ensures
+        v as u8 == b0,
+        (v >> 8) as u8 == b1,
+        (v >> 16) as u8 == b2,
+        (v >> 24) as u8 == b3,
+{
+}
+
+/// `v == b0 | b1<<8 | … | b7<<56` splits back into its bytes `b0..b7`.
+proof fn lemma_u64_le_bytes(
+    v: u64,
+    b0: u8,
+    b1: u8,
+    b2: u8,
+    b3: u8,
+    b4: u8,
+    b5: u8,
+    b6: u8,
+    b7: u8,
+) by (bit_vector)
+    requires
+        v == (b0 as u64) | ((b1 as u64) << 8) | ((b2 as u64) << 16) | ((b3 as u64) << 24) | ((b4
+            as u64) << 32) | ((b5 as u64) << 40) | ((b6 as u64) << 48) | ((b7 as u64) << 56),
+    ensures
+        v as u8 == b0,
+        (v >> 8) as u8 == b1,
+        (v >> 16) as u8 == b2,
+        (v >> 24) as u8 == b3,
+        (v >> 32) as u8 == b4,
+        (v >> 40) as u8 == b5,
+        (v >> 48) as u8 == b6,
+        (v >> 56) as u8 == b7,
+{
+}
+
+// ── Exec byte readers (explicit index + shift, not `from_le_bytes`/`try_into`),
+//    each citing the matching byte-split identity above ────────────────────────
 
 fn read_u16_le(buf: &[u8], off: usize) -> (v: u16)
     requires
@@ -720,8 +779,9 @@ fn read_u16_le(buf: &[u8], off: usize) -> (v: u16)
     let b0 = buf[off];
     let b1 = buf[off + 1];
     let v: u16 = (b0 as u16) | ((b1 as u16) << 8);
-    assert(((b0 as u16) | ((b1 as u16) << 8)) as u8 == b0) by (bit_vector);
-    assert((((b0 as u16) | ((b1 as u16) << 8)) >> 8) as u8 == b1) by (bit_vector);
+    proof {
+        lemma_u16_le_bytes(v, b0, b1);
+    }
     assert(buf@.subrange(off as int, off as int + 2) =~= u16_le(v));
     v
 }
@@ -738,14 +798,9 @@ fn read_u32_le(buf: &[u8], off: usize) -> (v: u32)
     let b2 = buf[off + 2];
     let b3 = buf[off + 3];
     let v: u32 = (b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16) | ((b3 as u32) << 24);
-    assert(((b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16) | ((b3 as u32) << 24)) as u8 == b0)
-        by (bit_vector);
-    assert(((((b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16) | ((b3 as u32) << 24)) >> 8) as u8) == b1)
-        by (bit_vector);
-    assert(((((b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16) | ((b3 as u32) << 24)) >> 16) as u8) == b2)
-        by (bit_vector);
-    assert(((((b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16) | ((b3 as u32) << 24)) >> 24) as u8) == b3)
-        by (bit_vector);
+    proof {
+        lemma_u32_le_bytes(v, b0, b1, b2, b3);
+    }
     assert(buf@.subrange(off as int, off as int + 4) =~= u32_le(v));
     v
 }
@@ -767,30 +822,9 @@ fn read_u64_le(buf: &[u8], off: usize) -> (v: u64)
     let b7 = buf[off + 7];
     let v: u64 = (b0 as u64) | ((b1 as u64) << 8) | ((b2 as u64) << 16) | ((b3 as u64) << 24)
         | ((b4 as u64) << 32) | ((b5 as u64) << 40) | ((b6 as u64) << 48) | ((b7 as u64) << 56);
-    assert(v as u8 == b0) by (bit_vector)
-        requires v == (b0 as u64) | ((b1 as u64) << 8) | ((b2 as u64) << 16) | ((b3 as u64) << 24)
-            | ((b4 as u64) << 32) | ((b5 as u64) << 40) | ((b6 as u64) << 48) | ((b7 as u64) << 56);
-    assert((v >> 8) as u8 == b1) by (bit_vector)
-        requires v == (b0 as u64) | ((b1 as u64) << 8) | ((b2 as u64) << 16) | ((b3 as u64) << 24)
-            | ((b4 as u64) << 32) | ((b5 as u64) << 40) | ((b6 as u64) << 48) | ((b7 as u64) << 56);
-    assert((v >> 16) as u8 == b2) by (bit_vector)
-        requires v == (b0 as u64) | ((b1 as u64) << 8) | ((b2 as u64) << 16) | ((b3 as u64) << 24)
-            | ((b4 as u64) << 32) | ((b5 as u64) << 40) | ((b6 as u64) << 48) | ((b7 as u64) << 56);
-    assert((v >> 24) as u8 == b3) by (bit_vector)
-        requires v == (b0 as u64) | ((b1 as u64) << 8) | ((b2 as u64) << 16) | ((b3 as u64) << 24)
-            | ((b4 as u64) << 32) | ((b5 as u64) << 40) | ((b6 as u64) << 48) | ((b7 as u64) << 56);
-    assert((v >> 32) as u8 == b4) by (bit_vector)
-        requires v == (b0 as u64) | ((b1 as u64) << 8) | ((b2 as u64) << 16) | ((b3 as u64) << 24)
-            | ((b4 as u64) << 32) | ((b5 as u64) << 40) | ((b6 as u64) << 48) | ((b7 as u64) << 56);
-    assert((v >> 40) as u8 == b5) by (bit_vector)
-        requires v == (b0 as u64) | ((b1 as u64) << 8) | ((b2 as u64) << 16) | ((b3 as u64) << 24)
-            | ((b4 as u64) << 32) | ((b5 as u64) << 40) | ((b6 as u64) << 48) | ((b7 as u64) << 56);
-    assert((v >> 48) as u8 == b6) by (bit_vector)
-        requires v == (b0 as u64) | ((b1 as u64) << 8) | ((b2 as u64) << 16) | ((b3 as u64) << 24)
-            | ((b4 as u64) << 32) | ((b5 as u64) << 40) | ((b6 as u64) << 48) | ((b7 as u64) << 56);
-    assert((v >> 56) as u8 == b7) by (bit_vector)
-        requires v == (b0 as u64) | ((b1 as u64) << 8) | ((b2 as u64) << 16) | ((b3 as u64) << 24)
-            | ((b4 as u64) << 32) | ((b5 as u64) << 40) | ((b6 as u64) << 48) | ((b7 as u64) << 56);
+    proof {
+        lemma_u64_le_bytes(v, b0, b1, b2, b3, b4, b5, b6, b7);
+    }
     assert(buf@.subrange(off as int, off as int + 8) =~= u64_le(v));
     v
 }
