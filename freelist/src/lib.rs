@@ -79,7 +79,7 @@ impl<const N: usize> FreeList<N> {
         &&& (forall|k: int| 0 <= k < self.nfree ==> #[trigger] self.free@[k].1 > 0)
         &&& (forall|k: int| 0 <= k < self.nfree
                 ==> #[trigger] self.free@[k].0 as int + self.free@[k].1 as int <= self.len as int)
-        &&& (forall|k: int| #![trigger self.free@[k]]
+        &&& (forall|k: int| #![trigger self.free@[k].0, self.free@[k].1]
                 0 <= k < self.nfree - 1
                 ==> (self.free@[k].0 as int + self.free@[k].1 as int)
                         < self.free@[k + 1].0 as int)
