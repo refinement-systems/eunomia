@@ -4,6 +4,7 @@
 #   scripts/tla-baseline.sh                       # baseline every cfg in the manifest
 #   scripts/tla-baseline.sh IpcReactor CommitProtocol   # restrict to named cfgs
 #   TLC_WORKERS=4 scripts/tla-baseline.sh         # faster (see determinism note)
+#   scripts/tla-baseline.sh --no-symmetry CapRevocation_Teardown  # pre-quotient count
 #
 # This is the TLC analogue of scripts/verus-baseline.sh and operationalises the
 # "measure every change, correctness first" discipline (doc/plans/0_tla-
@@ -46,6 +47,20 @@ if ! ( cd "$ROOT/tools/tla" && shasum -c tla2tools.jar.sha1 ) >/dev/null 2>&1; t
   echo "warning: tools/tla/tla2tools.jar does not match its .sha1 — baseline not comparable to CI" >&2
 fi
 
+# --no-symmetry (-n): re-derive the PRE-quotient distinct/diameter by stripping
+# the SYMMETRY line from each selected cfg on the fly — the folded-in form of the
+# manual no-symmetry copy from doc/results/2_tla-findings.md §3, so the
+# before/after of a symmetry change is a one-flag re-run. The pre-quotient counts
+# differ from the post-quotient manifest pins, so this mode REPORTS them rather
+# than asserting; arms with no SYMMETRY line are skipped (nothing to strip). The
+# stripped cfg is a temp sibling, removed after the run (and on exit).
+NOSYM=0
+case "${1:-}" in
+  --no-symmetry|-n) NOSYM=1; shift ;;
+esac
+TMP_CFGS=()
+trap 'for f in "${TMP_CFGS[@]:-}"; do [ -n "$f" ] && rm -f "$f"; done' EXIT
+
 # Restrict to named cfgs if any positional args are given.
 SELECT=("$@")
 selected() {
@@ -73,12 +88,29 @@ while IFS=$'\t' read -r name spec cfg exp_distinct exp_diameter; do
   metadir="$ROOT/target/tla-states/$name"
   rm -rf "$metadir"   # cold run — no warm fingerprint set
 
+  # In --no-symmetry mode run a SYMMETRY-stripped temp sibling instead of the
+  # committed cfg; skip arms that carry no SYMMETRY line (nothing to strip).
+  spec_dir="$ROOT/$(dirname "$spec")"
+  runcfg="$cfg"
+  if [ "$NOSYM" -eq 1 ]; then
+    if grep -qE '^[[:space:]]*SYMMETRY' "$spec_dir/$cfg"; then
+      runcfg="${cfg%.cfg}_nosym_tmp.cfg"
+      grep -vE '^[[:space:]]*SYMMETRY' "$spec_dir/$cfg" > "$spec_dir/$runcfg"
+      TMP_CFGS+=("$spec_dir/$runcfg")
+    else
+      printf '%-26s %10s %12s %9s %5s  %s\n' "$name" "-" "-" "-" "-" \
+        "skipped (no SYMMETRY line to strip)" | tee -a "$SUMMARY"
+      continue
+    fi
+  fi
+
   TLC_WORKERS="$WORKERS" \
   TLC_METADIR="$metadir" \
   TLA_JAVA_OPTS="-Xmx$XMX" \
   TLC_FLAGS="-fp $FP -fpmem $FPMEM -coverage 1" \
-    bash "$ROOT/tools/tla/tla-model-check.sh" "$ROOT/$spec" "$cfg" </dev/null >"$log" 2>&1
+    bash "$ROOT/tools/tla/tla-model-check.sh" "$ROOT/$spec" "$runcfg" </dev/null >"$log" 2>&1
   trc=$?
+  [ "$NOSYM" -eq 1 ] && rm -f "$spec_dir/$runcfg"
 
   stats="$(sed -n 's/^\([0-9][0-9,]*\) states generated, \([0-9][0-9,]*\) distinct states found.*/\1 \2/p' "$log" | tail -1 | tr -d ,)"
   generated="?"; distinct="?"
@@ -94,7 +126,11 @@ while IFS=$'\t' read -r name spec cfg exp_distinct exp_diameter; do
 
   verdict="ok"
   if [ "$trc" -ne 0 ]; then verdict="RUN FAILED (exit $trc) — see $log"; rc=1; fi
-  if [ "$exp_distinct" != "-" ] && [ "$distinct" != "$exp_distinct" ]; then
+  if [ "$NOSYM" -eq 1 ]; then
+    # Pre-quotient numbers differ from the post-quotient manifest pins — report,
+    # do not assert.
+    [ "$verdict" = "ok" ] && verdict="no-symmetry pre-quotient (not asserted)"
+  elif [ "$exp_distinct" != "-" ] && [ "$distinct" != "$exp_distinct" ]; then
     verdict="COVERAGE REGRESSION: distinct $distinct != expected $exp_distinct"; rc=1
   elif [ "$exp_diameter" != "-" ] && [ "$diameter" != "$exp_diameter" ]; then
     verdict="DIAMETER CHANGED: $diameter != expected $exp_diameter"; rc=1

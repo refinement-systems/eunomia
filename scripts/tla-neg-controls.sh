@@ -25,6 +25,7 @@ mkdir -p "$OUT_DIR"
 CONTROLS=(
   "tla/cap_revocation/CapRevocation.tla|CapRevocation_NegControl.cfg|LiveParent"
   "tla/cap_revocation/CapRevocation.tla|CapRevocation_Safety_NegControl.cfg|LiveParent"
+  "tla/cap_revocation/CapRevocation.tla|CapRevocation_AsymBug.cfg|DeadNowhere"
   "tla/cap_revocation/CapRevocation.tla|CapRevocation_NegLiveness.cfg|EventuallyRevoked"
   "tla/commit_protocol/CommitProtocol.tla|CommitProtocol_NegControl.cfg|RecoverReconstructs"
   "tla/ipc_reactor/IpcReactor.tla|IpcReactor_NegControl.cfg|NoLostWakeup"
