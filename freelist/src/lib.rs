@@ -286,7 +286,6 @@ impl<const N: usize> FreeList<N> {
     /// loop invariant carries per-extent disjointness, mirroring `free`'s own
     /// covers-reasoning (an extent overlaps `[off, off+n)` iff it covers a point in it).
     #[verifier::spinoff_prover]
-    #[verifier::rlimit(100)]
     pub fn is_allocated(&self, off: usize, n: usize) -> (r: bool)
         requires
             self.wf(),
@@ -348,7 +347,6 @@ impl<const N: usize> FreeList<N> {
     /// only frames `covers` (first-fit + the `N`-cap may refuse with space left,
     /// so — unlike a bitmap allocator — `None` is *not* an exact-exhaustion claim).
     #[verifier::spinoff_prover]
-    #[verifier::rlimit(100)]
     pub fn alloc(&mut self, n: usize, align: usize) -> (r: Option<usize>)
         requires
             old(self).wf(),
@@ -791,7 +789,7 @@ impl<const N: usize> FreeList<N> {
     /// fresh extent at `i`, with a strict gap on both sides. `covers` gains
     /// exactly `[off, off+n)`.
     #[verifier::spinoff_prover]
-    #[verifier::rlimit(100)]
+    #[verifier::rlimit(50)]
     proof fn free_insert(new: FreeList<N>, old: FreeList<N>, i: int, off: int, n: int)
         requires
             old.wf(),
@@ -893,7 +891,7 @@ impl<const N: usize> FreeList<N> {
     /// when `g` is the left neighbour, a left-extension when `g` is the right
     /// neighbour). `covers` gains exactly `[off, off+n)`.
     #[verifier::spinoff_prover]
-    #[verifier::rlimit(120)]
+    #[verifier::rlimit(20)]
     proof fn free_replace(new: FreeList<N>, old: FreeList<N>, g: int, off: int, n: int,
         eoff: int, elen: int)
         requires
@@ -1000,7 +998,7 @@ impl<const N: usize> FreeList<N> {
     /// `remove_at(i)`, so the correspondence is the remove-shift over a list whose
     /// `i-1` already holds `E`.
     #[verifier::spinoff_prover]
-    #[verifier::rlimit(50)]
+    #[verifier::rlimit(15)]
     proof fn free_both(new: FreeList<N>, old: FreeList<N>, i: int, off: int, n: int,
         eoff: int, elen: int)
         requires
@@ -1064,7 +1062,6 @@ impl<const N: usize> FreeList<N> {
 
     /// `covers` half of [`FreeList::free_both`] (split out for rlimit).
     #[verifier::spinoff_prover]
-    #[verifier::rlimit(50)]
     proof fn free_covers_both(new: FreeList<N>, old: FreeList<N>, i: int, off: int, n: int,
         eoff: int, elen: int)
         requires
@@ -1127,7 +1124,6 @@ impl<const N: usize> FreeList<N> {
     /// merges), or one `insert_at` (no merge), rather than three nested
     /// `copy_within`s.
     #[verifier::spinoff_prover]
-    #[verifier::rlimit(100)]
     pub fn free(&mut self, off: usize, n: usize)
         requires
             old(self).wf(),
@@ -1154,7 +1150,7 @@ impl<const N: usize> FreeList<N> {
                 self.nfree == old(self).nfree,
                 self.free@ == old(self).free@,
                 0 <= i <= self.nfree,
-                forall|k: int| 0 <= k < i ==> self.free@[k].0 < off,
+                forall|k: int| #![trigger self.free@[k].0] 0 <= k < i ==> self.free@[k].0 < off,
             decreases self.nfree - i,
         {
             i += 1;
