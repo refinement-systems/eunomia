@@ -24,6 +24,7 @@ mkdir -p "$OUT_DIR"
 # spec_relpath | cfg | expected violated invariant/property
 CONTROLS=(
   "tla/cap_revocation/CapRevocation.tla|CapRevocation_NegControl.cfg|LiveParent"
+  "tla/cap_revocation/CapRevocation.tla|CapRevocation_Safety_NegControl.cfg|LiveParent"
   "tla/cap_revocation/CapRevocation.tla|CapRevocation_NegLiveness.cfg|EventuallyRevoked"
   "tla/commit_protocol/CommitProtocol.tla|CommitProtocol_NegControl.cfg|RecoverReconstructs"
   "tla/ipc_reactor/IpcReactor.tla|IpcReactor_NegControl.cfg|NoLostWakeup"
