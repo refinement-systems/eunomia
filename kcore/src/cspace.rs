@@ -6963,7 +6963,7 @@ pub proof fn lemma_census_frame_thread_halt<S: Store>(s0: &S, s1: &S, t: ObjId)
 // then reads `census_delta_frozen`, `refcount_sound`, and `census_dom_complete`-preservation off
 // the map plus its own `refs[n] -= 1`. `notification::signal`'s wake path has the same edit shape
 // but proves the map inline — its `make_runnable` enqueue leaves a context too large for the
-// lemma's `requires` to discharge cheaply there (the extraction measurably regressed it). The
+// lemma's `requires` to discharge cheaply there. The
 // `+1` enqueue twin is `lemma_waiter_enqueue_census`; the no-delta twin is
 // `lemma_census_frame_thread_halt`; the cspace-clear analog is `lemma_census_after_hold_clear`.
 pub proof fn lemma_waiter_dequeue_census<S: Store>(s0: &S, s1: &S, n: ObjId)
