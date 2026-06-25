@@ -2023,6 +2023,52 @@ transitive rewrite chain with per-step localized contexts (§5); and **`opaque` 
 `closed`** chosen by whether you need in-module hiding (performance, recursive specs)
 or only cross-module hiding (abstraction) (§10).
 
+## 14. The verified accounting template: a `well_formed` cap and a non-underflowing observable, preserved by every mutator
+
+**A pattern companion to §§1–3, for the recurring "bounded resource handed out and
+returned" shape.** When a verified type meters a finite resource — a byte budget, a
+slot mask, a refcount ceiling — three pieces make the never-over-grant property hold
+for *all* operation sequences, deductively, where a concurrent smoke test only
+witnesses a bounded slice:
+
+- a `closed spec fn well_formed` stating the single accounting bound
+  (`granted <= budget`);
+- a `closed spec fn` **observable** as a ghost `int` (`budget - granted`), provably
+  non-negative *under* `well_formed`, so the exec accessor that returns it as a machine
+  integer (`remaining`) cannot underflow;
+- every mutator carries `requires self.well_formed()` and proves
+  `ensures final(self).well_formed()` plus the exact observable delta. Modular
+  composition then closes the bound over *any* sequence of calls — the unbounded twin
+  of an N-thread "exactly `min(budget, N)` grants" harness.
+
+The canonical instance is `ipc::session::Admission` (the rev2§3.5 bulk-window quota):
+
+```rust
+pub closed spec fn well_formed(self) -> bool { self.granted <= self.budget }
+pub closed spec fn spec_remaining(self) -> int { self.budget as int - self.granted as int }
+
+pub fn admit(&mut self, requested: u32) -> (res: Result<WindowGrant, ConnectErr>)
+    requires self.well_formed(),
+    ensures
+        final(self).well_formed(),                       // never over-grants, for ANY requested
+        res is Ok ==> final(self).spec_remaining()
+                        == old(self).spec_remaining() - requested,
+        res is Err ==> final(self).spec_remaining() == old(self).spec_remaining(),
+{ /* grant iff it fits the remainder, else refuse and leave the quota untouched */ }
+```
+
+`closed` keeps the private-field body out of the public contract: callers reason in
+terms of `well_formed`/`spec_remaining`, never the `budget`/`granted` split.
+
+**Reuse target — the reactor `used`-mask dispatch accounting follows this template.**
+Map `used` ↔ `granted`, the full word (`u64::MAX` / 64 bits) ↔ `budget`, and
+`alloc`/`drain` ↔ `admit`/`release`: the dispatch arithmetic's "sets exactly the
+lowest clear bit, `None` iff the word is full" (the `alloc_lowest` /
+no-double-allocation core, §6) and its slot/used coherence bijection are the same
+`closed spec fn` invariant + per-op-`ensures` discipline, with a bitmask invariant in
+place of a scalar cap. The accounting bound is the design decision made before any
+property is stated — exactly as in §1 — so it is documented here as a named template.
+
 ---
 
 *This guideline distills the technique; the enumerated source of record is the

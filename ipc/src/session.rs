@@ -325,6 +325,10 @@ impl GrantReply {
 /// — the quota invariant a malicious flood of connects cannot break), and
 /// `release` returns the bytes when a session closes. The MVP grants one window
 /// per session, all into window 0.
+///
+/// This is the verified-accounting template of `doc/guidelines/verus.md` §14 (a
+/// `well_formed` cap + a non-underflowing observable preserved by every mutator),
+/// which the reactor `used`-mask dispatch accounting reuses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Admission {
     budget: u32,
