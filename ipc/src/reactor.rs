@@ -54,7 +54,7 @@ verus! {
 // `bit_vector` to bridge the `(!used >> k) & 1` form the axiom speaks to the
 // `used & (1 << k)` form the allocator's `used |= 1 << bit` speaks. No new
 // trusted seam: a pure bitmask over a `vstd` axiom, no interpreted primitive.
-// `alloc_bit` (plain Rust, the trusted shell over the slot array) calls this.
+// `alloc_lowest` (which records the allocation) calls this.
 // Crate-private: this adds no public API surface, only a verified internal core.
 fn lowest_clear_bit(used: u64) -> (r: Option<u32>)
     ensures
@@ -210,11 +210,23 @@ spec fn coherent(slots: Seq<Option<Reg>>, used: u64) -> bool {
         0 <= b < 64 ==> (slots[b].is_some() <==> used & (1u64 << (b as u64)) != 0u64)
 }
 
+// The reactor's whole **dispatch invariant**: the 64-slot array stays full-width and
+// slot/used `coherent`. Both registration paths (`register_into`, `register_bound_into`)
+// take it as `requires`/`ensures`, so coherence is preserved by every source admission
+// — the deductive twin of the `register_sequence_keeps_used_coherent` proptest. `pending`
+// carries no clause here: it may hold signaled-but-unregistered bits (`wait` skips them),
+// so its only discipline is `drain_one`'s lowest-first single-step `ensures`, not a
+// coherence relation with `slots`/`used`.
+spec fn wf(slots: Seq<Option<Reg>>, used: u64) -> bool {
+    &&& slots.len() == 64
+    &&& coherent(slots, used)
+}
+
 // The reactor's bit allocator (rev2§3.6): the lowest free bit of `used`, marked
 // allocated, or `None` when the 64-bit word is full. The lowest-clear scan is the
 // verified `lowest_clear_bit`; this records the allocation (`used |= 1 << bit`)
 // and proves it flips *exactly* that bit — no double-allocation, nothing else
-// moves. `Reactor::alloc_bit` (the plain shell over the slot array) delegates.
+// moves. `register_into` (the verified register-path helper) delegates here.
 fn alloc_lowest(used: &mut u64) -> (r: Option<usize>)
     ensures
         r is None ==> *final(used) == *old(used) && *old(used) == 0xFFFF_FFFF_FFFF_FFFFu64,
@@ -232,6 +244,88 @@ fn alloc_lowest(used: &mut u64) -> (r: Option<usize>)
     };
     *used = *used | (1u64 << bit);
     Some(bit)
+}
+
+// Admit a channel source on the **lowest clear** bit (rev2§3.6) — the verified twin of
+// `register_bound_into` for the auto-allocated `register` path. Pick the lowest free bit
+// (the verified `alloc_lowest`), fill exactly that slot with the source's `key`/`signals`,
+// and preserve the slot/used `wf` bijection: `Full` (state unchanged) iff the 64-bit word
+// is exhausted, otherwise exactly that bit set in `used` and exactly that slot filled — no
+// double-allocation, nothing else moves. `Reactor::register` (the plain shell) commits the
+// returned `(slots, used)` only **after** its `Transport::bind`s succeed, so a bind failure
+// leaves the reactor entirely untouched. The proptest `register_sequence_keeps_used_coherent`
+// is the companion oracle; this is its deductive, all-inputs twin for the register path.
+fn register_into(
+    slots: [Option<Reg>; WORD_BITS],
+    used: u64,
+    signals: Signals,
+    key: Key,
+) -> (r: ([Option<Reg>; WORD_BITS], u64, Result<usize, RegisterErr>))
+    requires
+        wf(slots@, used),
+    ensures
+        wf(r.0@, r.1),
+        match r.2 {
+            Err(e) => {
+                &&& e == RegisterErr::Full
+                &&& used == 0xFFFF_FFFF_FFFF_FFFFu64
+                &&& r.1 == used
+                &&& r.0@ == slots@
+            },
+            Ok(bit) => {
+                &&& bit < 64
+                &&& used & (1u64 << (bit as u64)) == 0u64
+                &&& r.1 == used | (1u64 << (bit as u64))
+                &&& forall|j: u64| #![trigger used & (1u64 << j)]
+                        j < bit ==> used & (1u64 << j) != 0u64
+                &&& r.0@ == slots@.update(bit as int, Some(Reg { key, signals }))
+            },
+        },
+{
+    broadcast use vstd::array::group_array_axioms;
+
+    let mut u = used;
+    match alloc_lowest(&mut u) {
+        // Full word: nothing claimed, state returned unchanged (`u == used == MAX`).
+        None => (slots, used, Err(RegisterErr::Full)),
+        Some(bit) => {
+            let mut out = slots;
+            out[bit] = Some(Reg { key, signals });
+            let ghost g: u64 = bit as u64;
+            proof {
+                // `out` is `slots` with index `bit` set to `Some(..)` (array set axiom).
+                assert(out@ =~= slots@.update(bit as int, Some(Reg { key, signals })));
+                // Re-establish coherence. The only changed slot is `bit`, which is exactly
+                // the bit `alloc_lowest` set in `u` (`u == used | (1<<bit)`); OR-ing in
+                // `1<<bit` leaves every other bit of `used` — hence every other slot's
+                // membership — unchanged. Case split on `b == bit` vs `b != bit`.
+                assert forall|b: int| 0 <= b < 64 implies
+                    ((#[trigger] out@[b]).is_some() <==> u & (1u64 << (b as u64)) != 0u64) by {
+                    let bb = b as u64;
+                    if b == g as int {
+                        // Newly filled slot; its `used` bit is the one just set.
+                        assert(u & (1u64 << bb) != 0u64) by (bit_vector)
+                            requires
+                                u == used | (1u64 << g),
+                                bb == g,
+                                g < 64;
+                    } else {
+                        // Untouched slot: membership carries over from the entry coherence,
+                        // and bit `bb` of `u` equals bit `bb` of `used` (OR didn't touch it).
+                        assert(out@[b] == slots@[b]);
+                        assert((u & (1u64 << bb) != 0u64) == (used & (1u64 << bb) != 0u64))
+                            by (bit_vector)
+                            requires
+                                u == used | (1u64 << g),
+                                bb != g,
+                                bb < 64,
+                                g < 64;
+                    }
+                }
+            }
+            (out, u, Ok(bit))
+        },
+    }
 }
 
 // Popping the lowest set bit (`bits & (bits - 1)`) of a word whose lowest set bit
@@ -267,10 +361,9 @@ fn register_bound_into(
     key: Key,
 ) -> (r: ([Option<Reg>; WORD_BITS], u64, Result<(), RegisterErr>))
     requires
-        coherent(slots@, used),
+        wf(slots@, used),
     ensures
-        r.0@.len() == 64,
-        coherent(r.0@, r.1),
+        wf(r.0@, r.1),
         match r.2 {
             Err(e) => {
                 &&& e == RegisterErr::Taken
@@ -444,28 +537,30 @@ impl<'t, T: Transport> Reactor<'t, T> {
         }
     }
 
-    /// The lowest free bit, marking it allocated; `None` when the 64-bit word is
-    /// exhausted (`RegisterErr::Full`). The bit-scan + free/lowest-clear
-    /// guarantees are the Verus-verified [`lowest_clear_bit`]; this shell only
-    /// records the allocation (`used |= 1 << bit`).
-    fn alloc_bit(&mut self) -> Option<usize> {
-        alloc_lowest(&mut self.used)
-    }
-
-    /// Register `source` for `signals`, dispatched as `key`. Binds each requested
-    /// event to a freshly-allocated bit, then **self-signals** that bit so the
-    /// first `wait` polls the source (the "poll once", catching a pre-bind
-    /// message). Idempotent re-registration is not supported — each call consumes
-    /// a bit.
+    /// Register `source` for `signals`, dispatched as `key`. Picks the lowest free
+    /// bit and fills its slot via the Verus-verified [`register_into`] (which proves
+    /// the slot/used coherence bijection — no double-allocation, `Full` at the 64-bit
+    /// ceiling), binds each requested event to that bit, then **self-signals** it so
+    /// the first `wait` polls the source (the "poll once", catching a pre-bind
+    /// message). Idempotent re-registration is not supported — each call consumes a
+    /// bit.
+    ///
+    /// The verified `(slots, used)` is committed only **after** every `bind` succeeds,
+    /// so a `bind` failure leaves the reactor entirely unchanged (the bit is not even
+    /// consumed) — the slot/used coherence holds on every path.
     pub fn register(
         &mut self,
         source: Chan,
         signals: Signals,
         key: Key,
     ) -> Result<(), RegisterErr> {
-        let bit = self.alloc_bit().ok_or(RegisterErr::Full)?;
+        // Verified, pure: pick the lowest clear bit and the would-be new state, without
+        // touching `self` yet. `Full` (word exhausted) returns here, self untouched.
+        let (slots, used, r) = register_into(self.slots, self.used, signals, key);
+        let bit = r?;
         let mask = 1u64 << bit;
 
+        // Bind before committing: a bind failure returns with `self` unchanged.
         if signals.readable() {
             self.bind(source, Event::Readable, mask)?;
         }
@@ -476,7 +571,9 @@ impl<'t, T: Transport> Reactor<'t, T> {
             self.bind(source, Event::PeerClosed, mask)?;
         }
 
-        self.slots[bit] = Some(Reg { key, signals });
+        // All binds succeeded: commit the verified-coherent allocation.
+        self.slots = slots;
+        self.used = used;
         // Poll once: surface this source on the first wait, so a message already
         // queued before the bind is not slept through.
         self.transport.notif_signal(self.notif, mask);
@@ -579,17 +676,16 @@ mod proptests {
             .. ProptestConfig::default()
         })]
 
-        /// `alloc_bit` returns the **lowest clear** bit (characterized, not
-        /// compared to its own impl): the returned bit was clear, every lower
-        /// bit was already set, and exactly that bit flips. It refuses (`None`)
-        /// only when the word is full — never aliases, never panics.
+        /// `alloc_lowest` (the verified lowest-clear allocator core `register`/
+        /// `register_into` delegate to) returns the **lowest clear** bit
+        /// (characterized, not compared to its own impl): the returned bit was
+        /// clear, every lower bit was already set, and exactly that bit flips. It
+        /// refuses (`None`) only when the word is full — never aliases, never panics.
         #[test]
         fn alloc_bit_is_lowest_clear(used in any::<u64>()) {
-            let t = ModelTransport::shared(1, 1);
-            let mut reactor = Reactor::new(&*t, NOTIF);
-            reactor.used = used;
-            let before = reactor.used;
-            match reactor.alloc_bit() {
+            let mut u = used;
+            let before = u;
+            match alloc_lowest(&mut u) {
                 Some(bit) => {
                     prop_assert!(bit < WORD_BITS);
                     prop_assert_eq!(before & (1u64 << bit), 0, "allocated an already-set bit");
@@ -597,7 +693,7 @@ mod proptests {
                     let below = (1u64 << bit) - 1;
                     prop_assert_eq!(before & below, below, "a lower bit was clear — not lowest-first");
                     // Exactly that bit is added; nothing else moves.
-                    prop_assert_eq!(reactor.used, before | (1u64 << bit));
+                    prop_assert_eq!(u, before | (1u64 << bit));
                 }
                 None => prop_assert_eq!(before, u64::MAX, "refused while a bit was still free"),
             }
