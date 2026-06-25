@@ -127,12 +127,24 @@ tdVars == <<nlive, ncaps, pcbind, eopen>>
 vars   == <<live, parent, cspaces, queues, bindings, treport, revoked,
             revoking, nlive, ncaps, pcbind, eopen>>
 
+\* c's direct CDT children. Descendants is the transitive closure of this, so
+\* an empty subtree <=> no direct child: Descendants(c) = {} <=> Children(c) =
+\* {}. The action guards only need that one-level emptiness test, so they use
+\* Children directly and skip the RECURSIVE walk; the genuine closure is still
+\* used where the whole subtree is enumerated (RevokeStep) and where "the
+\* subtree is empty" reads as the intended property (EventuallyRevoked). Stated
+\* as a set comparison (not \E x \in CapIds : parent[x] = c) on purpose: a
+\* positive existential in an action guard makes TLC branch over each witness
+\* and regenerate the (identical) successor once per child, inflating generated
+\* states; the set-emptiness test does not.
+Children(c) == {x \in CapIds : parent[x] = c}
+
 \* All descendants of cap in the CDT (recursive). Dead caps have parent
 \* NULL, so the walk only ever finds live caps.
 RECURSIVE Descendants(_)
 Descendants(cap) ==
-    LET children == {c \in CapIds : parent[c] = cap}
-    IN  children \cup UNION {Descendants(c) : c \in children}
+    LET ch == Children(cap)
+    IN  ch \cup UNION {Descendants(c) : c \in ch}
 
 \* A live cap with no live child — a leaf of the live CDT forest. RevokeStep
 \* may only delete a leaf, so deleting it orphans nobody (the leaf-first
@@ -258,7 +270,7 @@ DeleteOne(d) ==
 \* one preemption-point-free step that sets the marker, deletes nothing.
 RevokeBegin(c) ==
     /\ c \in live
-    /\ Descendants(c) /= {}
+    /\ Children(c) /= {}
     /\ c \notin revoking
     /\ revoking' = revoking \cup {c}
     /\ UNCHANGED <<live, parent, cspaces, queues, bindings, treport, revoked>>
@@ -275,7 +287,7 @@ RevokeStep(c) ==
 \* Clear the marker once the subtree is empty; c survives.
 RevokeEnd(c) ==
     /\ c \in revoking
-    /\ Descendants(c) = {}
+    /\ Children(c) = {}
     /\ revoking' = revoking \ {c}
     /\ UNCHANGED <<live, parent, cspaces, queues, bindings, treport, revoked>>
 
@@ -283,10 +295,11 @@ RevokeEnd(c) ==
 \* Sound only when no derived caps exist anywhere — the guard the kernel
 \* establishes by running revoke first (rev2§2.2). Caps parked in binding
 \* slots are not in any cspace, so they cannot be retyped; as CDT
-\* residents they still block an ancestor's retype via Descendants.
+\* residents they still hold a parent edge, so they count among an ancestor's
+\* Children and block its retype.
 Retype(p, c) ==
     /\ c \in cspaces[p]
-    /\ Descendants(c) = {}
+    /\ Children(c) = {}
     /\ live'    = live \ {c}
     /\ parent'  = [parent EXCEPT ![c] = NULL]
     /\ cspaces' = [cspaces EXCEPT ![p] = @ \ {c}]
