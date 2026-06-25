@@ -73,13 +73,13 @@ jobs:
   # it the same safety invariants run at the larger residence constants the
   # liveness arm trims (Threads=2, QueueDepth=2), so MoveSemantics/LiveParent/
   # FireSafe/etc. now hold across a second TCB's bind/exit/fault interleavings and
-  # a depth-2 channel ring. Run under SYMMETRY SafetySymmetry: its 12,183,480
-  # reachable states collapse to 1,240,344 post-quotient orbit representatives
-  # (same behaviours, fewer states) vs the liveness arm's 503,070. Same
-  # vendored-jar pin and TLC_WORKERS as `model`.
+  # a depth-2 channel ring. Run under SYMMETRY SafetySymmetry (Procs, CapIds,
+  # and Threads): its 12,183,480 reachable states collapse to 635,034
+  # post-quotient orbit representatives (same behaviours, fewer states) vs the
+  # liveness arm's 503,070. Same vendored-jar pin and TLC_WORKERS as `model`.
   model-safety:
     runs-on: ubuntu-latest
-    # ~2 min at 4 workers; the cap is margin — a constants bump that explodes the
+    # ~1.5 min at 4 workers; the cap is margin — a constants bump that explodes the
     # state space should fail fast here, not hang.
     timeout-minutes: 15
     env:
