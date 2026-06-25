@@ -18,8 +18,10 @@
 # the regression guard.
 #
 # Canonical CONSTANTS (kept here so the lock-step cfgs cannot silently drift):
-#   cap_revocation revoke set  (Spec @ CapRevocation.cfg / SpecBad / SpecNoGuard
-#     — the liveness arm and its two negative controls, must match in lock-step):
+#   cap_revocation revoke set  (Spec @ CapRevocation.cfg and
+#     CapRevocation_SafetyFloor.cfg / SpecBad / SpecNoGuard — the liveness arm, the
+#     floor-containment arm, and the two negative controls, must match in
+#     lock-step):
 #     CapIds={c0,c1,c2,c3} Procs={p0,p1} Channels={ch0} Threads={t0}
 #     Notifs={nf0,nf1} QueueDepth=1 NULL=NULL
 #     This liveness arm checks only TypeOK + the EventuallyRevoked liveness
@@ -48,6 +50,17 @@
 #     Procs x CapIds x Threads permutation-orbit — group order 96; adding the
 #     size-2 Threads axis is a near-ideal 1.95x on top of the Procs x CapIds
 #     quotient — same behaviours, fewer representatives).
+#   cap_revocation safety floor  (Spec @ CapRevocation_SafetyFloor.cfg): the safety
+#     arm above re-run at the liveness floor (Threads={t0} QueueDepth=1) — same Spec
+#     and same six obligations under the same SYMMETRY SafetySymmetry, so it shares
+#     the floor lock-step constants of the revoke set above. It mechanizes the
+#     CapRevocation.cfg subsumption argument: re-checking the safety obligations the
+#     liveness arm drops, directly on the floor, so a floor-containment break fails
+#     a run instead of going unchecked. Pinned distinct is its own post-quotient
+#     orbit count: the floor's 503,070 full reachable states (the liveness arm's
+#     no-SYMMETRY count) collapse to 46,599 by quotienting each Procs x CapIds
+#     permutation-orbit (group order 48; the Threads axis is a singleton at the
+#     floor, so it degenerates to identity). Diameter 22 matches the liveness arm.
 #   cap_revocation teardown    (TSpec): as above but Threads={t0,t1} QueueDepth=2;
 #     carries SYMMETRY NotifSymmetry — pinned distinct is the nf0<->nf1 orbit
 #     count (252 full reachable, quotiented to 132).
@@ -62,6 +75,7 @@
 name	spec_relpath	cfg	expected_distinct	expected_diameter
 CapRevocation	tla/cap_revocation/CapRevocation.tla	CapRevocation.cfg	503070	22
 CapRevocation_Safety	tla/cap_revocation/CapRevocation.tla	CapRevocation_Safety.cfg	635034	28
+CapRevocation_SafetyFloor	tla/cap_revocation/CapRevocation.tla	CapRevocation_SafetyFloor.cfg	46599	22
 CapRevocation_Teardown	tla/cap_revocation/CapRevocation.tla	CapRevocation_Teardown.cfg	132	8
 CommitProtocol	tla/commit_protocol/CommitProtocol.tla	CommitProtocol.cfg	413455	29
 IpcReactor	tla/ipc_reactor/IpcReactor.tla	IpcReactor.cfg	39	13
