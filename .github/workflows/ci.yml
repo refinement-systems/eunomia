@@ -36,11 +36,12 @@ jobs:
   # re-checked on every PR.
   model:
     runs-on: ubuntu-latest
-    # find-tla-tools.sh honours a pre-set JAVA + TLA_TOOLS instead of probing
-    # for the macOS Toolbox, so the same scripts run here. TLA_TOOLS points at
-    # the byte-identical vendored jar (verified below), not a rolling download,
-    # so the toolchain is pinned the way the Verus binary is. TLC_WORKERS is
-    # fixed for reproducibility; -Xmx sizes the heap-bound liveness tableau.
+    # find-tla-tools.sh honours a pre-set JAVA + TLA_TOOLS as its explicit-override
+    # tier, so the same scripts run here without auto-detecting a toolchain.
+    # TLA_TOOLS points at the byte-identical vendored jar (verified below), not a
+    # rolling download, so the toolchain is pinned the way the Verus binary is.
+    # TLC_WORKERS is fixed for reproducibility; -Xmx sizes the heap-bound liveness
+    # tableau.
     env:
       JAVA: java
       TLA_TOOLS: ${{ github.workspace }}/tools/tla/tla2tools.jar
@@ -70,13 +71,15 @@ jobs:
   # EventuallyRevoked liveness property (checked by `model` above), and that
   # tableau is what forces the liveness arm down to its constant floor; without
   # it the same safety invariants run at the larger residence constants the
-  # liveness arm trims (Threads=2, QueueDepth=2): ~12.2M reachable states vs the
-  # liveness arm's 503k, so MoveSemantics/LiveParent/FireSafe/etc. now hold
-  # across a second TCB's bind/exit/fault interleavings and a depth-2 channel
-  # ring. Same vendored-jar pin and TLC_WORKERS as `model`.
+  # liveness arm trims (Threads=2, QueueDepth=2), so MoveSemantics/LiveParent/
+  # FireSafe/etc. now hold across a second TCB's bind/exit/fault interleavings and
+  # a depth-2 channel ring. Run under SYMMETRY SafetySymmetry: its 12,183,480
+  # reachable states collapse to 1,240,344 post-quotient orbit representatives
+  # (same behaviours, fewer states) vs the liveness arm's 503,070. Same
+  # vendored-jar pin and TLC_WORKERS as `model`.
   model-safety:
     runs-on: ubuntu-latest
-    # ~5 min at 4 workers; the cap is margin — a constants bump that explodes the
+    # ~2 min at 4 workers; the cap is margin — a constants bump that explodes the
     # state space should fail fast here, not hang.
     timeout-minutes: 15
     env:

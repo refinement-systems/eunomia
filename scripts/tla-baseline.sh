@@ -7,8 +7,8 @@
 #   scripts/tla-baseline.sh --no-symmetry CapRevocation_Teardown  # pre-quotient count
 #
 # This is the TLC analogue of scripts/verus-baseline.sh and operationalises the
-# "measure every change, correctness first" discipline (doc/plans/0_tla-
-# optimization.md §1). For each cfg in tools/tla/model-manifest.tsv it does a
+# "measure every change, correctness first" discipline. For each cfg in
+# tools/tla/model-manifest.tsv it does a
 # COLD run (its TLC scratch is wiped first — a warm fingerprint/checkpoint set is
 # the false-green equivalent of a stale Verus cache) at pinned flags and records:
 #
@@ -42,15 +42,15 @@ TOP_N="${TOP_N:-8}"
 [ -f "$MANIFEST" ] || { echo "error: manifest not found: $MANIFEST" >&2; exit 1; }
 
 # Confirm the vendored jar matches its pin — a baseline from a different jar is
-# not comparable to CI (the §1 pinned-toolchain control).
+# not comparable to CI (the pinned-toolchain control).
 if ! ( cd "$ROOT/tools/tla" && shasum -c tla2tools.jar.sha1 ) >/dev/null 2>&1; then
   echo "warning: tools/tla/tla2tools.jar does not match its .sha1 — baseline not comparable to CI" >&2
 fi
 
 # --no-symmetry (-n): re-derive the PRE-quotient distinct/diameter by stripping
-# the SYMMETRY line from each selected cfg on the fly — the folded-in form of the
-# manual no-symmetry copy from doc/results/2_tla-findings.md §3, so the
-# before/after of a symmetry change is a one-flag re-run. The pre-quotient counts
+# the SYMMETRY line from each selected cfg on the fly — no separate hand-kept
+# no-symmetry cfg to drift, so the before/after of a symmetry change is a one-flag
+# re-run. The pre-quotient counts
 # differ from the post-quotient manifest pins, so this mode REPORTS them rather
 # than asserting; arms with no SYMMETRY line are skipped (nothing to strip). The
 # stripped cfg is a temp sibling, removed after the run (and on exit).

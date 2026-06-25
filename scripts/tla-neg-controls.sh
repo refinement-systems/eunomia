@@ -5,7 +5,7 @@
 #
 # Each control is a deliberately-broken spec variant paired with the invariant /
 # property it must violate — the runnable proof that a load-bearing guard has
-# teeth (doc/plans/0_tla-optimization.md §2 A7). They are also the standing
+# teeth. They are also the standing
 # soundness monitor for any future SYMMETRY: TLC never validates a symmetry
 # itself, so a mis-scoped one that silently hides bugs is caught here when a
 # control it should still trip stops tripping. A control that PASSES (TLC exits
