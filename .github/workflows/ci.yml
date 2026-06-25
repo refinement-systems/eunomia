@@ -76,8 +76,17 @@ jobs:
           bash tools/tla/tla-model-check.sh tla/commit_protocol/CommitProtocol.tla
           # Safety invariants + the EventuallyDelivered liveness property.
           bash tools/tla/tla-model-check.sh tla/ipc_reactor/IpcReactor.tla
-      - name: Negative controls must fail as designed
-        run: bash scripts/tla-neg-controls.sh
+      - name: Safety negative controls must fail as designed
+        # The cheap invariant/property controls only; each trips on a short
+        # counterexample. The two liveness controls (EventuallyRevoked) run in the
+        # separate `model-neg-liveness` job below so the ~5-cap NegFairness check
+        # is off this serial critical path. Pinned to a single worker / -Xmx2g
+        # (the job env sets 4 / -Xmx4g for the positive specs) for a deterministic
+        # short trace.
+        env:
+          TLC_WORKERS: "1"
+          TLA_JAVA_OPTS: -Xmx2g
+        run: bash scripts/tla-neg-controls.sh safety
 
   # The safety-only arm of the CapRevocation model (rev2§2.2/§3 CDT revocation),
   # a SEPARATE job so it runs in PARALLEL with `model` — total model-checking
@@ -125,6 +134,38 @@ jobs:
         env:
           TLC_ASSERT_MANIFEST: "1"
         run: bash tools/tla/tla-model-check.sh tla/cap_revocation/CapRevocation.tla CapRevocation_SafetyFloor.cfg
+
+  # The liveness negative controls (the EventuallyRevoked teeth-tests: the missing
+  # derive-guard NegLiveness, and NegFairness — the per-cap fairness weakened to a
+  # single existential WF). A SEPARATE job so it runs in PARALLEL with `model`
+  # rather than serially behind its positive specs: NegFairness explores a 5-cap
+  # reachable set (one above the liveness floor) to exhibit its starvation lasso
+  # and is the suite's slowest single check, so running it serially in `model`
+  # would dominate the whole critical path. Run at the same 4 workers / -Xmx4g
+  # as the positive arm to shrink its own runtime. These controls keep TLC's
+  # default periodic liveness checking — never `-lncheck final`: on a *failing* spec
+  # `final` forfeits the early-exit and balloons the livelock detection (the
+  # inverse of why the positive liveness arm sets it at `model` above). Same
+  # vendored-jar pin and TLC_WORKERS as `model`.
+  model-neg-liveness:
+    runs-on: ubuntu-latest
+    # NegFairness is the pole here; the cap is margin, not a budget.
+    timeout-minutes: 15
+    env:
+      JAVA: java
+      TLA_TOOLS: ${{ github.workspace }}/tools/tla/tla2tools.jar
+      TLC_WORKERS: "4"
+      TLA_JAVA_OPTS: -Xmx4g
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Verify the vendored tla2tools.jar matches its pin
+        run: cd tools/tla && shasum -c tla2tools.jar.sha1
+      - name: Liveness negative controls must fail as designed
+        run: bash scripts/tla-neg-controls.sh liveness
 
   # The §5.1 exit criterion: boot the real system under QEMU and drive the
   # shell through the burn regression (spawn/wait/reclaim 100x), status
