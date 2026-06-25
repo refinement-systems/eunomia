@@ -56,6 +56,13 @@ jobs:
       - name: Verify the vendored tla2tools.jar matches its pin
         run: cd tools/tla && shasum -c tla2tools.jar.sha1
       - name: Model-check CapRevocation (+ teardown), CommitProtocol, IpcReactor
+        # Assert each run's distinct-states (the coverage metric) against its
+        # pinned row in tools/tla/model-manifest.tsv, so a silent coverage SHRINK
+        # (same verdict, fewer states explored) fails CI here, not just a local
+        # baseline run. All four cfgs run here are pinned; set per-step so it never
+        # reaches the unpinned negative controls below.
+        env:
+          TLC_ASSERT_MANIFEST: "1"
         run: |
           # -lncheck final defers the EventuallyRevoked liveness check (rev2§2.2
           # restartable revoke) to a single SCC pass over the complete tableau,
@@ -103,6 +110,10 @@ jobs:
       - name: Verify the vendored tla2tools.jar matches its pin
         run: cd tools/tla && shasum -c tla2tools.jar.sha1
       - name: Model-check CapRevocation safety invariants at larger constants
+        # Assert distinct-states against the pinned CapRevocation_Safety row
+        # (tools/tla/model-manifest.tsv) so a silent coverage shrink fails CI here.
+        env:
+          TLC_ASSERT_MANIFEST: "1"
         run: bash tools/tla/tla-model-check.sh tla/cap_revocation/CapRevocation.tla CapRevocation_Safety.cfg
 
   # The §5.1 exit criterion: boot the real system under QEMU and drive the
