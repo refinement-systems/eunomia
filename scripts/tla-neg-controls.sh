@@ -30,6 +30,7 @@ CONTROLS=(
   "tla/cap_revocation/CapRevocation.tla|CapRevocation_ThreadAsymBug.cfg|FireSafe"
   "tla/cap_revocation/CapRevocation.tla|CapRevocation_ReportMonotoneBad.cfg|ReportMonotone"
   "tla/cap_revocation/CapRevocation.tla|CapRevocation_NegLiveness.cfg|EventuallyRevoked"
+  "tla/cap_revocation/CapRevocation.tla|CapRevocation_NegFairness.cfg|EventuallyRevoked"
   "tla/commit_protocol/CommitProtocol.tla|CommitProtocol_NegControl.cfg|RecoverReconstructs"
   "tla/commit_protocol/CommitProtocol.tla|CommitProtocol_AsymBug.cfg|RecoverReconstructs"
   "tla/ipc_reactor/IpcReactor.tla|IpcReactor_NegControl.cfg|NoLostWakeup"

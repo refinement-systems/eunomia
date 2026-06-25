@@ -24,6 +24,16 @@
 #     not re-evaluated on this heap-bound tableau. distinct/diameter are graph
 #     metrics, independent of which invariants are checked, so these pins are
 #     unchanged by that trim.
+#   cap_revocation fairness control  (SpecExistFair @ CapRevocation_NegFairness.cfg):
+#     the revoke set above but CapIds={c0,c1,c2,c3,c4} — one cap above the floor.
+#     SpecExistFair reuses Spec's Init/Next and weakens the per-cap WF on RevokeStep
+#     to a single existential WF; the starvation lasso it must exhibit (one revoking
+#     subtree churned forever while another persists) needs two disjoint revoking
+#     subtrees under a non-revoking root, which is unreachable below five caps — the
+#     4-cap floor HOLDS even under the existential WF. Intentionally one cap above
+#     the floor, so deliberately NOT in the lock-step set above. A liveness control
+#     (no SYMMETRY); like the other negative controls it is not a pinned row — TLC
+#     stops at the first lasso, so it has no full distinct/diameter to assert.
 #   cap_revocation safety arm  (Spec @ CapRevocation_Safety.cfg): as above but
 #     Threads={t0,t1} QueueDepth=2 — restores the two residence axes the liveness
 #     arm trims to fit its tableau. Intentionally LARGER (added safety coverage),
