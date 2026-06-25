@@ -22,9 +22,10 @@
 #     arm trims to fit its tableau. Intentionally LARGER (added safety coverage),
 #     so deliberately NOT in the floor lock-step set above. Carries SYMMETRY
 #     SafetySymmetry; its pinned distinct is the post-quotient orbit count (the
-#     full reachable set is 12,183,480, quotiented to 1,240,344 by collapsing
-#     each Procs x CapIds permutation-orbit — same behaviours, fewer
-#     representatives).
+#     full reachable set is 12,183,480, quotiented to 635,034 by collapsing each
+#     Procs x CapIds x Threads permutation-orbit — group order 96; adding the
+#     size-2 Threads axis is a near-ideal 1.95x on top of the Procs x CapIds
+#     quotient — same behaviours, fewer representatives).
 #   cap_revocation teardown    (TSpec): as above but Threads={t0,t1} QueueDepth=2;
 #     carries SYMMETRY NotifSymmetry — pinned distinct is the nf0<->nf1 orbit
 #     count (252 full reachable, quotiented to 132).
@@ -38,7 +39,7 @@
 # Columns (tab-separated): name  spec_relpath  cfg  expected_distinct  expected_diameter
 name	spec_relpath	cfg	expected_distinct	expected_diameter
 CapRevocation	tla/cap_revocation/CapRevocation.tla	CapRevocation.cfg	503070	22
-CapRevocation_Safety	tla/cap_revocation/CapRevocation.tla	CapRevocation_Safety.cfg	1240344	28
+CapRevocation_Safety	tla/cap_revocation/CapRevocation.tla	CapRevocation_Safety.cfg	635034	28
 CapRevocation_Teardown	tla/cap_revocation/CapRevocation.tla	CapRevocation_Teardown.cfg	132	8
 CommitProtocol	tla/commit_protocol/CommitProtocol.tla	CommitProtocol.cfg	413455	29
 IpcReactor	tla/ipc_reactor/IpcReactor.tla	IpcReactor.cfg	39	13
