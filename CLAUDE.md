@@ -188,7 +188,8 @@ cargo verus verify -p dma-pool
 cargo verus verify -p cas --no-default-features   # cas is Vec-heavy; the
                                                   # feature-agnostic codecs verify
                                                   # in the no_std+alloc variant
-cargo verus verify -p virtio-blk                  # avail_ring_slot index/wrap
+cargo verus verify -p virtio-blk                  # avail_ring_slot index/wrap +
+                                                  # check_capacity LBA-bound
                                                   # arithmetic; re-verifies its
                                                   # gated deps (cas pulls
                                                   # vstd[alloc])

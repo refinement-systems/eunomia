@@ -30,14 +30,13 @@
 use dma_pool::{DmaBacking, DmaBuf, DmaPool};
 
 // Verus is the deductive-proof tier for the avail-ring index arithmetic
-// (`avail_ring_slot`). `vstd::prelude` supplies the `verus!{}` macro + ghost
+// (`avail_ring_slot`) and the LBA-bound refusal arithmetic (`check_capacity`'s
+// `capacity_check`). `vstd::prelude` supplies the `verus!{}` macro + ghost
 // vocabulary; Verus requires it imported at the crate root. In an ordinary build
 // the macro erases ghost code, so this import is otherwise unused — hence the
 // allow (same as kcore/ipc/dma-pool).
 #[allow(unused_imports)]
 use vstd::prelude::*;
-
-pub const SECTOR: usize = 512;
 
 /// Volatile 32-bit register access. Implementors: real MMIO on the OS,
 /// the fake device on the host.
@@ -98,6 +97,14 @@ const STATUS_OK: u8 = 0;
 
 verus! {
 
+/// Sector size in bytes — virtio-blk LBAs address 512-byte sectors. Declared
+/// inside `verus!{}` so the `capacity_check` proof sees its literal value: the
+/// spec division `len / SECTOR` and the exec `(len / SECTOR)` are total only
+/// because Verus knows `SECTOR == 512 != 0` (doc/guidelines/verus.md §6, the
+/// same reason storage-server's rights bits live inside the block). It stays a
+/// crate-root `pub const`, so plain-Rust callers and the host tests are unchanged.
+pub const SECTOR: usize = 512;
+
 /// Byte-offset of `avail.ring[idx % size]` within the avail buffer
 /// (`flags: u16`, `idx: u16`, then the `size`-entry `u16` ring). Pure ring/
 /// `u16`-wrap arithmetic, mechanized for *all* inputs: the slot is exactly
@@ -118,6 +125,35 @@ pub fn avail_ring_slot(idx: u16, qsize: u16) -> (slot: usize)
         slot + 2 <= 6 + 2 * qsize,
 {
     4 + (idx % qsize) as usize * 2
+}
+
+/// A `len`-byte transfer starting at sector `lba` runs *past* a device of
+/// `capacity` sectors exactly when its last sector `lba + len/SECTOR` exceeds
+/// `capacity`. Pure mathematical (`int`) arithmetic — it never wraps — so it is
+/// the overflow-free oracle the exec refusal (`capacity_check`) is proven
+/// against (rev2§4.5 defensive LBA bound).
+pub open spec fn out_of_range(lba: u64, len: usize, capacity: u64) -> bool {
+    lba + (len / SECTOR) > capacity
+}
+
+/// The rev2§4.5 LBA bound as overflow-safe arithmetic, mechanized total for
+/// *all* `(lba, len, capacity)`: `Err` exactly when the transfer is
+/// `out_of_range`, `Ok` otherwise (so `Ok` holds iff `lba + len/SECTOR <=
+/// capacity`, by Result's exhaustiveness). A single `checked_add` discharges
+/// both the u64-wrap and the past-capacity cases — an overflowing last sector
+/// already exceeds the u64 `capacity` — so an adversarial `lba` near `u64::MAX`
+/// refuses rather than aliasing a valid range. Never panics. The device stays
+/// ground truth for its geometry; this is local hardening, never a correctness
+/// dependency. `check_capacity` maps the `()` error to `VirtioError::OutOfRange`.
+pub fn capacity_check(lba: u64, len: usize, capacity: u64) -> (r: Result<(), ()>)
+    ensures
+        r is Err <==> out_of_range(lba, len, capacity),
+{
+    let nsectors = (len / SECTOR) as u64;
+    match lba.checked_add(nsectors) {
+        None => Err(()),
+        Some(end) => if end > capacity { Err(()) } else { Ok(()) },
+    }
 }
 
 } // verus!
@@ -417,18 +453,12 @@ impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
     /// Defensive LBA bound (rev2§4.5). The device remains ground truth
     /// for its own geometry; this refuses a transfer whose last sector runs
     /// past the reported `capacity` *before* any device round-trip — a local
-    /// hardening, never a correctness dependency. Checked so an adversarial
-    /// `lba` near `u64::MAX` refuses rather than wraps (same discipline as
-    /// `cas::dev::access_range`).
+    /// hardening, never a correctness dependency. The overflow-safe arithmetic
+    /// lives in `capacity_check`, verified under Verus to refuse (not wrap) for
+    /// *all* `(lba, len, capacity)`: an adversarial `lba` near `u64::MAX` yields
+    /// `OutOfRange`, never a wrapped in-range alias.
     fn check_capacity(&self, lba: u64, len: usize) -> Result<(), VirtioError> {
-        let nsectors = (len / SECTOR) as u64;
-        if lba
-            .checked_add(nsectors)
-            .is_none_or(|end| end > self.capacity)
-        {
-            return Err(VirtioError::OutOfRange);
-        }
-        Ok(())
+        capacity_check(lba, len, self.capacity).map_err(|()| VirtioError::OutOfRange)
     }
 
     pub fn read_sectors(&mut self, lba: u64, out: &mut [u8]) -> Result<(), VirtioError> {
