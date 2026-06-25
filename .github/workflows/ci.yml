@@ -115,6 +115,16 @@ jobs:
         env:
           TLC_ASSERT_MANIFEST: "1"
         run: bash tools/tla/tla-model-check.sh tla/cap_revocation/CapRevocation.tla CapRevocation_Safety.cfg
+      - name: Model-check CapRevocation safety obligations at the liveness floor
+        # Mechanizes the CapRevocation.cfg subsumption argument: re-checks the six
+        # safety obligations at the liveness floor (Threads={t0}, QueueDepth=1)
+        # under the same SYMMETRY SafetySymmetry, so a future edit that breaks
+        # floor-containment (e.g. an action newly gated on Threads/QueueDepth) fails
+        # CI here instead of silently leaving a floor state unchecked. Sub-second,
+        # and off the critical-path `model` job. Same manifest assertion as above.
+        env:
+          TLC_ASSERT_MANIFEST: "1"
+        run: bash tools/tla/tla-model-check.sh tla/cap_revocation/CapRevocation.tla CapRevocation_SafetyFloor.cfg
 
   # The §5.1 exit criterion: boot the real system under QEMU and drive the
   # shell through the burn regression (spawn/wait/reclaim 100x), status
