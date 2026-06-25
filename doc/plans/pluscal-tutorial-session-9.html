@@ -1,0 +1,986 @@
+<!--
+%&c&<code>#</code>&
+%&i&<i>#</i>&
+%&b&<b>#</b>&
+%&f&<font>#</font>&
+%&F&<font class="#">&
+%&p&</p><p>#&
+%&P&</p><p>
+<pre>
+%#
+%</pre>&
+-->
+<!DOCTYPE html>
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=iso-8859-1">
+<META NAME="GENERATOR" CONTENT="Mozilla/4.05 [en] (X11; I; OSF1 V4.0 alpha) 
+              [Netscape]">
+
+<!-- The following loads the style sheet for the html files of 
+     the tutorial site  -->
+<link rel="stylesheet" type="text/css" href="tutorial.css">  
+
+<!-- The following loads the JavaScript stuff from tutorial.js -->
+<script src="tutorial.js"> </script> 
+
+
+
+<title>PlusCal Tutorial - Session 9</title> 
+
+</HEAD>
+<BODY onload="initialize()" onkeypress= "closeOnCharacter()"> 
+<table id="main">
+<tr>
+<td id="main_leftcolumn"> 
+<div style="color:blue;font-size:17px">
+<!-- THE LEFT-HAND COLUMN CONTENTS GO HERE.
+     To control the vertical spacing between the TLA+ logo and the 
+     rest of the left-hand column, modify tutorialCreateLeftHandCol
+     in tutorial.js.  To change font color,size, etc, modify
+     #main_leftcolumn in tutorial.css.
+-->
+
+<!--------------------------  CONTENTS --------------------------------->
+
+1 <a href="#sec1" style="margin-left:3px">Safety versus Liveness</a>
+<br>
+
+
+<!------------------------- SUBSECTIONS ----------------------------------
+<p class="tc"> 1.1 
+<a href="#sec1-1" style="margin-left:3px">Section 1.1</a></p>
+<br>
+<p class="tc"> 1.2 
+<a href="#sec1-2" style="margin-left:3px">Section 1.2</a></p>
+<br>
+<p class="tc"> 1.3 
+<a href="#sec1-3" style="margin-left:3px">Section 1.3</a></p> 
+<br>
+<p class="tc"> 1.4 
+<a href="#sec1-4" style="margin-left:3px">Section 1.4</a></p> 
+<br>
+------------------------------------------------------------------------->
+
+
+<p style="margin-bottom:15px"></p>
+
+2 <a href="#sec2" style="margin-left:3px"><code>Alternate</code></a>
+
+<br>
+
+<p style="margin-bottom:15px"></p>
+
+3 <a href="#sec3" style="margin-left:3px"><code>1BitMutex</code></a>
+
+<br>
+
+<p style="margin-bottom:15px"></p>
+
+4 <a href="#sec4" style="margin-left:3px">Starvation Freedom</a>
+
+<br>
+
+<p style="margin-bottom:15px"></p>
+
+5 <a href="#sec5" style="margin-left:3px">Semaphore Liveness</a>
+
+<br>
+
+<p style="margin-bottom:15px"></p>
+
+6 <a href="#sec6" style="margin-left:3px">What Good is Liveness?</a>
+
+<br>
+
+
+
+
+
+
+<!------------------------- SUBSECTIONS ----------------------------------
+<p class="tc"> 2.1 
+<a href="#sec2-1" style="margin-left:3px">Section 2.1</a></p> 
+<br>
+<p class="tc"> 2.2 
+<a href="#sec2-2"  style="margin-left:3px">Section 2.2</a></p> 
+<br>
+<p class="tc"> 2.3 
+<a href="#sec2-3" style="margin-left:3px">Section 2.3</a></p> 
+<br>
+<p class="tc"> 2.4 
+<a href="#sec2-4" style="margin-left:3px">Section 2.4</a></p> 
+<br>
+------------------------------------------------------------------------->
+
+
+<!------------------------SECTIONS/SUBSECTIONS --------------------------
+
+<p style="margin-bottom:15px"></p>
+3 <a href="#sec3">Section 3</a>
+<p class="tc"> 3.1 
+<a href="#sec3-1" style="margin-left:3px">Section 3.1</a></p> 
+<br>
+<p class="tc"> 3.2 
+<a href="#sec3-2"  style="margin-left:3px">Section 3.2</a></p> 
+<br>
+<p class="tc"> 3.3 
+<a href="#sec3-3" style="margin-left:3px">Section 3.3</a></p> 
+<br>
+<p class="tc"> 3.4 
+<a href="#sec3-4" style="margin-left:3px">Section 3.4</a></p> 
+<br>
+------------------------------------------------------------------------->
+
+<!------------------------SECTIONS/SUBSECTIONS --------------------------
+                     REPLACE YY BY SECTION NUMBER  
+<p style="margin-bottom:15px"></p>
+YY <a href="#sec3">Section YY</a>
+<p class="tc"> YY.1 
+<a href="#secYY-1" style="margin-left:3px">Section YY.1</a></p> 
+<br>
+<p class="tc"> YY.2 
+<a href="#secYY-2"  style="margin-left:3px">Section YY.2</a></p> 
+<br>
+<p class="tc"> YY.3 
+<a href="#secYY-3" style="margin-left:3px">Section YY.3</a></p> 
+<br>
+<p class="tc"> YY.4 
+<a href="#secYY-4" style="margin-left:3px">Section YY.4</a></p> 
+<br>
+------------------------------------------------------------------------->
+
+
+
+
+<p style="margin-bottom:30px"></p>
+
+Prev: &nbsp;<a href="session8.html">Session 8</a>
+<p style="margin-bottom:15px"></p>
+Next: &nbsp;<a href="intermezzo1.html">Intermezzo 1</a>
+
+
+<p style="margin-bottom:20px"></p>
+<a href="contents.html">Contents</a>
+
+<!--                 THE BACK-TO-TOP BUTTONS        --
+  --  This is a sequence of buttons going to the top of the    --
+  --  page.  Use as many as necessary to fill the left-hand    --
+  --  column.  Note that each button is a <DIV> with a unique  --
+  --  id.  The final one should have the margin-top of its     --
+  --  adjusted so it is at the bottom of the right-hand        --
+  --  column .                                                 --
+-->
+
+
+<div style="margin-top:300px;margin-left:65px;" 
+          class="top-button" color="blue" id="topbutton1">
+     <font onclick="topFunction()" style="font-size:15px">&nbsp;&uarr;<br>
+        <p style="margin-top:-8px;">top</p></font>
+</div>
+
+
+<div style="margin-top:500px;margin-left:65px;" 
+          class="top-button" color="blue" id="topbutton2">
+     <font onclick="topFunction()" style="font-size:15px">&nbsp;&uarr;<br>
+        <p style="margin-top:-8px;">top</p></font>
+</div>
+
+<div style="margin-top:500px;margin-left:65px;" 
+          class="top-button" color="blue" id="topbutton3">
+     <font onclick="topFunction()" style="font-size:15px">&nbsp;&uarr;<br>
+        <p style="margin-top:-8px;">top</p></font>
+</div>
+
+
+<div style="margin-top:500px;margin-left:65px;" 
+          class="top-button" color="blue" id="topbutton4">
+     <font onclick="topFunction()" style="font-size:15px">&nbsp;&uarr;<br>
+        <p style="margin-top:-8px;">top</p></font>
+</div>
+
+
+<div style="margin-top:500px;margin-left:65px;" 
+          class="top-button" color="blue" id="topbutton5">
+     <font onclick="topFunction()" style="font-size:15px">&nbsp;&uarr;<br>
+        <p style="margin-top:-8px;">top</p></font>
+</div>
+
+
+<div style="margin-top:500px;margin-left:65px;" 
+          class="top-button" color="blue" id="topbutton6">
+     <font onclick="topFunction()" style="font-size:15px">&nbsp;&uarr;<br>
+        <p style="margin-top:-8px;">top</p></font>
+</div>
+
+
+<div style="margin-top:500px;margin-left:65px;" 
+          class="top-button" color="blue" id="topbutton7">
+     <font onclick="topFunction()" style="font-size:15px">&nbsp;&uarr;<br>
+        <p style="margin-top:-8px;">top</p></font>
+</div>
+
+
+<div style="margin-top:500px;margin-left:65px;" 
+          class="top-button" color="blue" id="topbutton8">
+     <font onclick="topFunction()" style="font-size:15px">&nbsp;&uarr;<br>
+        <p style="margin-top:-8px;">top</p></font>
+</div>
+
+
+<div style="margin-top:500px;margin-left:65px;" 
+          class="top-button" color="blue" id="topbutton9">
+     <font onclick="topFunction()" style="font-size:15px">&nbsp;&uarr;<br>
+        <p style="margin-top:-8px;">top</p></font>
+</div>
+
+
+<div style="margin-top:500px;margin-left:65px;" 
+          class="top-button" color="blue" id="topbutton10">
+     <font onclick="topFunction()" style="font-size:15px">&nbsp;&uarr;<br>
+        <p style="margin-top:-8px;">top</p></font>
+</div>
+
+
+
+<div style="margin-top:500px;margin-left:65px;" 
+          class="top-button" color="blue" id="topbutton11">
+     <font onclick="topFunction()" style="font-size:15px">&nbsp;&uarr;<br>
+        <p style="margin-top:-8px;">top</p></font>
+</div>
+
+<!------------------------------------------------------
+
+<div style="margin-top:500px;margin-left:65px;" 
+          class="top-button" color="blue" id="topbutton12">
+     <font onclick="topFunction()" style="font-size:15px">&nbsp;&uarr;<br>
+        <p style="margin-top:-8px;">top</p></font>
+</div>
+
+
+
+<div style="margin-top:500px;margin-left:65px;" 
+          class="top-button" color="blue" id="topbutton13">
+     <font onclick="topFunction()" style="font-size:15px">&nbsp;&uarr;<br>
+        <p style="margin-top:-8px;">top</p></font>
+</div>
+-------------------------------------->
+
+<!-- NOTE EXTRA SPACE ABOVE THIS BACK-TO-TOP TO PUT IT AT BOTTOM
+
+<div style="margin-top:650px;margin-left:65px;" 
+          class="top-button" color="blue" id="topbutton14">
+     <font onclick="topFunction()" style="font-size:15px">&nbsp;&uarr;<br>
+        <p style="margin-top:-8px;">top</p></font>
+</div>
+
+ ----------------------------------------------------------------->
+
+</div>
+
+
+</td>
+<td id="main_contentcolumn"> 
+<table>
+<tr >
+<td style="vertical-align:top;">  
+
+<div id = "showleftcol" > </div> 
+
+
+<H1>Session 9&nbsp;&nbsp; Liveness</H1>
+
+<p style="margin-top:-10px; margin-bottom:-8px">
+Leslie Lamport</p><p style="margin-top:8px; margin-bottom:8px">
+<font size=-1><I> 
+
+Last modified on Mon 19 August 2024 at  9:15:20 PST by lamport -->
+
+</I></font>
+</p>
+</td>
+<td style="vertical-align:top;width:auto">
+</td>
+</tr>
+</table>
+
+<HR style="margin-bottom:-15px;margin-top:-11px"> 
+
+<P style="margin-top:0px"> </P>
+
+<!-- 
+<DIV class="hidden-div" style="color:red;margin-bottom:-22px"><b>
+   You'll miss a lot on this web site unless you enable Javascript
+   in your browser. </b></DIV>
+-->
+
+<!-- ========================= TEXT ================================= -->
+
+<h2 id="sec1">1&nbsp; Safety versus Liveness</h2>
+
+<p>
+
+Invariance of <code>MutualExclusion</code> is trivially satisfied by
+an algorithm in which no process ever enters its critical
+section.&nbsp;
+
+Invariance belongs to a class of properties called <i>safety</i>
+properties.&nbsp; A safety property is one that, if it is 
+<i>not</i> satisfied by an execution, then you can tell that it's not
+satisfied by looking at a finite portion of the execution&mdash;even
+if the execution is infinite.&nbsp; A formula is not invariant in an
+execution iff it is not satisfied in some state of the execution, and
+you can tell that by looking just at the execution up to and including
+that state.
+
+</p><p>
+
+Termination is an example of a different class of properties called
+<i>liveness</i> properties.&nbsp; A liveness property is one for which
+you have to look at the entire execution, which may be infinite, to
+determine that it is <i>not</i> satisfied.&nbsp; Termination means
+that a terminating state is eventually reached.&nbsp; For an infinite
+execution, to determine that a terminating state isn't reached <i>just
+by looking at the execution</i>, you have to look at the entire
+execution.&nbsp; Knowing that it's an execution of a certain
+algorithm, you may be able to infer that it will never reach such a
+state.&nbsp; But just by observing the execution, without knowing what
+it's an execution of, you can't tell that it does not reach a state
+satisfying some condition without seeing the complete execution.
+
+</p><p>
+
+If you look at the translation of algorithm <code>Add2</code> or 
+the other algorithms in Session&nbsp;7, you will see that they define
+the property <code>Termination</code> by
+
+</p><p>
+<pre>
+Termination  ==  <>(\A self \in ProcSet: pc[self] = "Done")
+</pre>
+
+where <code>ProcSet</code> is defined to be the set
+<code>{3,-7}</code> of process ids.&nbsp; This defines
+<code>Termination</code> to be a temporal formula, meaning it is true
+or false of a sequence of states.&nbsp; Mathematically, a <i>state</i>
+is an assignment of values to variables, and a sequence of states is
+called a <i>behavior</i>.&nbsp; We describe the execution of an
+algorithm as a behavior.&nbsp; But when we discuss temporal formulas,
+it's important to remember that a behavior just means a sequence of
+states, not necessarily one generated by executing an algorithm.
+
+</p><p>
+
+Formula <code>Termination</code> is true of a behavior
+iff its subformula
+
+</p><p>
+<pre>
+\A self \in ProcSet: pc[self] = "Done"
+</pre>
+
+is true of at least one state of the behavior.&nbsp; For a behavior
+allowed by a multiprocess PlusCal algorithm, this formula can be true
+for at most one state&mdash;namely, the final state.&nbsp; But there
+are lots of behaviors not allowed by any PlusCal algorithm for which
+the formula is true for more than one state.&nbsp; There are also lots
+of behaviors in which <code>Termination</code> is not true, but we
+have to look at the entire behavior to be sure that it's one of them;
+so <code>Termination</code> is a liveness property.
+
+</p><p>
+
+Formula <code>Termination</code> has the form <code><>P</code> where
+<code>P</code> is a formula that is true or false of a state.&nbsp; A
+formula that is true or false of a state is called a <i>state
+predicate</i>.&nbsp; A state predicate is just an ordinary
+Boolean-valued formula that can contain variables but no primed
+variables and no temporal operators like <code><></code>.&nbsp;
+
+For any state predicate <code>P</code>, the formula <code><>P</code>
+is true of a behavior iff <code>P</code> is true of at least one state
+of the behavior.&nbsp; The operator <code><></code>, pretty-printed
+&#9671;, is read <i>eventually</i>.
+
+</p>
+
+<h2 id="sec2"><code class="h2">2&nbsp; Alternate</code></h2>
+<p>
+
+The operator <code><></code> by itself just asserts that something
+happens at least once.&nbsp; For 
+
+   <!---------------------- RAISE POPOVER -------------------------->
+   <font   id="alter-link" class = "popup-blue" color="blue"
+   onclick="showMyPopover('alter-popover', 'alter-iframe', 'session8.html?hide-col=true#sec2-2')">
+   <b>algorithm <code>Alternate</code> of Session&nbsp;8</b></font>,
+
+we want processes to enter the critical section not just once but
+repeatedly.&nbsp; We want the code to say that the algorithm keeps
+taking steps, and we want to check that processes keep entering the
+critical section.&nbsp;  Nothing runs forever; but just as the infinite set
+of all integers is a convenient abstraction even though all the
+integers can never be written, allowing a behavior of algorithm
+<code>Alternate</code> to consist of infinitely many states is a
+convenient abstraction.&nbsp;
+
+   <!------------------------ BEGIN POPOVER ------------------------->
+   <div id="alter-popover"   style="display:none"
+        onclick="hideMyPopover('alter-popover')"
+        class = "popover" >
+     <iframe height="430" width="650" id = "alter-iframe"
+       src = "session8.html?hide-col=true#sec2-2">
+     </iframe>
+     <div style="background-color:#ffffe4">
+       <p> <b> <center class = "show-hide" id= "alter-close"
+        style="color:blue">click here or type a letter to hide </center>
+       </b> </p>
+      </div>
+   </div>
+   <!------------------------ END POPOVER --------------------------->
+
+
+</p><p>
+
+We want a behavior of algorithm <code>Alternate</code> to be
+infinite, which means each process must be in its critical 
+section infinitely many times.&nbsp;  For process 0 to be
+in its critical section infinitely many times means that 
+formula <code>pc[0]="cs"</code> must be true on infinitely
+many states of a behavior of the algorithm.&nbsp;
+The temporal property asserting that <code>pc[0]="cs"</code>
+is true on infinitely many states of a behavior is written
+ <code>[]<>(pc[0]="cs")</code>.&nbsp;
+The symbol <code>[]</code> is pretty-printed &#9723; and is read
+<i>always</i>.&nbsp; If we think of the sequence of states of a
+behavior representing the state of the system at successive times,
+then the formula <code>[]<>P</code>, which asserts that <code>P</code>
+is true in infinitely many states of the behavior, asserts that
+<code>P</code> is true at infinitely many times.&nbsp; For this
+reason, <code>[]<></code> is usually read as <i>infinitely often</i>.&nbsp;
+However, it's a mistake to think that a step from one state to
+the next in a behavior necessarily represents time advancing.
+
+</p><p>
+
+I haven't explained what <code>[]<>P</code> asserts about a finite
+behavior.&nbsp; An easy way to think about what a temporal formula
+means for finite behaviors is to pretend that a finite behavior is an
+infinite behavior in which the final state is repeated forever.&nbsp;
+This pretense tells us that <code>[]<>P</code> is true for a finite
+behavior iff <code>P</code> is true of the last state of that
+behavior.&nbsp; 
+
+(Ideas introduced in Session 11 imply that this is more than just a
+convenient pretense.)&nbsp;
+
+
+</p><p>
+
+The liveness property we want algorithm <code>Alternate</code>
+to satisfy is that each process is in its critical section
+infinitely often.&nbsp;  Since <code>Procs</code> is the set
+of processes, this is expressed by this property: 
+
+</p><p>
+<pre>
+\A i \in Procs : []<>(pc[i] = "cs")
+</pre>
+
+It is a liveness property because we have to look at the entire
+behavior to know if it is not the case that
+  <code>pc[i] = "cs"</code>
+is true in infinitely many states of the behavior.
+
+</p><p>
+
+
+For any algorithm, we have to add a fairness requirement to require
+that it does something.&nbsp; The fairness requirement most often
+added for multiprocess algorithms is <i>weak fairness</i> for each
+process.&nbsp; Weak fairness for a process roughly means that the
+process must keep taking steps if it can.&nbsp; I will explain
+precisely what it means below.&nbsp; We require weak fairness of a
+process by putting the keyword <code>fair</code> (followed by at
+least one space) before the keyword <code>process</code>.&nbsp; For a
+process set, this means weak fairness is required for each process in
+the set.&nbsp;
+
+</p><p>
+
+Add the weak fairness requirement to the process set of algorithm
+<code>Alternate</code>.&nbsp; Add to a model for the algorithm the
+liveness property above to the <i>Properties</i> subfield of the
+<i>What to check?</i> field of the <i>Model Overview</i> tab.&nbsp;
+Run TLC to check that the algorithm satisfies this property.
+
+
+
+
+
+
+ <!-------------
+To understand the full meanings of the operators <code>[]</code> and
+<code><></code>, you'd have to learn about the temporal logic
+underlying TLA+.&nbsp; But that's not necessary for using PlusCal.
+  ------->
+</p>
+
+<h2 id="sec3">3&nbsp; <code class="h2">1BitMutex</code></h2>
+
+<p>
+
+
+A mutual exclusion solution should not require that a process enter
+its critical section infinitely often.&nbsp; A process should be
+allowed to halt at any time in its noncritical section.&nbsp;
+
+Consider
+   <!---------------------- RAISE POPOVER -------------------------->
+   <font   id="1bitmutex-link" class = "popup-blue" color="blue"
+   onclick="showMyPopover('1bitmutex-popover', '1bitmutex-iframe', 'session8.html?hide-col=true#1bitmutex')">
+   <b>algorithm <code>1BitMutex</code> of Session&nbsp;8</b></font>.&nbsp;
+
+Halting in its noncritical section means that control in a process
+remains forever at label <code>ncs</code>.&nbsp;
+Weak fairness of a process would not allow that.&nbsp;
+
+We don't want to allow a process to remain forever at any other label,
+only at <code>ncs</code>.&nbsp;  
+
+I will call this requirement weak fairness of the process <i>except
+at</i> <code>ncs</code>.&nbsp;
+
+
+It is specified by a <code>fair process</code> declaration with the
+modifier <code>-</code> added to the label <code>ncs</code>.&nbsp; The
+beginning of the process becomes:
+
+</p><p>
+<pre>
+  <font class="pcal">fair process</font> (P \in Procs) {
+   ncs:- <font class="pcal">while</font> (<font class="tla">TRUE</font>) {
+           <font class="pcal">skip</font> ;
+</pre>
+
+The modifier <code>-</code> comes after the <code>:</code> that
+follows the label.&nbsp;  (There can be spaces before and/or after
+the <code>:</code>.)&nbsp;  Open your specification containing 
+algorithm <code>1BitMutex</code> and make this modification to it.&nbsp;  
+
+</p><p>
+
+Some statements of the mutual exclusion problem allow a process to remain
+forever in its critical section.&nbsp;  In that case, we would also
+add the <code>-</code> modifier to the label <code>cs</code>.&nbsp;
+However, that complicates the liveness properties that a solution
+should have, so we will require that a process with control
+at <code>cs</code> eventually executes that statement, leaving the
+critical section.
+
+</p><p>
+
+Algorithm <code>1BitMutex</code> ensures that if process&nbsp;0 begins
+executing the entry code, then it will enter the critical
+section.&nbsp;  We can state that more precisely as:&nbsp;
+If <code>pc[0]</code> equals <code>"enter"</code>, then
+it eventually equals <code>"cs"</code>.&nbsp;  This condition
+is 
+expressed in TLA+ with the temporal operator <code>~></code>,
+pretty printed 
+ <img src="leadsto.jpg" style="width:22px;height:15"/>
+and read <i>leads to</i>.&nbsp; For state predicates <code>P</code>
+and <code>Q</code>, the formula <code>P ~> Q</code> is true of a
+behavior iff for every state of the behavior in which <code>P</code>
+is true, <code>Q</code> is true in that state or a subsequent
+state.&nbsp;  The liveness guarantee that the algorithm ensures
+for process&nbsp;0 is:
+
+</p><p>
+<pre>
+(pc[0] = "enter") ~> (pc[0] = "cs")
+</pre>
+
+   <!------------------------ BEGIN POPOVER ------------------------->
+   <div id="1bitmutex-popover"   style="display:none"
+        onclick="hideMyPopover('1bitmutex-popover')"
+        class = "popover" >
+     <iframe height="435" width="650" id = "1bitmutex-iframe"
+       src = "session8.html?hide-col=true#1bitmutex">
+     </iframe>
+     <div style="background-color:#ffffe4">
+       <p> <b> <center class = "show-hide" id= "1bitmutex-close"
+        style="color:blue">click here or type a letter to hide </center>
+       </b> </p>
+      </div>
+   </div>
+   <!------------------------ END POPOVER --------------------------->
+
+Open a model for the algorithm and add this formula to the 
+<i>Properties</i> to be checked on the <i>Model Overview</i>
+page.&nbsp;  Run TLC to check that the algorithm satisfies this
+property.
+
+</p>
+<p>
+
+The algorithm does not satisfy the corresponding condition for
+process&nbsp;1.&nbsp;  Have TLC check that property:
+
+</p><p>
+<pre>
+(pc[1] = "enter") ~> (pc[1] = "cs")
+</pre>
+
+Examine the error trace reported by TLC to see why <code>1BitMutex</code>
+doesn't satisfy the property.
+
+</p><p>
+
+
+Algorithm <code>1BitMutex</code> satisfies
+
+   <!---------------------- RAISE POPOVER -------------------------->
+   <font   id="mutex3x-link" class = "popup-blue" color="blue"
+   onclick=
+"showMyPopover('mutex3x-popover', 'mutex3x-iframe', 'session8.html?hide-col=true#cond3')">
+   <b>Dijkstra's third requirement</b></font>.&nbsp;
+
+This requirement can also be expressed as follows:
+
+ <blockquote>
+Whenever there is some process in the entry code, some process must
+then or later be in the critical section.
+ </blockquote>
+
+This condition is confusingly called <q>deadlock freedom</q>.&nbsp; It
+actually prohibits deadlock and livelock, so I will give it the
+awkward name <code>DeadAndLivelockFree</code>.&nbsp;
+If <code>Procs</code> is the set of processes, it is defined by:
+
+</p><p>
+<pre>
+DeadAndLivelockFree == 
+  (\E i \in Procs : pc[i] = "enter") ~> (\E i \in Procs : pc[i] = "cs")
+</pre>
+
+   <!------------------------ BEGIN POPOVER ------------------------->
+   <div id="mutex3x-popover"   style="display:none"
+        onclick="hideMyPopover('mutex3x-popover')"
+        class = "popover" >
+     <iframe height="87" width="650" id = "mutex3x-iframe"
+       src = "session8.html?hide-col=true#cond3">
+     </iframe>
+     <div style="background-color:#ffffe4">
+       <p> <b> <center class = "show-hide" id= "mutex3x-close"
+        style="color:blue">click here or type a letter to hide </center>
+       </b> </p>
+      </div>
+   </div>
+   <!------------------------ END POPOVER --------------------------->
+
+Add this definition to your module, add
+<code>DeadAndLivelockFree</code> to the temporal properties checked by
+the model, and have TLC check that it is satisfied by
+<code>1BitMutex</code>.&nbsp; Also check that the
+<code>N</code>-process version you wrote in Exercise&nbsp;4 of
+Session&nbsp;8 satisfies the property.
+
+
+
+
+</p>
+
+<h2 id="sec4">4&nbsp; Starvation Freedom</h2>
+
+In Session 8, an algorithm was defined to be starvation free if any
+process that begins executing the entry code eventually enters the
+critical section.&nbsp; For our mutual exclusion algorithms, where
+<code>Procs</code> is the set of processes, this property is expressed in
+TLA+ as:
+
+</p><p>
+<pre>
+StarvationFree == \A i \in Procs : (pc[i] = "enter") ~> (pc[i] = "cs")
+</pre>
+
+Modify 
+
+
+   <!---------------------- RAISE POPOVER -------------------------->
+   <font   id="peter-link" class = "popup-blue" color="blue"
+   onclick=
+"showMyPopover('peter-popover', 'peter-iframe', 'session8.html?hide-col=true#peteralg')">
+   <b>Peterson's algorithm</b></font>
+
+to make each process weakly fair except at <code>ncs</code>, and
+have TLC check that it satisfies property <code>StarvationFree</code>.&nbsp;
+Do the same for the <code>N</code>-process generalization
+in Exercise&nbsp;5 of Session&nbsp;8.
+
+</p><p>
+
+   <!------------------------ BEGIN POPOVER ------------------------->
+   <div id="peter-popover"   style="display:none"
+        onclick="hideMyPopover('peter-popover')"
+        class = "popover" >
+     <iframe height="425" width="650" id = "peter-iframe"
+       src = "session8.html?hide-col=true#peteralg">
+     </iframe>
+     <div style="background-color:#ffffe4">
+       <p> <b> <center class = "show-hide" id= "peter-close"
+        style="color:blue">click here or type a letter to hide </center>
+       </b> </p>
+      </div>
+   </div>
+   <!------------------------ END POPOVER --------------------------->
+
+
+</p>
+<h2 id="sec5">5&nbsp; Semaphore Liveness</h2>
+
+<p>
+
+
+   <!---------------------- RAISE POPOVER -------------------------->
+   <font   id="add2fg-link" class = "popup-blue" color="blue"
+   onclick=
+"showMyPopover('add2fg-popover', 'add2fg-iframe', 'session7.html?hide-col=true#add2fgalg')">
+   <b>Algorithm <code>Add2FGSem</code></b></font>
+
+of Session&nbsp;7 uses a semaphore variable <code>sem</code>
+to implement mutual exclusion, where the critical section consists
+of statements <code>ab1</code> and <code>ab2</code>.&nbsp;
+
+We can obviously use a semaphore to implement a mutual exclusion
+algorithm like this:
+
+
+
+   <!------------------------ BEGIN POPOVER ------------------------->
+   <div id="add2fg-popover"   style="display:none"
+        onclick="hideMyPopover('add2fg-popover')"
+        class = "popover" >
+     <iframe height="245" width="650" id = "add2fg-iframe"
+       src = "session7.html?hide-col=true#add2fgalg">
+     </iframe>
+     <div style="background-color:#ffffe4">
+       <p> <b> <center class = "show-hide" id= "add2fg-close"
+        style="color:blue">click here or type a letter to hide </center>
+       </b> </p>
+      </div>
+   </div>
+   <!------------------------ END POPOVER --------------------------->
+
+</p><p>
+<pre>
+--<font class="pcal">algorithm</font> SemMutex {
+   <font class="pcal">variable</font> sem = 1 ; 
+   <font class="pcal">fair process</font> (P \in Procs) {
+     ncs:- <font class="pcal">while</font> (<font class="tla">TRUE</font>) {
+             <font class="pcal">skip</font> ;
+      enter: <font class="pcal">await</font> sem = 1 ;
+             sem := 0 ;
+         cs: <font class="pcal">skip</font> ;
+       exit: sem := 1 ;
+           }
+   }
+}
+</pre>
+where <code>Procs</code> can be any finite set.&nbsp;
+
+</p><p>
+
+Use TLC to check that this algorithm satisfies mutual exclusion and
+also the property <code>DeadAndLivelockFree</code>.&nbsp; It does not
+satisfy <code>StarvationFree</code>.&nbsp; Have TLC check starvation
+freedom and examine the error trace that it produces.&nbsp; TLC finds
+a behavior that reaches a point at which one or more processes 
+remain forever at the <code>enter</code> statement, while one or
+more other processes repeatedly enter and exit the critical section.&nbsp;
+When I just tried it, process 0 was one process stuck forever
+at <code>enter</code>.
+
+</p><p>
+
+We say that the <code>enter</code> step of process 0 is
+<i>enabled</i> in a state iff it is possible for 0 to
+take an <code>enter</code> step starting in that state.&nbsp; It is
+enabled in states in which <code>pc[0]</code> equals
+<code>"enter"</code> and <code>sem</code> equals 1.&nbsp;
+
+(Even though code implementing statement <code>enter</code> might keep
+reading the semaphore when it equals 0, that is not
+considered an <code>enter</code> step.)&nbsp;
+
+The behavior found by TLC contains infinitely many states in which
+process 0's <code>enter</code> step is enabled.&nbsp;  (More precisely,
+it contains a finite number of such states that occur infinitely
+many times.)&nbsp;
+
+
+However, the behavior also contains infinitely many states in which
+that step is not enabled.&nbsp; Weak fairness only requires a process
+0 to take an <code>enter</code> step if that step will remain
+continuously enabled until it takes that step.&nbsp;
+
+
+The <code>fair process</code> declaration requires that for every
+label <code>lbl</code> not modified by <code>-</code>, the step
+<code>lbl</code> of its process (or each of its processes for a
+process set) is weakly fair in every behavior of the algorithm.&nbsp;
+
+</p><p>
+
+A step of a process is <i>strongly fair</i> in a behavior iff
+there is no point in the behavior after which the step is enabled in
+infinitely many states but no such step occurs in the behavior.&nbsp;
+
+In the behavior found by TLC, at some point there are infinitely many
+states in which an <code>enter</code> step of process 0 is enabled,
+but such a step is never performed.&nbsp; Strong fairness of that step
+would forbid such a behavior.&nbsp;
+
+To require strong fairness of an <code>sp</code> step in a
+<code>fair</code> process, we modify the <code>sp</code> label by
+adding a <code>+</code> after it.&nbsp;  Modify algorithm
+<code>SemMutex</code> by changing the <code>enter</code> statement 
+to:
+
+</p><p>
+<pre>
+     enter:+ <font class="pcal">await</font> sem = 1 ;
+             sem := 0 ;
+</pre>
+
+Run TLC and check that that the algorithm now satisfies
+<code>StarvationFree</code>.
+
+
+
+</p><p>
+
+Strong fairness implies weak fairness, since if a step
+is enabled from some point on, then it is enabled in 
+infinitely many states.&nbsp;
+
+(Remember we are pretending that terminating executions are
+represented by behaviors in which the last state is repeated
+forever.)&nbsp;
+
+Strong fairness is a stronger requirement than weak fairness because
+it requires the step to eventually be taken if it becomes enabled
+infinitely often, even if it also becomes disabled infinitely often.&nbsp;
+
+Both weak and strong fairness are liveness properties because we can
+tell if they are not satisfied by a behavior only by examining the
+complete behavior.&nbsp; (Remember that for determining liveness, we
+don't assume that the behavior is produced by any algorithm.)
+
+
+</p><p>
+
+Strong and weak fairness of a step <code>sp</code> in a process
+<code>i</code> are equivalent if the step cannot be disabled or
+enabled by a step of another process.&nbsp; This is usually the case
+if <code>sp</code> does not contain an <code>await</code>
+statement.&nbsp; However, for reasons we'll see later, any execution
+of a statement <code>sp</code> that does not change the state is not
+considered to be an <code>sp</code> step for purposes of determining
+weak and strong fairness.&nbsp; For example, the following statement
+is completely equivalent to the <code>enter</code> statement above.
+
+</p><p>
+<pre>
+        enter:+ <font class="pcal">if</font> (sem = 1) {
+                  sem := 0 ;
+                  <font class="pcal">goto</font> cs 
+                } 
+                <font class="pcal">else</font> {
+                  goto <font class="pcal">enter</font>
+                } ;
+</pre>
+
+An execution of this statement when <code>sem</code> equals 0 does not
+change the state, so it is not considered an <code>enter</code> step
+when interpreting the definition of strong fairness.&nbsp;
+
+
+Replace the <code>enter</code> statement in algorithm
+<code>SemMutex</code> with this version and check with TLC that the
+algorithm still satisfies <code>StarvationFree</code>.
+
+</p>
+
+<h2 id="sec6">6&nbsp; What Good is Liveness?</h2>
+
+<p>
+
+A liveness property asserts that something eventually happens.&nbsp;
+
+
+It is sometimes argued that such a property is useless because it
+doesn't say when that something will happen.&nbsp;
+
+What good is knowing that a program eventually terminates if it might
+run for a billion years?&nbsp;
+
+</p><p>
+
+The assertion that something happens in less than a billion years is
+a safety property.&nbsp;  You just have to look at the (finite)
+part of the behavior that represents the first billion years of
+execution to know that it hasn't happened.&nbsp;
+
+We can model the real-time behavior of an algorithm with
+PlusCal.&nbsp; (One way is to represent time by a variable and have
+a process that does nothing but increase the variable's
+value.)&nbsp;  However, it's not worth the effort
+in most applications.&nbsp;
+
+</p><p>
+
+Liveness properties are a useful compromise between just checking
+safety properties like postconditions and mutual exclusion,
+and checking how long it takes an algorithm to terminate or
+a process to enter its critical section.&nbsp;
+
+Understanding why an algorithm satisfies a liveness property 
+can help you figure out if it does things quickly enough.&nbsp;
+
+Moreover, learning that an algorithm does not satisfy a liveness
+property provides important information.&nbsp; An algorithm that never
+terminates is not going to terminate in a billion years.&nbsp; When
+implementing an algorithm, you should know if it satisfies a liveness
+property only under a strong fairness assumption about a step.
+
+
+</p><p>
+
+One common use of time in systems is implementing timeouts to recover
+from errors such as lost messages.&nbsp; Almost always, such timeouts
+can be modeled as events that can happen at any time.&nbsp; Exactly
+when a timeout occurs generally affects performance, but not
+correctness.&nbsp; An error that occurs because a timeout happens at
+the wrong time most likely indicates an error that can occur in the
+implementation even when timeouts occur at the right time.
+
+</p>
+
+
+<!-- ===================== BOTTOM BOILERPLATE ===================== -->
+<hr class="divider" style="margin-top:-3px">
+<hr class="divider" style="margin-top:-7px">
+
+<div id="endtotop" class = "popup-blue" onclick="topFunction()" 
+  style="margin-top:-8px;margin-left:244px;color:blue">back to top</div>
+
+
+</tr>
+
+
+</table>
+
+
+</BODY>
+</HTML>
