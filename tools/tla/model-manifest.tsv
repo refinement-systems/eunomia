@@ -1,6 +1,11 @@
 # TLC model-checking manifest — the coverage ledger (the TLC analogue of the
 # Verus trusted-base ledger). scripts/tla-baseline.sh reads it for both its
-# model list and its coverage-regression assertion targets.
+# model list and its coverage-regression assertion targets;
+# tools/tla/tla-assert-coverage.sh reads the distinct-states pin to gate CI (the
+# model and model-safety jobs run their checks with TLC_ASSERT_MANIFEST set), so a
+# coverage shrink fails a PR, not just a local baseline run. CI gates on distinct
+# only — TLC's reported diameter can wobble under its multi-worker run, so the
+# strict diameter check stays with tla-baseline.sh at -workers 1.
 #
 # distinct-states is the coverage metric: a drop means TLC explored a smaller
 # behaviour set, i.e. the model now proves *less*. diameter is the worker-invariant
