@@ -188,6 +188,10 @@ cargo verus verify -p dma-pool
 cargo verus verify -p cas --no-default-features   # cas is Vec-heavy; the
                                                   # feature-agnostic codecs verify
                                                   # in the no_std+alloc variant
+cargo verus verify -p virtio-blk                  # avail_ring_slot index/wrap
+                                                  # arithmetic; re-verifies its
+                                                  # gated deps (cas pulls
+                                                  # vstd[alloc])
 ```
 
 A real run ends each crate with a `verification results:: N verified, 0 errors`

@@ -1036,6 +1036,7 @@ dependencies = [
  "dma-pool",
  "proptest",
  "virtio-blk",
+ "vstd",
 ]
 
 [[package]]

@@ -789,7 +789,11 @@ impl<const N: usize> FreeList<N> {
     /// fresh extent at `i`, with a strict gap on both sides. `covers` gains
     /// exactly `[off, off+n)`.
     #[verifier::spinoff_prover]
-    #[verifier::rlimit(50)]
+    // Budget sized for the `vstd[alloc]` re-verification, not just the no-alloc
+    // gate: this crate is re-checked under the larger alloc prelude when an alloc
+    // consumer pulls it transitively (doc/guidelines/verus.md §10), where this
+    // merge proof costs ~1.4x more. No-alloc consumption is unchanged.
+    #[verifier::rlimit(120)]
     proof fn free_insert(new: FreeList<N>, old: FreeList<N>, i: int, off: int, n: int)
         requires
             old.wf(),
@@ -998,7 +1002,9 @@ impl<const N: usize> FreeList<N> {
     /// `remove_at(i)`, so the correspondence is the remove-shift over a list whose
     /// `i-1` already holds `E`.
     #[verifier::spinoff_prover]
-    #[verifier::rlimit(15)]
+    // Budget sized for the `vstd[alloc]` re-verification (see `free_insert`,
+    // doc/guidelines/verus.md §10): ~1.85x the no-alloc cost under the alloc prelude.
+    #[verifier::rlimit(40)]
     proof fn free_both(new: FreeList<N>, old: FreeList<N>, i: int, off: int, n: int,
         eoff: int, elen: int)
         requires

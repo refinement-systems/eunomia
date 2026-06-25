@@ -1638,6 +1638,26 @@ positive evidence the change did only what was intended and added no hidden seam
 with one helper containing one loop can leave the tally flat — read the *presence* of
 the `verification results::` line, not the count, as proof of a real run.)
 
+**An `rlimit` budget must cover every context the proof is re-verified in, not just
+its own gate.** `rlimit` is deterministic only for *byte-identical* SMT input, and a
+shared crate's input is not fixed by its own source: it also depends on the `vstd`
+prelude in scope, which **cargo feature-unifies globally per invocation**. When a
+crate is gated *above* other gated crates, `cargo verus verify -p <upper>`
+re-verifies those deps in-session (a leaf imports them as pre-verified; an upper
+crate rebuilds and re-checks them), and if *any* crate in the graph requests
+`vstd`'s `alloc` feature, every co-verified no-alloc dep is re-checked under the
+larger alloc prelude. That richer context raises a heavy proof's resource cost with
+no source change (≈1.4–1.85× on the `freelist` `spinoff_prover` merge proofs when
+`virtio-blk` pulls `cas`→`vstd[alloc]`), which can blow a budget tuned only to the
+standalone gate. Size the shared crate's heavy proofs' budgets to the *worst* context
+they ship in. Raising a ceiling does not change the cheaper context's consumption —
+re-measure with `--time-expanded` and confirm the no-alloc total is byte-identical —
+so it is regression-free hardening, not a perf change (and the standalone Baseline
+total is unmoved). The corollary to "verify the minimal feature set" (which keeps
+`std`/test scaffolding out of scope): a dep that is part of the *no_std core*, like
+`cas` via the `blockdev` adapter `storaged` links, is in the verify graph regardless
+and brings its `vstd` features with it.
+
 ## 11. Trusted seams, kept honest by host tests
 
 Verus proves the verifiable core and *trusts* an irreducible boundary. The

@@ -14,6 +14,17 @@ std = ["dma-pool/std", "cas/std"]
 dma-pool = { path = "../dma-pool" }
 cas = { path = "../cas", default-features = false }
 
+# vstd is the *Verus* dependency (see doc/guidelines/verus.md): the `verus!{}`
+# macro + ghost vocabulary for the avail-ring index/wrap arithmetic proof
+# (`avail_ring_slot` — the slot offset is `4 + 2*(idx % qsize)` and always lands
+# inside the `6 + 2*qsize`-byte avail buffer, ∀ `u16` idx and `1..=8` qsize). The
+# device-shared virtqueue itself stays the trusted DMA seam (rev2§2.5). The
+# verified core is no_std + no-alloc, so `default-features = false`; in an
+# ordinary build the macro erases to plain Rust and vstd compiles to nothing
+# load-bearing. Pinned (=version) in lockstep with kcore/ipc/urt/dma-pool/cas: an
+# upgrade is a deliberate PR. Same recipe as dma-pool/Cargo.toml.
+vstd = { version = "=0.0.0-2026-05-31-0205", default-features = false }
+
 [dev-dependencies]
 cas = { path = "../cas" }
 dma-pool = { path = "../dma-pool", features = ["std"] }
@@ -21,3 +32,17 @@ proptest = "1"
 # Self dev-dependency: integration tests need the std-gated modules
 # (fake device, BlockDev adapter) compiled into the lib.
 virtio-blk = { path = ".", features = ["std"] }
+
+# `cargo verus verify -p virtio-blk` targets this crate (default features ⇒
+# no_std). Only `avail_ring_slot` is in `verus!{}`; the generic driver, MMIO
+# `unsafe`, the std-gated fake device, and the no_std `blockdev` (cas) adapter are
+# external. cas stays in the build — `storaged` links the adapter in no_std — and
+# pulls vstd's `alloc` feature, so this run re-verifies the gated deps under the
+# alloc prelude (see doc/guidelines/verus.md §10; freelist Baseline row).
+[package.metadata.verus]
+verify = true
+
+# cfg(verus_keep_ghost)/cfg(verus_only) are set by Verus during `cargo verus
+# verify`; teach plain cargo they're expected (same handling as dma-pool/ipc/urt/kcore).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(verus_keep_ghost)", "cfg(verus_only)"] }

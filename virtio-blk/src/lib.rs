@@ -29,6 +29,14 @@
 
 use dma_pool::{DmaBacking, DmaBuf, DmaPool};
 
+// Verus is the deductive-proof tier for the avail-ring index arithmetic
+// (`avail_ring_slot`). `vstd::prelude` supplies the `verus!{}` macro + ghost
+// vocabulary; Verus requires it imported at the crate root. In an ordinary build
+// the macro erases ghost code, so this import is otherwise unused — hence the
+// allow (same as kcore/ipc/dma-pool).
+#[allow(unused_imports)]
+use vstd::prelude::*;
+
 pub const SECTOR: usize = 512;
 
 /// Volatile 32-bit register access. Implementors: real MMIO on the OS,
@@ -88,12 +96,31 @@ pub const REQ_FLUSH: u32 = 4;
 
 const STATUS_OK: u8 = 0;
 
+verus! {
+
 /// Byte-offset of `avail.ring[idx % size]` within the avail buffer
-/// (`flags: u16`, `idx: u16`, then the `size`-entry `u16` ring). Pure so the
-/// ring/`u16`-wrap arithmetic is directly proptest-addressable.
-pub fn avail_ring_slot(idx: u16, qsize: u16) -> usize {
+/// (`flags: u16`, `idx: u16`, then the `size`-entry `u16` ring). Pure ring/
+/// `u16`-wrap arithmetic, mechanized for *all* inputs: the slot is exactly
+/// `4 + 2*(idx % qsize)` and its two bytes always land inside the `6 + 2*qsize`
+/// avail buffer `new()` allocates (`pool.alloc(6 + 2 * n, 2)`). `qsize` in
+/// `1..=8` is the caller's trusted MMIO bring-up precondition (`new()`'s
+/// `u32→u16 .min(8)`); the device-shared ring stays the trusted DMA seam
+/// (rev2§2.5). The two ring proptests (`avail_ring_slot_in_bounds`,
+/// `avail_index_wraps_consistently`) are the companion oracle tier, kept.
+pub fn avail_ring_slot(idx: u16, qsize: u16) -> (slot: usize)
+    requires
+        qsize > 0,
+        qsize <= 8,
+    ensures
+        idx % qsize < qsize,
+        slot == 4 + (idx % qsize) * 2,
+        4 <= slot,
+        slot + 2 <= 6 + 2 * qsize,
+{
     4 + (idx % qsize) as usize * 2
 }
+
+} // verus!
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VirtioError {
