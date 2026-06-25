@@ -57,7 +57,14 @@ jobs:
         run: cd tools/tla && shasum -c tla2tools.jar.sha1
       - name: Model-check CapRevocation (+ teardown), CommitProtocol, IpcReactor
         run: |
-          bash tools/tla/tla-model-check.sh tla/cap_revocation/CapRevocation.tla
+          # -lncheck final defers the EventuallyRevoked liveness check (rev2§2.2
+          # restartable revoke) to a single SCC pass over the complete tableau,
+          # dropping TLC's periodic intermediate passes. Behaviour-preserving —
+          # same distinct/diameter/verdict, only less scheduling work. Scoped to
+          # this liveness arm alone: on a *failing* spec `final` forfeits the
+          # early-exit, so it must stay off the negative controls below, whose
+          # livelock has to trip cheaply.
+          TLC_FLAGS="-lncheck final" bash tools/tla/tla-model-check.sh tla/cap_revocation/CapRevocation.tla
           bash tools/tla/tla-model-check.sh tla/cap_revocation/CapRevocation.tla CapRevocation_Teardown.cfg
           bash tools/tla/tla-model-check.sh tla/commit_protocol/CommitProtocol.tla
           # Safety invariants + the EventuallyDelivered liveness property.
