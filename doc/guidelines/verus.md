@@ -143,70 +143,11 @@ reason and a test is a finding, not a boundary.
 
 ## When Verus is not the tool
 
-The best-tool routing (rev2§6's verification tiering) is authoritative; the short
-form:
-
-- **Concurrency interleavings** (lost-wakeup, seqlock torn reads) → Loom/Shuttle +
-  TLA+. Verus *can* do tokenized concurrency, but it is a research-grade lift and
-  the existing tier is strong. Loom and Shuttle are not interchangeable — scope the
-  claim to what the tool models: Loom enumerates interleavings but does *not*
-  faithfully reorder Relaxed atomics, so a structure correct via an explicit
-  `Release`/`Acquire` fence (data fields `Relaxed`) is proven correct *via the
-  modeled fence*, not over every C11-permitted reordering; say so. A module with no
-  atomics (synchronizing only through `Mutex`/`Condvar`) gains nothing from Loom's
-  weak-memory modeling, so a thread-interleaving checker (Shuttle) is load-bearing
-  there. Name the actually-load-bearing tool, not the strongest-sounding one.
-- **Adversarial bytes** (wire/on-disk decoders, ELF, mount over arbitrary device
-  contents) → cargo-fuzz (`fuzzing.md`). Verus proves decode *totality* and
-  *canonical form*; differential/corpus coverage stays fuzzing's.
-- **Provenance, not just concern-class, decides routing.** Adversarial bytes earn
-  the decode-totality proof *plus* fuzzing above; trusted-provenance input — typed
-  interactive input, a value your own code just produced — earns neither. Record
-  the absent overflow/totality guard as a deliberate, documented non-guard rather
-  than proving or fuzzing it (a shell's decimal parser may panic on an
-  over-`u64::MAX` digit string: a forward note, not a wire decoder). A verified
-  gate's postcondition can still keep a *downstream plain-Rust* step total over
-  arbitrary device bytes — sequence the gate before the operation
-  (`validate_geometry(&sb)?;` ensuring `sb.head <= len`, *then* the
-  `buf.rotate_left(sb.head)` that now provably cannot panic) — the proof crosses
-  the `verus!{}` boundary by execution order, not by re-verifying the step.
-- **Design-level state machines** (revocation, the commit protocol) → TLA+. Verus
-  closes the model-to-code gap on the extracted function; TLA+ owns the design and
-  the content-coverage half.
-- **A TLA+ model needs teeth too.** It earns its keep only with a *runnable
-  negative control* — the real action minus exactly one load-bearing conjunct,
-  asserted to *fail* and confirmed to reach a concrete bad state at a stated depth;
-  a control that finds no violation is the alarm, not the all-clear (the §11
-  host-test teeth, one tier up). Three faithfulness traps pass such a control while
-  checking nothing. (1) *A state-invariant standing in for a relational property* —
-  asserting the recovery ingredients are durable, not that the post-state equals
-  the inputs across the step; a no-op action body still passes. Reconstruction /
-  equality properties are step relations (`post'` vs the inputs), not invariants.
-  (2) *An over-permissive action makes the defect unexpressible* — model each action
-  behind the *same* enabling guard the code runs, and gate a wait/block on the exact
-  primitive the loop sleeps on (a notification word), never a coupled proxy
-  (queue-empty); a freely-enabled drain delivers the message regardless, so the
-  lost-wakeup control never bites. (3) *Fairness on an over-free action compels the
-  system down the masking path*, so the defect never manifests — attach weak
-  fairness only to genuinely-progress actions, not to the over-free one.
-
-  ```tla
-  \* THEATRE: drain enabled on queue non-empty -> lost-wakeup is unexpressible
-  DrainBad == Len(queue) > 0 /\ ...
-  \* FAITHFUL: gate on the primitive the loop actually waits on
-  Drain    == woken = TRUE   /\ ...
-  \* control: real action minus ONE load-bearing conjunct, asserted to FAIL
-  SpecBad  == Init /\ [][NextBad]_vars   \* must reach a concrete bad state
-  ```
-- **The asm shell** (boot, MMU/TLB, GIC, MMIO, the one PA→pointer site) → trusted
-  base, inherently unverifiable; the whole `kcore` split exists to keep it small.
-- **Crypto/perf inner loops** (blake3, the FastCDC gear loop) → out of scope; stub
-  a hash with an injective-on-small-inputs ghost where a proof needs one.
-- **A pure policy/scheduler over already-verified ops** (a flush trigger, a dispatch
-  order — code that decides *when* an effect fires, not *how* it persists or what
-  data it touches) → proptest/Miri, no new chokepoint. The underlying ops' `ensures`
-  already cover correctness, so re-triggering a verified op under new conditions
-  needs no re-proof of the persistence invariant; verify the op, route the schedule.
+Verus is one tier of a wider verification scheme (rev2§6). When a problem is not
+a deductive-proof obligation on an extracted function — a design-level state
+machine, code-level concurrency interleavings, adversarial bytes, or a pure
+policy over already-verified ops — the method that fits it and the reason are in
+the dispatcher, `doc/guidelines/verification.md`.
 
 ---
 

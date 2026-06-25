@@ -1,0 +1,69 @@
+# Verification: choosing the method
+
+This is the dispatcher. The verification *tiering* — which class of claim is
+discharged by which method, and why the tiers compose — is rev2§6, which is
+authoritative. This note turns that tiering into a problem-shape → tool routing
+table and points each entry at the dedicated guideline that teaches the method
+in depth:
+
+- **Verus** — deductive proof of extracted functions: `doc/guidelines/verus.md`.
+- **TLA+/TLC** — design-level state machines: `doc/guidelines/tla.md`.
+- **cargo-fuzz** — adversarial bytes: `doc/guidelines/fuzzing.md`.
+- **Loom/Shuttle** — concurrency interleavings (scoped below).
+- **proptest/Miri** — pure policy/schedulers and undefined-behaviour oracles.
+
+Each method proves a different kind of claim; none subsumes another, so the
+routing decision is about the *shape of the problem*, not about reaching for the
+strongest-sounding tool.
+
+## Routing table — problem shape to method
+
+| The problem is… | Route to | One-line "use this when" |
+|---|---|---|
+| A function's functional contract, termination, and `wf` invariants must hold *for all inputs* with no bound to pick | **Verus** (`verus.md`) | The claim is about an extracted, pure-ish function and you want an unbounded proof, not a sampled one. |
+| A *design-level state machine* — a protocol whose correctness lives in how concurrent actions interleave (revocation/CDT teardown, the storage commit + crash-recovery protocol, the IPC lost-wakeup/backpressure handshake) | **TLA+/TLC** (`tla.md`) | The bug you fear is an interleaving or a missing fairness/guard in the *design*, above the code level; you want exhaustive (bounded) state exploration of the model. |
+| *Adversarial bytes* — wire/on-disk decoders, ELF, a mount over arbitrary device contents | **cargo-fuzz** (`fuzzing.md`), paired with a Verus decode-totality/canonical-form proof | Untrusted input crosses a parse boundary. Verus proves decode totality and canonical form; differential/corpus coverage stays fuzzing's. |
+| *Concurrency interleavings* in code (lost-wakeup, seqlock torn reads) | **Loom or Shuttle** (scope to the tool — see below), alongside the TLA+ design model | You need to exercise the actual code's interleavings, not just the design model. |
+| A *pure policy or scheduler over already-verified ops* — code that decides *when* an effect fires, not *how* it persists or what data it touches (a flush trigger, a dispatch order) | **proptest / Miri** | The underlying ops already carry their `ensures`; you are testing the schedule, so no new proof chokepoint is needed. Miri also serves as the undefined-behaviour oracle for `unsafe`. |
+
+## Routing nuances that decide the call
+
+- **Loom and Shuttle are not interchangeable; scope the claim to what the tool
+  models.** Loom enumerates interleavings but does *not* faithfully reorder
+  Relaxed atomics — a structure correct via an explicit `Release`/`Acquire` fence
+  (with data fields `Relaxed`) is proven correct *via the modeled fence*, not over
+  every C11-permitted reordering, and the claim must say so. A module with no
+  atomics (synchronizing only through `Mutex`/`Condvar`) gains nothing from Loom's
+  weak-memory modeling, so a thread-interleaving checker (Shuttle) is the
+  load-bearing tool there. Name the actually-load-bearing tool, not the
+  strongest-sounding one.
+
+- **Provenance, not just concern-class, decides routing.** Adversarial bytes earn
+  the decode-totality proof *plus* fuzzing; trusted-provenance input — typed
+  interactive input, or a value your own code just produced — earns neither.
+  Record the absent overflow/totality guard as a deliberate, documented non-guard
+  rather than proving or fuzzing it (a shell's decimal parser may panic on an
+  over-`u64::MAX` digit string: a forward note, not a wire decoder). A verified
+  gate's postcondition can still keep a *downstream plain-Rust* step total over
+  arbitrary device bytes — sequence the gate before the operation
+  (`validate_geometry(&sb)?;` ensuring `sb.head <= len`, *then* the
+  `buf.rotate_left(sb.head)` that now provably cannot panic) — the proof crosses
+  the `verus!{}` boundary by execution order, not by re-verifying the step.
+
+- **Some things have no method and are trusted by construction.** The asm shell
+  (boot, MMU/TLB, GIC, MMIO, the one PA→pointer site) is inherently unverifiable
+  trusted base; the whole `kcore` split exists to keep it small. Crypto and
+  perf inner loops (blake3, the FastCDC gear loop) are out of scope — stub a hash
+  with an injective-on-small-inputs ghost where a proof needs one.
+
+## A model or proof is only worth its teeth
+
+Whatever the method, a model or proof earns its keep only when a deliberately
+broken variant is *confirmed to fail*. A passing check over a model that cannot
+express the defect proves nothing; a control that finds no violation is the
+alarm, not the all-clear. For Verus this is the host-test-with-teeth discipline
+in `verus.md`; for TLA+ it is the *runnable negative control* — the real action
+minus exactly one load-bearing conjunct, asserted to fail and confirmed to reach
+a concrete bad state — whose construction, faithfulness traps, and CI wiring are
+in `tla.md`. Keep the framing here at the level of the principle; the per-method
+"how" lives in each tool's guideline.
