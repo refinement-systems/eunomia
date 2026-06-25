@@ -23,5 +23,29 @@ serde = { version = "1", default-features = false, features = ["derive", "alloc"
 postcard = { version = "1", default-features = false, features = ["alloc"], optional = true }
 arbitrary = { version = "1", features = ["derive"], optional = true }
 
+# vstd is the *Verus* dependency (doc/guidelines/verus.md): the `verus!{}` macro
+# + ghost vocabulary for the rights-lattice proof (`attenuate` is monotone and
+# strips `R_STAT_STORE` by default, ∀ u8 parent/mask, rev2§2.3). The
+# session/handle dispatch and the serde/postcard wire codec stay external.
+# `default-features = false, features = ["alloc"]` mirrors cas (the no_std+alloc
+# verify variant); in an ordinary build the macro erases to plain Rust and vstd
+# compiles to nothing load-bearing. Pinned (=version) in lockstep with the other
+# gated crates: an upgrade is a deliberate PR.
+vstd = { version = "=0.0.0-2026-05-31-0205", default-features = false, features = ["alloc"] }
+
 [dev-dependencies]
 proptest = "1"
+
+# `cargo verus verify -p storage-server --no-default-features` targets this crate
+# (⇒ no_std + alloc; serde/postcard/std dropped). Only the rights lattice
+# (`attenuate`, `has_right`, the `by (bit_vector)` lemmas) is in `verus!{}`; the
+# session/handle dispatch, the wire codec, and the cas/ipc adapters are external.
+# cas/ipc stay in the build (storaged links them) and pull vstd's `alloc` feature,
+# so this run re-verifies the gated deps under the alloc prelude (verus.md §10).
+[package.metadata.verus]
+verify = true
+
+# cfg(verus_keep_ghost)/cfg(verus_only) are set by Verus during `cargo verus
+# verify`; teach plain cargo they're expected (same handling as virtio-blk/cas/ipc).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(verus_keep_ghost)", "cfg(verus_only)"] }

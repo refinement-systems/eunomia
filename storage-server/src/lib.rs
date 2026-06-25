@@ -35,7 +35,21 @@ use cas::store::{Store, StoreError};
 // wire consumers reach it from this crate (rev2§4.7 guarded batch vocabulary).
 pub use cas::store::RefEdit;
 
+// Verus is the deductive-proof tier for the rights lattice (`attenuate` + the
+// rights bits, below). `vstd::prelude` supplies the `verus!{}` macro + ghost
+// vocabulary; Verus requires it imported at the crate root. In an ordinary build
+// the macro erases ghost code, so this import is otherwise unused — hence the
+// allow (same as kcore/ipc/virtio-blk).
+#[allow(unused_imports)]
+use vstd::prelude::*;
+
 // ── Rights (rev2§2.3) ───────────────────────────────────────────────────
+//
+// The rights lattice is the Verus-verified deductive core of delegation: the
+// rights bits, the `has_right` reading of the dispatch guards, and `attenuate`'s
+// monotone / deny-by-default contract all live in the `verus!{}` block so the
+// `by (bit_vector)` proofs see the bit literals (doc/guidelines/verus.md §6).
+verus! {
 
 pub const R_READ: u8 = 1 << 0;
 pub const R_WRITE: u8 = 1 << 1;
@@ -56,13 +70,57 @@ pub const R_STAT_STORE: u8 = 1 << 5;
 /// numeric value is stable — the committed fuzz corpora depend on it.
 pub const R_ALL: u8 = 0b1_1111;
 
+/// `has_right(bits, r)`: a handle carrying `bits` holds the right named by the
+/// single-bit mask `r` — the spec reading of the dispatch guards `e.rights & R_x
+/// != 0`. Phrasing the lattice in these terms makes `attenuate`'s monotonicity
+/// legible: a derived handle holds no right its parent lacked.
+pub open spec fn has_right(bits: u8, r: u8) -> bool {
+    bits & r != 0
+}
+
 /// Monotone rights attenuation (rev2§2.3): a derived handle's rights are the
 /// intersection of the parent's rights with the requested mask — never a
 /// superset. The sole arithmetic by which delegation narrows authority; it is
-/// also what strips `R_STAT_STORE` when a mask omits bit 5.
-pub const fn attenuate(parent: u8, mask: u8) -> u8 {
-    parent & mask
+/// also what strips `R_STAT_STORE` when a mask omits bit 5. Mechanized for all
+/// `u8` inputs: the result is exactly `parent & mask`, sets no bit absent from
+/// `parent`, and drops `R_STAT_STORE` whenever the mask does.
+pub fn attenuate(parent: u8, mask: u8) -> (r: u8)
+    ensures
+        r == parent & mask,
+        r & !parent == 0,
+        (mask & R_STAT_STORE == 0) ==> (r & R_STAT_STORE == 0),
+{
+    let r = parent & mask;
+    assert(r & !parent == 0) by (bit_vector)
+        requires r == parent & mask;
+    assert((mask & R_STAT_STORE == 0) ==> (r & R_STAT_STORE == 0)) by (bit_vector)
+        requires r == parent & mask;
+    r
 }
+
+/// Monotonicity, the right-keyed reading: an attenuated handle (`parent & mask`)
+/// holds a right only if its parent did. Delegation never grows authority
+/// (rev2§2.3) — for any single-bit (or composite) `right`.
+pub proof fn lemma_attenuate_monotone(parent: u8, mask: u8, right: u8)
+    ensures
+        has_right(parent & mask, right) ==> has_right(parent, right),
+{
+    assert(((parent & mask) & right != 0) ==> (parent & right != 0)) by (bit_vector);
+}
+
+/// Deny-by-default (rev2§2.3): attenuating by `R_ALL` always clears
+/// `R_STAT_STORE`, because `R_ALL` (bits 0..=4) omits bit 5 — ordinary
+/// delegation strips store-global observation for free, for any parent.
+pub proof fn lemma_attenuate_r_all_denies_stat_store(parent: u8)
+    ensures
+        !has_right(parent & R_ALL, R_STAT_STORE),
+{
+    assert(R_ALL == 0b1_1111u8);
+    assert(R_STAT_STORE == 1u8 << 5);
+    assert((parent & 0b1_1111u8) & (1u8 << 5) == 0) by (bit_vector);
+}
+
+} // verus!
 
 pub type SessionId = u64;
 pub type HandleId = u32;

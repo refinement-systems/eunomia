@@ -334,3 +334,11 @@ jobs:
           # re-verifies freelist under that richer prelude — freelist's
           # free_insert/free_both rlimit budgets are sized to cover it.
           cargo verus verify -p virtio-blk
+          # storage-server rights lattice — `attenuate` is `parent & mask`:
+          # monotone (sets no bit absent from the parent), strips `R_STAT_STORE`
+          # whenever the mask omits bit 5, and `R_ALL` denies it by default ∀ u8.
+          # The session/handle dispatch + the serde/postcard wire codec stay
+          # external; like cas it verifies in the no_std+alloc variant
+          # (--no-default-features), and --lib skips the placeholder bin (which
+          # carries no proofs). Links cas+ipc, re-verified under the alloc prelude.
+          cargo verus verify -p storage-server --no-default-features --lib

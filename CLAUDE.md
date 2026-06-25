@@ -192,6 +192,11 @@ cargo verus verify -p virtio-blk                  # avail_ring_slot index/wrap
                                                   # arithmetic; re-verifies its
                                                   # gated deps (cas pulls
                                                   # vstd[alloc])
+cargo verus verify -p storage-server --no-default-features --lib
+                                                  # rights lattice (attenuate
+                                                  # monotone / deny-by-default);
+                                                  # no_std+alloc variant like cas,
+                                                  # --lib skips the placeholder bin
 ```
 
 A real run ends each crate with a `verification results:: N verified, 0 errors`

@@ -29,10 +29,18 @@ OUT_DIR="${OUT_DIR:-$ROOT/target/verus-baseline}"
 TOP_N="${TOP_N:-8}"               # slowest functions to list per crate
 NO_CLEAN="${NO_CLEAN:-0}"
 
-# The CI gate set, in CI order (.github/workflows/ci.yml `verus` job). cas is
-# Vec-heavy, so its feature-agnostic codecs verify in the no_std+alloc variant.
-ALL_CRATES=(kcore ipc urt freelist dma-pool cas virtio-blk)
-verus_args_for() { case "$1" in cas) echo "--no-default-features" ;; *) echo "" ;; esac; }
+# The CI gate set, in CI order (.github/workflows/ci.yml `verus` job). cas and
+# storage-server are Vec/serde-heavy, so their feature-agnostic verified cores
+# verify in the no_std+alloc variant (--no-default-features); storage-server also
+# scopes to --lib (its placeholder bin carries no proofs).
+ALL_CRATES=(kcore ipc urt freelist dma-pool cas virtio-blk storage-server)
+verus_args_for() {
+  case "$1" in
+    cas) echo "--no-default-features" ;;
+    storage-server) echo "--no-default-features --lib" ;;
+    *) echo "" ;;
+  esac
+}
 
 [ -n "${VERUS_BIN_DIR:-}" ] && PATH="$VERUS_BIN_DIR:$PATH"
 command -v cargo-verus >/dev/null || { echo "error: cargo-verus not on PATH (see README Prerequisites; or set VERUS_BIN_DIR)" >&2; exit 1; }
