@@ -579,6 +579,34 @@ NextThreadAsymBad == Next \/ LeakRevokedThreadAsym
 
 SpecThreadAsymBad == Init /\ [][NextThreadAsymBad]_vars
 
+\* SYMMETRY-soundness control (injected SYMMETRIC bug, the teeth-test for the
+\* action PROPERTY ReportMonotone): ReportMonotone (rev2§5.1) is the one safety
+\* *property* — a [][...]_vars action property, not a state invariant — the
+\* safety arm checks under SafetySymmetry. TLC's symmetry reduction is soundly
+\* defined for state invariants; an action property is sound under a quotient
+\* only if it is itself symmetric. ReportMonotone is (it quantifies uniformly
+\* over Threads, naming none), so the quotient is sound — this control is the
+\* runnable proof it still has teeth. ReportFlip lets a thread whose report has
+\* already reached a terminal state flip to the OTHER terminal value, a direct
+\* ReportMonotone violation. The bug is SYMMETRIC (\E over all Threads, no thread
+\* singled out, no CHOOSE), so like SpecBad it is present in every orbit member
+\* and must trip even under the quotient; the asymmetric SpecThreadAsymBad
+\* already guards the over-broad-Threads case. Run under SYMMETRY SafetySymmetry
+\* (CapRevocation_ReportMonotoneBad.cfg) the quotient must STILL report it — if
+\* SafetySymmetry ever made the safety arm's ReportMonotone check unsound, this
+\* control would stop tripping. It must keep violating ReportMonotone for as long
+\* as CapRevocation_Safety carries SYMMETRY SafetySymmetry.
+ReportFlip(t) ==
+    /\ treport[t] /= "running"
+    /\ treport' = [treport EXCEPT
+                       ![t] = IF @ = "exited" THEN "faulted" ELSE "exited"]
+    /\ UNCHANGED <<live, parent, cspaces, queues, bindings, revoked, revoking,
+                   nlive, ncaps, pcbind, eopen>>
+
+NextReportBad == Next \/ (\E t \in Threads : ReportFlip(t))
+
+SpecReportBad == Init /\ [][NextReportBad]_vars
+
 \* =======================================================================
 \* Channel whole-object teardown and peer-closed firing (rev2§3.3) — TSpec
 \* =======================================================================
