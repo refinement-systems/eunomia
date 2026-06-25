@@ -86,19 +86,21 @@ under the existential WF; five is the minimum breadth that exhibits it.
 
 `scripts/tla-neg-controls.sh`'s run of the control reports
 `Temporal property EventuallyRevoked was violated` (exit 13) with a lasso back to
-an earlier state — exactly the churn-while-starve shape:
+an earlier state. Its *shape* is the churn-while-starve configuration the threshold
+argument predicts — described below by cap role; the specific ids are illustrative,
+not a transcription of TLC's trace (whose labels depend on exploration order):
 
-- **Victim `c1`** is marked `revoking` and stays revoking through the whole cycle,
-  with **`c4` (child of `c1`) persisting** as its leaf — so `c1`'s subtree never
-  empties and `(c1 \in revoking) ~> (Descendants(c1) = {})` is violated.
-- **Churn on `c2`/`c3`** (the other subtree under the non-revoking root `c0`):
-  `RevokeStep` fires there each cycle (`revoking` reaches `{c1,c2}`, `c3` is
-  deleted and re-`Copy`'d), so `\E c : RevokeStep(c)` fires infinitely and the
-  trace is fair — yet `c1` is never serviced.
+- **A victim root** is marked `revoking` and stays revoking through the whole
+  cycle, with a **child persisting** as its leaf — so its subtree never empties and
+  `(c \in revoking) ~> (Descendants(c) = {})` is violated for that root.
+- **A second, independently-refilled subtree** (the other subtree under a
+  non-revoking common root) is churned every cycle: `RevokeStep` fires there (its
+  leaf is deleted and re-`Copy`'d), so `\E c : RevokeStep(c)` fires infinitely and
+  the trace is fair — yet the victim root is never serviced.
 
-This is the per-cap-vs-existential gap made concrete: per-cap WF would force
-`RevokeStep(c1)` (it is continuously enabled) and drain `c1`; the existential WF
-does not, and `c1` starves.
+This is the per-cap-vs-existential gap made concrete: per-cap WF would force the
+victim's `RevokeStep` (it is continuously enabled) and drain it; the existential WF
+does not, and the victim starves.
 
 ## Why adoption is rejected (theorem-touching discipline)
 
@@ -148,11 +150,12 @@ channel present, `Send`/`Receive` shuffle caps regardless of process count);
 dropping the channel halves it (≈1m05s, the lasso is pure-cspace) but adds a
 second departure from the real arm. The single-change `CapIds=5` config was kept
 as the cleanest faithful witness. Even so the cost is **comfortably within the CI
-budget**: the full negative-control suite runs in ~8 s today, so the `model` job
+budget**: the other twelve controls run in ~8 s, but this new fairness control adds
+the ~2m11s above, so the negative-control suite is now ~2m20s and the `model` job
 (liveness arm ~1m45s + the small `Teardown`/`CommitProtocol`/`IpcReactor` checks +
-controls) lands near **5 min** against the **15-min** cap — roughly a third of it,
-with ~10 min of headroom. (This is the early-terminating regime the plan
-distinguished from an *exhaustive* `CapIds=5` run, which would blow the cap.)
+~2m20s of controls) lands near **4–4.5 min** against the **15-min** cap — under a
+third of it, with ~10 min of headroom. (This is the early-terminating regime the
+plan distinguished from an *exhaustive* `CapIds=5` run, which would blow the cap.)
 
 ## Negative controls / coverage
 

@@ -1,7 +1,7 @@
 name: ci
 
 # Phase 4 of the process-caps plan: rerun the formal models and the host
-# test suite on every PR, and boot the system under QEMU to run the §5.1
+# test suite on every PR, and boot the system under QEMU to run the rev2§5.1
 # spawn/reclaim exit criterion. Fuzzing has its own workflow (fuzz.yml).
 on:
   pull_request:
@@ -24,14 +24,14 @@ jobs:
       - name: cargo test (workspace minus kernel)
         run: cargo test --workspace --exclude kernel
       - name: ipc wire codec tests (feature-gated)
-        # The wire codec (§3.7) is behind the opt-in `wire` feature so minimal
+        # The wire codec (rev2§3.7) is behind the opt-in `wire` feature so minimal
         # user binaries stay no-alloc; `cargo test --workspace` builds ipc
         # default-features, so its unit tests need this explicit pass.
         run: cargo test -p ipc --features wire
 
-  # Rerun the TLA+ proofs. The CapRevocation safety model (incl. the §3.3
+  # Rerun the TLA+ proofs. The CapRevocation safety model (incl. the rev2§3.3
   # channel whole-object teardown TSpec), the CommitProtocol model, and the
-  # §3.6 IpcReactor lost-wakeup/backpressure model must all come back clean,
+  # rev2§3.6 IpcReactor lost-wakeup/backpressure model must all come back clean,
   # and the negative controls must all still FAIL — the M1/M2 formal gates,
   # re-checked on every PR.
   model:
@@ -70,7 +70,9 @@ jobs:
           # same distinct/diameter/verdict, only less scheduling work. Scoped to
           # this liveness arm alone: on a *failing* spec `final` forfeits the
           # early-exit, so it must stay off the negative controls below, whose
-          # livelock has to trip cheaply.
+          # livelock has to trip cheaply. -lncheck is an internal TLC strategy
+          # selector (absent from its -help), so its semantics ride the
+          # vendored-jar pin verified above — a jar bump must re-confirm it.
           TLC_FLAGS="-lncheck final" bash tools/tla/tla-model-check.sh tla/cap_revocation/CapRevocation.tla
           bash tools/tla/tla-model-check.sh tla/cap_revocation/CapRevocation.tla CapRevocation_Teardown.cfg
           bash tools/tla/tla-model-check.sh tla/commit_protocol/CommitProtocol.tla
@@ -88,7 +90,7 @@ jobs:
           TLA_JAVA_OPTS: -Xmx2g
         run: bash scripts/tla-neg-controls.sh safety
 
-  # The safety-only arm of the CapRevocation model (rev2§2.2/§3 CDT revocation),
+  # The safety-only arm of the CapRevocation model (rev2§2.2/rev2§3 CDT revocation),
   # a SEPARATE job so it runs in PARALLEL with `model` — total model-checking
   # wall-clock is then the max of the two arms, not their sum. It drops the
   # EventuallyRevoked liveness property (checked by `model` above), and that
@@ -167,7 +169,7 @@ jobs:
       - name: Liveness negative controls must fail as designed
         run: bash scripts/tla-neg-controls.sh liveness
 
-  # The §5.1 exit criterion: boot the real system under QEMU and drive the
+  # The rev2§5.1 exit criterion: boot the real system under QEMU and drive the
   # shell through the burn regression (spawn/wait/reclaim 100x), status
   # propagation, the wild-pointer fault demo + re-spawn, the panic path,
   # and the time grant. Also runs the M1 cap-mechanism EL0 test. Needs a
@@ -191,20 +193,20 @@ jobs:
 
   # There is no `kani` job. Kani was the interim bounded mechanized tier; every
   # target it covered — the kcore kernel core (proven in the `verus` job) and
-  # the §4.7 host chokepoints `ipc`/`urt`/`dma-pool`/`cas` — is now proven
+  # the rev2§4.7 host chokepoints `ipc`/`urt`/`dma-pool`/`cas` — is now proven
   # unbounded in Verus. The superblock harnesses ported cleanly (no Vec), so the
   # whole job, its pinned-cargo-kani install dance, and the cover-vacuity guard
   # are gone.
 
   # The concurrency tier: the time-page
   # seqlock under both schedulers. Loom (RUSTFLAGS="--cfg loom") is the
-  # certifying proof — urt::time::loom_tests (§4.1), every C11-permitted
+  # certifying proof — urt::time::loom_tests (rev2§4.1), every C11-permitted
   # interleaving + reordering of one writer's seqlock update and one reader's
   # sample(), proving no torn read. Shuttle (RUSTFLAGS="--cfg shuttle") is a
-  # non-certifying breadth-smoke — urt::time::shuttle_tests (§4.1 item 5),
+  # non-certifying breadth-smoke — urt::time::shuttle_tests (rev2§4.1 item 5),
   # randomized schedules over the same model; SeqCst-only, so it cannot witness
   # the torn-read class, but it is a second scheduler's sanity pass and the
-  # template for the IPC Shuttle models (§4.2). The native proptest stays the
+  # template for the IPC Shuttle models (rev2§4.2). The native proptest stays the
   # breadth/Miri tier (cfg(not(loom),not(shuttle))-gated). It also drives the
   # `ipc` rig (the ModelTransport sender/receiver smoke, 2_ipc.md Phase 0)
   # under both schedulers. No per-test filter, so a new loom::model / shuttle
@@ -260,8 +262,8 @@ jobs:
   # Deductive verification with Verus. PINNED
   # to 0.2026.06.07.cd03505 (the `vstd` companion is pinned in kcore/Cargo.toml +
   # ipc/urt/dma-pool/cas Cargo.toml); an upgrade is a deliberate PR that re-runs the
-  # proofs. Covers `kcore` (the kernel object core) and the §4.7 host
-  # chokepoints — `ipc`, `urt`, `dma-pool`, and `cas`. Every §4.7 chokepoint
+  # proofs. Covers `kcore` (the kernel object core) and the rev2§4.7 host
+  # chokepoints — `ipc`, `urt`, `dma-pool`, and `cas`. Every rev2§4.7 chokepoint
   # is on Verus. No per-proof filter, so a new
   # verus!{} obligation auto-gates (the property the concurrency job also prizes).
   # Verus ships no crates.io binary — the release zip (verus + cargo-verus + z3 +
@@ -304,7 +306,7 @@ jobs:
           if [ -z "$bindir" ]; then echo "::error::cargo-verus not found in the Verus release"; exit 1; fi
           export PATH="$bindir:$PATH"
           cargo verus verify -p kcore
-          # §4.7 host chokepoints, one -p per crate: ipc::header; ipc::session
+          # rev2§4.7 host chokepoints, one -p per crate: ipc::header; ipc::session
           # codecs + the Admission never-over-grant quota; urt::slots — the bitmap
           # free-list ∀ cap/WORDS; urt::time — the tick→ns conversion's totality +
           # monotonicity ∀; dma-pool — the free-list allocator's two-buffer
