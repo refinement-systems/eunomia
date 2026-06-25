@@ -31,7 +31,7 @@ NO_CLEAN="${NO_CLEAN:-0}"
 
 # The CI gate set, in CI order (.github/workflows/ci.yml `verus` job). cas is
 # Vec-heavy, so its feature-agnostic codecs verify in the no_std+alloc variant.
-ALL_CRATES=(kcore ipc urt freelist dma-pool cas)
+ALL_CRATES=(kcore ipc urt freelist dma-pool cas virtio-blk)
 verus_args_for() { case "$1" in cas) echo "--no-default-features" ;; *) echo "" ;; esac; }
 
 [ -n "${VERUS_BIN_DIR:-}" ] && PATH="$VERUS_BIN_DIR:$PATH"
