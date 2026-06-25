@@ -73,7 +73,7 @@ when to reach for each tool:
 **MISSING from the pin — flagged by the feasibility verdicts, with the handling:**
 
 1. **No Relaxed / Acquire / Release atomics and no standalone `fence`.** Every
-   `vstd` atomic op is hardcoded `SeqCst` (`reference/vstd/atomic.rs`). A proof
+   `vstd` atomic op is hardcoded `SeqCst` (`vendor/verus/source/vstd/atomic.rs`). A proof
    built on `atomic_with_ghost!` therefore models a **SeqCst machine**. Handling:
    do **not** silently certify Relaxed+fence ship code with a SeqCst proof — that
    is a false statement about the binary (erasure cuts both ways). Either prove

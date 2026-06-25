@@ -33,6 +33,38 @@ Verus has no crates.io binary: CI fetches the release zip (it bundles
 — bump binary + `vstd` + toolchain together, re-run the whole suite, never fold
 into a feature change.
 
+## The vendored prover and authoring state machines
+
+`vendor/verus` is the Verus project (fork `refinement-systems/verus`) vendored as
+a git submodule, checked out at the exact pin above — HEAD is the upstream release
+tag `release/0.2026.06.07.cd03505` and `source/vstd` is `0.0.0-2026-05-31-0205`.
+It is the in-tree, version-matched **source-of-truth and reading copy**: read the
+ghost library under `vendor/verus/source/vstd` and the macro idioms under
+`vendor/verus/examples/state_machines/`. It is **not** a workspace member and is
+**not** built by `cargo build`: the prover (`rust_verify`/`cargo-verus`/`z3`)
+builds only through Verus's own `vargo` system, and the CI verify gate uses the
+downloaded prebuilt binary — byte-identical to building the submodule while the
+fork tracks upstream. The submodule is the staging ground for the day the fork
+must diverge to patch a prover gap (e.g. atomics weaker than SeqCst, or minting a
+`PointsToRaw` for a pre-existing `static [u8; N]`); only then does building from
+source via `vargo`, and moving the ghost crates to path deps, become mandatory.
+
+The ghost libraries are all on crates.io at the pin, so the submodule is **not**
+required to author proofs. A crate that writes a `state_machine!{}` or
+`tokenized_state_machine!{}` adds **one** direct dependency — `vstd`'s prelude
+does not re-export the macros:
+
+```toml
+verus_state_machines_macros = "=0.0.0-2026-05-31-0205"
+```
+
+then `use verus_state_machines_macros::{state_machine, tokenized_state_machine};`.
+Nothing else is needed (`vstd`/`verus_builtin` come in transitively), and no CI
+change is required — the prover discharges the macro-generated obligations inside
+the crate's existing `cargo verus verify -p <crate>` run. The macros emit
+`cfg(verus_keep_ghost)`, so the crate's `[lints.rust] unexpected_cfgs` check-cfg
+must list `cfg(verus_keep_ghost)` (every verified crate already does).
+
 ## The CI job and erasure
 
 The `verus` job runs one `cargo verus verify` per verified crate, **no per-proof

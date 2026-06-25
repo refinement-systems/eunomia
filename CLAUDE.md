@@ -34,8 +34,9 @@ tools/tla/       Scripts: tla-check.sh (SANY), tla-model-check.sh (TLC)
 doc/spec/        Design documents
 doc/results/     Implementation and research results.
 doc/guidelines/  Additional guidelines
-reference/       Reference code
-reference/vstd   Verus standard library
+vendor/verus/    Vendored Verus prover (git submodule, fork pinned to the release
+                 in doc/guidelines/verus.md) — in-tree reading copy of vstd and
+                 the state-machine macro examples; not built by cargo
 ```
 
 ---
