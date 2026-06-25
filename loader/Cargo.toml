@@ -6,9 +6,32 @@ edition.workspace = true
 [dependencies]
 ipc = { path = "../ipc" }
 
+# vstd is the *Verus* dependency (see doc/guidelines/verus.md): the `verus!{}`
+# macro + ghost vocabulary for the ELF page-geometry proof (`Segment::page_layout`
+# — total/overflow-safe page rounding, refuse-not-crash for all `u64` vaddr/memsz,
+# rev2§5.3). The verified core is pure u64 bit/arithmetic, no_std + no-alloc, so
+# `default-features = false` (mirrors freelist/virtio-blk); in an ordinary build
+# the macro erases to plain Rust and vstd compiles to nothing load-bearing. The
+# ELF/startup decoders and the target-only `spawn` stay external. Pinned
+# (=version) in lockstep with the other gated crates: an upgrade is a deliberate PR.
+vstd = { version = "=0.0.0-2026-05-31-0205", default-features = false }
+
 [dev-dependencies]
 proptest = "1"
 
 [features]
 default = ["std"]
 std = []
+
+# `cargo verus verify -p loader --no-default-features` targets this crate (⇒
+# no_std, no alloc; the kernel-shipping config). Only `Segment::page_layout` and
+# its geometry types are in `verus!{}`; the ELF/startup byte decoders and the
+# target-only `spawn` are external. loader links `ipc`, so a cold run re-verifies
+# that gated dep transitively (see doc/guidelines/verus.md §10).
+[package.metadata.verus]
+verify = true
+
+# cfg(verus_keep_ghost)/cfg(verus_only) are set by Verus during `cargo verus
+# verify`; teach plain cargo they're expected (same handling as freelist/virtio-blk/cas).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(verus_keep_ghost)", "cfg(verus_only)"] }

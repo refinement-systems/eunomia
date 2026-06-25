@@ -295,6 +295,7 @@ name = "loader"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "vstd",
 ]
 
 [[package]]
@@ -658,6 +659,7 @@ dependencies = [
  "ipc",
  "postcard",
  "serde",
+ "vstd",
 ]
 
 [[package]]
@@ -881,6 +883,7 @@ version = "0.1.0"
 dependencies = [
  "cas",
  "dma-pool",
+ "vstd",
 ]
 
 [[package]]

@@ -6,10 +6,33 @@ pub const PF_X: u32 = 1;
 pub const PF_W: u32 = 2;
 pub const PF_R: u32 = 4;
 
+// Verus is the deductive-proof tier for the page geometry (`Segment::page_layout`,
+// below). `vstd::prelude` supplies the `verus!{}` macro + ghost vocabulary; Verus
+// requires it imported at the crate root. In an ordinary build the macro erases
+// ghost code, so this import is otherwise unused — hence the allow (same as
+// freelist/virtio-blk/storage-server).
+#[allow(unused_imports)]
+use vstd::prelude::*;
+
+// The page-geometry cluster is the Verus-verified deductive core: `PAGE`, the
+// `Segment`/`PageLayout` types, `ElfError`, and `page_layout`'s total/overflow-
+// safe contract all live in the `verus!{}` block so the proof can name them
+// (doc/guidelines/verus.md §6). The ELF/startup byte decoders and the
+// target-only `spawn` stay external plain Rust — after erasure these are
+// ordinary items, so `parse`, `spawn`, and the `pub use crate::elf::PAGE`
+// re-export keep working unchanged.
+verus! {
+
 /// Page size the loader maps segments at (rev2§5). Canonical home: `spawn`
 /// re-exports it (`pub use crate::elf::PAGE`) so the page-layout predicate
 /// and its sole consumer agree by construction.
 pub const PAGE: u64 = 4096;
+
+/// Low-bits mask for page rounding (`PAGE - 1`). A `u64` const so it reads as
+/// `u64` in spec positions — `PAGE - 1` written inline is mathematical-`int`
+/// subtraction under Verus and would not type against `&`/the `u64` lemma args.
+/// `pub` because `page_layout`'s (public) `ensures` names it.
+pub const PAGE_MASK: u64 = PAGE - 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Segment {
@@ -30,40 +53,6 @@ pub struct PageLayout {
     pub page_offset: u64,
 }
 
-impl Segment {
-    /// Page geometry the loader maps this segment into (rev2§5). All
-    /// arithmetic is checked: a segment whose page-rounded end would exceed
-    /// `u64::MAX` is refused (`BadSegment`), never wrapped or aborted —
-    /// `spawn::prepare` runs this on untrusted images (rev2§3.7) and must
-    /// refuse-not-crash (rev2§5.3). `parse` runs the same check so the
-    /// producer never hands `prepare` a segment it cannot lay out.
-    ///
-    /// Total for *all* `(vaddr, memsz)` including `memsz == 0` (yields
-    /// `pages == 0` for a page-aligned `vaddr`, else `1` from the round-up — no
-    /// panic either way); `parse` drops `memsz == 0` segments, so `prepare`
-    /// only ever sees `memsz > 0` (⇒ `pages >= 1`).
-    pub fn page_layout(&self) -> Result<PageLayout, ElfError> {
-        let va_start = self.vaddr & !(PAGE - 1); // round down: cannot overflow
-        let va_end = self
-            .vaddr
-            .checked_add(self.memsz) // catches the vaddr+memsz wrap
-            .and_then(|e| e.checked_add(PAGE - 1)) // the page-rounding overflow point
-            .map(|e| e & !(PAGE - 1)) // round up to page boundary
-            .ok_or(ElfError::BadSegment)?;
-        // va_end >= va_start (round-up of vaddr+memsz vs round-down of vaddr),
-        // so the subtraction cannot underflow once the checked add succeeds;
-        // checked_sub is belt-and-suspenders, keeping the fn total under any
-        // future caller.
-        let span = va_end.checked_sub(va_start).ok_or(ElfError::BadSegment)?;
-        Ok(PageLayout {
-            va_start,
-            va_end,
-            pages: span / PAGE,
-            page_offset: self.vaddr - va_start, // in [0, PAGE): cannot underflow
-        })
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElfError {
     Truncated,
@@ -74,6 +63,116 @@ pub enum ElfError {
     TooManySegments,
     BadSegment,
 }
+
+/// Align-down by an arbitrary mask `m`: clearing `m`'s bits never grows the
+/// value, leaves it `m`-aligned, and the cleared remainder is exactly `x & m`
+/// (so the two parts partition `x`). All four facts hold for *every* mask, so a
+/// single symbolic `by (bit_vector)` discharges them; `page_layout` calls this
+/// with `m = PAGE_MASK` and the outer SMT context supplies PAGE's value.
+proof fn lemma_align_down(x: u64, m: u64)
+    ensures
+        (x & !m) <= x,
+        (x & !m) & m == 0,
+        (x & !m) + (x & m) == x,
+        (x & m) <= m,
+{
+    assert((x & !m) <= x && (x & !m) & m == 0 && (x & !m) + (x & m) == x && (x & m) <= m)
+        by (bit_vector);
+}
+
+/// Two PAGE-aligned bounds enclose an exact whole number of pages: their span
+/// `hi - lo` is a multiple of PAGE, so integer division by PAGE loses nothing
+/// (`(hi - lo) / PAGE * PAGE == hi - lo`). PAGE = 2^12, so the low-12-bit mask
+/// *is* the modulus (vstd `low_bits_mask_is_mod`); both bounds are then ≡ 0
+/// (mod PAGE), their difference is too (`sub_mod_noop`), and the fundamental
+/// div-mod identity closes it. Stays in the modular world — no subtraction
+/// inside `by (bit_vector)` (where only a contiguous low-bit mask would survive
+/// it, doc/guidelines/verus.md §10).
+proof fn lemma_pages_exact(lo: u64, hi: u64)
+    requires
+        lo & PAGE_MASK == 0,
+        hi & PAGE_MASK == 0,
+        lo <= hi,
+    ensures
+        (hi - lo) / (PAGE as int) * (PAGE as int) == hi - lo,
+{
+    vstd::arithmetic::power2::lemma2_to64();
+    // The low-12-bit mask is mod 4096; both bounds aligned ⇒ both ≡ 0 (mod PAGE).
+    vstd::bits::lemma_u64_low_bits_mask_is_mod(lo, 12);
+    vstd::bits::lemma_u64_low_bits_mask_is_mod(hi, 12);
+    // Difference of two multiples of PAGE is a multiple of PAGE ⇒ div is exact.
+    vstd::arithmetic::div_mod::lemma_sub_mod_noop(hi as int, lo as int, PAGE as int);
+    vstd::arithmetic::div_mod::lemma_fundamental_div_mod((hi - lo) as int, PAGE as int);
+}
+
+impl Segment {
+    /// Page geometry the loader maps this segment into (rev2§5). All
+    /// arithmetic is checked: a segment whose page-rounded end would exceed
+    /// `u64::MAX` is refused (`BadSegment`), never wrapped or aborted —
+    /// `spawn::prepare` runs this on untrusted images (rev2§3.7) and must
+    /// refuse-not-crash (rev2§5.3). `parse` runs the same check so the
+    /// producer never hands `prepare` a segment it cannot lay out.
+    ///
+    /// Mechanized total for *all* `(vaddr, memsz)`: `Err(BadSegment)` exactly
+    /// when the page-up rounding `vaddr + memsz + (PAGE-1)` overflows `u64`;
+    /// otherwise the returned geometry is page-aligned at both ends, encloses
+    /// `vaddr` (and, when `memsz > 0`, strictly), the in-page offset is in
+    /// `[0, PAGE)`, and `pages` counts the span exactly
+    /// (`pages * PAGE == va_end - va_start`). `memsz == 0` yields `pages == 0`
+    /// for a page-aligned `vaddr`, else `1` from the round-up — no panic either
+    /// way; `parse` drops `memsz == 0` segments, so `prepare` only ever sees
+    /// `memsz > 0` (⇒ `pages >= 1`).
+    pub fn page_layout(&self) -> (res: Result<PageLayout, ElfError>)
+        ensures
+            res is Err <==> self.vaddr + self.memsz + PAGE_MASK > u64::MAX,
+            res matches Err(e) ==> e == ElfError::BadSegment,
+            res matches Ok(l) ==> {
+                &&& l.va_start & PAGE_MASK == 0
+                &&& l.va_end & PAGE_MASK == 0
+                &&& l.va_start <= self.vaddr
+                &&& (self.memsz > 0 ==> self.vaddr < l.va_end)
+                &&& l.page_offset < PAGE
+                &&& l.page_offset == self.vaddr - l.va_start
+                &&& l.pages * PAGE == l.va_end - l.va_start
+            },
+    {
+        let va_start = self.vaddr & !PAGE_MASK; // round down: cannot overflow
+        proof {
+            lemma_align_down(self.vaddr, PAGE_MASK);
+        }
+        // `checked_add` refuses both the `vaddr + memsz` wrap and the page-up
+        // rounding overflow; either failure is the single `Err(BadSegment)`.
+        match self.vaddr.checked_add(self.memsz) {
+            None => Err(ElfError::BadSegment),
+            Some(s) => match s.checked_add(PAGE_MASK) {
+                None => Err(ElfError::BadSegment),
+                Some(e) => {
+                    let va_end = e & !PAGE_MASK; // round up to page boundary
+                    proof {
+                        lemma_align_down(e, PAGE_MASK);
+                        // Round-up never drops below the input: va_end == e - (e & m)
+                        // >= e - (PAGE-1) == vaddr + memsz, so va_start <= va_end and
+                        // the span subtraction below is total (no underflow).
+                        assert(va_end >= self.vaddr + self.memsz);
+                    }
+                    let span = va_end - va_start;
+                    proof {
+                        // span is an exact number of pages (difference of two aligned bounds).
+                        lemma_pages_exact(va_start, va_end);
+                    }
+                    Ok(PageLayout {
+                        va_start,
+                        va_end,
+                        pages: span / PAGE,
+                        page_offset: self.vaddr - va_start, // in [0, PAGE): cannot underflow
+                    })
+                },
+            },
+        }
+    }
+}
+
+} // verus!
 
 pub const MAX_SEGMENTS: usize = 8;
 
