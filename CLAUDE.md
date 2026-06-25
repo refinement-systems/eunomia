@@ -197,6 +197,10 @@ cargo verus verify -p storage-server --no-default-features --lib
                                                   # monotone / deny-by-default);
                                                   # no_std+alloc variant like cas,
                                                   # --lib skips the placeholder bin
+cargo verus verify -p loader --no-default-features # ELF page_layout: total,
+                                                  # overflow-safe page geometry
+                                                  # ∀ (vaddr, memsz); verified as
+                                                  # the no_std core, re-verifies ipc
 ```
 
 A real run ends each crate with a `verification results:: N verified, 0 errors`

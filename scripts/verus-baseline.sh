@@ -32,12 +32,14 @@ NO_CLEAN="${NO_CLEAN:-0}"
 # The CI gate set, in CI order (.github/workflows/ci.yml `verus` job). cas and
 # storage-server are Vec/serde-heavy, so their feature-agnostic verified cores
 # verify in the no_std+alloc variant (--no-default-features); storage-server also
-# scopes to --lib (its placeholder bin carries no proofs).
-ALL_CRATES=(kcore ipc urt freelist dma-pool cas virtio-blk storage-server)
+# scopes to --lib (its placeholder bin carries no proofs). loader's verified core
+# (page_layout) is no_std + no-alloc, so it too verifies under --no-default-features.
+ALL_CRATES=(kcore ipc urt freelist dma-pool cas virtio-blk storage-server loader)
 verus_args_for() {
   case "$1" in
     cas) echo "--no-default-features" ;;
     storage-server) echo "--no-default-features --lib" ;;
+    loader) echo "--no-default-features" ;;
     *) echo "" ;;
   esac
 }

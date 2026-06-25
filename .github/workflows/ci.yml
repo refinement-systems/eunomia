@@ -342,3 +342,11 @@ jobs:
           # (--no-default-features), and --lib skips the placeholder bin (which
           # carries no proofs). Links cas+ipc, re-verified under the alloc prelude.
           cargo verus verify -p storage-server --no-default-features --lib
+          # loader ELF page geometry — `Segment::page_layout` is total and
+          # overflow-safe ∀ (vaddr, memsz): Err exactly when the page-up rounding
+          # vaddr+memsz+(PAGE-1) overflows u64; otherwise both ends page-aligned,
+          # encloses vaddr (strictly when memsz>0), page_offset in [0,PAGE), and
+          # pages counts the span exactly. The ELF/startup byte decoders and the
+          # target-only spawn stay external; verified as the no_std core
+          # (--no-default-features). Links ipc, re-verified transitively.
+          cargo verus verify -p loader --no-default-features
