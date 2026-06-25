@@ -286,6 +286,24 @@ RecoverReconstructs ==
                               /\ \E i \in (LiveSlot.walHead + 1)..Len(walLog) :
                                      walLog[i] = <<r, v>> } ]_vars
 
+\* --- Symmetry ----------------------------------------------------------
+
+\* The ref ids in Refs are interchangeable: Init, every action (Write / Flush /
+\* CommitPrepare / CommitFinish / Crash / Recover), every invariant, and the
+\* RecoverReconstructs action property treat them uniformly — via \A r \in Refs,
+\* function comprehension over Refs, or \E r \in Refs — and none hard-codes a
+\* specific id (there is no CHOOSE over Refs). walLog records carry a ref in
+\* their first component, so a ref permutation carries a durable/volatile state
+\* to an equivalent one; Permutations(Refs) is therefore a sound quotient.
+\* Named by CommitProtocol.cfg and its two negative controls
+\* (CommitProtocol_NegControl.cfg, CommitProtocol_AsymBug.cfg); the model
+\* declares no liveness property, so the symmetry-is-unsound-with-liveness rule
+\* does not apply. TLC never validates a symmetry itself: the two committed
+\* negative controls run under this SAME SYMMETRY are the standing proof the
+\* quotient has teeth (the symmetric RecoverNoop control) and is not over-broad
+\* (the asymmetric RecoverAsymBad control).
+RefSymmetry == Permutations(Refs)
+
 \* --- Negative control --------------------------------------------------
 
 \* NEGATIVE CONTROL (rev2§6 discipline): a Recover that rebuilds nothing.
@@ -310,5 +328,42 @@ NextNeg ==
     \/ RecoverNoop
 
 SpecNeg == Init /\ [][NextNeg]_vars
+
+\* SYMMETRY-soundness control (injected ASYMMETRIC bug): a Recover that rebuilds
+\* every ref's overlay correctly EXCEPT one CHOOSE-singled ref (AsymRef), for
+\* which it rebuilds nothing — a genuine RecoverReconstructs violation that
+\* singles out one model value, so it BREAKS the Refs-symmetry premise and its
+\* reachable path crosses states the quotient collapses (e.g.
+\* Write(AsymRef) -> Crash -> RecoverAsymBad leaves overlay'[AsymRef] empty with
+\* an unflushed acked write outstanding). Run under SYMMETRY RefSymmetry
+\* (CommitProtocol_AsymBug.cfg) the quotient must STILL report it: unlike the
+\* symmetric RecoverNoop guard — a symmetric bug is present in every orbit member
+\* and survives even a wrong quotient — this catches an OVER-BROAD symmetry that
+\* merged an asymmetric violating state with a non-violating one. SpecAsymBad
+\* reuses every real action except it swaps Recover for RecoverAsymBad.
+AsymRef == CHOOSE r \in Refs : TRUE
+
+RecoverAsymBad ==
+    /\ crashed
+    /\ LET L == LiveSlot IN
+        overlay' = [r \in Refs |->
+                      IF r = AsymRef THEN {}
+                      ELSE {walLog[i][2] :
+                              i \in {j \in (L.walHead + 1)..Len(walLog) :
+                                       /\ walLog[j][1] = r
+                                       /\ walLog[j][2] > L.refRoots[r]}}]
+    /\ crashed' = FALSE
+    /\ UNCHANGED <<slotA, slotB, walLog, durableRoots, chunkBuf,
+                   pendingRoot, pendingSB, commitPhase, writeCtr>>
+
+NextAsymBad ==
+    \/ \E r \in Refs : Write(r)
+    \/ \E r \in Refs : Flush(r)
+    \/ CommitPrepare
+    \/ CommitFinish
+    \/ Crash
+    \/ RecoverAsymBad
+
+SpecAsymBad == Init /\ [][NextAsymBad]_vars
 
 ====

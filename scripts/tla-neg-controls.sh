@@ -29,6 +29,7 @@ CONTROLS=(
   "tla/cap_revocation/CapRevocation.tla|CapRevocation_CapAsymBug.cfg|DeadNowhere"
   "tla/cap_revocation/CapRevocation.tla|CapRevocation_NegLiveness.cfg|EventuallyRevoked"
   "tla/commit_protocol/CommitProtocol.tla|CommitProtocol_NegControl.cfg|RecoverReconstructs"
+  "tla/commit_protocol/CommitProtocol.tla|CommitProtocol_AsymBug.cfg|RecoverReconstructs"
   "tla/ipc_reactor/IpcReactor.tla|IpcReactor_NegControl.cfg|NoLostWakeup"
   "tla/ipc_reactor/IpcReactor.tla|IpcReactor_NegBackpressure.cfg|NoLostWakeupWritable"
   "tla/ipc_reactor/IpcReactor.tla|IpcReactor_NegLostWakeup.cfg|NoLostWakeup"
