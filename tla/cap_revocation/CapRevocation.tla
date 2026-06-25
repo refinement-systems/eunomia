@@ -503,6 +503,23 @@ NextNoGuard ==
 
 SpecNoGuard == Init /\ [][NextNoGuard]_vars /\ Fairness
 
+\* LIVENESS control: the per-cap weak fairness (Fairness, carried by Spec)
+\* weakened to a SINGLE existential WF on the whole RevokeStep disjunct. Same
+\* Init / Next / Copy derive-guard as Spec — ONLY the fairness conjunct changes,
+\* so a passing main model plus this failing control proves the per-cap fairness
+\* is the load-bearing part. A single existential WF forces only *some*
+\* RevokeStep infinitely often, not each marked root's: once two revoking
+\* subtrees coexist (reachable once the cap breadth admits a non-revoking root
+\* anchoring both), a fair schedule can churn one subtree forever and starve the
+\* other, so its rev2§2.2 "restartable" revoke never completes -> EventuallyRevoked
+\* livelocks. The runnable proof the per-cap Fairness is load-bearing; the real
+\* model (Spec, CapRevocation.cfg) keeps it and EventuallyRevoked holds. TLC
+\* reports a lasso (one root's subtree drained and refilled while another's
+\* persists, RevokeStep firing throughout so the trace is fair).
+ExistFairness == WF_crVars(\E c \in CapIds : RevokeStep(c))
+
+SpecExistFair == Init /\ [][Next]_vars /\ ExistFairness
+
 \* SYMMETRY-soundness control (injected ASYMMETRIC bug): leak a ghost-revoked
 \* (dead) cap into a SPECIFIC non-InitProc process's cspace — a genuine
 \* DeadNowhere violation that singles out one model value, so it BREAKS the
