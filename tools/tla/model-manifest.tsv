@@ -17,6 +17,13 @@
 #     — the liveness arm and its two negative controls, must match in lock-step):
 #     CapIds={c0,c1,c2,c3} Procs={p0,p1} Channels={ch0} Threads={t0}
 #     Notifs={nf0,nf1} QueueDepth=1 NULL=NULL
+#     This liveness arm checks only TypeOK + the EventuallyRevoked liveness
+#     property; the safety invariants (MoveSemantics/DeadNowhere/LiveParent/
+#     FireSafe/RevokedDead) and the ReportMonotone action property are subsumed by
+#     the CapRevocation_Safety arm below (a strict superset of states), so they are
+#     not re-evaluated on this heap-bound tableau. distinct/diameter are graph
+#     metrics, independent of which invariants are checked, so these pins are
+#     unchanged by that trim.
 #   cap_revocation safety arm  (Spec @ CapRevocation_Safety.cfg): as above but
 #     Threads={t0,t1} QueueDepth=2 — restores the two residence axes the liveness
 #     arm trims to fit its tableau. Intentionally LARGER (added safety coverage),
