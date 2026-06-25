@@ -52,8 +52,13 @@ mkdir -p "$TLC_METADIR"
 
 echo "Model checking: $SPEC_BASE (config: $CFG, workers: ${TLC_WORKERS:-auto})"
 cd "$SPEC_DIR"
-echo "+ $JAVA ${TLA_JAVA_OPTS:-} -cp $TLA_TOOLS tlc2.TLC -workers ${TLC_WORKERS:-auto} -metadir $TLC_METADIR ${TLC_FLAGS:-} -config $CFG $SPEC_BASE"
+# -noGenerateSpecTE: on a violation TLC otherwise writes a trace-exploration
+# spec (*_TTrace_*.{tla,bin}) into the cwd — i.e. the spec dir under tla/, which
+# -metadir does not cover — littering the source tree (the negative controls trip
+# one on every run). The full counterexample is still printed below, so the TE
+# spec adds nothing here; suppress it so no scratch lands in tla/.
+echo "+ $JAVA ${TLA_JAVA_OPTS:-} -cp $TLA_TOOLS tlc2.TLC -workers ${TLC_WORKERS:-auto} -metadir $TLC_METADIR -noGenerateSpecTE ${TLC_FLAGS:-} -config $CFG $SPEC_BASE"
 # shellcheck disable=SC2086  # word-splitting of the flag lists is intentional
 "$JAVA" ${TLA_JAVA_OPTS:-} -cp "$TLA_TOOLS" tlc2.TLC \
-    -workers "${TLC_WORKERS:-auto}" -metadir "$TLC_METADIR" ${TLC_FLAGS:-} \
+    -workers "${TLC_WORKERS:-auto}" -metadir "$TLC_METADIR" -noGenerateSpecTE ${TLC_FLAGS:-} \
     -config "$CFG" "$SPEC_BASE"

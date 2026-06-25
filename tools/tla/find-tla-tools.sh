@@ -22,14 +22,11 @@
 # Resolution order (first match wins):
 #   1. Caller-provided TLA_TOOLS + JAVA  -> trust them (CI / explicit override).
 #   2. Vendored ./tla2tools.jar + a system JDK (java on PATH or $JAVA_HOME).
-#      This is the recommended, fully native, Toolbox-free path. Run
-#      ./fetch-tools.sh once to download the jar.
-#   3. Legacy fallback: the installed "/Applications/TLA+ Toolbox.app".
-#      DEPRECATED -- the Toolbox GUI is unmaintained and its bundled JRE is
-#      x86_64 (needs Rosetta 2 and will stop working on a macOS that drops it).
-#      Kept only so existing installs keep running until the jar is vendored.
+#      The recommended, fully native path. Run ./fetch-tools.sh once to
+#      download the jar.
+# If neither resolves, fail with a message pointing at ./fetch-tools.sh.
 
-# --- 1. explicit override (e.g. CI on Linux without the Toolbox) ------------
+# --- 1. explicit override (CI / explicit caller) ---------------------------
 if [ -n "${TLA_TOOLS:-}" ] && [ -n "${JAVA:-}" ]; then
   export TLA_TOOLS JAVA
   return 0 2>/dev/null || exit 0
@@ -62,43 +59,16 @@ if [ -n "${TLA_TOOLS:-}" ] && [ -n "${JAVA:-}" ]; then
   return 0 2>/dev/null || exit 0
 fi
 
-# --- 3. legacy fallback: installed TLA+ Toolbox.app (DEPRECATED) ------------
-_APP="/Applications/TLA+ Toolbox.app"
-
-if [ -z "${TLA_TOOLS:-}" ]; then
-  TLA_TOOLS="$(find "$_APP/Contents/Eclipse/plugins" \
-    -maxdepth 1 \
-    -name 'org.lamport.tlatools_*' \
-    | head -n 1)"
-fi
-
+# --- neither override nor the vendored jar + a system JDK resolved ----------
 if [ -z "${TLA_TOOLS:-}" ]; then
   echo "ERROR: no TLA+ tools found." >&2
-  echo "  Run '$_HERE/fetch-tools.sh' to vendor tla2tools.jar (recommended)," >&2
-  echo "  or install the (deprecated) TLA+ Toolbox at '$_APP'." >&2
-  unset _HERE _APP
-  return 1 2>/dev/null || exit 1
-fi
-
-if [ -z "${JAVA:-}" ]; then
-  JAVA="$(find "$_APP" \
-    -type f \
-    -path '*/bin/java' \
-    -perm -111 \
-    -print \
-    | head -n 1)"
+  echo "  Run '$_HERE/fetch-tools.sh' to vendor tla2tools.jar." >&2
 fi
 
 if [ -z "${JAVA:-}" ]; then
   echo "ERROR: no Java runtime found." >&2
   echo "  Install a JDK (e.g. 'brew install --cask temurin@17')." >&2
-  unset _HERE _APP
-  return 1 2>/dev/null || exit 1
 fi
 
-echo "WARNING: falling back to the deprecated TLA+ Toolbox at '$_APP'" >&2
-echo "         (bundled Java is x86_64/Rosetta). Run '$_HERE/fetch-tools.sh'" >&2
-echo "         to vendor tla2tools.jar and stop depending on it." >&2
-
-unset _HERE _APP
-export TLA_TOOLS JAVA
+unset _HERE
+return 1 2>/dev/null || exit 1
