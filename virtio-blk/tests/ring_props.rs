@@ -9,7 +9,7 @@ use dma_pool::host::{HostBacking, SharedMem};
 use dma_pool::DmaPool;
 use proptest::prelude::*;
 use virtio_blk::fake::FakeBlock;
-use virtio_blk::{avail_ring_slot, VirtioBlk, SECTOR};
+use virtio_blk::{avail_ring_slot, capacity_check, VirtioBlk, SECTOR};
 
 const DEV_BASE: u64 = 0x4000_0000;
 /// Disk geometry for the behavioural properties. `MAX_K` sectors of headroom
@@ -51,6 +51,15 @@ fn op_strategy() -> impl Strategy<Value = Op> {
         (lba, 1usize..=MAX_K).prop_map(|(lba, k)| Op::Read { lba, k }),
         Just(Op::Flush),
     ]
+}
+
+/// Overflow-free `u128` mirror of `virtio_blk::out_of_range` (a ghost `spec fn`,
+/// so not callable from exec test code): a transfer is out of range when its
+/// last sector `lba + len/SECTOR` exceeds `capacity`. Independent of the
+/// production `checked_add` path, so it gives the `capacity_check` proptests
+/// real teeth.
+fn out_of_range_oracle(lba: u64, len: usize, capacity: u64) -> bool {
+    lba as u128 + (len / SECTOR) as u128 > capacity as u128
 }
 
 proptest! {
@@ -97,6 +106,57 @@ proptest! {
         prop_assert!(slot >= 4);
         prop_assert!(slot + 2 <= 6 + 2 * qsize as usize);
     }
+
+    /// Property 4 — the Verus-verified `capacity_check` (rev2§4.5 LBA bound)
+    /// agrees with an independent `u128` oracle that cannot wrap, for every
+    /// `(lba, len, capacity)`. The oracle shares none of `checked_add`'s
+    /// production arithmetic, so a wrong refusal in either direction fails here.
+    #[test]
+    fn capacity_check_matches_oracle(
+        lba in any::<u64>(),
+        len in 0usize..=1 << 20,
+        capacity in any::<u64>(),
+    ) {
+        prop_assert_eq!(
+            capacity_check(lba, len, capacity).is_err(),
+            out_of_range_oracle(lba, len, capacity)
+        );
+    }
+
+    /// Property 4 (continued) — pin `lba` to the `u64::MAX` neighbourhood so the
+    /// `checked_add` wrap edge (rarely hit by a uniform `lba`) is exercised: the
+    /// last-sector sum overflows u64 and must still refuse, not alias a valid LBA.
+    #[test]
+    fn capacity_check_high_lba_refuses(
+        lba in (u64::MAX - 4096)..=u64::MAX,
+        len in 0usize..=1 << 20,
+        capacity in any::<u64>(),
+    ) {
+        prop_assert_eq!(
+            capacity_check(lba, len, capacity).is_err(),
+            out_of_range_oracle(lba, len, capacity)
+        );
+    }
+}
+
+/// Property 4 (boundaries) — the `capacity_check` edge cases, asserted with
+/// teeth (each accept and each refusal pinned). Mirrors the integration test
+/// `lba_past_capacity_refused_locally`, but on the pure verified helper.
+#[test]
+fn capacity_check_boundaries_have_teeth() {
+    // len == 0 ⇒ 0 sectors: Ok iff lba <= capacity.
+    assert!(capacity_check(64, 0, 64).is_ok());
+    assert!(capacity_check(65, 0, 64).is_err());
+    // end == capacity is in range; end == capacity + 1 is refused.
+    assert!(capacity_check(63, SECTOR, 64).is_ok()); // 63 + 1 == 64
+    assert!(capacity_check(64, SECTOR, 64).is_err()); // 64 + 1 == 65 > 64
+
+    // A multi-sector transfer whose tail crosses the end is refused as a whole.
+    assert!(capacity_check(62, SECTOR * 4, 64).is_err()); // 62 + 4 == 66 > 64
+
+    // An adversarial lba near u64::MAX refuses via checked_add, never wraps.
+    assert!(capacity_check(u64::MAX, SECTOR, 64).is_err());
+    assert!(capacity_check(u64::MAX, 0, u64::MAX).is_ok()); // exact end, no overflow
 }
 
 /// Property 2 (continued) — the `u16` index wraps cleanly: stepping

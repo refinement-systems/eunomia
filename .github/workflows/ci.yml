@@ -325,9 +325,11 @@ jobs:
           # feature-agnostic superblock fns are verified in the no_std+alloc
           # variant (--no-default-features).
           cargo verus verify -p cas --no-default-features
-          # virtio-blk avail-ring index arithmetic — `avail_ring_slot` (the slot
-          # byte-offset 4 + 2*(idx % qsize) and its in-bounds bound ∀ idx, qsize
-          # 1..=8). The generic driver, MMIO `unsafe`, fake device, and cas
+          # virtio-blk avail-ring index + LBA-bound arithmetic — `avail_ring_slot`
+          # (the slot byte-offset 4 + 2*(idx % qsize) and its in-bounds bound ∀ idx,
+          # qsize 1..=8) and `capacity_check` (the `check_capacity` LBA bound:
+          # OutOfRange exactly when lba + len/SECTOR exceeds capacity, overflow-safe
+          # ∀ inputs). The generic driver, MMIO `unsafe`, fake device, and cas
           # blockdev adapter stay external; the device-shared ring is the trusted
           # DMA seam (rev2§2.5). virtio-blk links cas (the no_std blockdev adapter
           # storaged uses), which turns on vstd's `alloc` feature, so this session

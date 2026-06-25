@@ -34,11 +34,12 @@ proptest = "1"
 virtio-blk = { path = ".", features = ["std"] }
 
 # `cargo verus verify -p virtio-blk` targets this crate (default features ⇒
-# no_std). Only `avail_ring_slot` is in `verus!{}`; the generic driver, MMIO
-# `unsafe`, the std-gated fake device, and the no_std `blockdev` (cas) adapter are
-# external. cas stays in the build — `storaged` links the adapter in no_std — and
-# pulls vstd's `alloc` feature, so this run re-verifies the gated deps under the
-# alloc prelude (see doc/guidelines/verus.md §10; freelist Baseline row).
+# no_std). `avail_ring_slot` (avail-ring index arithmetic) and `capacity_check`
+# (the `check_capacity` LBA-bound refusal) are in `verus!{}`; the generic driver,
+# MMIO `unsafe`, the std-gated fake device, and the no_std `blockdev` (cas) adapter
+# are external. cas stays in the build — `storaged` links the adapter in no_std —
+# and pulls vstd's `alloc` feature, so this run re-verifies the gated deps under
+# the alloc prelude (see doc/guidelines/verus.md §10; freelist Baseline row).
 [package.metadata.verus]
 verify = true
 
