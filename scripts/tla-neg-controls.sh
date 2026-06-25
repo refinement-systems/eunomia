@@ -29,6 +29,8 @@ CONTROLS=(
   "tla/cap_revocation/CapRevocation.tla|CapRevocation_CapAsymBug.cfg|DeadNowhere"
   "tla/cap_revocation/CapRevocation.tla|CapRevocation_ThreadAsymBug.cfg|FireSafe"
   "tla/cap_revocation/CapRevocation.tla|CapRevocation_ReportMonotoneBad.cfg|ReportMonotone"
+  "tla/cap_revocation/CapRevocation.tla|CapRevocation_MoveSemanticsBad.cfg|MoveSemantics"
+  "tla/cap_revocation/CapRevocation.tla|CapRevocation_RevokedDeadBad.cfg|RevokedDead"
   "tla/cap_revocation/CapRevocation.tla|CapRevocation_NegLiveness.cfg|EventuallyRevoked"
   "tla/cap_revocation/CapRevocation.tla|CapRevocation_NegFairness.cfg|EventuallyRevoked"
   "tla/commit_protocol/CommitProtocol.tla|CommitProtocol_NegControl.cfg|RecoverReconstructs"

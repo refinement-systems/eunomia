@@ -624,6 +624,61 @@ NextReportBad == Next \/ (\E t \in Threads : ReportFlip(t))
 
 SpecReportBad == Init /\ [][NextReportBad]_vars
 
+\* SYMMETRY-soundness control (injected SYMMETRIC bug, the teeth-test for the
+\* MoveSemantics single-owner invariant, rev2§3.4): MoveSemantics is a state
+\* invariant the safety arm checks under SafetySymmetry, where TLC's symmetry
+\* reduction is soundly defined for state invariants — this control is the
+\* runnable proof it still has teeth. The real model only MOVES a cap between
+\* residences (Send/Receive/Bind hand it from a cspace to a queue/binding slot and
+\* back) and never duplicates it, so a live cap always has exactly one owner.
+\* DupOwner copies a LIVE cap already in one process's cspace into another's
+\* WITHOUT removing it from the first, so it resides in two places at once — a
+\* direct MoveSemantics violation. The bug is SYMMETRIC (\E over Procs and live, no
+\* thread/proc/cap singled out, no CHOOSE), so like SpecBad and SpecReportBad it is
+\* present in every orbit member and must trip even under the quotient; the
+\* asymmetric SpecAsymBad / SpecCapAsymBad already guard the over-broad
+\* Procs / CapIds case. Run under SYMMETRY SafetySymmetry
+\* (CapRevocation_MoveSemanticsBad.cfg) the quotient must STILL report it — if it
+\* ever made the MoveSemantics check unsound this control would stop tripping. It
+\* must keep violating MoveSemantics for as long as CapRevocation_Safety carries
+\* SYMMETRY SafetySymmetry.
+DupOwner ==
+    /\ \E p, q \in Procs, c \in live :
+        /\ p /= q
+        /\ c \in cspaces[p]
+        /\ c \notin cspaces[q]
+        /\ cspaces' = [cspaces EXCEPT ![q] = @ \cup {c}]
+    /\ UNCHANGED <<live, parent, queues, bindings, treport, revoked, revoking,
+                   nlive, ncaps, pcbind, eopen>>
+
+NextMoveBad == Next \/ DupOwner
+
+SpecMoveBad == Init /\ [][NextMoveBad]_vars
+
+\* SYMMETRY-soundness control (injected SYMMETRIC bug, the teeth-test for the
+\* RevokedDead ghost invariant, rev2§2.2): RevokedDead (revoked \cap live = {}) is
+\* a state invariant the safety arm checks under SafetySymmetry. The real Copy
+\* reuses a previously revoked slot id only by FORGETTING it from the ghost set
+\* (revoked' = revoked \ {dst}), so a slot is never dead and live at once.
+\* ReviveRevoked instead returns a revoked cap to `live` and a cspace while leaving
+\* it in `revoked` — a direct RevokedDead violation, the runnable proof the
+\* ghost-clear in Copy is load-bearing. The bug is SYMMETRIC (\E over Procs and
+\* revoked, no CHOOSE), present in every orbit member so it survives even a wrong
+\* quotient. Run under SYMMETRY SafetySymmetry (CapRevocation_RevokedDeadBad.cfg)
+\* the quotient must STILL report it. It must keep violating RevokedDead for as
+\* long as CapRevocation_Safety carries SYMMETRY SafetySymmetry.
+ReviveRevoked ==
+    /\ \E p \in Procs, c \in revoked :
+        /\ c \notin live
+        /\ live'    = live \cup {c}
+        /\ cspaces' = [cspaces EXCEPT ![p] = @ \cup {c}]
+    /\ UNCHANGED <<parent, queues, bindings, treport, revoked, revoking,
+                   nlive, ncaps, pcbind, eopen>>
+
+NextRevokedDeadBad == Next \/ ReviveRevoked
+
+SpecRevokedDeadBad == Init /\ [][NextRevokedDeadBad]_vars
+
 \* =======================================================================
 \* Channel whole-object teardown and peer-closed firing (rev2§3.3) — TSpec
 \* =======================================================================
