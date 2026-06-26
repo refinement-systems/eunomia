@@ -5,30 +5,28 @@
 
 use crate::chunk::{boundaries, ChunkerParams};
 use crate::hash::Hash;
-use crate::prolly::{Content, Entry, EntryKind, FormatError, NodeStore, INLINE_MAX};
-use alloc::vec;
+use crate::prolly::{Content, Entry, EntryKind, FormatError, NodeStore, TlvErr, INLINE_MAX};
 use alloc::vec::Vec;
-
-/// Chunk-list objects share the content-addressed keyspace with tree nodes;
-/// the leading byte keeps the decoders from confusing them (tree nodes
-/// start with their level, capped well below this).
-const CHUNK_LIST_MAGIC: u8 = 0xC1;
+use vstd::prelude::*;
 
 pub fn store_file(store: &mut impl NodeStore, params: &ChunkerParams, data: &[u8]) -> Content {
     if data.len() <= INLINE_MAX {
         return Content::Inline(data.to_vec());
     }
-    let mut list = vec![CHUNK_LIST_MAGIC];
     let cuts = boundaries(params, data);
-    list.extend_from_slice(&(cuts.len() as u32).to_le_bytes());
+    let mut refs: Vec<RawChunkRef> = Vec::with_capacity(cuts.len());
     let mut start = 0;
     for cut in cuts {
         let chunk = &data[start..cut];
         let hash = store.put(chunk);
-        list.extend_from_slice(hash.as_bytes());
-        list.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
+        refs.push(RawChunkRef {
+            hash: *hash.as_bytes(),
+            len: chunk.len() as u32,
+        });
         start = cut;
     }
+    let mut list = Vec::new();
+    encode_chunk_list(&refs, &mut list);
     Content::ChunkList(store.put(&list))
 }
 
@@ -67,22 +65,17 @@ pub fn read_file(
 
 /// Parse a chunk-list object into (chunk hash, chunk length) pairs.
 /// Shared by the read path and the GC mark walk (rev2§4.6).
+///
+/// The integer/framing half is the verified `decode_chunk_list` (total ∀ bytes,
+/// never panics, accepts only a canonical encoding — doc/guidelines/verus.md
+/// §8/§9); this thin shell wraps each raw `[u8; 32]` digest back into `Hash`,
+/// the one place the crypto type is touched (§9).
 pub fn chunk_list_entries(list: &[u8]) -> Result<Vec<(Hash, u32)>, FormatError> {
-    if list.len() < 5 || list[0] != CHUNK_LIST_MAGIC {
-        return Err(FormatError::BadNode("not a chunk list"));
-    }
-    let count = u32::from_le_bytes(list[1..5].try_into().unwrap()) as usize;
-    if list.len() != 5 + count * 36 {
-        return Err(FormatError::BadNode("chunk list length mismatch"));
-    }
-    let mut out = Vec::with_capacity(count);
-    for i in 0..count {
-        let off = 5 + i * 36;
-        let chunk_hash = Hash::from_bytes(list[off..off + 32].try_into().unwrap());
-        let chunk_len = u32::from_le_bytes(list[off + 32..off + 36].try_into().unwrap());
-        out.push((chunk_hash, chunk_len));
-    }
-    Ok(out)
+    let refs = decode_chunk_list(list).map_err(crate::prolly::tlv_err)?;
+    Ok(refs
+        .into_iter()
+        .map(|r| (Hash::from_bytes(r.hash), r.len))
+        .collect())
 }
 
 /// Build a complete, validated file entry from raw content.
@@ -196,13 +189,17 @@ pub fn store_file_neighborhood(
         pos = cut;
     }
 
-    // Encode the spliced chunk list — identical format to `store_file`.
-    let mut out = vec![CHUNK_LIST_MAGIC];
-    out.extend_from_slice(&(refs.len() as u32).to_le_bytes());
-    for (hash, len) in &refs {
-        out.extend_from_slice(hash.as_bytes());
-        out.extend_from_slice(&len.to_le_bytes());
-    }
+    // Encode the spliced chunk list through the same verified layout
+    // (`encode_chunk_list`) `store_file` uses — identical bytes.
+    let raw_refs: Vec<RawChunkRef> = refs
+        .iter()
+        .map(|(hash, len)| RawChunkRef {
+            hash: *hash.as_bytes(),
+            len: *len,
+        })
+        .collect();
+    let mut out = Vec::new();
+    encode_chunk_list(&raw_refs, &mut out);
     Content::ChunkList(store.put(&out))
 }
 
@@ -216,6 +213,195 @@ fn common_suffix_len(a: &[u8], b: &[u8]) -> usize {
     }
     k
 }
+
+// ── Verified chunk-list codec (rev2§4.1/§4.9) ──────────────────────────────
+//
+// The chunk-list object `[MAGIC][count u32][ count × ([u8;32] hash, u32 len) ]`
+// is an on-disk CAS object read by both the file read path and the rev2§4.6 GC
+// mark walk, so its decoder is a strict adversarial-input parser. This island
+// lifts the integer/framing half into Verus: `decode_chunk_list` is total over
+// arbitrary bytes (verifying its body *is* the no-panic theorem) and frames an
+// accepted buffer exactly against `chunk_list_bytes`, the one layout spec the
+// encoder `encode_chunk_list` also targets — so the plain-Rust shells
+// (`chunk_list_entries`/`store_file`/`store_file_neighborhood`) reference a
+// single canonical layout. Like `prolly.rs`'s `decode_node`, it works on a
+// `Hash`-free image (`[u8; 32]` in place of `Hash`, doc/guidelines/verus.md §9)
+// and proves totality + framing only — no injectivity over the digest bytes.
+verus! {
+
+/// Chunk-list objects share the content-addressed keyspace with tree nodes; the
+/// leading byte keeps the decoders from confusing them (tree nodes start with
+/// their level, capped well below this). Inside the macro so the spec can name
+/// it (a const outside `verus!{}` is invisible to Verus). `pub(crate)` because
+/// the `open` spec body that names it must be at least as visible as the spec.
+pub(crate) const CHUNK_LIST_MAGIC: u8 = 0xC1;
+
+/// The `Hash`-free image of one chunk reference — `[u8; 32]` in place of `Hash`
+/// so the framing proof never touches the external `Hash` type (§9). The shells
+/// do the thin `Hash` wrap/unwrap. `pub(crate)` for the same reason as the const:
+/// the `open` specs name it.
+pub(crate) struct RawChunkRef {
+    pub(crate) hash: [u8; 32],
+    pub(crate) len: u32,
+}
+
+/// The canonical bytes of one reference: the 32-byte digest then the little-endian
+/// chunk length (fixed 36-byte stride). `open` (its body unfolds for the codec
+/// proofs), so `pub(crate)` per Verus's open-implies-visible rule.
+pub(crate) open spec fn chunk_ref_bytes(r: RawChunkRef) -> Seq<u8> {
+    r.hash@ + le_bytes::u32_le(r.len)
+}
+
+/// The references concatenated in order. Back-recursive (peels the last ref) so
+/// the decode/encode loops restore their running concat invariant in one
+/// `lemma_chunk_refs_push` step per pushed ref (mirrors `prolly::entries_bytes`).
+pub(crate) open spec fn chunk_refs_bytes(rs: Seq<RawChunkRef>) -> Seq<u8>
+    decreases rs.len(),
+{
+    if rs.len() == 0 {
+        Seq::<u8>::empty()
+    } else {
+        chunk_refs_bytes(rs.drop_last()) + chunk_ref_bytes(rs.last())
+    }
+}
+
+/// The canonical byte image of a whole chunk-list object:
+/// `[MAGIC][count u32][refs…]`. `decode_chunk_list` proves the consumed bytes
+/// equal this for every accepted buffer; `encode_chunk_list` produces exactly it.
+pub(crate) open spec fn chunk_list_bytes(rs: Seq<RawChunkRef>) -> Seq<u8> {
+    seq![CHUNK_LIST_MAGIC] + le_bytes::u32_le(rs.len() as u32) + chunk_refs_bytes(rs)
+}
+
+/// One unfold step of [`chunk_refs_bytes`]: appending a ref appends its
+/// `chunk_ref_bytes`. The decode/encode loops cite it to restore their running
+/// concat invariant after each pushed ref (mirrors `prolly::lemma_entries_push`).
+proof fn lemma_chunk_refs_push(rs: Seq<RawChunkRef>, r: RawChunkRef)
+    ensures
+        chunk_refs_bytes(rs.push(r)) == chunk_refs_bytes(rs) + chunk_ref_bytes(r),
+{
+    assert(rs.push(r).drop_last() =~= rs);
+    assert(rs.push(r).last() == r);
+}
+
+/// Decode a stored chunk-list object — `[MAGIC][count u32][refs…]` — into its
+/// `Hash`-free image, **total ∀ bytes** (verifying the body *is* the no-panic
+/// theorem). The whole buffer must be consumed (a chunk list is one stored
+/// object; trailing bytes are rejected). For an accepted buffer the consumed
+/// bytes equal `chunk_list_bytes` — the canonical framing (totality + framing
+/// only, no injectivity over the digests, as `decode_node` does).
+fn decode_chunk_list(buf: &[u8]) -> (r: Result<Vec<RawChunkRef>, TlvErr>)
+    ensures
+        r matches Ok(rs) ==> chunk_list_bytes(rs@) == buf@,
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    let len = buf.len();
+
+    // [MAGIC][count u32]: one `fits(0, 5, len)` covers both `buf[0]` and the
+    // `read_u32_le(buf, 1)` four-byte read.
+    if !crate::prolly::fits(0, 5, len) {
+        return Err(TlvErr::BadNode("not a chunk list"));
+    }
+    if buf[0] != CHUNK_LIST_MAGIC {
+        return Err(TlvErr::BadNode("not a chunk list"));
+    }
+    let count = le_bytes::read_u32_le(buf, 1);
+    assert(buf@.subrange(0, 1) =~= seq![CHUNK_LIST_MAGIC]);
+
+    let mut refs: Vec<RawChunkRef> = Vec::new();
+    let mut i: u32 = 0;
+    let mut pos: usize = 5;
+    assert(buf@.subrange(5, 5) =~= chunk_refs_bytes(refs@));
+    while i < count
+        invariant
+            5 <= pos <= len,
+            len == buf@.len(),
+            i <= count,
+            refs@.len() == i,
+            buf@.subrange(0, 1) == seq![CHUNK_LIST_MAGIC],
+            buf@.subrange(1, 5) == le_bytes::u32_le(count),
+            buf@.subrange(5, pos as int) == chunk_refs_bytes(refs@),
+        decreases count - i,
+    {
+        if !crate::prolly::fits(pos, 36, len) {
+            return Err(TlvErr::BadNode("chunk list length mismatch"));
+        }
+        // One fixed 36-byte ref, read inline (like `decode_node`'s internal-node
+        // loop) so the loop's `fits(pos, 36, len)` — `len` an exec `usize` —
+        // bounds the `pos + 32` / `pos + 36` offset arithmetic. The byte-indexed
+        // readers keep `from_le_bytes`/`try_into` out of the proof (§8).
+        let ghost old_refs = refs@;
+        let hash = crate::prolly::read_arr32(buf, pos);
+        let clen = le_bytes::read_u32_le(buf, pos + 32);
+        let rr = RawChunkRef { hash, len: clen };
+        refs.push(rr);
+        proof {
+            crate::prolly::lemma_cat(buf@, pos as int, pos as int + 32, pos as int + 36);
+            assert(chunk_ref_bytes(rr) =~= buf@.subrange(pos as int, pos as int + 36));
+            lemma_chunk_refs_push(old_refs, rr);
+            crate::prolly::lemma_cat(buf@, 5, pos as int, pos as int + 36);
+        }
+        pos = pos + 36;
+        i += 1;
+    }
+    // `count` refs parsed; the whole buffer must be consumed.
+    if pos != len {
+        return Err(TlvErr::BadNode("chunk list length mismatch"));
+    }
+    proof {
+        crate::prolly::lemma_cat(buf@, 0, 1, 5);
+        crate::prolly::lemma_cat(buf@, 0, 5, len as int);
+    }
+    assert(refs@.len() == count);
+    assert(refs@.len() as u32 == count);
+    assert(buf@ =~= buf@.subrange(0, len as int));
+    assert(chunk_list_bytes(refs@) =~= buf@);
+    Ok(refs)
+}
+
+/// Serialize one reference (`[hash u8;32][len u32]`), appended to `out` — the
+/// encode half of one 36-byte stride.
+fn encode_chunk_ref(out: &mut Vec<u8>, r: &RawChunkRef)
+    ensures
+        final(out)@ == old(out)@ + chunk_ref_bytes(*r),
+{
+    crate::prolly::push_arr32(out, &r.hash);
+    crate::prolly::push_u32_le(out, r.len);
+    assert(out@ =~= old(out)@ + chunk_ref_bytes(*r));
+}
+
+/// Serialize a chunk-list object's references to their canonical bytes
+/// (`[MAGIC][count u32][refs…]`), appended to `out`. The encode half of the
+/// chunk-list round-trip: produces exactly `chunk_list_bytes`, so it and
+/// `decode_chunk_list` reference the one layout spec (mirrors
+/// `prolly::encode_node_leaf`).
+fn encode_chunk_list(refs: &Vec<RawChunkRef>, out: &mut Vec<u8>)
+    ensures
+        final(out)@ == old(out)@ + chunk_list_bytes(refs@),
+{
+    out.push(CHUNK_LIST_MAGIC);
+    crate::prolly::push_u32_le(out, refs.len() as u32);
+    assert(refs@.subrange(0, 0) =~= Seq::<RawChunkRef>::empty());
+    let mut i: usize = 0;
+    while i < refs.len()
+        invariant
+            i <= refs@.len(),
+            out@ == old(out)@ + seq![CHUNK_LIST_MAGIC] + le_bytes::u32_le(refs@.len() as u32)
+                + chunk_refs_bytes(refs@.subrange(0, i as int)),
+        decreases refs@.len() - i,
+    {
+        let ghost prev = refs@.subrange(0, i as int);
+        encode_chunk_ref(out, &refs[i]);
+        proof {
+            lemma_chunk_refs_push(prev, refs@[i as int]);
+            assert(refs@.subrange(0, i as int + 1) =~= prev.push(refs@[i as int]));
+        }
+        i += 1;
+    }
+    assert(refs@.subrange(0, refs@.len() as int) =~= refs@);
+    assert(out@ =~= old(out)@ + chunk_list_bytes(refs@));
+}
+
+} // verus!
 
 #[cfg(test)]
 mod tests {
@@ -330,6 +516,48 @@ mod tests {
         }
         new[off..end].copy_from_slice(edit);
         new
+    }
+
+    /// Strict adversarial decode: `chunk_list_entries` (the verified
+    /// `decode_chunk_list` plus the thin `Hash` wrap) round-trips a well-formed
+    /// buffer and *rejects* every malformed shape — bad magic, short header,
+    /// trailing bytes, a truncated final ref, and a count larger than the bytes
+    /// supply — without panicking (the decoder is Verus-total over all inputs).
+    #[test]
+    fn chunk_list_entries_strictness() {
+        // A well-formed one-ref object: [MAGIC][count=1][hash][len=7].
+        let hash = Hash::of(b"chunk-0");
+        let mut good = Vec::new();
+        good.push(CHUNK_LIST_MAGIC);
+        good.extend_from_slice(&1u32.to_le_bytes());
+        good.extend_from_slice(hash.as_bytes());
+        good.extend_from_slice(&7u32.to_le_bytes());
+
+        let entries = chunk_list_entries(&good).expect("well-formed chunk list");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0], (hash, 7u32));
+
+        // Bad magic byte.
+        let mut bad_magic = good.clone();
+        bad_magic[0] ^= 0xFF;
+        assert!(chunk_list_entries(&bad_magic).is_err());
+
+        // Short header (< 5 bytes) and the empty buffer.
+        assert!(chunk_list_entries(&good[..3]).is_err());
+        assert!(chunk_list_entries(b"").is_err());
+
+        // One trailing byte past the single ref.
+        let mut trailing = good.clone();
+        trailing.push(0x00);
+        assert!(chunk_list_entries(&trailing).is_err());
+
+        // Final ref truncated by one byte (35 of 36).
+        assert!(chunk_list_entries(&good[..good.len() - 1]).is_err());
+
+        // Count claims two refs but only one is present.
+        let mut overcount = good.clone();
+        overcount[1..5].copy_from_slice(&2u32.to_le_bytes());
+        assert!(chunk_list_entries(&overcount).is_err());
     }
 
     /// Deterministic pseudo-random bytes (LCG) — same generator the chunker's
