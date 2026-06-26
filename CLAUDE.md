@@ -54,6 +54,23 @@ Documents in doc/plans and doc/results are considered temporary intermediate rep
 
 ### Kernel (cross-compiled for AArch64 bare-metal)
 
+The `user/*` binaries build `std` via build-std from the **vendored fork**
+(`vendor/rust`), so a fresh clone needs that submodule plus its `library/backtrace`
+nested submodule (std includes it unconditionally via `#[path]`) before the kernel
+build will succeed — `-Zbuild-std` is redirected there by `kernel/build.rs`
+(`__CARGO_TESTS_ONLY_SRC_ROOT`), not at rustup's `rust-src`. Pull only those (the
+fork's other nested submodules — `llvm-project`, `cargo`, … — are huge and
+unneeded):
+
+```sh
+git submodule update --init vendor/rust
+git -C vendor/rust submodule update --init library/backtrace
+```
+
+The std-build nightly is pinned by `kernel/rust-toolchain.toml` to match the
+`vendor/rust` commit exactly (rustup auto-installs it with `rust-src`); the pin is
+kernel-scoped so it never perturbs the `verus` (Rust 1.95.0) or host toolchains.
+
 ```sh
 # Build (target aarch64-unknown-none-softfloat and build-std set by
 # kernel/.cargo/config.toml; softfloat because trap frames don't save SIMD)
