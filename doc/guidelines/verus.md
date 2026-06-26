@@ -1418,6 +1418,27 @@ the lines spelled out inline — the explicit conjunction *is* the audit anchor,
 predicate that lives in one module while siblings keep frames inline reads
 inconsistently.
 
+**Naming a whole-store predicate as an `ensures` on a function that *establishes* it is the
+cheap side — and redundancy, not cost, is the reason to omit it on a producer.** The
+asymmetry above warns that a *consumer* of a folded predicate can ~double. The dual is worth
+stating: adding `ensures P(final)` to a function that already proves an invariant `Q(final)`
+from which `P` follows by a one-step corollary lemma (`Q ⇒ P`, `requires Q ensures P`) is the
+*establish* side — it costs only the corollary call, not a re-unfold inside a
+quantifier-dense consumer. Measured for the CapRevocation `fire_safe` corollary (a whole-store
+predicate over TCB bind slots) on `thread::destroy_tcb`, the crate's single heaviest proof:
+adding the `ensures` left its cold `rlimit` *flat* (24.6M → 22.0M, well inside the
+`cspace::delete` ±3M run-to-run swing on byte-identical code in the same pair of runs). So the
+cost is not the reason to omit such a label on a producer. **Redundancy is:** if the function
+already `ensure`s `Q(final)`, every verified caller derives `P(final)` from the corollary for
+free, so an explicit `ensures P(final)` adds proof surface and a future-edit obligation on a
+heavy op for *no new derivable fact*. Reserve the explicit label for the one site where the
+property genuinely *bites* — the operation the invariant is *about* (the firing site
+`report_terminal`, not the bind-slot-emptying teardown that merely preserves it) — and let the
+corollary carry it everywhere else. This is the deductive twin of a TLA per-step invariant
+named where it is cheaply entailed (Part A §1.3); the discharge across the op's own body uses a
+*light* frame lemma (read-set: slot caps + `bind_slots` + notif domain), never a re-run of the
+full `caps_consistent` frame the op's heavy ensures already pay for.
+
 **`spinoff_prover` is redundant after a clean extraction.** Once a heavy step is
 extracted into a self-contained lemma that is already a small isolated query,
 additionally marking it `#[verifier::spinoff_prover]` buys nothing — a separate solver
