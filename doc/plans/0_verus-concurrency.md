@@ -647,14 +647,14 @@ the fallback. Do **not** schedule these as Verus work.
   is wanted, add a `_has_teeth` control to the disjointness proptest.
 
 - **`ipc-reactor-protocol-tsm` — abstract `tokenized_state_machine!` twin of
-  IpcReactor.tla.** *Reason:* the macro crate is off-crates.io (fragile CI build
-  graph), the unbounded-vs-bounded win is largely theoretical (TLC already
-  exhausts the meaningful state space), it duplicates rather than retires the TLA
-  safety arm, and it loses the TLA negative controls' CI-runnable teeth.
+  IpcReactor.tla.** *Reason:* the unbounded-vs-bounded win is largely theoretical
+  (TLC already exhausts the meaningful state space), it duplicates rather than
+  retires the TLA safety arm, and it loses the TLA negative controls' CI-runnable
+  teeth.
   *Fallback:* keep IpcReactor.tla as-is. If ever pursued, it must be a non-tokenized
-  `state_machine!`, solve the macro dep first, and explicitly retire the TLA safety
-  invariants (keeping `EventuallyDelivered`) with guard-stripped failing-`#[inductive]`
-  negative controls — a high bar.
+  `state_machine!` and explicitly retire the TLA safety invariants (keeping
+  `EventuallyDelivered`) with guard-stripped failing-`#[inductive]` negative
+  controls — a high bar.
 
 ### Already satisfied (no work) or net-negative (do not pursue)
 
