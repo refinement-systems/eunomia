@@ -22,13 +22,26 @@ fn build_user(
         .arg(&spec)
         // `--target <path>.json` is gated behind this unstable cargo flag.
         .arg("-Zjson-target-spec")
-        .arg("-Zbuild-std=core,compiler_builtins,alloc")
+        .arg("-Zbuild-std=core,compiler_builtins,alloc,std,panic_abort")
         .arg("-Zbuild-std-features=compiler-builtins-mem")
         .arg("--target-dir")
         .arg(target_dir)
+        // Build std from the vendored fork (which carries the eunomia PAL +
+        // restricted_std allowlist entry), not rustup's pristine rust-src. This
+        // cargo override names the std workspace directory directly (the dir
+        // whose Cargo.toml is the library workspace), i.e. vendor/rust/library —
+        // not the monorepo root, whose Cargo.toml is the whole-compiler workspace.
+        .env(
+            "__CARGO_TESTS_ONLY_SRC_ROOT",
+            root.join("vendor").join("rust").join("library"),
+        )
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("CARGO_TARGET_DIR");
+    // The pinned nightly (kernel/rust-toolchain.toml) flows to this sub-build for
+    // free: we invoke the active toolchain's `cargo` (CARGO) and inherit its
+    // `RUSTC`/`RUSTUP_TOOLCHAIN`, none of which are scrubbed above — so the
+    // sub-build uses the same toolchain regardless of its user/<pkg> cwd.
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -47,6 +60,9 @@ fn main() {
     let root = manifest.parent().unwrap();
     for dep in [
         "targets/aarch64-unknown-eunomia.json",
+        // The vendored std the user builds compile via build-std; an edit here
+        // (or a submodule bump) must re-spawn them.
+        "vendor/rust/library/std/src",
         "user/hello",
         "user/selftest",
         "user/init",

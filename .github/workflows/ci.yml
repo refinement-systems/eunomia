@@ -178,8 +178,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      # The user/* binaries now build std via build-std from the vendored fork
+      # (vendor/rust). Check out only what build-std needs: vendor/rust itself
+      # (non-recursive, so its huge llvm-project/cargo/miri submodules are
+      # skipped) plus its library/backtrace nested submodule, which std includes
+      # unconditionally via `#[path]`. The fork commit is pinned by the eunomiaos
+      # submodule pointer.
+      - name: Check out the vendored std (library + its backtrace submodule)
+        run: |
+          # .gitmodules pins SSH URLs; rewrite to HTTPS so the public repos clone
+          # without an SSH key on the runner.
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          git submodule update --init vendor/rust
+          git -C vendor/rust submodule update --init library/backtrace
+      - uses: dtolnay/rust-toolchain@master
         with:
+          # Pinned to the vendor/rust commit (matches kernel/rust-toolchain.toml).
+          # rust-src backs the kernel's own core/compiler_builtins build-std; the
+          # user/* std comes from vendor/rust (kernel/build.rs redirect).
+          toolchain: nightly-2026-06-26
           components: rust-src
       - uses: Swatinem/rust-cache@v2
       - name: Install QEMU (aarch64 system emulation)
