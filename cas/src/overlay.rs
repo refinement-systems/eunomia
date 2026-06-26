@@ -471,8 +471,10 @@ impl Overlay {
     /// Cross-check the id indirection (test-only): the indices stay mutually
     /// consistent after every op. `by_name`/`names` are inverses for live files;
     /// every id is either dirty (`by_id`) or open (or both); a nameless id is an
-    /// unlinked-while-open orphan and must be held open; and a *dirty* live name
-    /// is never tombstoned (an opened-but-unwritten one may be).
+    /// unlinked-while-open orphan and must be held open; a *dirty* live name
+    /// is never tombstoned (an opened-but-unwritten one may be); and the byte
+    /// census is recomputable from state — `bytes` equals the total length of
+    /// every live interval map, so a clamp cannot silently absorb a miscount.
     #[cfg(test)]
     pub(crate) fn check_invariants(&self) {
         for (name, id) in &self.by_name {
@@ -522,6 +524,20 @@ impl Overlay {
                 "open id {id} absent from names"
             );
         }
+        // The byte census is recomputable from state: `bytes` (rev2§4.4) must
+        // equal the total length of every live interval map. It is delta-accounted
+        // through `(bytes + delta).max(0)` writes and `saturating_sub` reaps, whose
+        // clamps would otherwise silently absorb a miscount — this independent
+        // recomputation catches any such drift.
+        let census: usize = self
+            .by_id
+            .values()
+            .map(|fo| fo.writes.values().map(|v| v.len()).sum::<usize>())
+            .sum();
+        assert_eq!(
+            self.bytes, census,
+            "byte census disagrees with by_id writes"
+        );
     }
 }
 
