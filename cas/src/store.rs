@@ -1647,7 +1647,7 @@ proof fn lemma_recover_reconstructs(
 {
 }
 
-/// **Anti-theatre teeth** (Task 13): the projection *pins* its head/seq to the rebuilt
+/// **Anti-theatre teeth**: the projection *pins* its head/seq to the rebuilt
 /// run's anchor, so a deliberately-wrong (e.g. off-by-one) head bound `(h2, s2)` cannot
 /// also satisfy it. With `records` non-empty, [`recover_reconstructs`] forces
 /// `records[0].off == head && records[0].seq == next_seq`; any `(h2, s2)` differing from

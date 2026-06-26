@@ -110,10 +110,11 @@ pub const SECTOR: usize = 512;
 /// `u16`-wrap arithmetic, mechanized for *all* inputs: the slot is exactly
 /// `4 + 2*(idx % qsize)` and its two bytes always land inside the `6 + 2*qsize`
 /// avail buffer `new()` allocates (`pool.alloc(6 + 2 * n, 2)`). `qsize` in
-/// `1..=8` is the caller's trusted MMIO bring-up precondition (`new()`'s
-/// `u32→u16 .min(8)`); the device-shared ring stays the trusted DMA seam
-/// (rev2§2.5). The two ring proptests (`avail_ring_slot_in_bounds`,
-/// `avail_index_wraps_consistently`) are the companion oracle tier, kept.
+/// `1..=8` is the caller's trusted MMIO bring-up precondition (`new()`
+/// computes it as `max.min(8) as u16` after rejecting a zero `QUEUE_NUM_MAX`);
+/// the device-shared ring stays the trusted DMA seam (rev2§2.5). The two ring
+/// proptests (`avail_ring_slot_in_bounds`, `avail_index_wraps_consistently`)
+/// are the companion oracle tier, kept.
 pub fn avail_ring_slot(idx: u16, qsize: u16) -> (slot: usize)
     requires
         qsize > 0,
@@ -237,7 +238,11 @@ impl<M: Mmio, B: DmaBacking> VirtioBlk<M, B> {
         if max == 0 {
             return Err(VirtioError::NoQueue);
         }
-        let queue_size = (max as u16).min(8);
+        // Clamp in `u32` space *before* the `u16` cast: a device whose
+        // `QUEUE_NUM_MAX` low 16 bits are zero (e.g. 0x10000) would otherwise
+        // truncate to a zero-length ring, breaking `avail_ring_slot`'s
+        // `qsize > 0` precondition (rev2§2.5).
+        let queue_size = max.min(8) as u16;
         mmio.write32(reg::QUEUE_NUM, queue_size as u32);
 
         let n = queue_size as usize;
