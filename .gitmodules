@@ -1,3 +1,6 @@
 [submodule "vendor/verus"]
 	path = vendor/verus
 	url = git@github.com:refinement-systems/verus.git
+[submodule "vendor/rust"]
+	path = vendor/rust
+	url = git@github.com:refinement-systems/rust.git
