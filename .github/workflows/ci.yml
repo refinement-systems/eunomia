@@ -349,11 +349,15 @@ jobs:
           # and --lib skips the placeholder bin (which carries no proofs). Links
           # cas+ipc, re-verified under the alloc prelude.
           cargo verus verify -p storage-server --no-default-features --lib
-          # loader ELF page geometry — `Segment::page_layout` is total and
-          # overflow-safe ∀ (vaddr, memsz): Err exactly when the page-up rounding
-          # vaddr+memsz+(PAGE-1) overflows u64; otherwise both ends page-aligned,
-          # encloses vaddr (strictly when memsz>0), page_offset in [0,PAGE), and
-          # pages counts the span exactly. The ELF/startup byte decoders and the
-          # target-only spawn stay external; verified as the no_std core
-          # (--no-default-features). Links ipc, re-verified transitively.
+          # loader ELF decoder — `Segment::page_layout` total/overflow-safe ∀
+          # (vaddr, memsz): Err exactly when vaddr+memsz+(PAGE-1) overflows u64;
+          # otherwise both ends page-aligned, encloses vaddr (strictly when
+          # memsz>0), page_offset in [0,PAGE), pages counts the span exactly. And
+          # `parse` is a total bounded decoder ∀ &[u8] (no panic/OOB), with the
+          # mask/shift little-endian field readers proven to reassemble each value
+          # (`read_u{16,32,64}_le` vs `u*_le`); every accepted Image is
+          # well-formed (1..=MAX_SEGMENTS segments, each file extent in-bounds and
+          # `page_layout`-safe). The startup byte codec and the target-only spawn
+          # stay external; verified as the no_std core (--no-default-features).
+          # Links ipc, re-verified transitively.
           cargo verus verify -p loader --no-default-features
