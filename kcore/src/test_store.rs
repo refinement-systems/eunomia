@@ -934,6 +934,32 @@ fn caps_consistent_exec(st: &ArrayStore) -> bool {
     })
 }
 
+// The executable counterpart of `cspace::fire_safe` (the rev2§5.1 CapRevocation FireSafe
+// per-step half): every resident TCB binding slot is empty ("NULL") or names a *live*
+// notification, so a thread-death fire (`thread::report_terminal` → `signal`) only ever
+// signals a live object or skips a cleared slot — it never touches freed memory. The
+// `caps_consistent ⇒ fire_safe` corollary makes this a projection of the cap-consistency
+// invariant; `report_terminal` is host-checked across it, and
+// `fire_safe_exec_has_teeth` proves the mirror is not vacuous.
+fn fire_safe_exec(st: &ArrayStore) -> bool {
+    st.tcbs.values().all(|tcb| {
+        tcb.bind_slots.iter().all(|&s| {
+            // Only an in-arena bind slot carries the obligation; a non-resident handle
+            // makes the spec antecedent `slot_view().dom().contains(s)` false ⇒ vacuously safe.
+            if (s.0 as usize) < st.n() {
+                match st.slots[s.0 as usize].cap.kind {
+                    // `cap_notif` Some(nn): the bind cap names a notif ⇒ it must be live.
+                    CapKind::Notification(nn) => st.notifs.contains_key(&nn.0),
+                    // Empty ("NULL") or any non-notif cap: the death-fire is a no-op.
+                    _ => true,
+                }
+            } else {
+                true
+            }
+        })
+    })
+}
+
 // Exec mirror of `cspace::end_caps_sound`: every live channel's `end_caps[e]` equals the
 // count of `Channel(ch, e)` caps in the arena (the rev2§3.3 per-endpoint census). Host-checks
 // that clause against the real `ArrayStore` bodies (`end_caps_sound_exec_has_teeth` proves
@@ -2389,7 +2415,11 @@ fn report_terminal_first_call_wins_and_fires() {
     // an absorbing no-op.
     let (mut st, t) = report_terminal_fixture(BIND_EXIT, true, true);
     let w = ObjId(201);
+    // FireSafe holds entering the fire (caps_consistent pre-state) and is preserved across it
+    // (`cspace::fire_safe`, the `caps_consistent(old) ⟹ fire_safe(final)` postcondition).
+    assert!(fire_safe_exec(&st), "fire-safe before the fire");
     report_terminal(&mut st, t, Report::Exited(42));
+    assert!(fire_safe_exec(&st), "fire-safe preserved across the fire");
     assert_eq!(
         st.tcbs[&t.0].report,
         Report::Exited(42),
@@ -2461,7 +2491,16 @@ fn report_terminal_firesafe_empty_slot() {
     // FireSafe: an empty bind slot (a revoke raced the death and cleared it) ⇒ the fire
     // is a no-op, no panic, and the report still records.
     let (mut st, t) = report_terminal_fixture(BIND_EXIT, false, false);
+    // An empty bind slot is fire-safe, and the no-op fire preserves it.
+    assert!(
+        fire_safe_exec(&st),
+        "fire-safe before the fire (empty slot)"
+    );
     report_terminal(&mut st, t, Report::Exited(5));
+    assert!(
+        fire_safe_exec(&st),
+        "fire-safe preserved across the no-op fire"
+    );
     assert_eq!(
         st.tcbs[&t.0].report,
         Report::Exited(5),
@@ -3418,6 +3457,40 @@ fn caps_consistent_exec_has_teeth() {
     assert!(
         !caps_consistent_exec(&st),
         "teeth: CSpace cap with no live cspace"
+    );
+}
+
+#[test]
+fn fire_safe_exec_has_teeth() {
+    // Well-formed: a resident TCB whose EXIT bind slot holds Notification(100), with 100 live.
+    // slot 2 (the FAULT bind slot) stays empty ("NULL"), the other fire-safe shape.
+    let mut base = ArrayStore::new(3);
+    base.slots[1] = detached(notif_cap(100));
+    base.notifs.insert(
+        100,
+        NotifState {
+            word: 0,
+            wait_head: None,
+            wait_tail: None,
+        },
+    );
+    base.tcbs.insert(
+        200,
+        TcbState {
+            bind_slots: [SlotId(1), SlotId(2)],
+            ..tcb_state_default()
+        },
+    );
+    assert!(fire_safe_exec(&base), "a live-notif bind slot is fire-safe");
+
+    // Teeth: the same in-arena bind slot now names a notification absent from the arena.
+    // This is distinct from `caps_consistent_exec_has_teeth`'s out-of-arena Thread arm
+    // (`bind_slots[0] = SlotId(999)`), so it adds discriminating coverage.
+    let mut st = base.clone();
+    st.notifs.remove(&100);
+    assert!(
+        !fire_safe_exec(&st),
+        "teeth: a resident bind slot names a dead notification"
     );
 }
 
