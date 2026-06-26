@@ -223,9 +223,9 @@ impl<'a> Startup<'a> {
 }
 
 /// A bounds-checked cursor over the input. Every read is `get`-checked with
-/// `checked_add` (mirroring `elf::u16le`/`u32le`/`u64le`), so decode is total:
-/// any read past the end yields `None`, never a panic or an out-of-bounds
-/// access.
+/// `checked_add` (the same bounds discipline as the verified `elf::parse`
+/// decoder), so decode is total: any read past the end yields `None`, never a
+/// panic or an out-of-bounds access.
 struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
