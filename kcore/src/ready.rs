@@ -134,7 +134,6 @@ pub fn top_ready<S: Store>(store: &S) -> (r: Option<usize>)
 // and level non-empty; every other bit and chain is unchanged. The 32 per-bit
 // `bit_vector` instantiations, spun off so the main sweep stays in budget.
 #[verifier::spinoff_prover]
-#[verifier::rlimit(100)]
 pub proof fn lemma_ready_coherent_after_set(
     rv0: cspace::ReadyView,
     tv0: Map<ObjId, cspace::TcbView>,
@@ -181,7 +180,6 @@ pub proof fn lemma_ready_coherent_after_set(
 // unchanged. The clear-bit twin of `lemma_ready_coherent_after_set` — the level-still-
 // non-empty case keeps the bitmap unchanged and is handled inline in `lemma_ready_remove_wf`.
 #[verifier::spinoff_prover]
-#[verifier::rlimit(100)]
 pub proof fn lemma_ready_coherent_after_clear(
     rv0: cspace::ReadyView,
     tv0: Map<ObjId, cspace::TcbView>,
@@ -226,7 +224,6 @@ pub proof fn lemma_ready_coherent_after_clear(
 // the *global* `ready_wf`/`ready_complete` over all 32 levels. Spun off into its own Z3
 // instance so the op body stays within budget.
 #[verifier::spinoff_prover]
-#[verifier::rlimit(150)]
 pub proof fn lemma_ready_push_wf(
     rv0: cspace::ReadyView,
     tv0: Map<ObjId, cspace::TcbView>,
@@ -367,7 +364,6 @@ pub proof fn lemma_ready_push_wf(
 // `ready_wf(rv0)` (not `ready_complete`), so both ops call it. Spun off into its own Z3
 // instance so the op body stays within budget.
 #[verifier::spinoff_prover]
-#[verifier::rlimit(150)]
 pub proof fn lemma_ready_remove_wf(
     rv0: cspace::ReadyView,
     tv0: Map<ObjId, cspace::TcbView>,
@@ -490,7 +486,6 @@ pub proof fn lemma_ready_remove_wf(
 // a ready thread holds no object ref). `t` must be off the ready queue (`state !=
 // Runnable`), so the push preserves `no_duplicates`. After: `t` is `Runnable` at the tail.
 #[verifier::spinoff_prover]
-#[verifier::rlimit(40)]
 pub fn ready_enqueue<S: Store>(store: &mut S, t: ObjId)
     requires
         old(store).tcb_view().dom().contains(t),
@@ -661,7 +656,6 @@ pub fn ready_enqueue<S: Store>(store: &mut S, t: ObjId)
 // (the caller — `maybe_switch` — immediately sets it `Running`), so the op preserves
 // `ready_wf` but *not* `ready_complete` (hence the contract carries neither completeness form).
 #[verifier::spinoff_prover]
-#[verifier::rlimit(60)]
 pub fn ready_dequeue<S: Store>(store: &mut S, level: usize) -> (r: Option<ObjId>)
     requires
         level < NUM_PRIOS,
@@ -775,7 +769,6 @@ pub fn ready_dequeue<S: Store>(store: &mut S, level: usize) -> (r: Option<ObjId>
 // off-chain, so the op preserves `ready_wf` + `ready_complete_except(t)` (the `destroy_tcb`
 // caller halts `t` to close the completeness gap).
 #[verifier::spinoff_prover]
-#[verifier::rlimit(100)]
 pub fn ready_unqueue<S: Store>(store: &mut S, t: ObjId)
     requires
         old(store).tcb_view().dom().contains(t),
