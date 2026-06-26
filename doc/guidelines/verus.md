@@ -172,6 +172,17 @@ Three rules govern what a contract may name:
   `ring_fifo().len() == count` by construction). Pick the predicate that carries genuine,
   non-derived content (the channel `send`/`recv` FIFO labels name `Seq::push` /
   `drop_first` and the Err-arm store-frame, not the length).
+- **A *new* projection `spec fn` of an external (TLA) invariant must carry a
+  pins/teeth control** — the case the comment-only labels above don't cover. When the
+  named predicate is discharged *only* by feeding it its sole producer's `ensures`
+  (e.g. `recover_reconstructs` from `recover_records`), a green proof risks being
+  vacuous: it could hold for the wrong reconstruction too. Add a committed `proof fn`
+  proving the predicate is *false* for a deliberately-wrong argument (an off-by-one
+  anchor — `lemma_recover_reconstructs_pins_head` proves a head ≠ the rebuilt run's
+  anchor fails it), so the green proof demonstrably constrains the input it is stated
+  against. The pins lemma stays in the tree; the symmetric "wrong `ensures` fails to
+  verify" experiment is recorded in the findings doc and reverted — it is red by
+  construction and cannot be committed.
 
 ## The trusted base
 
