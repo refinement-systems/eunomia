@@ -67,16 +67,28 @@ items needing a human call are consolidated in [Open decisions](#open-decisions)
   reaper (`urt::spawn::reap`) distinguishes a crash from `exit(0)` by that status.
 - **`OsStr` is bytes** (the `_` default), matching rev2§4.9 byte-equality names —
   no WTF-8, no `os/eunomia/ffi.rs`.
-- **Locks use a parker-over-notifications backend, not a futex.** *Recommended over*
-  a `urt::futex` module (which would hand Mutex/Condvar/RwLock/Once/Parker to std's
-  generic impls "for free" but needs a new address-keyed wait-queue **kernel
-  object**). The parker maps 1:1 onto the existing `NotifSignal`/`NotifWait`
-  primitive (verified core) and the already-Loom/Shuttle/TLA-validated `ipc`
-  reactor, adding **no kernel surface**. Cost: more per-primitive PAL wiring than
-  the futex route. Either way the concurrent wakeup is irreducibly Loom/Shuttle —
-  never Verus (the version-pinned Verus ghost atomics are SeqCst-only with no
-  standalone fence, per `doc/guidelines/verification.md`; a proof would certify a
-  different binary).
+- **Locks use a `sys::futex` backend, emulated in userspace over per-thread
+  notifications.** *This is decided, not open.* This tree has **no generic
+  parking-based Mutex/Condvar** — `mutex/mod.rs` and `condvar/mod.rs` select either
+  the `futex` impl, a platform-specific impl, or `no_threads` (panics on
+  contention); the `Parker` backs only `thread::park` and the `queue` RwLock/Once,
+  **not** the locks. So `sys::futex` is the *only* primitive that lights up the whole
+  stack (Mutex/Condvar/RwLock/Once/Parker) from upstream's already-correct impls —
+  we write zero lock logic, just the four futex functions
+  (`futex_wait`/`futex_wake`/`futex_wake_all` + the `u32` atomic types). `motor`
+  (`sys/pal/motor/mod.rs` = `pub use moto_rt::futex;`, present in all five futex
+  arms) is the exact template: a from-scratch OS delegating `sys::futex` to its
+  runtime crate. The eunomia PAL arm is a one-line `pub use eunomia_sys::futex;`; the
+  emulation — a process-global address→waiter table over `NotifSignal`/`NotifWait`,
+  with a small bootstrap spinlock — lives in the gated crate. **Future-proof:** a
+  later *kernel* futex/wait-set object (rev2§8.3) is an internal backend swap inside
+  `eunomia_sys::futex`, invisible to std. The concurrent wakeup is irreducibly
+  Loom/Shuttle (reusing the rev2§3.6 word-check-before-wait discipline the
+  `IpcReactor` already models) — never Verus (the version-pinned Verus ghost atomics
+  are SeqCst-only with no standalone fence, per `doc/guidelines/verification.md`; a
+  proof would certify a different binary). `no_threads` locks are the Phase-2
+  single-threaded interim. See [Open decisions](#open-decisions) for why the parker
+  route was rejected.
 - **Entropy: a startup-block seed grant**, *recommended over* virtio-rng. The seed
   rides the existing rev2§5.1 named-grant mechanism and its decode is covered by the
   Phase-1 verified startup parser, so it **adds no trusted seam**. virtio-rng is
@@ -132,8 +144,9 @@ The constraint's escape hatch — *unverified only where tools provably cannot r
   *and* the userspace `svc #0` syscall-trap + register-marshalling wrappers in
   `eunomia-sys` (the userspace mirror of the kernel-side trusted register
   marshalling; inherently unverifiable, rev2§6.1(d));
-- the concurrent wakeup path (Parker/Mutex/Condvar over notifications) — SeqCst-pin
-  infeasible in Verus; Loom/Shuttle-of-record + the existing `IpcReactor` TLA model;
+- the concurrent wakeup path (the emulated-futex address→waiter dispatch + its
+  bootstrap spinlock, over notifications) — SeqCst-pin infeasible in Verus;
+  Loom/Shuttle-of-record + the existing `IpcReactor` TLA model;
 - any `virtio-rng` device seam (DMA/hardware, rev2§2.5) — avoided by the seed-grant decision.
 
 **Everything else is verified on arrival**, never stubbed-then-replaced. Note the
@@ -161,8 +174,9 @@ register-file marshalling around it are the trusted inline-asm shell above.
 | GlobalAlloc arena byte-region + `sbrk` grow | **Miri**+proptest (region, green); grow **folds under the Store/aspace page-table-join seam (c)** | No — region is *not* one of the 14 (ledger scope note) |
 | TLS — `TPIDR_EL0` save/restore | **trusted-shell + ledger routing-note** (under asm-context-switch shell (d)) | No — touches no Verus obligation (`TcbView` omits the register frame) |
 | TLS — key table | **Verus** (over the verified `SlotAlloc`) | No — verified surface; the per-thread block uses the verified heap |
-| Parker (atomic state word + wakeup fence) | **Loom** (certifying — the load-bearing tool only where a raw atomic+fence lives) | No |
-| Mutex / Condvar / RwLock / Once (synchronize *through* the Parker) | **Shuttle** (thread-interleaving — Loom's weak-memory modeling adds nothing without their own atomics); **reuse** `tla/ipc_reactor` + its 3 negative controls | No |
+| `sys::futex` emulation — bucket spinlock (raw atomic + fence) | **Loom** (certifying — the load-bearing tool only where a raw atomic+fence lives) | No |
+| `sys::futex` emulation — address→waiter dispatch over notifications | **Shuttle** (thread-interleaving); **reuse** `tla/ipc_reactor` + its 3 negative controls | No |
+| Mutex / Condvar / RwLock / Once / Parker (upstream futex impls) | **none new** — verified by upstream over `sys::futex`; covered transitively by the two rows above | No — we write no lock logic |
 | stdio sinks | **trusted-shell** (marshalling over verified `ipc` Admission/reactor) | No |
 | fs marshalling | **Verus** (path-component decode) + **cargo-fuzz**; rights lattice + `check_header` already verified | No — path decode is verified surface |
 | time (Instant/SystemTime) | **Verus** (`utc_ns_at`, green) + **Loom** (seqlock read, green) | No |
@@ -239,7 +253,7 @@ Everything else has a `_`→unsupported and can ship unsupported first.
 | **panic/unwind** | panic=abort (no `eh_personality`) | **ready** | Target JSON + build-std flags only |
 | **env / args** | `loader::startup::decode` of the slot-0 boot message | **partial** | Verify the decoder (Phase 1); `sys/args`+`sys/env` arms. `env::vars` empty until a producer emits env entries |
 | **thread: spawn/join/yield/sleep** | `Retype→Thread` + `ThreadStart(13/18)`; `ThreadExit(15)`; join via `ThreadBind(21,on-exit)`+`NotifWait(12)`+`ReadReport(22)`; **`Yield`=op 2**; sleep `TimerArm(14)`+`NotifWait` | **partial** | `urt` in-process thread-spawn primitive (only one scalar arg `x0` — a boxed `FnOnce` ptr fits); fund stack+guard (rev2§5.3). `urt::spawn` has **zero Verus/host coverage** today — net-new test surface |
-| **sync: Mutex/Condvar/RwLock/Parker** | notifications `NotifSignal(11)`/`NotifWait(12)` (verified core) | **partial** | parker backend + committed Loom/Shuttle harness reusing `tla/ipc_reactor`. `notif_wait` has **no timeout** → `*_timeout` needs the unwired timer-as-source path |
+| **sync: Mutex/Condvar/RwLock/Once/Parker** | `sys::futex` emulated over `NotifSignal(11)`/`NotifWait(12)` (verified core) → upstream's futex lock impls | **partial** | `eunomia_sys::futex` (4 fns) + committed Loom/Shuttle harness reusing `tla/ipc_reactor`; the locks come free from std. `notif_wait` has **no timeout** → `futex_wait(Some(_))` / `*_timeout` need the unwired timer-as-source path (MVP: `None` only) |
 | **stdio** | (bring-up) `DebugWrite(1)`; (real) console channel over `ipc` | **partial** out / **missing** stdin | `sys/stdio/eunomia.rs` arm; `stdin` op deliberately unassigned (rev2§7) → must read the console channel. `NAME_STDIN`/`NAME_STDOUT` are **already emitted by init** (both → the console slot) and consumed by the shell, so only the std-side wiring remains, not grant delivery |
 | **thread_local / TLS** | `TPIDR_EL0` (absent) + `urt::slots` index alloc (verified) | **missing** | `TPIDR_EL0` save/restore (Phase 3) + `urt` TLS key table + `sys/thread_local` arm |
 | **fs: File/read_dir/metadata** | storage-server openat session (handle-relative, component paths) | **partial** | `sys/fs/eunomia.rs` client + path decode; `File=(HandleId, TreePath, client offset)`; 256-byte `MAX_MSG` → client offset loops |
@@ -342,7 +356,7 @@ global-statics fallback. Time is pulled in here — it is free.*
 |---|---|---|---|---|
 | **3.1** | Real TLS (kernel) | `TPIDR_EL0` save/restore: `tpidr` in `TrapFrame` (272→288 + pad), `mrs/msr` in `exceptions.rs`, grow `sub/add sp,#272`, seed at start; **`offset_of` const-assert** | `cargo clean -p kcore && cargo verus verify -p kcore` re-passes **406/0** (unchanged); host test: 2 threads share an aspace, read distinct TLS markers; ledger routing-note added | **8** |
 | **3.2** | spawn/join/yield/sleep | `urt` in-process thread-spawn primitive (`Box<ThreadInit>` ptr → `x0`); `sys/thread/eunomia.rs` (motor template); stack+guard (rev2§5.3); `yield_now` = op 2; sleep = `TimerArm`+`NotifWait` | QEMU spawn smoke + **new host tests** for the `urt::spawn` invariants (bind-before-start, read-report-before-revoke) — currently uncovered | **9** |
-| **3.3** | Locks | parker-over-notifications backend (decision above); Mutex/Condvar/RwLock/Once over it; lift the heap single-thread no-lock assumption (lock or per-thread arenas) | **Loom** (certifying) + **Shuttle** (breadth) green, **reusing `tla/ipc_reactor`** + its 3 negative controls — **never Verus** (SeqCst pin) | **10** |
+| **3.3** | Locks | `eunomia_sys::futex` emulated over notifications (the 4 futex fns + types; address→waiter table + bootstrap spinlock); add `eunomia` to the five `sys/sync/*/futex.rs` arms + `pub use eunomia_sys::futex;` in the PAL → Mutex/Condvar/RwLock/Once/Parker come free; lift the heap single-thread no-lock assumption (lock or per-thread arenas). MVP supports `futex_wait(timeout=None)`; `Some(_)` deferred to the timer-as-source path | **Loom** (certifying, the bucket spinlock) + **Shuttle** (breadth, the dispatch) green, **reusing `tla/ipc_reactor`** + its 3 negative controls — **never Verus** (SeqCst pin) | **10** |
 | **3.4** | Entropy + HashMap | startup-block seed grant (decision above); `sys/random/eunomia.rs` (mandatory arm) over the seed; unblock `HashMap` default `RandomState` | seed decode Verus+fuzz (rides 1.2); `HashMap` works under smoke | **11** |
 | **3.5** | TLS keys | `urt::tls` key table over the verified `SlotAlloc` + per-thread block over the verified heap; `sys/thread_local` arm | `cargo verus verify -p urt` (key-table obligations green); host test | **12** |
 
@@ -407,7 +421,7 @@ precedent). The mapping:
 | 7 | 2.4 time | 18 | 5.3 rewrite a user binary |
 | 8 | 3.1 TPIDR_EL0 | 19 | 6.1 on-target test triage |
 | 9 | 3.2 thread spawn/join | 20 | 6.2 fuzz corpora + PAL audit |
-| 10 | 3.3 parker/locks | 21 | 6.3 forward-port runbook + ledger |
+| 10 | 3.3 futex backend + locks | 21 | 6.3 forward-port runbook + ledger |
 
 Each findings doc records **everything worth keeping** — err on the side of too
 much; there is a consolidation pass at the end. At minimum:
@@ -433,10 +447,19 @@ they may **not** be referenced from code comments, specs, or guidelines.
 Each names a recommended default (already reflected in the plan) so work is never
 blocked; record the final call in the relevant task's findings doc.
 
-1. **Sync backend — parker vs futex (task 10).** *Recommended: parker over
-   notifications* (no new kernel object; reuses the Loom/Shuttle/TLA-validated
-   reactor). Futex hands the whole sync stack to std's generics but needs a new
-   address-keyed wait-queue kernel primitive + fresh Loom coverage.
+1. **Sync backend — RESOLVED: `sys::futex` emulated over notifications (task 10).**
+   The parker route was rejected: this tree has no generic parking-based
+   Mutex/Condvar (`sys/sync/{mutex,condvar}/mod.rs` offer only `futex`,
+   platform-specific, or `no_threads` arms; the `Parker` backs only `thread::park`
+   and the `queue` RwLock/Once), so a parker backend would force hand-writing
+   Mutex+Condvar as a bespoke platform backend (the sgx/xous pattern) — *more* code
+   and **throwaway** the day a futex is adopted. `sys::futex` is the only primitive
+   that yields the whole stack from upstream's impls; `motor` (`pub use
+   moto_rt::futex`) is the template; a future *kernel* futex object is an internal
+   backend swap inside `eunomia_sys::futex`, invisible to std. The per-thread
+   notification block/wake primitive is needed either way, so nothing is wasted. The
+   one added cost over the parker route — the address→waiter table's bootstrap
+   spinlock — is a single small Loom/Shuttle-certified component.
 2. **Entropy source (task 11).** *Recommended: startup-block seed grant* (no new
    seam; decode covered by task 3). virtio-rng only if seed quality proves
    insufficient — it raises the ledger 14→15.
@@ -445,11 +468,13 @@ blocked; record the final call in the relevant task's findings doc.
    only if a distinct stream is required.
 4. **Heap growth (tasks 5, later).** *Recommended: fixed `.bss` arena for the MVP.*
    The `heap` named grant + sbrk-grow (folds under the Store/aspace seam) is deferred.
-5. **`*_timeout` APIs in scope? (task 10).** `notif_wait` has no deadline; `park_timeout`
-   / `Condvar::wait_timeout` need the timer-as-source reactor path (`timer_arm` +
-   `register_bound`), which has no reactor consumer today. *Recommended: out of scope
-   for the initial port; return `Unsupported` or block without timeout, and wire the
-   timer source as a follow-up.*
+5. **`*_timeout` APIs in scope? (task 10).** `notif_wait` has no deadline, so
+   `futex_wait`'s `Option<Duration>` (and the `Condvar::wait_timeout` /
+   `park_timeout` it backs) need the timer-as-source reactor path (`timer_arm` +
+   `register_bound`), which has no reactor consumer today. *Recommended: MVP
+   implements `futex_wait(timeout=None)` fully and routes `Some(_)` to the timer
+   path as a follow-up — the lock stack works without timeouts; only the `_timeout`
+   variants wait on the timer wiring.*
 6. **`TPIDR_EL0` timing (task 8).** *Recommended: land it with real threading
    (Phase 3), not hello-world* — single-threaded bring-up uses the global-statics
    `thread_local` fallback, so Phase 2 is not gated on a kernel change.
