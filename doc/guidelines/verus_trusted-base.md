@@ -207,6 +207,27 @@ retired or demoted. No trusted seam added (the tally stays 14); kcore Baseline r
 `404 → 406` (the two new `proof fn`s; the `fire_safe` `spec fn` is non-recursive, +0),
 below.
 
+**CommitProtocol `AtLeastOneValidSlot` + `GenerationsDistinct` routing note.** The two CAS
+recovery-decision functions (`cas/src/store.rs`, rev2§4.5) now read as the mechanized
+*local per-call* half of the two `CommitProtocol` safety invariants. `pick_survivor`'s
+`ensures (valid_a && valid_b) ==> ((r is SlotA) <==> gen_a >= gen_b)` is the per-call
+witness of TLA `GenerationsDistinct` (`tla/commit_protocol/CommitProtocol.tla:247`): under
+two valid slots the winner is fixed by generation, so `LiveSlot` is deterministic.
+`commit_target`'s `ensures r != live_slot(sb_in_b)` is the by-construction witness of TLA
+`AtLeastOneValidSlot` (`CommitProtocol.tla:244`, the rev2§4.5 `Crash` three-outcome safety):
+a commit never targets the live slot, so a torn write damages only the slot being written.
+Both `ensures` **already existed and verified** — this labels them in place (inline comments
+on the clauses), adding *no* new coverage. What stays TLA-owned, by design: the *global*
+`AtLeastOneValidSlot`/`GenerationsDistinct` invariants as crash-step invariants over the
+whole `slotA`/`slotB` × `walLog`/`writeCtr` state the verified pure core does not model
+(checked by the 6886-state `CommitProtocol` TLC run + `CommitProtocol_NegControl.cfg`,
+below) — and, by the same routing, the `Crash` three-outcome safety, the cross-restart
+`Recover`/`RecoverReconstructs` replay-equality (the headline recovery arm), and the
+`FsyncMeansFsync` storage axiom (recorded above) all stay TLA-owned + by-construction; only
+these two per-call witnesses are Verus-mechanized. The TLA `CommitProtocol` model is **not**
+retired or demoted. No trusted seam added (the tally stays 14) and no Baseline change: cas
+stays `75 verified` (a clause comment carries no proof obligation), below.
+
 ## The seams (14 named constructs + the by-construction category)
 
 Grouped by the `verus.md` §11 category. Each interpreted-hash / size / std-gap seam is a
