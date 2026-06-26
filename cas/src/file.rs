@@ -2,7 +2,6 @@
 //! inline in the directory entry; larger content is FastCDC-chunked and
 //! referenced through a chunk-list object. The inline rule is a pure
 //! function of content, preserving canonical form.
-
 use crate::chunk::{boundaries, ChunkerParams};
 use crate::hash::Hash;
 use crate::prolly::{Content, Entry, EntryKind, FormatError, NodeStore, TlvErr, INLINE_MAX};
@@ -294,6 +293,7 @@ fn decode_chunk_list(buf: &[u8]) -> (r: Result<Vec<RawChunkRef>, TlvErr>)
         r matches Ok(rs) ==> chunk_list_bytes(rs@) == buf@,
 {
     broadcast use vstd::slice::group_slice_axioms;
+
     let len = buf.len();
 
     // [MAGIC][count u32]: one `fits(0, 5, len)` covers both `buf[0]` and the
@@ -329,6 +329,7 @@ fn decode_chunk_list(buf: &[u8]) -> (r: Result<Vec<RawChunkRef>, TlvErr>)
         // loop) so the loop's `fits(pos, 36, len)` — `len` an exec `usize` —
         // bounds the `pos + 32` / `pos + 36` offset arithmetic. The byte-indexed
         // readers keep `from_le_bytes`/`try_into` out of the proof (§8).
+
         let ghost old_refs = refs@;
         let hash = crate::prolly::read_arr32(buf, pos);
         let clen = le_bytes::read_u32_le(buf, pos + 32);
@@ -402,7 +403,6 @@ fn encode_chunk_list(refs: &Vec<RawChunkRef>, out: &mut Vec<u8>)
 }
 
 } // verus!
-
 #[cfg(test)]
 mod tests {
     use super::*;

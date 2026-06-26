@@ -14,7 +14,6 @@
 //! property (`kcore::proofs::sysabi`) rather than a review convention.
 //!
 //! No pointers, no `unsafe`, no kernel dependencies — pure data.
-
 use crate::channel::MSG_PAYLOAD;
 use crate::untyped::ObjType;
 use vstd::prelude::*;
@@ -111,7 +110,8 @@ fn decode_prio(raw: u64) -> (result: Result<u8, SysError>)
 /// in the verified fragment.
 pub fn decode(nr: u64, a: [u64; 6]) -> (result: Result<Sys, SysError>)
     ensures
-        // rev2§3.7: every `nr` outside the defined 0..=26 range is `UnknownCall`.
+// rev2§3.7: every `nr` outside the defined 0..=26 range is `UnknownCall`.
+
         nr >= 27 ==> result matches Err(SysError::UnknownCall),
         // Retype with an out-of-range `ObjType` discriminant is `BadObjType`
         // (via `ObjType::from_u64`'s `None`-iff-`v >= 8` characterization).
@@ -126,85 +126,101 @@ pub fn decode(nr: u64, a: [u64; 6]) -> (result: Result<Sys, SysError>)
         result matches Ok(Sys::ThreadStart { prio, .. }) ==> (prio as usize) < NUM_PRIOS,
         result matches Ok(Sys::ThreadStartAs { prio, .. }) ==> (prio as usize) < NUM_PRIOS,
 {
-    Ok(match nr {
-        0 => Sys::DebugPutc { ch: a[0] },
-        1 => Sys::DebugWrite { ptr: a[0], len: a[1] },
-        2 => Sys::Yield,
-        3 => {
-            // `from_u64` is `None` exactly when `a[1] >= 8`, so the BadObjType
-            // postcondition follows from its contract.
-            match ObjType::from_u64(a[1]) {
-                Some(ty) => Sys::Retype { ut: a[0], ty, param: a[2], dst: a[3], dst2: a[4] },
-                None => return Err(SysError::BadObjType),
+    Ok(
+        match nr {
+            0 => Sys::DebugPutc { ch: a[0] },
+            1 => Sys::DebugWrite { ptr: a[0], len: a[1] },
+            2 => Sys::Yield,
+            3 => {
+                // `from_u64` is `None` exactly when `a[1] >= 8`, so the BadObjType
+                // postcondition follows from its contract.
+                match ObjType::from_u64(a[1]) {
+                    Some(ty) => Sys::Retype { ut: a[0], ty, param: a[2], dst: a[3], dst2: a[4] },
+                    None => return Err(SysError::BadObjType),
+                }
             }
-        }
-        // a[3] is the rev2§5.4 priority-ceiling cap on a thread-cap copy (rev2§2.3
-        // supervision grant); `NO_PRIO_CEILING` (0xFF) means "no reduction". Carried
-        // raw (it only ever *shrinks* an existing ceiling in `derive`, so no decode
-        // validation is needed — see `derived_kind`).
-        4 => Sys::CapCopy { src: a[0], dst: a[1], mask: a[2], prio_ceiling: a[3] },
-        5 => Sys::CapDelete { slot: a[0] },
-        6 => Sys::CapRevoke { slot: a[0] },
-        7 => Sys::CapInstall { cs: a[0], src: a[1], dst_index: a[2] },
-        8 => {
-            // Length is capped here, before channel::send truncates it `as u16`.
-            if a[2] > MSG_PAYLOAD as u64 {
-                return Err(SysError::MsgTooLong);
-            }
-            Sys::ChanSend { chan: a[0], buf: a[1], len: a[2], caps: a[3] }
-        }
-        9 => Sys::ChanRecv { chan: a[0], buf: a[1], dests: a[2] },
-        10 => {
-            if a[1] > 2 {
-                return Err(SysError::BadEvent);
-            }
-            Sys::ChanBind { chan: a[0], event: a[1] as usize, notif: a[2], bits: a[3] }
-        }
-        11 => Sys::NotifSignal { slot: a[0], bits: a[1] },
-        12 => Sys::NotifWait { slot: a[0] },
-        13 => {
-            match decode_prio(a[4]) {
-                Ok(prio) => Sys::ThreadStart { tcb: a[0], cspace: a[1], entry: a[2], sp: a[3], prio, arg: a[5] },
-                Err(e) => return Err(e),
-            }
-        }
-        14 => Sys::TimerArm { timer: a[0], notif: a[1], bits: a[2], delta: a[3] },
-        15 => Sys::ThreadExit { status: a[0] },
-        16 => Sys::Map { aspace: a[0], frame: a[1], va: a[2], perms: a[3] },
-        17 => Sys::FrameWrite { frame: a[0], off: a[1], buf: a[2], len: a[3] },
-        18 => {
-            match decode_prio(a[5]) {
-                Ok(prio) => Sys::ThreadStartAs { tcb: a[0], cspace: a[1], aspace: a[2], entry: a[3], sp: a[4], prio },
-                Err(e) => return Err(e),
-            }
-        }
-        19 => Sys::FramePaddr { slot: a[0] },
-        // 20 is unassigned: the userspace console driver owns the PL011 RX line, so
-        // there is no ambient input syscall — opcode 20 falls through to
-        // `UnknownCall` (rev2§7 carve-out exit condition met).
-        21 => {
-            if a[1] > 1 {
-                return Err(SysError::BadWhich);
-            }
-            Sys::ThreadBind { tcb: a[0], which: a[1] as usize, notif: a[2], bits: a[3] }
-        }
-        22 => Sys::ReadReport { tcb: a[0] },
-        23 => Sys::UntypedReset { slot: a[0] },
-        // Grow an aspace's page-table pool from a donated untyped (rev2§2.5
-        // "accepts top-ups"). Three raw `u64`s, all validated downstream by the
-        // abutment carve + `grow_pool`, so no decode-time range `ensures`.
-        24 => Sys::AspaceTopUp { aspace: a[0], ut: a[1], pages: a[2] },
-        // Bind/ack an IRQ-handler cap (rev2§1, rev2§3.6). Raw `u64`s,
-        // all validated downstream by the cap lookup + the verified `irq_bind`,
-        // so no decode-time range `ensures` (the `TimerArm`/`AspaceTopUp` precedent).
-        25 => Sys::IrqBind { irq: a[0], notif: a[1], bits: a[2] },
-        26 => Sys::IrqAck { irq: a[0] },
-        _ => return Err(SysError::UnknownCall),
-    })
+            // a[3] is the rev2§5.4 priority-ceiling cap on a thread-cap copy (rev2§2.3
+            // supervision grant); `NO_PRIO_CEILING` (0xFF) means "no reduction". Carried
+            // raw (it only ever *shrinks* an existing ceiling in `derive`, so no decode
+            // validation is needed — see `derived_kind`).
+            ,
+            4 => Sys::CapCopy { src: a[0], dst: a[1], mask: a[2], prio_ceiling: a[3] },
+            5 => Sys::CapDelete { slot: a[0] },
+            6 => Sys::CapRevoke { slot: a[0] },
+            7 => Sys::CapInstall { cs: a[0], src: a[1], dst_index: a[2] },
+            8 => {
+                // Length is capped here, before channel::send truncates it `as u16`.
+                if a[2] > MSG_PAYLOAD as u64 {
+                    return Err(SysError::MsgTooLong);
+                }
+                Sys::ChanSend { chan: a[0], buf: a[1], len: a[2], caps: a[3] }
+            },
+            9 => Sys::ChanRecv { chan: a[0], buf: a[1], dests: a[2] },
+            10 => {
+                if a[1] > 2 {
+                    return Err(SysError::BadEvent);
+                }
+                Sys::ChanBind { chan: a[0], event: a[1] as usize, notif: a[2], bits: a[3] }
+            },
+            11 => Sys::NotifSignal { slot: a[0], bits: a[1] },
+            12 => Sys::NotifWait { slot: a[0] },
+            13 => {
+                match decode_prio(a[4]) {
+                    Ok(prio) => Sys::ThreadStart {
+                        tcb: a[0],
+                        cspace: a[1],
+                        entry: a[2],
+                        sp: a[3],
+                        prio,
+                        arg: a[5],
+                    },
+                    Err(e) => return Err(e),
+                }
+            },
+            14 => Sys::TimerArm { timer: a[0], notif: a[1], bits: a[2], delta: a[3] },
+            15 => Sys::ThreadExit { status: a[0] },
+            16 => Sys::Map { aspace: a[0], frame: a[1], va: a[2], perms: a[3] },
+            17 => Sys::FrameWrite { frame: a[0], off: a[1], buf: a[2], len: a[3] },
+            18 => {
+                match decode_prio(a[5]) {
+                    Ok(prio) => Sys::ThreadStartAs {
+                        tcb: a[0],
+                        cspace: a[1],
+                        aspace: a[2],
+                        entry: a[3],
+                        sp: a[4],
+                        prio,
+                    },
+                    Err(e) => return Err(e),
+                }
+            },
+            19 => Sys::FramePaddr { slot: a[0] },
+            // 20 is unassigned: the userspace console driver owns the PL011 RX line, so
+            // there is no ambient input syscall — opcode 20 falls through to
+            // `UnknownCall` (rev2§7 carve-out exit condition met).
+            21 => {
+                if a[1] > 1 {
+                    return Err(SysError::BadWhich);
+                }
+                Sys::ThreadBind { tcb: a[0], which: a[1] as usize, notif: a[2], bits: a[3] }
+            },
+            22 => Sys::ReadReport { tcb: a[0] },
+            23 => Sys::UntypedReset { slot: a[0] },
+            // Grow an aspace's page-table pool from a donated untyped (rev2§2.5
+            // "accepts top-ups"). Three raw `u64`s, all validated downstream by the
+            // abutment carve + `grow_pool`, so no decode-time range `ensures`.
+            24 => Sys::AspaceTopUp { aspace: a[0], ut: a[1], pages: a[2] },
+            // Bind/ack an IRQ-handler cap (rev2§1, rev2§3.6). Raw `u64`s,
+            // all validated downstream by the cap lookup + the verified `irq_bind`,
+            // so no decode-time range `ensures` (the `TimerArm`/`AspaceTopUp` precedent).
+            25 => Sys::IrqBind { irq: a[0], notif: a[1], bits: a[2] },
+            26 => Sys::IrqAck { irq: a[0] },
+            _ => return Err(SysError::UnknownCall),
+        },
+    )
 }
 
 } // verus!
-
 #[cfg(test)]
 mod tests {
     use super::*;

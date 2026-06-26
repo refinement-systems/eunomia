@@ -295,3 +295,37 @@ cargo fmt --manifest-path cas/fuzz/Cargo.toml
 (The trap this avoids: editing `user/storaged` and running only the root
 `cargo fmt` leaves it untouched, so the next person to fmt that workspace drags
 your file's pre-existing reformatting into their diff.)
+
+#### Verus code — also run `verusfmt` before committing
+
+`cargo fmt` does **not** format code inside the `verus!{}` macro (rustfmt skips
+macro interiors), so the spec/proof code is left untouched by it. `verusfmt`
+(pinned to **0.7.2** here) is the complement: run `scripts/verusfmt.sh` before
+committing any change that touches `verus!{}` code. It is a complement, not a
+replacement — it formats only the macro interior (`--verus-only`) and then runs
+`cargo fmt`, which stays the authority for every out-of-macro line. The two have
+disjoint domains, so the pair is a deterministic fixed point, and `verusfmt` is
+layout-only — it does not change what Verus proves (the verification gate was
+re-run green over the formatted tree).
+
+```sh
+scripts/verusfmt.sh            # format Verus interiors in place, then cargo fmt
+scripts/verusfmt.sh --check    # gate: verify formatting (pairs with cargo fmt --check)
+```
+
+The authoritative formatting gate is still `cargo fmt --check`;
+`scripts/verusfmt.sh --check` adds the macro-interior half.
+
+Four files are **excluded** by the script — `verusfmt` 0.7.2 mishandles them, so
+they keep their hand formatting and `cargo fmt` alone owns them:
+
+- `cas/src/disk.rs`, `cas/src/prolly.rs` — verusfmt's parser rejects the
+  half-open range index `x[..n]`.
+- `cas/src/store.rs`, `kcore/src/aspace.rs` — files with several `verus!{}`
+  blocks: verusfmt wrongly indents the plain-Rust comments **between** the
+  blocks.
+
+If a new file gains either trait (an `x[..n]` index, or comments between multiple
+`verus!{}` blocks that verusfmt re-indents), add it to the script's skip list.
+No `user/*` binary or `*/fuzz` crate contains `verus!{}`, so the separate-
+workspace caveat above does not apply to verusfmt.

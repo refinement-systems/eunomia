@@ -12,7 +12,6 @@
 //! analogs, no splice walk. The proof is the census bookkeeping alone — the
 //! `lemma_irq_binding_retarget` single-key transition discharges `bind`, `unbind`, and the
 //! `destroy_irq` teardown uniformly.
-
 // `cspace::` is referenced only from `verus!{}` spec/proof code, erased under a normal
 // build — hence the allow (the `timer.rs` precedent).
 #[allow(unused_imports)]
@@ -87,9 +86,9 @@ pub fn irq_unbind<S: Store>(store: &mut S, i: ObjId)
         old(store).irq_view().dom().finite(),
         // `bound ⇒ notif is Some` (the `irq_wf` per-object fact) — gives `notif->Some_0` below.
         cspace::irq_wf(old(store).irq_view()),
-        old(store).irq_view()[i].bound ==>
-            (old(store).irq_view()[i].notif matches Some(n) ==>
-                old(store).refs_view().dom().contains(n) && old(store).refs_view()[n] > 0),
+        old(store).irq_view()[i].bound ==> (old(store).irq_view()[i].notif matches Some(n) ==> old(
+            store,
+        ).refs_view().dom().contains(n) && old(store).refs_view()[n] > 0),
     ensures
         final(store).slot_view() == old(store).slot_view(),
         final(store).chan_view() == old(store).chan_view(),
@@ -113,10 +112,12 @@ pub fn irq_unbind<S: Store>(store: &mut S, i: ObjId)
             &&& final(store).irq_view()[i].bound == false
             &&& final(store).irq_view()[i].notif is None
             &&& final(store).refs_view() == old(store).refs_view().insert(
-                    old(store).irq_view()[i].notif->Some_0,
-                    (old(store).refs_view()[old(store).irq_view()[i].notif->Some_0] - 1) as nat)
-            &&& forall|j: ObjId| #![trigger final(store).irq_view()[j]]
-                    j != i ==> final(store).irq_view()[j] == old(store).irq_view()[j]
+                old(store).irq_view()[i].notif->Some_0,
+                (old(store).refs_view()[old(store).irq_view()[i].notif->Some_0] - 1) as nat,
+            )
+            &&& forall|j: ObjId|
+                #![trigger final(store).irq_view()[j]]
+                j != i ==> final(store).irq_view()[j] == old(store).irq_view()[j]
         },
 {
     if !store.irq_bound(i) {
@@ -148,8 +149,8 @@ pub fn irq_unbind<S: Store>(store: &mut S, i: ObjId)
         // `irq_wf` preserved: `i` is now unbound (the implication is vacuous), every other
         // IRQ is framed (the two sets hit key `i` only).
         assert(cspace::irq_wf(irqvf)) by {
-            assert forall|k: ObjId| #[trigger] irqvf.dom().contains(k) implies
-                (irqvf[k].bound ==> irqvf[k].notif is Some) by {
+            assert forall|k: ObjId| #[trigger] irqvf.dom().contains(k) implies (irqvf[k].bound
+                ==> irqvf[k].notif is Some) by {
                 if k != i {
                     assert(irqvf[k] == irqv0[k]);
                 }
@@ -166,15 +167,17 @@ pub fn irq_unbind<S: Store>(store: &mut S, i: ObjId)
         assert(store.timer_view() == old(store).timer_view());
         let n = irqv0[i].notif->Some_0;
         assert(store.refs_view() == old(store).refs_view().insert(
-            n, (old(store).refs_view()[n] - 1) as nat));
+            n,
+            (old(store).refs_view()[n] - 1) as nat,
+        ));
         assert(store.refs_view().dom() =~= old(store).refs_view().dom());
         assert(irqv0.dom().finite());
         // The two setters hit the existing key `i`, so the IRQ domain is unchanged
         // (the `lemma_irq_binding_retarget` `post.dom() == pre.dom()` precondition).
         assert(irqvf.dom() =~= irqv0.dom());
-        assert forall|o: ObjId| store.refs_view().dom().contains(o) implies
-            store.refs_view()[o] + cspace::obj_census(old(store), o)
-                == old(store).refs_view()[o] + #[trigger] cspace::obj_census(store, o) by {
+        assert forall|o: ObjId| store.refs_view().dom().contains(o) implies store.refs_view()[o]
+            + cspace::obj_census(old(store), o) == old(store).refs_view()[o]
+            + #[trigger] cspace::obj_census(store, o) by {
             cspace::lemma_irq_binding_retarget(irqv0, irqvf, i, o);
         }
         assert(cspace::census_delta_frozen(old(store), store));
@@ -201,9 +204,9 @@ pub fn irq_bind<S: Store>(store: &mut S, i: ObjId, notif: ObjId, bits: u64)
         old(store).refs_view().dom().contains(notif),
         old(store).refs_view()[notif] < u32::MAX,
         // re-bind release fragment (discharges the `irq_unbind` `-1` if `i` is already bound).
-        old(store).irq_view()[i].bound ==>
-            (old(store).irq_view()[i].notif matches Some(n) ==>
-                old(store).refs_view().dom().contains(n) && old(store).refs_view()[n] > 0),
+        old(store).irq_view()[i].bound ==> (old(store).irq_view()[i].notif matches Some(n) ==> old(
+            store,
+        ).refs_view().dom().contains(n) && old(store).refs_view()[n] > 0),
     ensures
         final(store).slot_view() == old(store).slot_view(),
         final(store).chan_view() == old(store).chan_view(),
@@ -243,8 +246,8 @@ pub fn irq_bind<S: Store>(store: &mut S, i: ObjId, notif: ObjId, bits: u64)
         let irqvf = store.irq_view();
         // `irq_wf` preserved: `i` ends bound-with-`Some(notif)`; every other IRQ is framed.
         assert(cspace::irq_wf(irqvf)) by {
-            assert forall|k: ObjId| #[trigger] irqvf.dom().contains(k) implies
-                (irqvf[k].bound ==> irqvf[k].notif is Some) by {
+            assert forall|k: ObjId| #[trigger] irqvf.dom().contains(k) implies (irqvf[k].bound
+                ==> irqvf[k].notif is Some) by {
                 if k != i {
                     assert(irqvf[k] == irqv0v[k]);
                 }
@@ -271,15 +274,17 @@ pub fn irq_bind<S: Store>(store: &mut S, i: ObjId, notif: ObjId, bits: u64)
         // Only `i`'s `(bound, notif)` differs from `old`: `irqvf[j] == irqv0v[j]` for `j != i`
         // (`irq_unbind` framed `j`, and `bind`'s sets all hit key `i`).
         assert(irqvf.dom() == irqv0v.dom());
-        assert forall|j: ObjId| #![trigger irqvf[j]] j != i implies
-            irqvf[j].bound == irqv0v[j].bound && irqvf[j].notif == irqv0v[j].notif by {
+        assert forall|j: ObjId| #![trigger irqvf[j]] j != i implies irqvf[j].bound
+            == irqv0v[j].bound && irqvf[j].notif == irqv0v[j].notif by {
             assert(irqvf[j] == irqv0v[j]);
         }
         assert(irqvf[i].bound && irqvf[i].notif == Some(notif));
         assert(irqv0v.dom().finite());
-        assert forall|o: ObjId| store.refs_view().dom().contains(o) implies
-            rvf[o] + cspace::obj_census(old(store), o)
-                == rv0[o] + #[trigger] cspace::obj_census(store, o) by {
+        assert forall|o: ObjId| store.refs_view().dom().contains(o) implies rvf[o]
+            + cspace::obj_census(old(store), o) == rv0[o] + #[trigger] cspace::obj_census(
+            store,
+            o,
+        ) by {
             cspace::lemma_irq_binding_retarget(irqv0v, irqvf, i, o);
         }
         assert(store.refs_view().dom() == old(store).refs_view().dom());
@@ -305,9 +310,9 @@ pub fn destroy_irq<S: Store>(store: &mut S, i: ObjId)
         old(store).irq_view().dom().finite(),
         cspace::irq_wf(old(store).irq_view()),
         cspace::refcount_sound(old(store)),
-        old(store).irq_view()[i].bound ==>
-            (old(store).irq_view()[i].notif matches Some(n) ==>
-                old(store).refs_view().dom().contains(n) && old(store).refs_view()[n] > 0),
+        old(store).irq_view()[i].bound ==> (old(store).irq_view()[i].notif matches Some(n) ==> old(
+            store,
+        ).refs_view().dom().contains(n) && old(store).refs_view()[n] > 0),
         cspace::caps_consistent(old(store)),
         cspace::end_caps_sound(old(store)),
         cspace::census_dom_complete(old(store)),
@@ -348,38 +353,43 @@ pub fn destroy_irq<S: Store>(store: &mut S, i: ObjId)
             assert(irqv0[i].notif is Some);
             let n = irqv0[i].notif->Some_0;
             assert(store.refs_view() == old(store).refs_view().insert(
-                n, (old(store).refs_view()[n] - 1) as nat));
+                n,
+                (old(store).refs_view()[n] - 1) as nat,
+            ));
             assert(store.refs_view().dom() =~= old(store).refs_view().dom());
             assert(old(store).refs_view()[n] > 0);
             // dead-stays-dead (bound): `refs` moved only at `n` (`refs[n] > 0`), so a dead `x`
             // is `x != n` and keeps `refs[x] == 0`.
             assert forall|x: ObjId|
-                old(store).refs_view().dom().contains(x) && old(store).refs_view()[x] == 0
-                implies #[trigger] store.refs_view()[x] == 0 by { assert(x != n); }
+                old(store).refs_view().dom().contains(x) && old(store).refs_view()[x]
+                    == 0 implies #[trigger] store.refs_view()[x] == 0 by {
+                assert(x != n);
+            }
         } else {
             // Not bound ⇒ `irq_unbind` is a no-op; the store (refs + every view) is unchanged.
             assert(store.refs_view() == old(store).refs_view());
             assert forall|x: ObjId|
-                old(store).refs_view().dom().contains(x) && old(store).refs_view()[x] == 0
-                implies #[trigger] store.refs_view()[x] == 0 by {}
+                old(store).refs_view().dom().contains(x) && old(store).refs_view()[x]
+                    == 0 implies #[trigger] store.refs_view()[x] == 0 by {}
         }
         // caps_consistent: `irq_unbind` frames cspace and keeps the IRQ domain + `irq_wf`, so
         // the Irq arm reads an unchanged domain + the ensured `irq_wf`; every other arm reads
         // a framed object view. Each live cap's consistency carries over.
         assert(store.cspace_view() == old(store).cspace_view());
         assert(store.irq_view().dom() == old(store).irq_view().dom());
-        assert forall|s: crate::id::SlotId| #![trigger store.slot_view()[s]]
-            store.slot_view().dom().contains(s)
-                && !cspace::is_empty_cap(store.slot_view()[s].cap)
-            implies cspace::cap_consistent(store, store.slot_view()[s].cap) by {
+        assert forall|s: crate::id::SlotId|
+            #![trigger store.slot_view()[s]]
+            store.slot_view().dom().contains(s) && !cspace::is_empty_cap(
+                store.slot_view()[s].cap,
+            ) implies cspace::cap_consistent(store, store.slot_view()[s].cap) by {
             assert(cspace::cap_consistent(old(store), old(store).slot_view()[s].cap));
         }
         // census_dom_complete: the refs domain is unchanged and the census only dropped (at
         // `n` in the bound case; unchanged otherwise), so any object with census >= 1 now had
         // census >= 1 before ⇒ it was already covered. Reuse the unbind census frame.
         assert(store.refs_view().dom() == old(store).refs_view().dom());
-        assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o) >= 1
-            implies store.refs_view().dom().contains(o) by {
+        assert forall|o: ObjId| #[trigger]
+            cspace::obj_census(store, o) >= 1 implies store.refs_view().dom().contains(o) by {
             if !store.refs_view().dom().contains(o) {
                 cspace::lemma_irq_binding_retarget(irqv0, store.irq_view(), i, o);
                 // census(final, o) == census(old, o), which is 0 for o ∉ dom (census_dom_complete).
@@ -394,8 +404,10 @@ pub fn destroy_irq<S: Store>(store: &mut S, i: ObjId)
         cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, i);
         // "Dead stays dead": the refs domain is unchanged, and a dead in-domain object
         // keeps `refs == 0` (the per-branch fact above) — so death is preserved.
-        assert forall|o: ObjId| cspace::dead_obj(old(store), o)
-            implies #[trigger] cspace::dead_obj(store, o) by {
+        assert forall|o: ObjId| cspace::dead_obj(old(store), o) implies #[trigger] cspace::dead_obj(
+            store,
+            o,
+        ) by {
             if old(store).refs_view().dom().contains(o) && old(store).refs_view()[o] == 0 {
                 assert(store.refs_view()[o] == 0);
             }

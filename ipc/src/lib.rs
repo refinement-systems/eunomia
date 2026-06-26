@@ -14,7 +14,6 @@
 //! The reactor API is epoll-shaped — `register(source, signals, key)` —
 //! implemented over notification bit-groups, and can be upgraded to the
 //! kernel wait-set object when that lands (spec rev2§3.6).
-
 #![cfg_attr(not(feature = "std"), no_std)]
 // Clippy is not a CI gate: this fires in `verus!{}` verified exec
 // code where the explicit `x = x + y` form is what Verus reasons about — fixing

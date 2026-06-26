@@ -15,7 +15,6 @@
 //! dropped under the `--no-default-features` verify config, like cas's), so it is
 //! outside verified scope by feature-exclusion and guarded by the host tests
 //! below — no `external_body`, no new trusted seam.
-
 // The `verus!{}` macro + ghost vocabulary; Verus requires it imported in the
 // module that carries a proof. In an ordinary build the macro erases ghost code,
 // so this import is otherwise unused (same allow as lib.rs / kcore / ipc).
@@ -84,6 +83,7 @@ pub fn check_header(buf: &[u8], negotiated: u8) -> (r: Result<usize, WireError>)
         r == spec_check_header(buf@, negotiated),
 {
     broadcast use vstd::slice::group_slice_axioms, vstd::array::group_array_axioms;
+
     if buf.len() < 3 || buf[0] != PROTO_MAGIC[0] || buf[1] != PROTO_MAGIC[1] {
         return Err(WireError::BadHeader);
     }
@@ -94,7 +94,6 @@ pub fn check_header(buf: &[u8], negotiated: u8) -> (r: Result<usize, WireError>)
 }
 
 } // verus!
-
 #[cfg(feature = "serde")]
 use crate::{Request, Response};
 #[cfg(feature = "serde")]

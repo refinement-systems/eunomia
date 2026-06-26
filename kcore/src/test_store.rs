@@ -14,7 +14,6 @@
 //! (erased in a normal build) and so uncallable from exec test code, hence the
 //! plain-Rust re-expression. Shapes are built with the *verified* `derive`, so
 //! the generator cannot manufacture a non-`cspace_wf` start state.
-
 use crate::channel::{
     bind, destroy_channel, endpoint_cap_dropped, recv, send, ChanError, EV_PEER_CLOSED,
     EV_READABLE, MSG_PAYLOAD,

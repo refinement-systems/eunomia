@@ -30,7 +30,6 @@
 //! Generic over `Transport`: production drives `SyscallTransport`, the harnesses
 //! drive `ModelTransport`. Single-threaded per process (`wait` takes `&mut`), so
 //! the reactor itself holds no locks.
-
 use core::ops::BitOr;
 
 use crate::transport::{Chan, Event, Notif, Transport};
@@ -66,6 +65,7 @@ fn lowest_clear_bit(used: u64) -> (r: Option<u32>)
         },
 {
     broadcast use vstd::std_specs::bits::axiom_u64_trailing_zeros;
+
     let inv = !used;
     let bit = inv.trailing_zeros();
     if bit == 64 {
@@ -74,24 +74,33 @@ fn lowest_clear_bit(used: u64) -> (r: Option<u32>)
             assert(inv == 0u64);
             assert(!used == 0u64);
             assert(used == 0xFFFF_FFFF_FFFF_FFFFu64) by (bit_vector)
-                requires !used == 0u64;
+                requires
+                    !used == 0u64,
+            ;
         }
         None
     } else {
         proof {
-            assert(bit < 64); // from 0 <= tz <= 64 (axiom) and bit != 64
+            assert(bit < 64);  // from 0 <= tz <= 64 (axiom) and bit != 64
             let g: u64 = bit as u64;
             // The bit at position `bit` of `inv` is set ⇒ that bit of `used` is clear.
             assert((inv >> g) & 1u64 == 1u64);
             assert(((!used) >> g) & 1u64 == 1u64);
             assert(used & (1u64 << g) == 0u64) by (bit_vector)
-                requires g < 64, ((!used) >> g) & 1u64 == 1u64;
+                requires
+                    g < 64,
+                    ((!used) >> g) & 1u64 == 1u64,
+            ;
             // Every lower bit of `inv` is clear ⇒ every lower bit of `used` is set.
-            assert forall|j: u64| #![trigger used & (1u64 << j)] j < bit implies used & (1u64 << j) != 0u64 by {
+            assert forall|j: u64| #![trigger used & (1u64 << j)] j < bit implies used & (1u64 << j)
+                != 0u64 by {
                 assert((inv >> j) & 1u64 == 0u64);
                 assert(((!used) >> j) & 1u64 == 0u64);
                 assert(used & (1u64 << j) != 0u64) by (bit_vector)
-                    requires j < 64, ((!used) >> j) & 1u64 == 0u64;
+                    requires
+                        j < 64,
+                        ((!used) >> j) & 1u64 == 0u64,
+                ;
             }
         }
         Some(bit)
@@ -121,6 +130,7 @@ fn drain_one(pending: u64) -> (r: (u32, u64))
         r.1 == pending & !(1u64 << (r.0 as u64)),
 {
     broadcast use vstd::std_specs::bits::axiom_u64_trailing_zeros;
+
     let bit = pending.trailing_zeros();
     proof {
         // pending != 0 ⇒ tz(pending) < 64 (axiom: tz == 64 <==> word == 0).
@@ -129,19 +139,25 @@ fn drain_one(pending: u64) -> (r: (u32, u64))
         // The bit at position `bit` is set ⇒ that bit of `pending` is set.
         assert((pending >> g) & 1u64 == 1u64);
         assert(pending & (1u64 << g) != 0u64) by (bit_vector)
-            requires g < 64, (pending >> g) & 1u64 == 1u64;
+            requires
+                g < 64,
+                (pending >> g) & 1u64 == 1u64,
+        ;
         // Every lower bit of `pending` is clear (the drained bit is the lowest).
-        assert forall|j: u64| #![trigger pending & (1u64 << j)] j < bit implies pending & (1u64 << j) == 0u64 by {
+        assert forall|j: u64| #![trigger pending & (1u64 << j)] j < bit implies pending & (1u64
+            << j) == 0u64 by {
             assert((pending >> j) & 1u64 == 0u64);
             assert(pending & (1u64 << j) == 0u64) by (bit_vector)
-                requires j < 64, (pending >> j) & 1u64 == 0u64;
+                requires
+                    j < 64,
+                    (pending >> j) & 1u64 == 0u64,
+            ;
         }
     }
     (bit, pending & !(1u64 << (bit as u64)))
 }
 
 } // verus!
-
 verus! {
 
 /// The events a source can be registered for / reported ready on (rev2§3.3, rev2§3.6).
@@ -150,7 +166,6 @@ verus! {
 pub struct Signals(u8);
 
 } // verus!
-
 impl Signals {
     pub const READABLE: Signals = Signals(1);
     pub const WRITABLE: Signals = Signals(2);
@@ -206,7 +221,8 @@ struct Reg {
 // `register_sequence_keeps_used_coherent` is the companion oracle; this is its
 // deductive, all-inputs twin (`Seq` view of the `[Option<Reg>; 64]` array).
 spec fn coherent(slots: Seq<Option<Reg>>, used: u64) -> bool {
-    forall|b: int| #![trigger slots[b]]
+    forall|b: int|
+        #![trigger slots[b]]
         0 <= b < 64 ==> (slots[b].is_some() <==> used & (1u64 << (b as u64)) != 0u64)
 }
 
@@ -234,8 +250,9 @@ fn alloc_lowest(used: &mut u64) -> (r: Option<usize>)
             &&& bit < 64
             &&& *old(used) & (1u64 << (bit as u64)) == 0u64
             &&& *final(used) == *old(used) | (1u64 << (bit as u64))
-            &&& forall|j: u64| #![trigger *old(used) & (1u64 << j)]
-                    j < bit ==> *old(used) & (1u64 << j) != 0u64
+            &&& forall|j: u64|
+                #![trigger *old(used) & (1u64 << j)]
+                j < bit ==> *old(used) & (1u64 << j) != 0u64
         },
 {
     let bit = match lowest_clear_bit(*used) {
@@ -255,12 +272,11 @@ fn alloc_lowest(used: &mut u64) -> (r: Option<usize>)
 // returned `(slots, used)` only **after** its `Transport::bind`s succeed, so a bind failure
 // leaves the reactor entirely untouched. The proptest `register_sequence_keeps_used_coherent`
 // is the companion oracle; this is its deductive, all-inputs twin for the register path.
-fn register_into(
-    slots: [Option<Reg>; WORD_BITS],
-    used: u64,
-    signals: Signals,
-    key: Key,
-) -> (r: ([Option<Reg>; WORD_BITS], u64, Result<usize, RegisterErr>))
+fn register_into(slots: [Option<Reg>; WORD_BITS], used: u64, signals: Signals, key: Key) -> (r: (
+    [Option<Reg>; WORD_BITS],
+    u64,
+    Result<usize, RegisterErr>,
+))
     requires
         wf(slots@, used),
     ensures
@@ -276,8 +292,9 @@ fn register_into(
                 &&& bit < 64
                 &&& used & (1u64 << (bit as u64)) == 0u64
                 &&& r.1 == used | (1u64 << (bit as u64))
-                &&& forall|j: u64| #![trigger used & (1u64 << j)]
-                        j < bit ==> used & (1u64 << j) != 0u64
+                &&& forall|j: u64|
+                    #![trigger used & (1u64 << j)]
+                    j < bit ==> used & (1u64 << j) != 0u64
                 &&& r.0@ == slots@.update(bit as int, Some(Reg { key, signals }))
             },
         },
@@ -299,8 +316,8 @@ fn register_into(
                 // the bit `alloc_lowest` set in `u` (`u == used | (1<<bit)`); OR-ing in
                 // `1<<bit` leaves every other bit of `used` — hence every other slot's
                 // membership — unchanged. Case split on `b == bit` vs `b != bit`.
-                assert forall|b: int| 0 <= b < 64 implies
-                    ((#[trigger] out@[b]).is_some() <==> u & (1u64 << (b as u64)) != 0u64) by {
+                assert forall|b: int| 0 <= b < 64 implies ((#[trigger] out@[b]).is_some() <==> u & (
+                1u64 << (b as u64)) != 0u64) by {
                     let bb = b as u64;
                     if b == g as int {
                         // Newly filled slot; its `used` bit is the one just set.
@@ -308,7 +325,8 @@ fn register_into(
                             requires
                                 u == used | (1u64 << g),
                                 bb == g,
-                                g < 64;
+                                g < 64,
+                        ;
                     } else {
                         // Untouched slot: membership carries over from the entry coherence,
                         // and bit `bb` of `u` equals bit `bb` of `used` (OR didn't touch it).
@@ -319,7 +337,8 @@ fn register_into(
                                 u == used | (1u64 << g),
                                 bb != g,
                                 bb < 64,
-                                g < 64;
+                                g < 64,
+                        ;
                     }
                 }
             }
@@ -354,12 +373,11 @@ proof fn lemma_pop_lowest(bits: u64, bit: u64)
 // `mask & !bits` (the processed bits) and re-establishes coherence per step.
 // `Reactor::register_bound` (the plain shell over the slot array) delegates here;
 // the proptest `register_sequence_keeps_used_coherent` is the companion oracle.
-fn register_bound_into(
-    slots: [Option<Reg>; WORD_BITS],
-    used: u64,
-    mask: u64,
-    key: Key,
-) -> (r: ([Option<Reg>; WORD_BITS], u64, Result<(), RegisterErr>))
+fn register_bound_into(slots: [Option<Reg>; WORD_BITS], used: u64, mask: u64, key: Key) -> (r: (
+    [Option<Reg>; WORD_BITS],
+    u64,
+    Result<(), RegisterErr>,
+))
     requires
         wf(slots@, used),
     ensures
@@ -374,12 +392,13 @@ fn register_bound_into(
             Ok(()) => {
                 &&& mask & used == 0u64
                 &&& r.1 == used | mask
-                &&& forall|b: int| #![trigger r.0@[b]]
-                        0 <= b < 64 ==> r.0@[b] == (if mask & (1u64 << (b as u64)) != 0u64 {
-                            Some(Reg { key, signals: Signals(0) })
-                        } else {
-                            slots@[b]
-                        })
+                &&& forall|b: int|
+                    #![trigger r.0@[b]]
+                    0 <= b < 64 ==> r.0@[b] == (if mask & (1u64 << (b as u64)) != 0u64 {
+                        Some(Reg { key, signals: Signals(0) })
+                    } else {
+                        slots@[b]
+                    })
             },
         },
 {
@@ -395,13 +414,12 @@ fn register_bound_into(
     // Loop entry: `bits == mask`, so the processed set `mask & !bits` is empty and
     // every slot still holds its entry value (`out == slots`).
     assert(mask & !mask == 0u64) by (bit_vector);
-    assert forall|b: int| 0 <= b < 64 implies #[trigger] out@[b] == (
-        if (mask & !mask) & (1u64 << (b as u64)) != 0u64 {
-            Some(Reg { key, signals: Signals(0) })
-        } else {
-            slots@[b]
-        }
-    ) by {
+    assert forall|b: int| 0 <= b < 64 implies #[trigger] out@[b] == (if (mask & !mask) & (1u64 << (
+    b as u64)) != 0u64 {
+        Some(Reg { key, signals: Signals(0) })
+    } else {
+        slots@[b]
+    }) by {
         let bb = b as u64;
         assert((mask & !mask) & (1u64 << bb) == 0u64) by (bit_vector);
     }
@@ -410,7 +428,8 @@ fn register_bound_into(
             out@.len() == 64,
             new_used == used | mask,
             bits & !mask == 0u64,
-            forall|b: int| #![trigger out@[b]]
+            forall|b: int|
+                #![trigger out@[b]]
                 0 <= b < 64 ==> out@[b] == (if (mask & !bits) & (1u64 << (b as u64)) != 0u64 {
                     Some(Reg { key, signals: Signals(0) })
                 } else {
@@ -429,7 +448,8 @@ fn register_bound_into(
             assert(bits & (1u64 << g) != 0u64) by (bit_vector)
                 requires
                     g < 64,
-                    (bits >> g) & 1u64 == 1u64;
+                    (bits >> g) & 1u64 == 1u64,
+            ;
         }
         let newbits = bits & (bits - 1);
         proof {
@@ -442,12 +462,14 @@ fn register_bound_into(
             assert(mask & (1u64 << g) != 0u64) by (bit_vector)
                 requires
                     bits & !mask == 0u64,
-                    bits & (1u64 << g) != 0u64;
+                    bits & (1u64 << g) != 0u64,
+            ;
             // Clearing a bit keeps `bits ⊆ mask`.
             assert(newbits & !mask == 0u64) by (bit_vector)
                 requires
                     bits & !mask == 0u64,
-                    newbits == bits & !(1u64 << g);
+                    newbits == bits & !(1u64 << g),
+            ;
         }
         out[bit as usize] = Some(Reg { key, signals: Signals(0) });
         proof {
@@ -456,29 +478,30 @@ fn register_bound_into(
             // (`mask & !newbits`); every other index is untouched, and its
             // membership in the processed set is unchanged because `newbits`
             // differs from `bits` only at `bit`.
-            assert forall|b: int| 0 <= b < 64 implies #[trigger] out@[b] == (
-                if (mask & !newbits) & (1u64 << (b as u64)) != 0u64 {
-                    Some(Reg { key, signals: Signals(0) })
-                } else {
-                    slots@[b]
-                }
-            ) by {
+            assert forall|b: int| 0 <= b < 64 implies #[trigger] out@[b] == (if (mask & !newbits)
+                & (1u64 << (b as u64)) != 0u64 {
+                Some(Reg { key, signals: Signals(0) })
+            } else {
+                slots@[b]
+            }) by {
                 let bb = b as u64;
                 if b == g as int {
                     assert((mask & !newbits) & (1u64 << bb) != 0u64) by (bit_vector)
                         requires
                             newbits == bits & !(1u64 << g),
                             mask & (1u64 << g) != 0u64,
-                            bb == g;
+                            bb == g,
+                    ;
                 } else {
                     assert(bb != g);
-                    assert(((mask & !newbits) & (1u64 << bb) != 0u64)
-                        == ((mask & !bits) & (1u64 << bb) != 0u64)) by (bit_vector)
+                    assert(((mask & !newbits) & (1u64 << bb) != 0u64) == ((mask & !bits) & (1u64
+                        << bb) != 0u64)) by (bit_vector)
                         requires
                             newbits == bits & !(1u64 << g),
                             bb != g,
                             bb < 64,
-                            g < 64;
+                            g < 64,
+                    ;
                 }
             }
         }
@@ -489,20 +512,22 @@ fn register_bound_into(
         // exactly `mask`'s bits. Coherence of `(out, new_used)` follows from the
         // entry coherence of `(slots, used)` and `new_used == used | mask`.
         assert(mask & !0u64 == mask) by (bit_vector);
-        assert forall|b: int| 0 <= b < 64 implies
-            ((#[trigger] out@[b]).is_some() <==> new_used & (1u64 << (b as u64)) != 0u64) by {
+        assert forall|b: int| 0 <= b < 64 implies ((#[trigger] out@[b]).is_some() <==> new_used & (
+        1u64 << (b as u64)) != 0u64) by {
             let bb = b as u64;
             if mask & (1u64 << bb) != 0u64 {
                 assert(new_used & (1u64 << bb) != 0u64) by (bit_vector)
                     requires
                         new_used == used | mask,
-                        mask & (1u64 << bb) != 0u64;
+                        mask & (1u64 << bb) != 0u64,
+                ;
             } else {
                 assert((new_used & (1u64 << bb) != 0u64) == (used & (1u64 << bb) != 0u64))
                     by (bit_vector)
                     requires
                         new_used == used | mask,
-                        mask & (1u64 << bb) == 0u64;
+                        mask & (1u64 << bb) == 0u64,
+                ;
             }
         }
     }
@@ -510,7 +535,6 @@ fn register_bound_into(
 }
 
 } // verus!
-
 /// The reactor: waits on one notification multiplexing many sources.
 pub struct Reactor<'t, T: Transport> {
     transport: &'t T,

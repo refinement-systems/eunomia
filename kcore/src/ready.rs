@@ -12,7 +12,6 @@
 //! `Tcb.qnext`, shared with the notification waiter queue and disambiguated by state:
 //! a thread is on the ready chain (`Runnable`) or a waiter chain (`BlockedNotif`),
 //! never both.
-
 // `cspace::` is referenced from `verus!{}` spec/proof code, erased under a normal build.
 #[allow(unused_imports)]
 use crate::cspace::{self, ObjHeader};
@@ -38,7 +37,9 @@ pub proof fn lemma_bit_set_eqv(x: u32, k: u32)
         ((x >> k) & 1u32 != 0u32) == (x & (1u32 << k) != 0u32),
 {
     assert(((x >> k) & 1u32 != 0u32) == (x & (1u32 << k) != 0u32)) by (bit_vector)
-        requires k < 32;
+        requires
+            k < 32,
+    ;
 }
 
 // Setting bit `k` makes bit `k` set (`ready_enqueue`'s `| (1<<lvl)`).
@@ -48,7 +49,10 @@ pub proof fn lemma_set_bit_self(x: u32, k: u32)
     ensures
         (x | (1u32 << k)) & (1u32 << k) != 0u32,
 {
-    assert((x | (1u32 << k)) & (1u32 << k) != 0u32) by (bit_vector) requires k < 32;
+    assert((x | (1u32 << k)) & (1u32 << k) != 0u32) by (bit_vector)
+        requires
+            k < 32,
+    ;
 }
 
 // Clearing bit `k` makes bit `k` clear (`ready_dequeue`/`ready_unqueue`'s `& !(1<<lvl)`).
@@ -58,7 +62,10 @@ pub proof fn lemma_clear_bit_self(x: u32, k: u32)
     ensures
         (x & !(1u32 << k)) & (1u32 << k) == 0u32,
 {
-    assert((x & !(1u32 << k)) & (1u32 << k) == 0u32) by (bit_vector) requires k < 32;
+    assert((x & !(1u32 << k)) & (1u32 << k) == 0u32) by (bit_vector)
+        requires
+            k < 32,
+    ;
 }
 
 // A set/clear of bit `k` leaves every *other* bit `j != k` untouched (instantiated per
@@ -72,7 +79,11 @@ pub proof fn lemma_set_bit_other(x: u32, k: u32, j: u32)
         ((x | (1u32 << k)) & (1u32 << j) != 0u32) == (x & (1u32 << j) != 0u32),
 {
     assert(((x | (1u32 << k)) & (1u32 << j) != 0u32) == (x & (1u32 << j) != 0u32)) by (bit_vector)
-        requires j < 32, k < 32, j != k;
+        requires
+            j < 32,
+            k < 32,
+            j != k,
+    ;
 }
 
 pub proof fn lemma_clear_bit_other(x: u32, k: u32, j: u32)
@@ -84,7 +95,11 @@ pub proof fn lemma_clear_bit_other(x: u32, k: u32, j: u32)
         ((x & !(1u32 << k)) & (1u32 << j) != 0u32) == (x & (1u32 << j) != 0u32),
 {
     assert(((x & !(1u32 << k)) & (1u32 << j) != 0u32) == (x & (1u32 << j) != 0u32)) by (bit_vector)
-        requires j < 32, k < 32, j != k;
+        requires
+            j < 32,
+            k < 32,
+            j != k,
+    ;
 }
 
 // Highest non-empty priority level, or `None` if the queue is empty. The verified
@@ -99,12 +114,17 @@ pub fn top_ready<S: Store>(store: &S) -> (r: Option<usize>)
         r matches Some(lvl) ==> {
             &&& lvl < NUM_PRIOS
             &&& cspace::ready_seq(store.ready_view(), store.tcb_view(), lvl as int).len() > 0
-            &&& forall|j: int| #![trigger cspace::ready_seq(store.ready_view(), store.tcb_view(), j)]
-                    lvl < j < NUM_PRIOS ==>
-                    cspace::ready_seq(store.ready_view(), store.tcb_view(), j).len() == 0
+            &&& forall|j: int|
+                #![trigger cspace::ready_seq(store.ready_view(), store.tcb_view(), j)]
+                lvl < j < NUM_PRIOS ==> cspace::ready_seq(
+                    store.ready_view(),
+                    store.tcb_view(),
+                    j,
+                ).len() == 0
         },
 {
     broadcast use vstd::std_specs::bits::axiom_u32_leading_zeros;
+
     let bm = store.ready_bitmap();
     if bm == 0 {
         None
@@ -118,8 +138,11 @@ pub fn top_ready<S: Store>(store: &S) -> (r: Option<usize>)
             lemma_bit_set_eqv(bm, lvl);
             assert(bm & (1u32 << lvl) != 0u32);
             // every level above `lvl` has a clear bit ⇒ (coherence) an empty chain.
-            assert forall|j: int| lvl < j < NUM_PRIOS implies
-                #[trigger] cspace::ready_seq(store.ready_view(), store.tcb_view(), j).len() == 0 by {
+            assert forall|j: int| lvl < j < NUM_PRIOS implies #[trigger] cspace::ready_seq(
+                store.ready_view(),
+                store.tcb_view(),
+                j,
+            ).len() == 0 by {
                 let ju = j as u32;
                 assert((bm >> ju) & 1u32 == 0u32);
                 lemma_bit_set_eqv(bm, ju);
@@ -148,14 +171,14 @@ pub proof fn lemma_ready_coherent_after_set(
         rvf.bitmap == rv0.bitmap | (1u32 << (level as u32)),
         cspace::ready_seq(rvf, tvf, level) == pws,
         pws.len() > 0,
-        forall|l: int| 0 <= l < NUM_PRIOS && l != level
-            ==> #[trigger] cspace::ready_seq(rvf, tvf, l) == cspace::ready_seq(rv0, tv0, l),
+        forall|l: int|
+            0 <= l < NUM_PRIOS && l != level ==> #[trigger] cspace::ready_seq(rvf, tvf, l)
+                == cspace::ready_seq(rv0, tv0, l),
     ensures
         cspace::ready_bitmap_coherent(rvf, tvf),
 {
-    assert forall|l: int| 0 <= l < NUM_PRIOS implies
-        ((rvf.bitmap & (1u32 << (l as u32))) != 0
-            <==> (#[trigger] cspace::ready_seq(rvf, tvf, l)).len() > 0) by {
+    assert forall|l: int| 0 <= l < NUM_PRIOS implies ((rvf.bitmap & (1u32 << (l as u32))) != 0
+        <==> (#[trigger] cspace::ready_seq(rvf, tvf, l)).len() > 0) by {
         if l == level {
             assert(l as u32 == level as u32);
             lemma_set_bit_self(rv0.bitmap, level as u32);
@@ -165,12 +188,12 @@ pub proof fn lemma_ready_coherent_after_set(
         } else {
             assert(l as u32 != level as u32);
             lemma_set_bit_other(rv0.bitmap, level as u32, l as u32);
-            assert((rvf.bitmap & (1u32 << (l as u32)) != 0)
-                == (rv0.bitmap & (1u32 << (l as u32)) != 0));
+            assert((rvf.bitmap & (1u32 << (l as u32)) != 0) == (rv0.bitmap & (1u32 << (l as u32))
+                != 0));
             assert(cspace::ready_seq(rvf, tvf, l) == cspace::ready_seq(rv0, tv0, l));
             // rv0 coherence (trigger ready_seq(rv0,tv0,l)) closes the iff.
-            assert((rv0.bitmap & (1u32 << (l as u32)) != 0)
-                == (cspace::ready_seq(rv0, tv0, l).len() > 0));
+            assert((rv0.bitmap & (1u32 << (l as u32)) != 0) == (cspace::ready_seq(rv0, tv0, l).len()
+                > 0));
         }
     }
 }
@@ -192,14 +215,14 @@ pub proof fn lemma_ready_coherent_after_clear(
         0 <= level < NUM_PRIOS,
         rvf.bitmap == rv0.bitmap & !(1u32 << (level as u32)),
         cspace::ready_seq(rvf, tvf, level).len() == 0,
-        forall|l: int| 0 <= l < NUM_PRIOS && l != level
-            ==> #[trigger] cspace::ready_seq(rvf, tvf, l) == cspace::ready_seq(rv0, tv0, l),
+        forall|l: int|
+            0 <= l < NUM_PRIOS && l != level ==> #[trigger] cspace::ready_seq(rvf, tvf, l)
+                == cspace::ready_seq(rv0, tv0, l),
     ensures
         cspace::ready_bitmap_coherent(rvf, tvf),
 {
-    assert forall|l: int| 0 <= l < NUM_PRIOS implies
-        ((rvf.bitmap & (1u32 << (l as u32))) != 0
-            <==> (#[trigger] cspace::ready_seq(rvf, tvf, l)).len() > 0) by {
+    assert forall|l: int| 0 <= l < NUM_PRIOS implies ((rvf.bitmap & (1u32 << (l as u32))) != 0
+        <==> (#[trigger] cspace::ready_seq(rvf, tvf, l)).len() > 0) by {
         if l == level {
             assert(l as u32 == level as u32);
             lemma_clear_bit_self(rv0.bitmap, level as u32);
@@ -208,12 +231,12 @@ pub proof fn lemma_ready_coherent_after_clear(
         } else {
             assert(l as u32 != level as u32);
             lemma_clear_bit_other(rv0.bitmap, level as u32, l as u32);
-            assert((rvf.bitmap & (1u32 << (l as u32)) != 0)
-                == (rv0.bitmap & (1u32 << (l as u32)) != 0));
+            assert((rvf.bitmap & (1u32 << (l as u32)) != 0) == (rv0.bitmap & (1u32 << (l as u32))
+                != 0));
             assert(cspace::ready_seq(rvf, tvf, l) == cspace::ready_seq(rv0, tv0, l));
             // rv0 coherence (trigger ready_seq(rv0,tv0,l)) closes the iff.
-            assert((rv0.bitmap & (1u32 << (l as u32)) != 0)
-                == (cspace::ready_seq(rv0, tv0, l).len() > 0));
+            assert((rv0.bitmap & (1u32 << (l as u32)) != 0) == (cspace::ready_seq(rv0, tv0, l).len()
+                > 0));
         }
     }
 }
@@ -247,9 +270,11 @@ pub proof fn lemma_ready_push_wf(
         cspace::ready_chain(rvf, tvf, level, pws),
         rvf.heads.dom() == rv0.heads.dom(),
         rvf.tails.dom() == rv0.tails.dom(),
-        forall|l: int| #![trigger rvf.heads[l]] #![trigger rvf.tails[l]]
-            0 <= l < NUM_PRIOS && l != level
-            ==> rvf.heads[l] == rv0.heads[l] && rvf.tails[l] == rv0.tails[l],
+        forall|l: int|
+            #![trigger rvf.heads[l]]
+            #![trigger rvf.tails[l]]
+            0 <= l < NUM_PRIOS && l != level ==> rvf.heads[l] == rv0.heads[l] && rvf.tails[l]
+                == rv0.tails[l],
         rvf.bitmap == rv0.bitmap | (1u32 << (level as u32)),
         forall|x: ObjId| x != t && rv0.tails[level] != Some(x) ==> #[trigger] tvf[x] == tv0[x],
         rv0.tails[level] matches Some(y) ==> tv0[y].priority as int == level,
@@ -266,9 +291,16 @@ pub proof fn lemma_ready_push_wf(
     cspace::lemma_ready_chain_unique(rvf, tvf, level, cspace::ready_seq(rvf, tvf, level), pws);
 
     // other levels: seq + chain preserved.
-    assert forall|l: int| 0 <= l < NUM_PRIOS && l != level implies
-        #[trigger] cspace::ready_seq(rvf, tvf, l) == cspace::ready_seq(rv0, tv0, l)
-        && cspace::ready_chain(rvf, tvf, l, cspace::ready_seq(rvf, tvf, l)) by {
+    assert forall|l: int| 0 <= l < NUM_PRIOS && l != level implies #[trigger] cspace::ready_seq(
+        rvf,
+        tvf,
+        l,
+    ) == cspace::ready_seq(rv0, tv0, l) && cspace::ready_chain(
+        rvf,
+        tvf,
+        l,
+        cspace::ready_seq(rvf, tvf, l),
+    ) by {
         assert(rvf.heads[l] == rv0.heads[l] && rvf.tails[l] == rv0.tails[l]);
         let rl = cspace::ready_seq(rv0, tv0, l);
         assert(cspace::ready_chain(rv0, tv0, l, rl));
@@ -283,8 +315,8 @@ pub proof fn lemma_ready_push_wf(
     // ready_wf assembly.
     assert(rvf.heads.dom() == Set::new(|i: int| 0 <= i < NUM_PRIOS as int));
     assert(rvf.tails.dom() == Set::new(|i: int| 0 <= i < NUM_PRIOS as int));
-    assert forall|lv: int| #![trigger rvf.heads[lv]] 0 <= lv < NUM_PRIOS as int implies
-        (rvf.heads[lv] is None <==> rvf.tails[lv] is None) by {
+    assert forall|lv: int| #![trigger rvf.heads[lv]] 0 <= lv < NUM_PRIOS as int implies (
+    rvf.heads[lv] is None <==> rvf.tails[lv] is None) by {
         if lv == level {
             assert(rvf.heads[level] is Some && rvf.tails[level] is Some);
         } else {
@@ -292,8 +324,14 @@ pub proof fn lemma_ready_push_wf(
         }
     }
     assert(cspace::ready_seq(rvf, tvf, level) == pws);
-    assert forall|lv: int| #![trigger cspace::ready_seq(rvf, tvf, lv)] 0 <= lv < NUM_PRIOS as int implies
-        cspace::ready_chain(rvf, tvf, lv, cspace::ready_seq(rvf, tvf, lv)) by {
+    assert forall|lv: int|
+        #![trigger cspace::ready_seq(rvf, tvf, lv)]
+        0 <= lv < NUM_PRIOS as int implies cspace::ready_chain(
+        rvf,
+        tvf,
+        lv,
+        cspace::ready_seq(rvf, tvf, lv),
+    ) by {
         if lv != level {
             assert(cspace::ready_seq(rvf, tvf, lv) == cspace::ready_seq(rv0, tv0, lv));
         }
@@ -306,14 +344,20 @@ pub proof fn lemma_ready_push_wf(
     // whose qnext moved); otherwise `x` is off level's chain, hence framed, and stays on
     // its own (untouched) level's chain.
     assert(cspace::ready_seq(rvf, tvf, level) == pws);
-    assert(pws.contains(t)) by { assert(pws[pws.len() - 1] == t); }
-    assert forall|x: ObjId| #[trigger] tvf.dom().contains(x) && tvf[x].state == ThreadState::Runnable
-        implies (tvf[x].priority as int) < NUM_PRIOS
-            && cspace::ready_seq(rvf, tvf, tvf[x].priority as int).contains(x) by {
+    assert(pws.contains(t)) by {
+        assert(pws[pws.len() - 1] == t);
+    }
+    assert forall|x: ObjId| #[trigger]
+        tvf.dom().contains(x) && tvf[x].state == ThreadState::Runnable implies (
+    tvf[x].priority as int) < NUM_PRIOS && cspace::ready_seq(
+        rvf,
+        tvf,
+        tvf[x].priority as int,
+    ).contains(x) by {
         if pws.contains(x) {
             let k = pws.index_of(x);
             assert(0 <= k < pws.len() && pws[k] == x);
-            assert(tvf[pws[k]].priority as int == level);   // ready_chain covenant
+            assert(tvf[pws[k]].priority as int == level);  // ready_chain covenant
         } else {
             // x off level's chain ⇒ x != t and x != old tail (both on pws) ⇒ framed.
             assert(x != t);
@@ -322,7 +366,7 @@ pub proof fn lemma_ready_push_wf(
                     let rs0 = cspace::ready_seq(rv0, tv0, level);
                     assert(cspace::ready_chain(rv0, tv0, level, rs0));
                     assert(rs0.len() > 0 && rs0[rs0.len() - 1] == x);
-                    assert(pws[rs0.len() - 1] == x);   // pws == rs0.push(t)
+                    assert(pws[rs0.len() - 1] == x);  // pws == rs0.push(t)
                 }
             }
             assert(tvf[x] == tv0[x]);
@@ -334,7 +378,7 @@ pub proof fn lemma_ready_push_wf(
                     assert(rs0.contains(x));
                     let j = rs0.index_of(x);
                     assert(0 <= j < rs0.len() && rs0[j] == x);
-                    assert(pws[j] == x && 0 <= j < pws.len());   // pws == rs0.push(t) ⇒ x ∈ pws
+                    assert(pws[j] == x && 0 <= j < pws.len());  // pws == rs0.push(t) ⇒ x ∈ pws
                     assert(pws.contains(x));
                 }
             }
@@ -344,8 +388,9 @@ pub proof fn lemma_ready_push_wf(
     // The strengthened `ready_complete` conjunct: every Runnable thread has `wait_notif is
     // None`. `t` and the old tail carry it from the new hypotheses; every other Runnable `x`
     // is framed (`tvf[x] == tv0[x]`) and was Runnable in `tv0`, so `ready_complete(rv0)` gives it.
-    assert forall|x: ObjId| #[trigger] tvf.dom().contains(x) && tvf[x].state == ThreadState::Runnable
-        implies tvf[x].wait_notif is None by {
+    assert forall|x: ObjId| #[trigger]
+        tvf.dom().contains(x) && tvf[x].state
+            == ThreadState::Runnable implies tvf[x].wait_notif is None by {
         if x == t {
         } else if rv0.tails[level] == Some(x) {
         } else {
@@ -385,9 +430,11 @@ pub proof fn lemma_ready_remove_wf(
         tvf.dom() == tv0.dom(),
         rvf.heads.dom() == rv0.heads.dom(),
         rvf.tails.dom() == rv0.tails.dom(),
-        forall|l: int| #![trigger rvf.heads[l]] #![trigger rvf.tails[l]]
-            0 <= l < NUM_PRIOS && l != level
-            ==> rvf.heads[l] == rv0.heads[l] && rvf.tails[l] == rv0.tails[l],
+        forall|l: int|
+            #![trigger rvf.heads[l]]
+            #![trigger rvf.tails[l]]
+            0 <= l < NUM_PRIOS && l != level ==> rvf.heads[l] == rv0.heads[l] && rvf.tails[l]
+                == rv0.tails[l],
         rs0.remove(k).len() > 0 ==> rvf.bitmap == rv0.bitmap,
         rs0.remove(k).len() == 0 ==> rvf.bitmap == rv0.bitmap & !(1u32 << (level as u32)),
         forall|x: ObjId| x != t && (k == 0 || x != rs0[k - 1]) ==> #[trigger] tvf[x] == tv0[x],
@@ -398,23 +445,36 @@ pub proof fn lemma_ready_remove_wf(
         cspace::ready_seq(rvf, tvf, level) == rs0.remove(k),
         // other levels' chains are untouched — `ready_unqueue` needs this to carry
         // `ready_complete_except` for the surviving Runnable threads at other levels.
-        forall|l: int| #![trigger cspace::ready_seq(rvf, tvf, l)]
-            0 <= l < NUM_PRIOS && l != level
-            ==> cspace::ready_seq(rvf, tvf, l) == cspace::ready_seq(rv0, tv0, l),
+        forall|l: int|
+            #![trigger cspace::ready_seq(rvf, tvf, l)]
+            0 <= l < NUM_PRIOS && l != level ==> cspace::ready_seq(rvf, tvf, l)
+                == cspace::ready_seq(rv0, tv0, l),
 {
     // `rs0` is genuinely the pre-state chain at `level`; `rs0[k-1]` (the spliced node's
     // predecessor) is therefore at `level` too.
     assert(cspace::ready_chain(rv0, tv0, level, rs0));
 
     // level's seq is the spliced chain.
-    cspace::lemma_ready_chain_unique(rvf, tvf, level, cspace::ready_seq(rvf, tvf, level),
-        rs0.remove(k));
+    cspace::lemma_ready_chain_unique(
+        rvf,
+        tvf,
+        level,
+        cspace::ready_seq(rvf, tvf, level),
+        rs0.remove(k),
+    );
 
     // other levels: seq + chain preserved (their nodes have priority != level, and the only
     // moved tcbs — `t` and its predecessor `rs0[k-1]` — are at `level`, so they are framed).
-    assert forall|l: int| 0 <= l < NUM_PRIOS && l != level implies
-        #[trigger] cspace::ready_seq(rvf, tvf, l) == cspace::ready_seq(rv0, tv0, l)
-        && cspace::ready_chain(rvf, tvf, l, cspace::ready_seq(rvf, tvf, l)) by {
+    assert forall|l: int| 0 <= l < NUM_PRIOS && l != level implies #[trigger] cspace::ready_seq(
+        rvf,
+        tvf,
+        l,
+    ) == cspace::ready_seq(rv0, tv0, l) && cspace::ready_chain(
+        rvf,
+        tvf,
+        l,
+        cspace::ready_seq(rvf, tvf, l),
+    ) by {
         assert(rvf.heads[l] == rv0.heads[l] && rvf.tails[l] == rv0.tails[l]);
         let rl = cspace::ready_seq(rv0, tv0, l);
         assert(cspace::ready_chain(rv0, tv0, l, rl));
@@ -432,8 +492,8 @@ pub proof fn lemma_ready_remove_wf(
     // ready_wf assembly.
     assert(rvf.heads.dom() == Set::new(|i: int| 0 <= i < NUM_PRIOS as int));
     assert(rvf.tails.dom() == Set::new(|i: int| 0 <= i < NUM_PRIOS as int));
-    assert forall|lv: int| #![trigger rvf.heads[lv]] 0 <= lv < NUM_PRIOS as int implies
-        (rvf.heads[lv] is None <==> rvf.tails[lv] is None) by {
+    assert forall|lv: int| #![trigger rvf.heads[lv]] 0 <= lv < NUM_PRIOS as int implies (
+    rvf.heads[lv] is None <==> rvf.tails[lv] is None) by {
         if lv == level {
             let rk = rs0.remove(k);
             assert(cspace::ready_chain(rvf, tvf, level, rk));
@@ -447,8 +507,14 @@ pub proof fn lemma_ready_remove_wf(
         }
     }
     assert(cspace::ready_seq(rvf, tvf, level) == rs0.remove(k));
-    assert forall|lv: int| #![trigger cspace::ready_seq(rvf, tvf, lv)] 0 <= lv < NUM_PRIOS as int
-        implies cspace::ready_chain(rvf, tvf, lv, cspace::ready_seq(rvf, tvf, lv)) by {
+    assert forall|lv: int|
+        #![trigger cspace::ready_seq(rvf, tvf, lv)]
+        0 <= lv < NUM_PRIOS as int implies cspace::ready_chain(
+        rvf,
+        tvf,
+        lv,
+        cspace::ready_seq(rvf, tvf, lv),
+    ) by {
         if lv != level {
             assert(cspace::ready_seq(rvf, tvf, lv) == cspace::ready_seq(rv0, tv0, lv));
         }
@@ -461,19 +527,24 @@ pub proof fn lemma_ready_remove_wf(
         lemma_ready_coherent_after_clear(rv0, tv0, rvf, tvf, level);
     } else {
         assert(rvf.bitmap == rv0.bitmap);
-        assert forall|l: int| 0 <= l < NUM_PRIOS implies
-            ((rvf.bitmap & (1u32 << (l as u32))) != 0
-                <==> (#[trigger] cspace::ready_seq(rvf, tvf, l)).len() > 0) by {
+        assert forall|l: int| 0 <= l < NUM_PRIOS implies ((rvf.bitmap & (1u32 << (l as u32))) != 0
+            <==> (#[trigger] cspace::ready_seq(rvf, tvf, l)).len() > 0) by {
             if l == level {
                 assert(l as u32 == level as u32);
                 assert(cspace::ready_seq(rvf, tvf, l) == rs0.remove(k));
                 assert(cspace::ready_seq(rv0, tv0, level).len() > 0);
-                assert((rv0.bitmap & (1u32 << (level as u32)) != 0)
-                    == (cspace::ready_seq(rv0, tv0, level).len() > 0));
+                assert((rv0.bitmap & (1u32 << (level as u32)) != 0) == (cspace::ready_seq(
+                    rv0,
+                    tv0,
+                    level,
+                ).len() > 0));
             } else {
                 assert(cspace::ready_seq(rvf, tvf, l) == cspace::ready_seq(rv0, tv0, l));
-                assert((rv0.bitmap & (1u32 << (l as u32)) != 0)
-                    == (cspace::ready_seq(rv0, tv0, l).len() > 0));
+                assert((rv0.bitmap & (1u32 << (l as u32)) != 0) == (cspace::ready_seq(
+                    rv0,
+                    tv0,
+                    l,
+                ).len() > 0));
             }
         }
     }
@@ -516,23 +587,30 @@ pub fn ready_enqueue<S: Store>(store: &mut S, t: ObjId)
             qnext: None,
             ..old(store).tcb_view()[t]
         }),
-        forall|x: ObjId| #![trigger final(store).tcb_view()[x]]
-            x != t && old(store).ready_view().tails[old(store).tcb_view()[t].priority as int] != Some(x)
-            ==> final(store).tcb_view()[x] == old(store).tcb_view()[x],
+        forall|x: ObjId|
+            #![trigger final(store).tcb_view()[x]]
+            x != t && old(store).ready_view().tails[old(store).tcb_view()[t].priority as int]
+                != Some(x) ==> final(store).tcb_view()[x] == old(store).tcb_view()[x],
         // The enqueue writes only `state` (on the woken `t`, specified above) and `qnext`
         // (on `t` + the old tail). Every thread *but* `t` changes **only its `qnext`** — its
         // `state`/`wait_notif`/`cspace`/`aspace`/`bind_*`/`priority`/`retval` are preserved, so the
         // old ready-tail stays Runnable with `wait_notif None`. `signal`'s census/caps proofs read
         // that off this global frame.
-        forall|x: ObjId| #![trigger final(store).tcb_view()[x]]
+        forall|x: ObjId|
+            #![trigger final(store).tcb_view()[x]]
             x != t ==> final(store).tcb_view()[x] == (cspace::TcbView {
                 qnext: final(store).tcb_view()[x].qnext,
                 ..old(store).tcb_view()[x]
             }),
-        cspace::ready_seq(final(store).ready_view(), final(store).tcb_view(),
-            old(store).tcb_view()[t].priority as int)
-            == cspace::ready_seq(old(store).ready_view(), old(store).tcb_view(),
-                old(store).tcb_view()[t].priority as int).push(t),
+        cspace::ready_seq(
+            final(store).ready_view(),
+            final(store).tcb_view(),
+            old(store).tcb_view()[t].priority as int,
+        ) == cspace::ready_seq(
+            old(store).ready_view(),
+            old(store).tcb_view(),
+            old(store).tcb_view()[t].priority as int,
+        ).push(t),
 {
     let ghost rv0 = old(store).ready_view();
     let ghost tv0 = old(store).tcb_view();
@@ -576,8 +654,14 @@ pub fn ready_enqueue<S: Store>(store: &mut S, t: ObjId)
             }
         }
         assert(cspace::ready_chain(rvf, tvf, level, pws)) by {
-            assert forall|i: int| 0 <= i < pws.len() implies #[trigger] tvf.dom().contains(pws[i]) by {
-                if i < rs0.len() { assert(pws[i] == rs0[i]); } else { assert(pws[i] == t); }
+            assert forall|i: int| 0 <= i < pws.len() implies #[trigger] tvf.dom().contains(
+                pws[i],
+            ) by {
+                if i < rs0.len() {
+                    assert(pws[i] == rs0[i]);
+                } else {
+                    assert(pws[i] == t);
+                }
             }
             // head / tail
             if rs0.len() == 0 {
@@ -589,23 +673,27 @@ pub fn ready_enqueue<S: Store>(store: &mut S, t: ObjId)
                 assert(rvf.tails[level] == Some(t));
             }
             // qnext threading
-            assert forall|i: int| 0 <= i < pws.len() implies
-                tvf[pws[i]].qnext == (if i + 1 < pws.len() { Some(pws[i + 1]) } else { None::<ObjId> }) by {
+            assert forall|i: int| 0 <= i < pws.len() implies tvf[pws[i]].qnext == (if i + 1
+                < pws.len() {
+                Some(pws[i + 1])
+            } else {
+                None::<ObjId>
+            }) by {
                 if i + 1 < rs0.len() {
                     assert(pws[i] == rs0[i] && rs0[i] != t);
-                    assert(Some(rs0[i]) != old_tail);   // not the tail (i is not last)
+                    assert(Some(rs0[i]) != old_tail);  // not the tail (i is not last)
                     assert(tv0[rs0[i]].qnext == Some(rs0[i + 1]));
                 } else if i + 1 == rs0.len() {
                     // old tail: qnext retargeted to `t`.
                     assert(pws[i] == rs0[i] && pws[i + 1] == t);
                     assert(old_tail == Some(rs0[i]));
                 } else {
-                    assert(pws[i] == t);   // `t` itself: qnext None.
+                    assert(pws[i] == t);  // `t` itself: qnext None.
                 }
             }
             // covenant: Runnable at `level`
-            assert forall|i: int| 0 <= i < pws.len() implies
-                tvf[pws[i]].state == ThreadState::Runnable && tvf[pws[i]].priority as int == level by {
+            assert forall|i: int| 0 <= i < pws.len() implies tvf[pws[i]].state
+                == ThreadState::Runnable && tvf[pws[i]].priority as int == level by {
                 if i < rs0.len() {
                     assert(pws[i] == rs0[i] && rs0[i] != t);
                 } else {
@@ -623,12 +711,17 @@ pub fn ready_enqueue<S: Store>(store: &mut S, t: ObjId)
                 assert(rs0.len() > 0 && y == rs0[rs0.len() - 1]);
             }
         }
-        assert forall|x: ObjId| x != t && old_tail != Some(x) implies #[trigger] tvf[x] == tv0[x] by {}
+        assert forall|x: ObjId| x != t && old_tail != Some(x) implies #[trigger] tvf[x]
+            == tv0[x] by {}
         assert(tvf.dom() == tv0.dom());
-        assert(rvf.heads.dom() =~= rv0.heads.dom()) by { assert(rv0.heads.dom().contains(level)); }
-        assert(rvf.tails.dom() =~= rv0.tails.dom()) by { assert(rv0.tails.dom().contains(level)); }
-        assert forall|l: int| 0 <= l < NUM_PRIOS && l != level implies
-            #[trigger] rvf.heads[l] == rv0.heads[l] && rvf.tails[l] == rv0.tails[l] by {}
+        assert(rvf.heads.dom() =~= rv0.heads.dom()) by {
+            assert(rv0.heads.dom().contains(level));
+        }
+        assert(rvf.tails.dom() =~= rv0.tails.dom()) by {
+            assert(rv0.tails.dom().contains(level));
+        }
+        assert forall|l: int| 0 <= l < NUM_PRIOS && l != level implies #[trigger] rvf.heads[l]
+            == rv0.heads[l] && rvf.tails[l] == rv0.tails[l] by {}
         assert(bm == rv0.bitmap);
         assert(rvf.bitmap == rv0.bitmap | (1u32 << (level as u32)));
         // `wait_notif` is untouched by the state/qnext writes: `t` keeps its `None`
@@ -645,7 +738,8 @@ pub fn ready_enqueue<S: Store>(store: &mut S, t: ObjId)
         // global frame: only `state` (on `t`) and `qnext` (on `t` + the old tail) ever change;
         // for `x != t` only `qnext` moves (the old-tail re-thread), so `set_tcb_qnext` frames
         // every other field — the old tail keeps its Runnable state and `wait_notif`.
-        assert forall|x: ObjId| #![trigger tvf[x]]
+        assert forall|x: ObjId|
+            #![trigger tvf[x]]
             x != t ==> tvf[x] == (cspace::TcbView { qnext: tvf[x].qnext, ..tv0[x] }) by {}
     }
 }
@@ -672,23 +766,35 @@ pub fn ready_dequeue<S: Store>(store: &mut S, level: usize) -> (r: Option<ObjId>
         final(store).tcb_view().dom() == old(store).tcb_view().dom(),
         cspace::ready_wf(final(store).ready_view(), final(store).tcb_view()),
         ({
-            let rs0 = cspace::ready_seq(old(store).ready_view(), old(store).tcb_view(),
-                level as int);
-            &&& r == (if rs0.len() == 0 { None::<ObjId> } else { Some(rs0[0]) })
+            let rs0 = cspace::ready_seq(
+                old(store).ready_view(),
+                old(store).tcb_view(),
+                level as int,
+            );
+            &&& r == (if rs0.len() == 0 {
+                None::<ObjId>
+            } else {
+                Some(rs0[0])
+            })
             &&& rs0.len() == 0 ==> {
-                    &&& final(store).ready_view() == old(store).ready_view()
-                    &&& final(store).tcb_view() == old(store).tcb_view()
-                }
+                &&& final(store).ready_view() == old(store).ready_view()
+                &&& final(store).tcb_view() == old(store).tcb_view()
+            }
             &&& rs0.len() > 0 ==> {
-                    &&& cspace::ready_seq(final(store).ready_view(), final(store).tcb_view(),
-                            level as int) == rs0.drop_first()
-                    &&& final(store).tcb_view()[rs0[0]].qnext is None
-                    &&& final(store).tcb_view()[rs0[0]].state == old(store).tcb_view()[rs0[0]].state
-                    &&& final(store).tcb_view()[rs0[0]].priority
-                            == old(store).tcb_view()[rs0[0]].priority
-                    &&& forall|x: ObjId| #![trigger final(store).tcb_view()[x]]
-                            x != rs0[0] ==> final(store).tcb_view()[x] == old(store).tcb_view()[x]
-                }
+                &&& cspace::ready_seq(
+                    final(store).ready_view(),
+                    final(store).tcb_view(),
+                    level as int,
+                ) == rs0.drop_first()
+                &&& final(store).tcb_view()[rs0[0]].qnext is None
+                &&& final(store).tcb_view()[rs0[0]].state == old(store).tcb_view()[rs0[0]].state
+                &&& final(store).tcb_view()[rs0[0]].priority == old(
+                    store,
+                ).tcb_view()[rs0[0]].priority
+                &&& forall|x: ObjId|
+                    #![trigger final(store).tcb_view()[x]]
+                    x != rs0[0] ==> final(store).tcb_view()[x] == old(store).tcb_view()[x]
+            }
         }),
 {
     let ghost rv0 = old(store).ready_view();
@@ -706,7 +812,7 @@ pub fn ready_dequeue<S: Store>(store: &mut S, level: usize) -> (r: Option<ObjId>
                 assert(rs0.len() == 0);
             }
             None
-        }
+        },
         Some(t) => {
             proof {
                 assert(rv0.heads[level_i] == Some(t));
@@ -714,15 +820,17 @@ pub fn ready_dequeue<S: Store>(store: &mut S, level: usize) -> (r: Option<ObjId>
                 assert(rs0[0] == t);
             }
             let next = store.tcb_qnext(t);
-            proof { assert(next == tv0[t].qnext); }
+            proof {
+                assert(next == tv0[t].qnext);
+            }
             store.set_ready_head(level, next);
             match next {
                 None => {
                     store.set_ready_tail(level, None);
                     let bm = store.ready_bitmap();
                     store.set_ready_bitmap(bm & !(1u32 << (level as u32)));
-                }
-                Some(_) => {}
+                },
+                Some(_) => {},
             }
             store.set_tcb_qnext(t, None);
             proof {
@@ -733,7 +841,7 @@ pub fn ready_dequeue<S: Store>(store: &mut S, level: usize) -> (r: Option<ObjId>
                 // lemma_ready_remove_chain (k = 0) final values.
                 assert(rvf.heads[level_i] == tv0[t].qnext);
                 if rs0.len() == 1 {
-                    assert(tv0[t].qnext is None);          // chain: sole node's qnext is None
+                    assert(tv0[t].qnext is None);  // chain: sole node's qnext is None
                     assert(rvf.tails[level_i] == None::<ObjId>);
                 } else {
                     assert(tv0[t].qnext == Some(rs0[1]));  // chain: rs0[0].qnext == Some(rs0[1])
@@ -741,13 +849,19 @@ pub fn ready_dequeue<S: Store>(store: &mut S, level: usize) -> (r: Option<ObjId>
                 }
                 assert forall|x: ObjId| x != t implies #[trigger] tvf[x] == tv0[x] by {}
                 cspace::lemma_ready_remove_chain(rv0, tv0, rvf, tvf, level_i, t, rs0, 0);
-                cspace::lemma_ready_chain_unique(rvf, tvf, level_i,
-                    cspace::ready_seq(rvf, tvf, level_i), rs0.remove(0));
+                cspace::lemma_ready_chain_unique(
+                    rvf,
+                    tvf,
+                    level_i,
+                    cspace::ready_seq(rvf, tvf, level_i),
+                    rs0.remove(0),
+                );
                 // per-level head/tail frame + bitmap split for lemma_ready_remove_wf.
                 assert(rvf.heads.dom() =~= rv0.heads.dom());
                 assert(rvf.tails.dom() =~= rv0.tails.dom());
-                assert forall|l: int| 0 <= l < NUM_PRIOS && l != level_i implies
-                    #[trigger] rvf.heads[l] == rv0.heads[l] && rvf.tails[l] == rv0.tails[l] by {}
+                assert forall|l: int|
+                    0 <= l < NUM_PRIOS && l != level_i implies #[trigger] rvf.heads[l]
+                    == rv0.heads[l] && rvf.tails[l] == rv0.tails[l] by {}
                 if rs0.remove(0).len() == 0 {
                     assert(rvf.bitmap == rv0.bitmap & !(1u32 << (level_i as u32)));
                 } else {
@@ -756,7 +870,7 @@ pub fn ready_dequeue<S: Store>(store: &mut S, level: usize) -> (r: Option<ObjId>
                 lemma_ready_remove_wf(rv0, tv0, rvf, tvf, level_i, t, rs0, 0);
             }
             Some(t)
-        }
+        },
     }
 }
 
@@ -792,33 +906,41 @@ pub fn ready_unqueue<S: Store>(store: &mut S, t: ObjId)
             let level = old(store).tcb_view()[t].priority as int;
             let rs0 = cspace::ready_seq(old(store).ready_view(), old(store).tcb_view(), level);
             &&& cspace::ready_seq(final(store).ready_view(), final(store).tcb_view(), level)
-                    == rs0.remove(rs0.index_of(t))
+                == rs0.remove(rs0.index_of(t))
             &&& final(store).tcb_view()[t].qnext is None
             &&& final(store).tcb_view()[t].state == old(store).tcb_view()[t].state
             &&& final(store).tcb_view()[t].priority == old(store).tcb_view()[t].priority
             &&& final(store).tcb_view()[t].wait_notif == old(store).tcb_view()[t].wait_notif
             &&& final(store).tcb_view()[t].cspace == old(store).tcb_view()[t].cspace
             &&& final(store).tcb_view()[t].aspace == old(store).tcb_view()[t].aspace
-            &&& final(store).tcb_view()[t].bind_slots == old(store).tcb_view()[t].bind_slots
+            &&& final(store).tcb_view()[t].bind_slots == old(
+                store,
+            ).tcb_view()[t].bind_slots
             // `t`'s report survives the splice (only `qnext` is written) —
             // `destroy_tcb` reads it off to preserve the halted subject's report (rev2§5.1).
-            &&& final(store).tcb_view()[t].report == old(store).tcb_view()[t].report
+            &&& final(store).tcb_view()[t].report == old(
+                store,
+            ).tcb_view()[t].report
             // the "signal-shaped" frame: only level's chain nodes (t + its predecessor) moved,
             // each Runnable (so off every waiter chain), and each preserves the home fields
             // `destroy_tcb`'s census/caps reasoning needs — `wait_notif` (waiter census),
             // `cspace`/`aspace` (`thread_hold_refs`), `bind_slots` (`caps_consistent`'s Thread arm).
             // Extends the part-2 frame with `cspace`/`aspace`.
-            &&& forall|x: ObjId| #![trigger final(store).tcb_view()[x]]
-                    final(store).tcb_view()[x] != old(store).tcb_view()[x]
-                    ==> old(store).tcb_view()[x].state == ThreadState::Runnable
-                        && final(store).tcb_view()[x].state == old(store).tcb_view()[x].state
-                        && old(store).tcb_view()[x].priority as int == level
-                        && final(store).tcb_view()[x].wait_notif
-                            == old(store).tcb_view()[x].wait_notif
-                        && final(store).tcb_view()[x].cspace == old(store).tcb_view()[x].cspace
-                        && final(store).tcb_view()[x].aspace == old(store).tcb_view()[x].aspace
-                        && final(store).tcb_view()[x].bind_slots
-                            == old(store).tcb_view()[x].bind_slots
+            &&& forall|x: ObjId|
+                #![trigger final(store).tcb_view()[x]]
+                final(store).tcb_view()[x] != old(store).tcb_view()[x] ==> old(
+                    store,
+                ).tcb_view()[x].state == ThreadState::Runnable && final(store).tcb_view()[x].state
+                    == old(store).tcb_view()[x].state && old(store).tcb_view()[x].priority as int
+                    == level && final(store).tcb_view()[x].wait_notif == old(
+                    store,
+                ).tcb_view()[x].wait_notif && final(store).tcb_view()[x].cspace == old(
+                    store,
+                ).tcb_view()[x].cspace && final(store).tcb_view()[x].aspace == old(
+                    store,
+                ).tcb_view()[x].aspace && final(store).tcb_view()[x].bind_slots == old(
+                    store,
+                ).tcb_view()[x].bind_slots
         }),
 {
     let ghost rv0 = old(store).ready_view();
@@ -840,7 +962,8 @@ pub fn ready_unqueue<S: Store>(store: &mut S, t: ObjId)
 
     while cur.is_some()
         invariant
-            // the walk is read-only: every view pinned to entry.
+    // the walk is read-only: every view pinned to entry.
+
             store.slot_view() == old(store).slot_view(),
             store.refs_view() == old(store).refs_view(),
             store.chan_view() == old(store).chan_view(),
@@ -864,8 +987,16 @@ pub fn ready_unqueue<S: Store>(store: &mut S, t: ObjId)
             rs0.contains(t),
             // `cur`/`prev` track position `k` in `rs0`, no `t` seen yet.
             0 <= k <= rs0.len(),
-            cur == (if k < rs0.len() { Some(rs0[k]) } else { None::<ObjId> }),
-            prev == (if k == 0 { None::<ObjId> } else { Some(rs0[k - 1]) }),
+            cur == (if k < rs0.len() {
+                Some(rs0[k])
+            } else {
+                None::<ObjId>
+            }),
+            prev == (if k == 0 {
+                None::<ObjId>
+            } else {
+                Some(rs0[k - 1])
+            }),
             forall|i: int| 0 <= i < k ==> rs0[i] != t,
         decreases rs0.len() - k,
     {
@@ -881,8 +1012,12 @@ pub fn ready_unqueue<S: Store>(store: &mut S, t: ObjId)
             assert(rv0.tails[level] == Some(rs0[len - 1]));
             // the tail names `t` iff `t` is the last element (no_duplicates).
             assert((rs0[len - 1] == t) == (k == len - 1)) by {
-                if rs0[len - 1] == t { assert(rs0[len - 1] == rs0[k]); }
-                if k == len - 1 { assert(rs0[len - 1] == rs0[k]); }
+                if rs0[len - 1] == t {
+                    assert(rs0[len - 1] == rs0[k]);
+                }
+                if k == len - 1 {
+                    assert(rs0[len - 1] == rs0[k]);
+                }
             }
 
             let next = store.tcb_qnext(t);
@@ -893,11 +1028,15 @@ pub fn ready_unqueue<S: Store>(store: &mut S, t: ObjId)
             match prev {
                 None => {
                     store.set_ready_head(lvl, next);
-                }
+                },
                 Some(p) => {
-                    proof { assert(k > 0); assert(p == rs0[k - 1]); assert(tv0.dom().contains(p)); }
+                    proof {
+                        assert(k > 0);
+                        assert(p == rs0[k - 1]);
+                        assert(tv0.dom().contains(p));
+                    }
                     store.set_tcb_qnext(p, next);
-                }
+                },
             }
             // tail fixup: if `t` was the tail, the new tail is `prev`.
             let tail_is_t = match store.ready_tail(lvl) {
@@ -914,7 +1053,6 @@ pub fn ready_unqueue<S: Store>(store: &mut S, t: ObjId)
                 let bm = store.ready_bitmap();
                 store.set_ready_bitmap(bm & !(1u32 << (lvl as u32)));
             }
-
             proof {
                 let rvf = store.ready_view();
                 let tvf = store.tcb_view();
@@ -935,16 +1073,24 @@ pub fn ready_unqueue<S: Store>(store: &mut S, t: ObjId)
                     assert(tvf[rs0[k - 1]].wait_notif == tv0[rs0[k - 1]].wait_notif);
                 }
                 if k == len - 1 {
-                    assert(rvf.tails[level]
-                        == (if k == 0 { None::<ObjId> } else { Some(rs0[k - 1]) }));
+                    assert(rvf.tails[level] == (if k == 0 {
+                        None::<ObjId>
+                    } else {
+                        Some(rs0[k - 1])
+                    }));
                 } else {
                     assert(rvf.tails[level] == rv0.tails[level]);
                 }
-                assert forall|j: ObjId| j != t && (k == 0 || j != rs0[k - 1])
-                    implies #[trigger] tvf[j] == tv0[j] by {}
+                assert forall|j: ObjId|
+                    j != t && (k == 0 || j != rs0[k - 1]) implies #[trigger] tvf[j] == tv0[j] by {}
                 cspace::lemma_ready_remove_chain(rv0, tv0, rvf, tvf, level, t, rs0, k);
-                cspace::lemma_ready_chain_unique(rvf, tvf, level,
-                    cspace::ready_seq(rvf, tvf, level), rs0.remove(k));
+                cspace::lemma_ready_chain_unique(
+                    rvf,
+                    tvf,
+                    level,
+                    cspace::ready_seq(rvf, tvf, level),
+                    rs0.remove(k),
+                );
                 // ── bitmap split: cleared iff the level emptied ──
                 assert(rvf.heads[level] is None <==> rs0.remove(k).len() == 0) by {
                     assert(cspace::ready_chain(rvf, tvf, level, rs0.remove(k)));
@@ -964,18 +1110,21 @@ pub fn ready_unqueue<S: Store>(store: &mut S, t: ObjId)
                 assert(rvf.tails.dom() =~= rv0.tails.dom()) by {
                     assert(rv0.tails.dom().contains(level));
                 }
-                assert forall|l: int| 0 <= l < NUM_PRIOS && l != level implies
-                    #[trigger] rvf.heads[l] == rv0.heads[l] && rvf.tails[l] == rv0.tails[l] by {}
+                assert forall|l: int|
+                    0 <= l < NUM_PRIOS && l != level implies #[trigger] rvf.heads[l] == rv0.heads[l]
+                    && rvf.tails[l] == rv0.tails[l] by {}
                 lemma_ready_remove_wf(rv0, tv0, rvf, tvf, level, t, rs0, k);
 
                 // ── ready_complete_except(t): every surviving Runnable thread stays charted ──
                 rs0.remove_ensures(k);
                 assert(cspace::ready_seq(rvf, tvf, level) == rs0.remove(k));
-                assert forall|x: ObjId| #[trigger] tvf.dom().contains(x)
-                    && tvf[x].state == ThreadState::Runnable && x != t
-                    implies (tvf[x].priority as int) < NUM_PRIOS
-                        && cspace::ready_seq(rvf, tvf, tvf[x].priority as int).contains(x)
-                        && tvf[x].wait_notif is None by {
+                assert forall|x: ObjId| #[trigger]
+                    tvf.dom().contains(x) && tvf[x].state == ThreadState::Runnable && x
+                        != t implies (tvf[x].priority as int) < NUM_PRIOS && cspace::ready_seq(
+                    rvf,
+                    tvf,
+                    tvf[x].priority as int,
+                ).contains(x) && tvf[x].wait_notif is None by {
                     // `tv0[x]` is Runnable in both cases: unchanged ⇒ from `tvf[x] == tv0[x]`;
                     // the changed `x != t` is `t`'s predecessor `rs0[k-1]`, on the chain.
                     if tvf[x] != tv0[x] {
@@ -1005,7 +1154,11 @@ pub fn ready_unqueue<S: Store>(store: &mut S, t: ObjId)
                                 assert(rs0[k] == t);
                             }
                         }
-                        let widx = if j < k { j } else { j - 1 };
+                        let widx = if j < k {
+                            j
+                        } else {
+                            j - 1
+                        };
                         assert(0 <= widx < rs0.remove(k).len());
                         assert(rs0.remove(k)[widx] == x);
                         assert(rs0.remove(k).contains(x));
@@ -1016,15 +1169,14 @@ pub fn ready_unqueue<S: Store>(store: &mut S, t: ObjId)
                 // ── signal-shaped frame: only `t` and its predecessor (both Runnable at
                 //    `level` in `tv0`) moved; the splice writes only `qnext`, so every thread's
                 //    `wait_notif`/`bind_slots` survive (`destroy_tcb`'s home/census frames) ──
-                assert forall|x: ObjId| #[trigger] tvf[x] != tv0[x] implies
-                    tv0[x].state == ThreadState::Runnable && tv0[x].priority as int == level
-                    && tvf[x].wait_notif == tv0[x].wait_notif
-                    && tvf[x].bind_slots == tv0[x].bind_slots by {
+                assert forall|x: ObjId| #[trigger] tvf[x] != tv0[x] implies tv0[x].state
+                    == ThreadState::Runnable && tv0[x].priority as int == level && tvf[x].wait_notif
+                    == tv0[x].wait_notif && tvf[x].bind_slots == tv0[x].bind_slots by {
                     if x != t {
                         assert(k > 0 && x == rs0[k - 1]);
                         assert(0 <= k - 1 < rs0.len());
-                        assert(tv0[rs0[k - 1]].state == ThreadState::Runnable
-                            && tv0[rs0[k - 1]].priority as int == level);
+                        assert(tv0[rs0[k - 1]].state == ThreadState::Runnable && tv0[rs0[k
+                            - 1]].priority as int == level);
                     }
                 }
                 assert(tvf[t].qnext is None);

@@ -15,7 +15,6 @@
 //! sessions, postcard bodies via the ipc crate, peer-closed cleanup)
 //! lives in the on-OS server; session lifecycle here is driven by explicit
 //! `open_session` / `close_session` calls that the transport owns.
-
 #![cfg_attr(not(feature = "std"), no_std)]
 
 extern crate alloc;
@@ -52,18 +51,24 @@ use vstd::prelude::*;
 verus! {
 
 pub const R_READ: u8 = 1 << 0;
+
 pub const R_WRITE: u8 = 1 << 1;
+
 pub const R_SNAPSHOT: u8 = 1 << 2;
+
 /// Destructive enough to deserve its own bit (rev2§2.3); also gates mass
 /// revocation (generation bump, rev2§2.2).
 pub const R_REWRITE_HISTORY: u8 = 1 << 3;
+
 pub const R_ENUMERATE: u8 = 1 << 4;
+
 /// Store-global observation (rev2§2.3): gates `statfs(handle)` and any
 /// future global observable (GC counters, index occupancy). The one right
 /// whose scope ignores the subtree its handle denotes — and the one right
 /// kept OUT of `R_ALL`, so ordinary delegation strips it by default
 /// (deny-by-default). It originates only on the privileged `root_grant`.
 pub const R_STAT_STORE: u8 = 1 << 5;
+
 /// All ordinary, subtree-scoped, *delegatable* rights. Deliberately excludes
 /// `R_STAT_STORE` (bit 5): attenuation is plain intersection, so a delegated
 /// handle masked by `R_ALL` (or narrower) strips `stat-store` for free. The
@@ -92,9 +97,13 @@ pub fn attenuate(parent: u8, mask: u8) -> (r: u8)
 {
     let r = parent & mask;
     assert(r & !parent == 0) by (bit_vector)
-        requires r == parent & mask;
+        requires
+            r == parent & mask,
+    ;
     assert((mask & R_STAT_STORE == 0) ==> (r & R_STAT_STORE == 0)) by (bit_vector)
-        requires r == parent & mask;
+        requires
+            r == parent & mask,
+    ;
     r
 }
 
@@ -121,7 +130,6 @@ pub proof fn lemma_attenuate_r_all_denies_stat_store(parent: u8)
 }
 
 } // verus!
-
 pub type SessionId = u64;
 pub type HandleId = u32;
 

@@ -13,7 +13,6 @@
 //! notification (rev2§3.6) and the poll loop becomes a wait; the driver
 //! exposes `complete()` so the caller owns the waiting strategy.
 //! QEMU note: modern MMIO needs `-global virtio-mmio.force-legacy=false`.
-
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 // Clippy is not a CI gate: these are device-driver cosmetics — a
 // block-device size trait where `is_empty` is meaningless, MMIO `unsafe` methods
@@ -153,12 +152,15 @@ pub fn capacity_check(lba: u64, len: usize, capacity: u64) -> (r: Result<(), ()>
     let nsectors = (len / SECTOR) as u64;
     match lba.checked_add(nsectors) {
         None => Err(()),
-        Some(end) => if end > capacity { Err(()) } else { Ok(()) },
+        Some(end) => if end > capacity {
+            Err(())
+        } else {
+            Ok(())
+        },
     }
 }
 
 } // verus!
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VirtioError {
     BadMagic,

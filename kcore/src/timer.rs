@@ -5,7 +5,6 @@
 //! generic-timer register access (`CNTVCT`/`CNTV`, the tick) stays in the
 //! `kernel` crate (`kernel/src/timer.rs`). Expiry is checked on the periodic
 //! tick, so deadline resolution is one tick at MVP.
-
 // `cspace::` is referenced only from `verus!{}` spec/proof code, erased under a
 // normal build — hence the allow (the lib.rs precedent).
 #[allow(unused_imports)]
@@ -78,9 +77,8 @@ pub fn disarm<S: Store>(store: &mut S, t: ObjId)
         // precedent, the `cap_consistent(Timer)` standing fact). Every real caller has it.
         old(store).timer_view().dom().finite(),
         cspace::timer_wf(old(store).timer_view(), old(store).timer_head_view()),
-        old(store).timer_view()[t].armed ==>
-            (old(store).timer_view()[t].notif matches Some(n) ==>
-                old(store).refs_view().dom().contains(n) && old(store).refs_view()[n] > 0),
+        old(store).timer_view()[t].armed ==> (old(store).timer_view()[t].notif matches Some(n)
+            ==> old(store).refs_view().dom().contains(n) && old(store).refs_view()[n] > 0),
     ensures
         final(store).slot_view() == old(store).slot_view(),
         final(store).chan_view() == old(store).chan_view(),
@@ -120,13 +118,20 @@ pub fn disarm<S: Store>(store: &mut S, t: ObjId)
             &&& final(store).timer_view()[t].notif is None
             &&& final(store).timer_view()[t].next is None
             &&& final(store).refs_view() == old(store).refs_view().insert(
-                    old(store).timer_view()[t].notif->Some_0,
-                    (old(store).refs_view()[old(store).timer_view()[t].notif->Some_0] - 1) as nat)
-            &&& !cspace::timer_seq(final(store).timer_view(), final(store).timer_head_view()).contains(t)
-            &&& forall|j: ObjId| #![trigger final(store).timer_view()[j]]
-                    j != t && old(store).timer_view()[j].next != Some(t)
+                old(store).timer_view()[t].notif->Some_0,
+                (old(store).refs_view()[old(store).timer_view()[t].notif->Some_0] - 1) as nat,
+            )
+            &&& !cspace::timer_seq(
+                final(store).timer_view(),
+                final(store).timer_head_view(),
+            ).contains(t)
+            &&& forall|j: ObjId|
+                #![trigger final(store).timer_view()[j]]
+                j != t && old(store).timer_view()[j].next != Some(t)
                     ==> final(store).timer_view()[j] == old(store).timer_view()[j]
-            &&& forall|j: ObjId| #![trigger final(store).timer_view()[j]] j != t ==> {
+            &&& forall|j: ObjId|
+                #![trigger final(store).timer_view()[j]]
+                j != t ==> {
                     &&& final(store).timer_view()[j].armed == old(store).timer_view()[j].armed
                     &&& final(store).timer_view()[j].notif == old(store).timer_view()[j].notif
                     &&& final(store).timer_view()[j].deadline == old(store).timer_view()[j].deadline
@@ -181,11 +186,19 @@ pub fn disarm<S: Store>(store: &mut S, t: ObjId)
             tmv0.dom().finite(),
             tmv0[t].armed,
             ts0.contains(t),
-            tmv0[t].notif matches Some(n) ==>
-                store.refs_view().dom().contains(n) && store.refs_view()[n] > 0,
+            tmv0[t].notif matches Some(n) ==> store.refs_view().dom().contains(n)
+                && store.refs_view()[n] > 0,
             0 <= k <= ts0.len(),
-            cur == (if k < ts0.len() { Some(ts0[k]) } else { None::<ObjId> }),
-            prev == (if k == 0 { None::<ObjId> } else { Some(ts0[k - 1]) }),
+            cur == (if k < ts0.len() {
+                Some(ts0[k])
+            } else {
+                None::<ObjId>
+            }),
+            prev == (if k == 0 {
+                None::<ObjId>
+            } else {
+                Some(ts0[k - 1])
+            }),
             forall|i: int| 0 <= i < k ==> ts0[i] != t,
         decreases ts0.len() - k,
     {
@@ -204,11 +217,15 @@ pub fn disarm<S: Store>(store: &mut S, t: ObjId)
             match prev {
                 None => {
                     store.set_timer_armed_head(cnext);
-                }
+                },
                 Some(p) => {
-                    proof { assert(k > 0); assert(p == ts0[k - 1]); assert(tmv0.dom().contains(p)); }
+                    proof {
+                        assert(k > 0);
+                        assert(p == ts0[k - 1]);
+                        assert(tmv0.dom().contains(p));
+                    }
                     store.set_timer_next(p, cnext);
-                }
+                },
             }
 
             // Release the queued ref, clear `t`. `t` armed ⇒ `notif is Some` (timer_chain).
@@ -236,8 +253,10 @@ pub fn disarm<S: Store>(store: &mut S, t: ObjId)
                 // Completeness: every still-armed timer was charted on `ts0` and is not
                 // `t`, so it survives the splice.
                 assert(cspace::timer_complete(tmvf, ts0.remove(k))) by {
-                    assert forall|j: ObjId| #[trigger] tmvf.dom().contains(j) && tmvf[j].armed
-                        implies ts0.remove(k).contains(j) by {
+                    assert forall|j: ObjId| #[trigger]
+                        tmvf.dom().contains(j) && tmvf[j].armed implies ts0.remove(k).contains(
+                        j,
+                    ) by {
                         assert(j != t);
                         assert(tmv0[j].armed);
                         assert(ts0.contains(j));
@@ -246,13 +265,21 @@ pub fn disarm<S: Store>(store: &mut S, t: ObjId)
                 }
                 assert(cspace::timer_wf(tmvf, headf));
                 // `t ∉ timer_seq(final)`: the unique chain is `ts0.remove(k)`, which omits `t`.
-                cspace::lemma_timer_chain_unique(tmvf, headf,
-                    cspace::timer_seq(tmvf, headf), ts0.remove(k));
+                cspace::lemma_timer_chain_unique(
+                    tmvf,
+                    headf,
+                    cspace::timer_seq(tmvf, headf),
+                    ts0.remove(k),
+                );
                 assert(!ts0.remove(k).contains(t)) by {
                     ts0.remove_ensures(k);
-                    assert forall|i: int| 0 <= i < ts0.remove(k).len() implies
-                        ts0.remove(k)[i] != t by {
-                        let ii = if i < k { i } else { i + 1 };
+                    assert forall|i: int| 0 <= i < ts0.remove(k).len() implies ts0.remove(k)[i]
+                        != t by {
+                        let ii = if i < k {
+                            i
+                        } else {
+                            i + 1
+                        };
                         assert(ts0.remove(k)[i] == ts0[ii]);
                         assert(ii != k);
                     }
@@ -269,12 +296,15 @@ pub fn disarm<S: Store>(store: &mut S, t: ObjId)
                 assert(tmv0[t].notif is Some);
                 let n = tmv0[t].notif->Some_0;
                 assert(store.refs_view() == old(store).refs_view().insert(
-                    n, (old(store).refs_view()[n] - 1) as nat));
+                    n,
+                    (old(store).refs_view()[n] - 1) as nat,
+                ));
                 assert(store.refs_view().dom() =~= old(store).refs_view().dom());
                 assert(tmv0.dom().finite());
-                assert forall|o: ObjId| store.refs_view().dom().contains(o) implies
-                    store.refs_view()[o] + cspace::obj_census(old(store), o)
-                        == old(store).refs_view()[o] + #[trigger] cspace::obj_census(store, o) by {
+                assert forall|o: ObjId|
+                    store.refs_view().dom().contains(o) implies store.refs_view()[o]
+                    + cspace::obj_census(old(store), o) == old(store).refs_view()[o]
+                    + #[trigger] cspace::obj_census(store, o) by {
                     cspace::lemma_armed_timer_disarm(tmv0, tmvf, t, o);
                 }
                 assert(cspace::census_delta_frozen(old(store), store));
@@ -324,9 +354,8 @@ pub fn arm<S: Store>(store: &mut S, t: ObjId, notif: ObjId, bits: u64, deadline:
         old(store).refs_view()[notif] < u32::MAX,
         cspace::timer_wf(old(store).timer_view(), old(store).timer_head_view()),
         // re-arm release fragment (discharges the `disarm` `-1` if `t` is already armed).
-        old(store).timer_view()[t].armed ==>
-            (old(store).timer_view()[t].notif matches Some(n) ==>
-                old(store).refs_view().dom().contains(n) && old(store).refs_view()[n] > 0),
+        old(store).timer_view()[t].armed ==> (old(store).timer_view()[t].notif matches Some(n)
+            ==> old(store).refs_view().dom().contains(n) && old(store).refs_view()[n] > 0),
     ensures
         final(store).slot_view() == old(store).slot_view(),
         final(store).chan_view() == old(store).chan_view(),
@@ -373,7 +402,9 @@ pub fn arm<S: Store>(store: &mut S, t: ObjId, notif: ObjId, bits: u64, deadline:
     store.set_timer_deadline(t, deadline);
     store.set_timer_armed(t, true);
     let h = store.timer_armed_head();
-    proof { assert(h == head1); }
+    proof {
+        assert(h == head1);
+    }
     store.set_timer_next(t, h);
     store.set_timer_armed_head(Some(t));
 
@@ -381,7 +412,15 @@ pub fn arm<S: Store>(store: &mut S, t: ObjId, notif: ObjId, bits: u64, deadline:
         let tmvf = store.timer_view();
         let headf = store.timer_head_view();
         // `pts == [t] ++ ts1`.
-        let pts = Seq::new((ts1.len() + 1) as nat, |i: int| if i == 0 { t } else { ts1[i - 1] });
+        let pts = Seq::new(
+            (ts1.len() + 1) as nat,
+            |i: int|
+                if i == 0 {
+                    t
+                } else {
+                    ts1[i - 1]
+                },
+        );
         assert(pts.len() == ts1.len() + 1);
         assert(pts[0] == t);
         assert(forall|i: int| 1 <= i < pts.len() ==> pts[i] == ts1[i - 1]);
@@ -391,8 +430,8 @@ pub fn arm<S: Store>(store: &mut S, t: ObjId, notif: ObjId, bits: u64, deadline:
         cspace::lemma_timer_push_head_chain(tmv1, head1, tmvf, headf, t, ts1, pts);
         // Completeness: every armed timer is `t` or was charted on `ts1`, all on `pts`.
         assert(cspace::timer_complete(tmvf, pts)) by {
-            assert forall|j: ObjId| #[trigger] tmvf.dom().contains(j) && tmvf[j].armed
-                implies pts.contains(j) by {
+            assert forall|j: ObjId| #[trigger]
+                tmvf.dom().contains(j) && tmvf[j].armed implies pts.contains(j) by {
                 if j == t {
                     assert(pts[0] == t);
                 } else {
@@ -426,15 +465,17 @@ pub fn arm<S: Store>(store: &mut S, t: ObjId, notif: ObjId, bits: u64, deadline:
         // Only `t`'s `(armed, notif)` differs from `old`: `tmvf[j] == tmv1[j]` for `j != t`
         // (the head push is a single `insert` at `t`), and `disarm` framed `j`'s armed/notif.
         assert(tmvf.dom() == tmv0v.dom());
-        assert forall|j: ObjId| #![trigger tmvf[j]] j != t implies
-            tmvf[j].armed == tmv0v[j].armed && tmvf[j].notif == tmv0v[j].notif by {
+        assert forall|j: ObjId| #![trigger tmvf[j]] j != t implies tmvf[j].armed == tmv0v[j].armed
+            && tmvf[j].notif == tmv0v[j].notif by {
             assert(tmvf[j] == tmv1[j]);
         }
         assert(tmvf[t].armed && tmvf[t].notif == Some(notif));
         assert(tmv0v.dom().finite());
-        assert forall|o: ObjId| store.refs_view().dom().contains(o) implies
-            rvf[o] + cspace::obj_census(old(store), o)
-                == rv0[o] + #[trigger] cspace::obj_census(store, o) by {
+        assert forall|o: ObjId| store.refs_view().dom().contains(o) implies rvf[o]
+            + cspace::obj_census(old(store), o) == rv0[o] + #[trigger] cspace::obj_census(
+            store,
+            o,
+        ) by {
             cspace::lemma_armed_timer_retarget(tmv0v, tmvf, t, o);
         }
         assert(store.refs_view().dom() == old(store).refs_view().dom());
@@ -466,9 +507,8 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
         old(store).timer_view().dom().finite(),
         cspace::timer_wf(old(store).timer_view(), old(store).timer_head_view()),
         cspace::refcount_sound(old(store)),
-        old(store).timer_view()[t].armed ==>
-            (old(store).timer_view()[t].notif matches Some(n) ==>
-                old(store).refs_view().dom().contains(n) && old(store).refs_view()[n] > 0),
+        old(store).timer_view()[t].armed ==> (old(store).timer_view()[t].notif matches Some(n)
+            ==> old(store).refs_view().dom().contains(n) && old(store).refs_view()[n] > 0),
         cspace::caps_consistent(old(store)),
         cspace::end_caps_sound(old(store)),
         cspace::census_dom_complete(old(store)),
@@ -527,31 +567,35 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
             let n = tmv0[t].notif->Some_0;
             // disarm's armed-case deltas (the `n` release + the armed/notif frame).
             assert(store.refs_view() == old(store).refs_view().insert(
-                n, (old(store).refs_view()[n] - 1) as nat));
+                n,
+                (old(store).refs_view()[n] - 1) as nat,
+            ));
             assert(store.refs_view().dom() =~= old(store).refs_view().dom());
             assert(old(store).refs_view()[n] > 0);
             // dead-stays-dead (armed): `refs` moved only at `n` (`refs[n] > 0`), so a dead `x`
             // is `x != n` and keeps `refs[x] == 0`.
             assert forall|x: ObjId|
-                old(store).refs_view().dom().contains(x) && old(store).refs_view()[x] == 0
-                implies #[trigger] store.refs_view()[x] == 0 by { assert(x != n); }
+                old(store).refs_view().dom().contains(x) && old(store).refs_view()[x]
+                    == 0 implies #[trigger] store.refs_view()[x] == 0 by {
+                assert(x != n);
+            }
             // The census moves only at `n`, by exactly the `-1` that `disarm` released.
-            assert forall|o: ObjId| store.refs_view().dom().contains(o)
-                implies store.refs_view()[o] == cspace::obj_census(store, o) by {
+            assert forall|o: ObjId| store.refs_view().dom().contains(o) implies store.refs_view()[o]
+                == cspace::obj_census(store, o) by {
                 cspace::lemma_armed_timer_disarm(tmv0, tmvf, t, o);
                 assert(old(store).refs_view()[o] == cspace::obj_census(old(store), o));
             }
         } else {
             // Not armed ⇒ disarm is a no-op; the store (refs + every view) is unchanged.
             assert(store.refs_view() == old(store).refs_view());
-            assert forall|o: ObjId| store.refs_view().dom().contains(o)
-                implies store.refs_view()[o] == cspace::obj_census(store, o) by {
+            assert forall|o: ObjId| store.refs_view().dom().contains(o) implies store.refs_view()[o]
+                == cspace::obj_census(store, o) by {
                 assert(cspace::obj_census(store, o) == cspace::obj_census(old(store), o));
             }
             // dead-stays-dead (not armed): `refs` is unchanged.
             assert forall|x: ObjId|
-                old(store).refs_view().dom().contains(x) && old(store).refs_view()[x] == 0
-                implies #[trigger] store.refs_view()[x] == 0 by {}
+                old(store).refs_view().dom().contains(x) && old(store).refs_view()[x]
+                    == 0 implies #[trigger] store.refs_view()[x] == 0 by {}
         }
         // caps_consistent: `disarm` frames cspace and keeps the timer domain, so the Timer
         // arm reads an unchanged domain + the ensured `timer_wf`; every other arm reads a
@@ -559,38 +603,43 @@ pub fn destroy_timer<S: Store>(store: &mut S, t: ObjId)
         assert(store.cspace_view() == old(store).cspace_view());
         assert(store.irq_view() == old(store).irq_view());
         assert(store.timer_view().dom() == old(store).timer_view().dom());
-        assert forall|s: crate::id::SlotId| #![trigger store.slot_view()[s]]
-            store.slot_view().dom().contains(s)
-                && !cspace::is_empty_cap(store.slot_view()[s].cap)
-            implies cspace::cap_consistent(store, store.slot_view()[s].cap) by {
+        assert forall|s: crate::id::SlotId|
+            #![trigger store.slot_view()[s]]
+            store.slot_view().dom().contains(s) && !cspace::is_empty_cap(
+                store.slot_view()[s].cap,
+            ) implies cspace::cap_consistent(store, store.slot_view()[s].cap) by {
             assert(cspace::cap_consistent(old(store), old(store).slot_view()[s].cap));
         }
         // census_dom_complete: the refs domain is unchanged and the census only dropped (at
         // `n` in the armed case; unchanged otherwise), so any object with census >= 1 now had
         // census >= 1 before ⇒ it was already covered. Reuse the disarm census frame.
         assert(store.refs_view().dom() == old(store).refs_view().dom());
-        assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o) >= 1
-            implies store.refs_view().dom().contains(o) by {
+        assert forall|o: ObjId| #[trigger]
+            cspace::obj_census(store, o) >= 1 implies store.refs_view().dom().contains(o) by {
             if !store.refs_view().dom().contains(o) {
                 if armed0 {
                     cspace::lemma_armed_timer_disarm(tmv0, store.timer_view(), t, o);
                 }
                 // census(final, o) == census(old, o), which is 0 for o ∉ dom (census_dom_complete).
+
                 assert(cspace::obj_census(old(store), o) == 0);
             }
         }
         // dead_tcb_frozen: `tcb` is framed whole, and the dead-stays-dead refs fact was
         // established in each `armed0` branch (the only `refs` move is at the bound notification,
         // which had `refs > 0`). So a dead object stays dead and detached.
-        assert forall|k: ObjId| #[trigger] store.tcb_view()[k] == old(store).tcb_view()[k]
-            || old(store).tcb_view()[k].wait_notif == Some(t) by {}
+        assert forall|k: ObjId| #[trigger]
+            store.tcb_view()[k] == old(store).tcb_view()[k] || old(store).tcb_view()[k].wait_notif
+                == Some(t) by {}
         assert(store.refs_view().dom() =~= old(store).refs_view().dom());
         assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
         cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, t);
         // "Dead stays dead": the refs domain is unchanged, and a dead in-domain object
         // (`refs == 0`) keeps `refs == 0` (the per-branch fact above) — so death is preserved.
-        assert forall|o: ObjId| cspace::dead_obj(old(store), o)
-            implies #[trigger] cspace::dead_obj(store, o) by {
+        assert forall|o: ObjId| cspace::dead_obj(old(store), o) implies #[trigger] cspace::dead_obj(
+            store,
+            o,
+        ) by {
             if old(store).refs_view().dom().contains(o) && old(store).refs_view()[o] == 0 {
                 assert(store.refs_view()[o] == 0);
             }
@@ -632,45 +681,58 @@ proof fn lemma_signal_ok_after_fire<S: Store>(
         store2.timer_view().dom() == tmv_pre.dom(),
         store2.timer_view().dom().finite(),
         !store2.timer_view()[c].armed,
-        forall|j: ObjId| #![trigger store2.timer_view()[j]]
+        forall|j: ObjId|
+            #![trigger store2.timer_view()[j]]
             j != c ==> store2.timer_view()[j].armed == tmv_pre[j].armed
                 && store2.timer_view()[j].notif == tmv_pre[j].notif,
         // notif/tcb/refs differ from the pre-state only at `n` (disarm frames notif/tcb and
         // touches refs[n]; signal touches `n`'s view, the threads waiting on `n`, refs[n]).
         store2.notif_view().dom() == nv_pre.dom(),
-        forall|m: ObjId| #![trigger store2.notif_view()[m]]
+        forall|m: ObjId|
+            #![trigger store2.notif_view()[m]]
             m != n ==> store2.notif_view()[m] == nv_pre[m],
         store2.tcb_view().dom() == tv_pre.dom(),
         // A thread with a pending wait is not Runnable. The caller derives this from
         // `ready_complete` (Runnable ⇒ `wait_notif None`); it lets the contrapositive frame
         // below discharge `lemma_notif_wf_frame` for an *unshared* notification `np`'s waiters.
-        forall|th: ObjId| #![trigger tv_pre[th].wait_notif]
-            tv_pre.dom().contains(th) && tv_pre[th].wait_notif is Some
-                ==> tv_pre[th].state != ThreadState::Runnable,
+        forall|th: ObjId|
+            #![trigger tv_pre[th].wait_notif]
+            tv_pre.dom().contains(th) && tv_pre[th].wait_notif is Some ==> tv_pre[th].state
+                != ThreadState::Runnable,
         // `signal`'s **contrapositive** caller-frame — a *changed* TCB was an `n`-waiter or
         // was Runnable (the faithful enqueue re-threads the Runnable old ready-tail). Replaces the
         // old un-guarded `wait_notif != Some(n) ==> unchanged`, which that Runnable tail violated.
-        forall|th: ObjId| #![trigger store2.tcb_view()[th]]
-            store2.tcb_view()[th] != tv_pre[th]
-                ==> tv_pre[th].wait_notif == Some(n)
-                    || tv_pre[th].state == ThreadState::Runnable,
+        forall|th: ObjId|
+            #![trigger store2.tcb_view()[th]]
+            store2.tcb_view()[th] != tv_pre[th] ==> tv_pre[th].wait_notif == Some(n)
+                || tv_pre[th].state == ThreadState::Runnable,
         rv_pre.dom().contains(n),
         store2.refs_view().dom() == rv_pre.dom(),
-        forall|m: ObjId| #![trigger store2.refs_view()[m]]
+        forall|m: ObjId|
+            #![trigger store2.refs_view()[m]]
             m != n ==> store2.refs_view()[m] == rv_pre[m],
         // `n` stays well-formed across the fire (`signal` ensures it) — the well-formedness
         // half of `timer_signal_ok_at` for the shared-notification case.
         cspace::notif_wf(store2.notif_view(), store2.tcb_view(), n),
     ensures
-        cspace::timer_signal_ok(store2.timer_view(), store2.notif_view(),
-            store2.tcb_view(), store2.refs_view()),
+        cspace::timer_signal_ok(
+            store2.timer_view(),
+            store2.notif_view(),
+            store2.tcb_view(),
+            store2.refs_view(),
+        ),
 {
     let tmv2 = store2.timer_view();
     let nv2 = store2.notif_view();
     let tv2 = store2.tcb_view();
     let rv2 = store2.refs_view();
-    assert forall|cp: ObjId| #[trigger] tmv2.dom().contains(cp)
-        implies cspace::timer_signal_ok_at(tmv2, nv2, tv2, rv2, cp) by {
+    assert forall|cp: ObjId| #[trigger] tmv2.dom().contains(cp) implies cspace::timer_signal_ok_at(
+        tmv2,
+        nv2,
+        tv2,
+        rv2,
+        cp,
+    ) by {
         if tmv2[cp].armed && tmv2[cp].notif is Some {
             assert(cp != c);
             let np = tmv2[cp].notif->Some_0;
@@ -685,8 +747,8 @@ proof fn lemma_signal_ok_after_fire<S: Store>(
                 // `refcount_sound` pins refs[n] to its census; drop the four framed nat
                 // summands to bound it below by the armed-timer (+ waiter) terms.
                 assert(rv2[n] == cspace::obj_census(store2, n));
-                assert(cspace::obj_census(store2, n)
-                    >= cspace::armed_timer_refs(tmv2, n) + cspace::waiter_refs(nv2, tv2, n));
+                assert(cspace::obj_census(store2, n) >= cspace::armed_timer_refs(tmv2, n)
+                    + cspace::waiter_refs(nv2, tv2, n));
                 assert(rv2[n] >= 1);
                 if nv2[n].wait_head is Some {
                     cspace::lemma_waiter_refs_pos_from_head(nv2, tv2, n);
@@ -699,8 +761,9 @@ proof fn lemma_signal_ok_after_fire<S: Store>(
                 // `np`'s in-domain waiters are unchanged across the fire — each has
                 // `wait_notif == Some(np) != Some(n)` (not an `n`-waiter) and is non-Runnable
                 // (`wait_notif Some ⇒ non-Runnable`), so the contrapositive frame leaves it whole.
-                assert forall|k: ObjId| #[trigger] tv_pre[k].wait_notif == Some(np)
-                    && tv_pre.dom().contains(k) implies tv2[k] == tv_pre[k] by {
+                assert forall|k: ObjId| #[trigger]
+                    tv_pre[k].wait_notif == Some(np) && tv_pre.dom().contains(k) implies tv2[k]
+                    == tv_pre[k] by {
                     assert(tv_pre[k].wait_notif is Some);
                     assert(tv_pre[k].state != ThreadState::Runnable);
                 }
@@ -727,16 +790,21 @@ proof fn lemma_signal_ok_after_fire<S: Store>(
 /// configuration the spec admits, not just one-timer-per-notification.
 pub fn check_expired<S: Store>(store: &mut S, now: u64)
     requires
-        // The timer arena is finite (`disarm`'s precondition, the `cap_consistent(Timer)`
-        // standing fact); the trusted IRQ shell that drives `check_expired` supplies it.
+// The timer arena is finite (`disarm`'s precondition, the `cap_consistent(Timer)`
+// standing fact); the trusted IRQ shell that drives `check_expired` supplies it.
+
         old(store).timer_view().dom().finite(),
         cspace::timer_wf(old(store).timer_view(), old(store).timer_head_view()),
         // The reference census is sound (the standing system invariant the trusted IRQ shell
         // maintains): it is what keeps `timer_signal_ok` across a fire on a shared
         // notification, replacing the unrealistic distinct-notification assumption.
         cspace::refcount_sound(old(store)),
-        cspace::timer_signal_ok(old(store).timer_view(), old(store).notif_view(),
-            old(store).tcb_view(), old(store).refs_view()),
+        cspace::timer_signal_ok(
+            old(store).timer_view(),
+            old(store).notif_view(),
+            old(store).tcb_view(),
+            old(store).refs_view(),
+        ),
         // The in-loop `signal` faithfully enqueues the woken thread, so it requires the
         // ready-queue invariants. `disarm` frames the ready views, so the pair carries to each
         // `signal` (via `lemma_ready_inv_frame`) and `signal` re-establishes them across the wake.
@@ -771,8 +839,12 @@ pub fn check_expired<S: Store>(store: &mut S, now: u64)
             // conditional `refcount_sound`), feeding the next iteration's shared-notification
             // re-establishment of `timer_signal_ok`.
             cspace::refcount_sound(store),
-            cspace::timer_signal_ok(store.timer_view(), store.notif_view(),
-                store.tcb_view(), store.refs_view()),
+            cspace::timer_signal_ok(
+                store.timer_view(),
+                store.notif_view(),
+                store.tcb_view(),
+                store.refs_view(),
+            ),
             // The ready pair carries the loop — `disarm` frames the ready views and `signal`
             // re-establishes them, so each iteration both consumes them (for `signal`'s requires)
             // and restores them.
@@ -783,15 +855,24 @@ pub fn check_expired<S: Store>(store: &mut S, now: u64)
             ts0 == cspace::timer_seq(tmv0, head0),
             cspace::timer_chain(tmv0, head0, ts0),
             0 <= k <= ts0.len(),
-            cur == (if k < ts0.len() { Some(ts0[k]) } else { None::<ObjId> }),
+            cur == (if k < ts0.len() {
+                Some(ts0[k])
+            } else {
+                None::<ObjId>
+            }),
             // the unprocessed suffix retains its original armed/notif/next links.
-            forall|i: int| #![trigger ts0[i]] k <= i < ts0.len() ==> {
-                &&& store.timer_view().dom().contains(ts0[i])
-                &&& store.timer_view()[ts0[i]].armed
-                &&& store.timer_view()[ts0[i]].notif is Some
-                &&& store.timer_view()[ts0[i]].next
-                        == (if i + 1 < ts0.len() { Some(ts0[i + 1]) } else { None::<ObjId> })
-            },
+            forall|i: int|
+                #![trigger ts0[i]]
+                k <= i < ts0.len() ==> {
+                    &&& store.timer_view().dom().contains(ts0[i])
+                    &&& store.timer_view()[ts0[i]].armed
+                    &&& store.timer_view()[ts0[i]].notif is Some
+                    &&& store.timer_view()[ts0[i]].next == (if i + 1 < ts0.len() {
+                        Some(ts0[i + 1])
+                    } else {
+                        None::<ObjId>
+                    })
+                },
         decreases ts0.len() - k,
     {
         let c = cur.unwrap();
@@ -810,7 +891,11 @@ pub fn check_expired<S: Store>(store: &mut S, now: u64)
         }
 
         let next = store.timer_next(c);
-        assert(next == (if k + 1 < ts0.len() { Some(ts0[k + 1]) } else { None::<ObjId> }));
+        assert(next == (if k + 1 < ts0.len() {
+            Some(ts0[k + 1])
+        } else {
+            None::<ObjId>
+        }));
 
         if store.timer_deadline(c) <= now {
             let notif = store.timer_notif(c);
@@ -864,16 +949,18 @@ pub fn check_expired<S: Store>(store: &mut S, now: u64)
                     // or was Runnable (the faithful enqueue re-threads the Runnable old
                     // ready-tail, at which a plain `wait_notif != Some(n) ==> unchanged`
                     // frame would be false).
-                    assert(forall|th: ObjId| #![trigger tv2[th]]
-                        tv2[th] != tv_pre[th]
-                            ==> tv_pre[th].wait_notif == Some(n)
-                                || tv_pre[th].state == ThreadState::Runnable);
+                    assert(forall|th: ObjId|
+                        #![trigger tv2[th]]
+                        tv2[th] != tv_pre[th] ==> tv_pre[th].wait_notif == Some(n)
+                            || tv_pre[th].state == ThreadState::Runnable);
                     // A thread with a pending wait is non-Runnable (from `ready_complete`
                     // over the pre-disarm views) — the helper `lemma_signal_ok_after_fire` needs
                     // to discharge `lemma_notif_wf_frame` for an unshared notification's waiters.
-                    assert forall|th: ObjId| #![trigger tv_pre[th].wait_notif]
-                        tv_pre.dom().contains(th) && tv_pre[th].wait_notif is Some
-                            implies tv_pre[th].state != ThreadState::Runnable by {}
+                    assert forall|th: ObjId|
+                        #![trigger tv_pre[th].wait_notif]
+                        tv_pre.dom().contains(th)
+                            && tv_pre[th].wait_notif is Some implies tv_pre[th].state
+                        != ThreadState::Runnable by {}
                     assert(rv2.dom() == rv_pre.dom());
                     assert(forall|m: ObjId| #![trigger rv2[m]] m != n ==> rv2[m] == rv_pre[m]);
                     // `signal` carries the census soundness from the post-disarm state (its
@@ -896,8 +983,11 @@ pub fn check_expired<S: Store>(store: &mut S, now: u64)
                         &&& tmv2.dom().contains(ts0[i])
                         &&& tmv2[ts0[i]].armed
                         &&& tmv2[ts0[i]].notif is Some
-                        &&& tmv2[ts0[i]].next
-                                == (if i + 1 < ts0.len() { Some(ts0[i + 1]) } else { None::<ObjId> })
+                        &&& tmv2[ts0[i]].next == (if i + 1 < ts0.len() {
+                            Some(ts0[i + 1])
+                        } else {
+                            None::<ObjId>
+                        })
                     } by {
                         assert(ts0[i] != c);
                         assert(tmv_pre[ts0[i]].next != Some(c));
@@ -911,8 +1001,11 @@ pub fn check_expired<S: Store>(store: &mut S, now: u64)
                     &&& store.timer_view().dom().contains(ts0[i])
                     &&& store.timer_view()[ts0[i]].armed
                     &&& store.timer_view()[ts0[i]].notif is Some
-                    &&& store.timer_view()[ts0[i]].next
-                            == (if i + 1 < ts0.len() { Some(ts0[i + 1]) } else { None::<ObjId> })
+                    &&& store.timer_view()[ts0[i]].next == (if i + 1 < ts0.len() {
+                        Some(ts0[i + 1])
+                    } else {
+                        None::<ObjId>
+                    })
                 } by {}
             }
         }

@@ -20,7 +20,6 @@
 //!
 //! This crate is the single home of that ~1300-line proof; `dma-pool` and the
 //! `urt` heap both depend on it.
-
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
 use vstd::prelude::*;
@@ -77,12 +76,13 @@ impl<const N: usize> FreeList<N> {
         &&& self.free@.len() == N
         &&& self.nfree <= N
         &&& (forall|k: int| 0 <= k < self.nfree ==> #[trigger] self.free@[k].1 > 0)
-        &&& (forall|k: int| 0 <= k < self.nfree
-                ==> #[trigger] self.free@[k].0 as int + self.free@[k].1 as int <= self.len as int)
-        &&& (forall|k: int| #![trigger self.free@[k].0, self.free@[k].1]
-                0 <= k < self.nfree - 1
-                ==> (self.free@[k].0 as int + self.free@[k].1 as int)
-                        < self.free@[k + 1].0 as int)
+        &&& (forall|k: int|
+            0 <= k < self.nfree ==> #[trigger] self.free@[k].0 as int + self.free@[k].1 as int
+                <= self.len as int)
+        &&& (forall|k: int|
+            #![trigger self.free@[k].0, self.free@[k].1]
+            0 <= k < self.nfree - 1 ==> (self.free@[k].0 as int + self.free@[k].1 as int)
+                < self.free@[k + 1].0 as int)
     }
 
     /// Sortedness is transitive AND strict: for `j < k`, extent `j` ends
@@ -133,7 +133,11 @@ impl<const N: usize> FreeList<N> {
         requires
             align > 0,
             0 <= off,
-            pad == (if off % align == 0 { 0int } else { align - off % align }),
+            pad == (if off % align == 0 {
+                0int
+            } else {
+                align - off % align
+            }),
         ensures
             (off + pad) % align == 0,
             0 <= pad < align,
@@ -145,15 +149,27 @@ impl<const N: usize> FreeList<N> {
         // off == align * q + r, 0 <= r < align.
         if r == 0 {
             assert(off + pad == q * align + 0) by (nonlinear_arith)
-                requires off == align * q, pad == 0;
+                requires
+                    off == align * q,
+                    pad == 0,
+            ;
             vstd::arithmetic::div_mod::lemma_fundamental_div_mod_converse_mod(
-                off + pad, align, q, 0,
+                off + pad,
+                align,
+                q,
+                0,
             );
         } else {
             assert(off + pad == (q + 1) * align + 0) by (nonlinear_arith)
-                requires off == align * q + r, pad == align - r;
+                requires
+                    off == align * q + r,
+                    pad == align - r,
+            ;
             vstd::arithmetic::div_mod::lemma_fundamental_div_mod_converse_mod(
-                off + pad, align, q + 1, 0,
+                off + pad,
+                align,
+                q + 1,
+                0,
             );
         }
     }
@@ -171,10 +187,11 @@ impl<const N: usize> FreeList<N> {
             final(self).nfree == old(self).nfree - 1,
             final(self).free@.len() == N,
             forall|k: int| 0 <= k < g ==> final(self).free@[k] == old(self).free@[k],
-            forall|k: int| g <= k < final(self).nfree
-                ==> final(self).free@[k] == old(self).free@[k + 1],
+            forall|k: int|
+                g <= k < final(self).nfree ==> final(self).free@[k] == old(self).free@[k + 1],
     {
         broadcast use vstd::array::group_array_axioms;
+
         let top = self.nfree - 1;
         let mut j = g;
         while j < top
@@ -209,10 +226,11 @@ impl<const N: usize> FreeList<N> {
             final(self).free@.len() == N,
             final(self).free@[g as int] == val,
             forall|k: int| 0 <= k < g ==> final(self).free@[k] == old(self).free@[k],
-            forall|k: int| g < k < final(self).nfree
-                ==> final(self).free@[k] == old(self).free@[k - 1],
+            forall|k: int|
+                g < k < final(self).nfree ==> final(self).free@[k] == old(self).free@[k - 1],
     {
         broadcast use vstd::array::group_array_axioms;
+
         let mut j = self.nfree;
         while j > g
             invariant
@@ -243,7 +261,8 @@ impl<const N: usize> FreeList<N> {
             forall|p: int| r.covers(p) <==> (0 <= p < len as int),
     {
         broadcast use vstd::array::group_array_axioms;
-        let mut free = [(0usize, 0usize); N];
+
+        let mut free = [(0usize, 0usize);N];
         let nfree;
         if len == 0 {
             nfree = 0;
@@ -297,6 +316,7 @@ impl<const N: usize> FreeList<N> {
             r == (forall|p: int| off <= p < off + n ==> !self.covers(p)),
     {
         broadcast use vstd::array::group_array_axioms;
+
         let mut k: usize = 0;
         while k < self.nfree
             invariant
@@ -305,10 +325,10 @@ impl<const N: usize> FreeList<N> {
                 off as int + n as int <= self.spec_len(),
                 0 <= k <= self.nfree,
                 // every scanned extent is disjoint from [off, off+n).
-                forall|j: int| #![trigger self.free@[j].0, self.free@[j].1]
-                    0 <= j < k
-                    ==> (self.free@[j].0 as int + self.free@[j].1 as int <= off as int
-                            || off as int + n as int <= self.free@[j].0 as int),
+                forall|j: int|
+                    #![trigger self.free@[j].0, self.free@[j].1]
+                    0 <= j < k ==> (self.free@[j].0 as int + self.free@[j].1 as int <= off as int
+                        || off as int + n as int <= self.free@[j].0 as int),
             decreases self.nfree - k,
         {
             let o = self.free[k].0;
@@ -318,7 +338,11 @@ impl<const N: usize> FreeList<N> {
             if o + l > off && o < off + n {
                 // The overlap covers a point of [off, off+n) — exhibit it.
                 assert(!(forall|p: int| off <= p < off + n ==> !self.covers(p))) by {
-                    let q: int = if o <= off { off as int } else { o as int };
+                    let q: int = if o <= off {
+                        off as int
+                    } else {
+                        o as int
+                    };
                     assert(self.free@[k as int].1 > 0);
                     assert(self.ext_has(k as int, q));
                     assert(self.covers(q));
@@ -334,8 +358,8 @@ impl<const N: usize> FreeList<N> {
                 assert(self.ext_has(j, p));
                 // invariant (k == nfree) gives j disjoint from [off, off+n), which
                 // contradicts ext_has(j, p) with p in [off, off+n).
-                assert(self.free@[j].0 as int + self.free@[j].1 as int <= off as int
-                    || off as int + n as int <= self.free@[j].0 as int);
+                assert(self.free@[j].0 as int + self.free@[j].1 as int <= off as int || off as int
+                    + n as int <= self.free@[j].0 as int);
             }
         }
         true
@@ -360,13 +384,14 @@ impl<const N: usize> FreeList<N> {
                     &&& start as int % align as int == 0
                     &&& (forall|p: int| start <= p < start + n ==> old(self).covers(p))
                     &&& (forall|p: int| start <= p < start + n ==> !final(self).covers(p))
-                    &&& (forall|p: int| !(start <= p < start + n)
-                            ==> final(self).covers(p) == old(self).covers(p))
+                    &&& (forall|p: int|
+                        !(start <= p < start + n) ==> final(self).covers(p) == old(self).covers(p))
                 },
                 None => forall|p: int| final(self).covers(p) == old(self).covers(p),
             },
     {
         broadcast use vstd::array::group_array_axioms;
+
         if n == 0 {
             return None;
         }
@@ -385,12 +410,17 @@ impl<const N: usize> FreeList<N> {
             let off = self.free[i].0;
             let flen = self.free[i].1;
             let rem = off % align;
-            let pad = if rem == 0 { 0 } else { align - rem };
+            let pad = if rem == 0 {
+                0
+            } else {
+                align - rem
+            };
             if pad > flen || n > flen - pad {
                 i += 1;
                 continue;
             }
             // pad <= flen and pad + n <= flen, so the carve fits in extent i.
+
             let start = off + pad;
             let rest_off = start + n;
             let rest_len = flen - pad - n;
@@ -402,8 +432,7 @@ impl<const N: usize> FreeList<N> {
             if pad == 0 && rest_len == 0 {
                 self.remove_at(i);
                 proof {
-                    Self::alloc_proof_remove(*self, *old(self), i as int, off as int,
-                        flen as int);
+                    Self::alloc_proof_remove(*self, *old(self), i as int, off as int, flen as int);
                     // remove's frame is over [off, off+flen); here pad == 0 and
                     // rest_len == 0, so start == off and n == flen — the carved
                     // region the alloc postcondition names.
@@ -413,14 +442,32 @@ impl<const N: usize> FreeList<N> {
             } else if pad > 0 && rest_len == 0 {
                 self.free[i] = (off, pad);
                 proof {
-                    Self::alloc_proof_set(*self, *old(self), i as int, off as int, flen as int,
-                        off as int, pad as int, start as int, n as int);
+                    Self::alloc_proof_set(
+                        *self,
+                        *old(self),
+                        i as int,
+                        off as int,
+                        flen as int,
+                        off as int,
+                        pad as int,
+                        start as int,
+                        n as int,
+                    );
                 }
             } else if pad == 0 && rest_len > 0 {
                 self.free[i] = (rest_off, rest_len);
                 proof {
-                    Self::alloc_proof_set(*self, *old(self), i as int, off as int, flen as int,
-                        rest_off as int, rest_len as int, start as int, n as int);
+                    Self::alloc_proof_set(
+                        *self,
+                        *old(self),
+                        i as int,
+                        off as int,
+                        flen as int,
+                        rest_off as int,
+                        rest_len as int,
+                        start as int,
+                        n as int,
+                    );
                 }
             } else {
                 if self.nfree == N {
@@ -430,8 +477,18 @@ impl<const N: usize> FreeList<N> {
                 self.free[i] = (off, pad);
                 self.insert_at(i + 1, (rest_off, rest_len));
                 proof {
-                    Self::alloc_proof_split(*self, *old(self), i as int, off as int, flen as int,
-                        pad as int, rest_off as int, rest_len as int, start as int, n as int);
+                    Self::alloc_proof_split(
+                        *self,
+                        *old(self),
+                        i as int,
+                        off as int,
+                        flen as int,
+                        pad as int,
+                        rest_off as int,
+                        rest_len as int,
+                        start as int,
+                        n as int,
+                    );
                 }
             }
             proof {
@@ -465,8 +522,17 @@ impl<const N: usize> FreeList<N> {
     /// (a prefix or suffix of it), removing the complementary interval
     /// `R = [rs, rs+rn)`. Proves `wf` survives and `covers` changes by exactly
     /// `R` (the (T,F) pad-keep and (F,T) rest-keep arms).
-    proof fn alloc_proof_set(new: FreeList<N>, old: FreeList<N>, i: int, off: int, flen: int,
-        a: int, b: int, rs: int, rn: int)
+    proof fn alloc_proof_set(
+        new: FreeList<N>,
+        old: FreeList<N>,
+        i: int,
+        off: int,
+        flen: int,
+        a: int,
+        b: int,
+        rs: int,
+        rn: int,
+    )
         requires
             old.wf(),
             0 <= i < old.nfree,
@@ -480,8 +546,8 @@ impl<const N: usize> FreeList<N> {
             forall|k: int| 0 <= k < new.nfree && k != i ==> new.free@[k] == old.free@[k],
             b > 0,
             rn > 0,
-            (a == off && rs == a + b && rs + rn == off + flen)
-                || (rs == off && rs + rn == a && a + b == off + flen),
+            (a == off && rs == a + b && rs + rn == off + flen) || (rs == off && rs + rn == a && a
+                + b == off + flen),
         ensures
             new.wf(),
             new.spec_len() == old.spec_len(),
@@ -500,8 +566,7 @@ impl<const N: usize> FreeList<N> {
                     < old.free@[i].0 as int);
             }
             if i + 1 < new.nfree {
-                assert((old.free@[i].0 as int + old.free@[i].1 as int)
-                    < old.free@[i + 1].0 as int);
+                assert((old.free@[i].0 as int + old.free@[i].1 as int) < old.free@[i + 1].0 as int);
             }
         }
         // POST5: R lies in old extent i.
@@ -610,8 +675,18 @@ impl<const N: usize> FreeList<N> {
     /// `[rest_off, off+flen)` at `i+1` — with everything above shifted up one
     /// (the (T,T) arm). The carved region `R = [off+pad, rest_off)`. Dispatches to
     /// two spinoff'd halves so neither blows the per-function rlimit.
-    proof fn alloc_proof_split(new: FreeList<N>, old: FreeList<N>, i: int, off: int, flen: int,
-        pad: int, rest_off: int, rest_len: int, start: int, n: int)
+    proof fn alloc_proof_split(
+        new: FreeList<N>,
+        old: FreeList<N>,
+        i: int,
+        off: int,
+        flen: int,
+        pad: int,
+        rest_off: int,
+        rest_len: int,
+        start: int,
+        n: int,
+    )
         requires
             old.wf(),
             old.nfree < N,
@@ -645,8 +720,18 @@ impl<const N: usize> FreeList<N> {
     }
 
     /// `wf` survives the split (the sorted/non-empty/in-bounds conjuncts).
-    proof fn split_wf(new: FreeList<N>, old: FreeList<N>, i: int, off: int, flen: int,
-        pad: int, rest_off: int, rest_len: int, start: int, n: int)
+    proof fn split_wf(
+        new: FreeList<N>,
+        old: FreeList<N>,
+        i: int,
+        off: int,
+        flen: int,
+        pad: int,
+        rest_off: int,
+        rest_len: int,
+        start: int,
+        n: int,
+    )
         requires
             old.wf(),
             old.nfree < N,
@@ -674,8 +759,10 @@ impl<const N: usize> FreeList<N> {
     {
         // Sortedness, junction by junction: i-1→i and i+1→i+2 close over old's
         // adjacent gaps; i→i+1 is the n>0 gap between the two new pieces.
-        assert forall|k: int| #![trigger new.free@[k].0, new.free@[k].1] 0 <= k < new.nfree - 1 implies
-            (new.free@[k].0 as int + new.free@[k].1 as int) < new.free@[k + 1].0 as int by {
+        assert forall|k: int|
+            #![trigger new.free@[k].0, new.free@[k].1]
+            0 <= k < new.nfree - 1 implies (new.free@[k].0 as int + new.free@[k].1 as int)
+            < new.free@[k + 1].0 as int by {
             if k + 1 < i {
                 assert((old.free@[k].0 as int + old.free@[k].1 as int) < old.free@[k + 1].0 as int);
             } else if k == i - 1 {
@@ -684,23 +771,24 @@ impl<const N: usize> FreeList<N> {
             } else if k == i {
                 // off+pad < rest_off == off+pad+n.
             } else if k == i + 1 {
-                assert((old.free@[i].0 as int + old.free@[i].1 as int)
-                    < old.free@[i + 1].0 as int);
+                assert((old.free@[i].0 as int + old.free@[i].1 as int) < old.free@[i + 1].0 as int);
             } else {
                 assert((old.free@[k - 1].0 as int + old.free@[k - 1].1 as int)
                     < old.free@[k].0 as int);
             }
         }
-        assert forall|k: int| #![trigger new.free@[k].1] 0 <= k < new.nfree implies
-            new.free@[k].1 > 0 by {
+        assert forall|k: int| #![trigger new.free@[k].1] 0 <= k < new.nfree implies new.free@[k].1
+            > 0 by {
             if k < i {
                 assert(old.free@[k].1 > 0);
             } else if k > i + 1 {
                 assert(old.free@[k - 1].1 > 0);
             }
         }
-        assert forall|k: int| #![trigger new.free@[k].0, new.free@[k].1] 0 <= k < new.nfree implies
-            new.free@[k].0 as int + new.free@[k].1 as int <= new.len as int by {
+        assert forall|k: int|
+            #![trigger new.free@[k].0, new.free@[k].1]
+            0 <= k < new.nfree implies new.free@[k].0 as int + new.free@[k].1 as int
+            <= new.len as int by {
             assert(old.free@[i].0 as int + old.free@[i].1 as int <= old.len as int);
             if k < i {
                 assert(old.free@[k].0 as int + old.free@[k].1 as int <= old.len as int);
@@ -713,8 +801,18 @@ impl<const N: usize> FreeList<N> {
 
     /// `covers` changes by exactly the carved `R = [start, start+n)` across the split.
     #[verifier::spinoff_prover]
-    proof fn split_covers(new: FreeList<N>, old: FreeList<N>, i: int, off: int, flen: int,
-        pad: int, rest_off: int, rest_len: int, start: int, n: int)
+    proof fn split_covers(
+        new: FreeList<N>,
+        old: FreeList<N>,
+        i: int,
+        off: int,
+        flen: int,
+        pad: int,
+        rest_off: int,
+        rest_len: int,
+        start: int,
+        n: int,
+    )
         requires
             old.wf(),
             0 <= i < old.nfree,
@@ -814,8 +912,10 @@ impl<const N: usize> FreeList<N> {
             forall|p: int| off <= p < off + n ==> new.covers(p),
             forall|p: int| !(off <= p < off + n) ==> new.covers(p) == old.covers(p),
     {
-        assert forall|k: int| #![trigger new.free@[k].0, new.free@[k].1] 0 <= k < new.nfree - 1 implies
-            (new.free@[k].0 as int + new.free@[k].1 as int) < new.free@[k + 1].0 as int by {
+        assert forall|k: int|
+            #![trigger new.free@[k].0, new.free@[k].1]
+            0 <= k < new.nfree - 1 implies (new.free@[k].0 as int + new.free@[k].1 as int)
+            < new.free@[k + 1].0 as int by {
             if k + 1 < i {
                 assert((old.free@[k].0 as int + old.free@[k].1 as int) < old.free@[k + 1].0 as int);
             } else if k == i - 1 {
@@ -827,16 +927,18 @@ impl<const N: usize> FreeList<N> {
                     < old.free@[k].0 as int);
             }
         }
-        assert forall|k: int| #![trigger new.free@[k].1] 0 <= k < new.nfree implies
-            new.free@[k].1 > 0 by {
+        assert forall|k: int| #![trigger new.free@[k].1] 0 <= k < new.nfree implies new.free@[k].1
+            > 0 by {
             if k < i {
                 assert(old.free@[k].1 > 0);
             } else if k > i {
                 assert(old.free@[k - 1].1 > 0);
             }
         }
-        assert forall|k: int| #![trigger new.free@[k].0, new.free@[k].1] 0 <= k < new.nfree implies
-            new.free@[k].0 as int + new.free@[k].1 as int <= new.len as int by {
+        assert forall|k: int|
+            #![trigger new.free@[k].0, new.free@[k].1]
+            0 <= k < new.nfree implies new.free@[k].0 as int + new.free@[k].1 as int
+            <= new.len as int by {
             if k < i {
                 assert(old.free@[k].0 as int + old.free@[k].1 as int <= old.len as int);
             } else if k > i {
@@ -883,6 +985,7 @@ impl<const N: usize> FreeList<N> {
                     assert(old.ext_has(k - 1, p));
                 }
                 // k == i ⇒ p ∈ [off, off+n), excluded by hypothesis.
+
                 assert(old.covers(p) || (off <= p < off + n));
             }
         }
@@ -896,8 +999,15 @@ impl<const N: usize> FreeList<N> {
     // Sized for the worst re-verification context (doc/guidelines/verus.md §10);
     // alloc context (~259k) is the highest of the two contexts (no-alloc ~245k).
     #[verifier::rlimit(1)]
-    proof fn free_replace(new: FreeList<N>, old: FreeList<N>, g: int, off: int, n: int,
-        eoff: int, elen: int)
+    proof fn free_replace(
+        new: FreeList<N>,
+        old: FreeList<N>,
+        g: int,
+        off: int,
+        n: int,
+        eoff: int,
+        elen: int,
+    )
         requires
             old.wf(),
             0 <= g < old.nfree,
@@ -911,10 +1021,8 @@ impl<const N: usize> FreeList<N> {
             n > 0,
             off + n <= old.len,
             // E = old[g] ∪ [off,off+n), adjacent: right-extension or left-extension.
-            (eoff == old.free@[g].0 as int
-                && old.free@[g].0 as int + old.free@[g].1 as int == off
-                && eoff + elen == off + n)
-            || (eoff == off && off + n == old.free@[g].0 as int
+            (eoff == old.free@[g].0 as int && old.free@[g].0 as int + old.free@[g].1 as int == off
+                && eoff + elen == off + n) || (eoff == off && off + n == old.free@[g].0 as int
                 && eoff + elen == old.free@[g].0 as int + old.free@[g].1 as int),
             // E keeps the strict gaps to its surviving neighbours.
             0 < g ==> (old.free@[g - 1].0 as int + old.free@[g - 1].1 as int) < eoff,
@@ -926,25 +1034,31 @@ impl<const N: usize> FreeList<N> {
             forall|p: int| !(off <= p < off + n) ==> new.covers(p) == old.covers(p),
     {
         assert(off <= eoff + elen && eoff <= off);
-        assert forall|k: int| #![trigger new.free@[k].0, new.free@[k].1] 0 <= k < new.nfree - 1 implies
-            (new.free@[k].0 as int + new.free@[k].1 as int) < new.free@[k + 1].0 as int by {
+        assert forall|k: int|
+            #![trigger new.free@[k].0, new.free@[k].1]
+            0 <= k < new.nfree - 1 implies (new.free@[k].0 as int + new.free@[k].1 as int)
+            < new.free@[k + 1].0 as int by {
             if k + 1 < g || k > g {
                 assert((old.free@[k].0 as int + old.free@[k].1 as int) < old.free@[k + 1].0 as int);
             }
             // k == g-1 and k == g use the two gap requires.
+
         }
-        assert forall|k: int| #![trigger new.free@[k].1] 0 <= k < new.nfree implies
-            new.free@[k].1 > 0 by {
+        assert forall|k: int| #![trigger new.free@[k].1] 0 <= k < new.nfree implies new.free@[k].1
+            > 0 by {
             if k != g {
                 assert(old.free@[k].1 > 0);
             }
         }
-        assert forall|k: int| #![trigger new.free@[k].0, new.free@[k].1] 0 <= k < new.nfree implies
-            new.free@[k].0 as int + new.free@[k].1 as int <= new.len as int by {
+        assert forall|k: int|
+            #![trigger new.free@[k].0, new.free@[k].1]
+            0 <= k < new.nfree implies new.free@[k].0 as int + new.free@[k].1 as int
+            <= new.len as int by {
             if k != g {
                 assert(old.free@[k].0 as int + old.free@[k].1 as int <= old.len as int);
             }
             // k == g: eoff+elen is old[g].end or off+n, both <= len.
+
             assert(old.free@[g].0 as int + old.free@[g].1 as int <= old.len as int);
         }
         assert(new.wf());
@@ -952,8 +1066,15 @@ impl<const N: usize> FreeList<N> {
     }
 
     /// `covers` half of [`FreeList::free_replace`] (split out for rlimit).
-    proof fn free_covers_replace(new: FreeList<N>, old: FreeList<N>, g: int, off: int, n: int,
-        eoff: int, elen: int)
+    proof fn free_covers_replace(
+        new: FreeList<N>,
+        old: FreeList<N>,
+        g: int,
+        off: int,
+        n: int,
+        eoff: int,
+        elen: int,
+    )
         requires
             0 <= g < old.nfree,
             new.nfree == old.nfree,
@@ -961,10 +1082,8 @@ impl<const N: usize> FreeList<N> {
             new.free@[g].1 as int == elen,
             forall|k: int| 0 <= k < new.nfree && k != g ==> new.free@[k] == old.free@[k],
             n > 0,
-            (eoff == old.free@[g].0 as int
-                && old.free@[g].0 as int + old.free@[g].1 as int == off
-                && eoff + elen == off + n)
-            || (eoff == off && off + n == old.free@[g].0 as int
+            (eoff == old.free@[g].0 as int && old.free@[g].0 as int + old.free@[g].1 as int == off
+                && eoff + elen == off + n) || (eoff == off && off + n == old.free@[g].0 as int
                 && eoff + elen == old.free@[g].0 as int + old.free@[g].1 as int),
         ensures
             forall|p: int| off <= p < off + n ==> new.covers(p),
@@ -1005,8 +1124,15 @@ impl<const N: usize> FreeList<N> {
     // after phase 5.1/5.2/6.2 trigger reductions the no-alloc consumption (~183k)
     // is the highest of the two contexts (alloc ~173k).
     #[verifier::rlimit(1)]
-    proof fn free_both(new: FreeList<N>, old: FreeList<N>, i: int, off: int, n: int,
-        eoff: int, elen: int)
+    proof fn free_both(
+        new: FreeList<N>,
+        old: FreeList<N>,
+        i: int,
+        off: int,
+        n: int,
+        eoff: int,
+        elen: int,
+    )
         requires
             old.wf(),
             1 <= i < old.nfree,
@@ -1030,31 +1156,35 @@ impl<const N: usize> FreeList<N> {
             forall|p: int| off <= p < off + n ==> new.covers(p),
             forall|p: int| !(off <= p < off + n) ==> new.covers(p) == old.covers(p),
     {
-        assert forall|k: int| #![trigger new.free@[k].0, new.free@[k].1] 0 <= k < new.nfree - 1 implies
-            (new.free@[k].0 as int + new.free@[k].1 as int) < new.free@[k + 1].0 as int by {
+        assert forall|k: int|
+            #![trigger new.free@[k].0, new.free@[k].1]
+            0 <= k < new.nfree - 1 implies (new.free@[k].0 as int + new.free@[k].1 as int)
+            < new.free@[k + 1].0 as int by {
             if k + 1 < i - 1 {
                 assert((old.free@[k].0 as int + old.free@[k].1 as int) < old.free@[k + 1].0 as int);
             } else if k == i - 2 {
-                assert((old.free@[i - 2].0 as int + old.free@[i - 2].1 as int)
-                    < old.free@[i - 1].0 as int);
+                assert((old.free@[i - 2].0 as int + old.free@[i - 2].1 as int) < old.free@[i
+                    - 1].0 as int);
             } else if k == i - 1 {
                 // E.end == old[i].end < old[i+1].start == new[i].start.
                 old.lemma_chain(i, i + 1);
             } else {
-                assert((old.free@[k + 1].0 as int + old.free@[k + 1].1 as int)
-                    < old.free@[k + 2].0 as int);
+                assert((old.free@[k + 1].0 as int + old.free@[k + 1].1 as int) < old.free@[k
+                    + 2].0 as int);
             }
         }
-        assert forall|k: int| #![trigger new.free@[k].1] 0 <= k < new.nfree implies
-            new.free@[k].1 > 0 by {
+        assert forall|k: int| #![trigger new.free@[k].1] 0 <= k < new.nfree implies new.free@[k].1
+            > 0 by {
             if k < i - 1 {
                 assert(old.free@[k].1 > 0);
             } else if k > i - 1 {
                 assert(old.free@[k + 1].1 > 0);
             }
         }
-        assert forall|k: int| #![trigger new.free@[k].0, new.free@[k].1] 0 <= k < new.nfree implies
-            new.free@[k].0 as int + new.free@[k].1 as int <= new.len as int by {
+        assert forall|k: int|
+            #![trigger new.free@[k].0, new.free@[k].1]
+            0 <= k < new.nfree implies new.free@[k].0 as int + new.free@[k].1 as int
+            <= new.len as int by {
             assert(old.free@[i].0 as int + old.free@[i].1 as int <= old.len as int);
             if k < i - 1 {
                 assert(old.free@[k].0 as int + old.free@[k].1 as int <= old.len as int);
@@ -1068,8 +1198,15 @@ impl<const N: usize> FreeList<N> {
 
     /// `covers` half of [`FreeList::free_both`] (split out for rlimit).
     #[verifier::spinoff_prover]
-    proof fn free_covers_both(new: FreeList<N>, old: FreeList<N>, i: int, off: int, n: int,
-        eoff: int, elen: int)
+    proof fn free_covers_both(
+        new: FreeList<N>,
+        old: FreeList<N>,
+        i: int,
+        off: int,
+        n: int,
+        eoff: int,
+        elen: int,
+    )
         requires
             old.wf(),
             1 <= i < old.nfree,
@@ -1144,10 +1281,10 @@ impl<const N: usize> FreeList<N> {
             final(self).wf(),
             final(self).spec_len() == old(self).spec_len(),
             forall|p: int| off <= p < off + n ==> final(self).covers(p),
-            forall|p: int| !(off <= p < off + n)
-                ==> final(self).covers(p) == old(self).covers(p),
+            forall|p: int| !(off <= p < off + n) ==> final(self).covers(p) == old(self).covers(p),
     {
         broadcast use vstd::array::group_array_axioms;
+
         let mut i: usize = 0;
         while i < self.nfree && self.free[i].0 < off
             invariant
@@ -1170,10 +1307,10 @@ impl<const N: usize> FreeList<N> {
                 // old[i-1].0 < off (loop invariant); off can't be inside old[i-1]
                 // (precondition), so old[i-1] ends at or before off.
                 assert((old(self).free@[i as int - 1].0 as int) < off as int);
-                assert((old(self).free@[i as int - 1].0 as int
-                        + old(self).free@[i as int - 1].1 as int) <= off as int) by {
-                    if (old(self).free@[i as int - 1].0 as int
-                            + old(self).free@[i as int - 1].1 as int) > off as int {
+                assert((old(self).free@[i as int - 1].0 as int + old(self).free@[i as int
+                    - 1].1 as int) <= off as int) by {
+                    if (old(self).free@[i as int - 1].0 as int + old(self).free@[i as int
+                        - 1].1 as int) > off as int {
                         assert(old(self).ext_has(i as int - 1, off as int));
                         assert(old(self).covers(off as int));
                         assert(!old(self).covers(off as int));
@@ -1205,16 +1342,30 @@ impl<const N: usize> FreeList<N> {
             let flen = self.free[i - 1].1 + n;
             self.free[i - 1] = (foff, flen);
             proof {
-                Self::free_replace(*self, old_self, (i - 1) as int, off as int, n as int,
-                    foff as int, flen as int);
+                Self::free_replace(
+                    *self,
+                    old_self,
+                    (i - 1) as int,
+                    off as int,
+                    n as int,
+                    foff as int,
+                    flen as int,
+                );
             }
         } else if !left && right {
             let foff = off;
             let flen = n + self.free[i].1;
             self.free[i] = (foff, flen);
             proof {
-                Self::free_replace(*self, old_self, i as int, off as int, n as int,
-                    foff as int, flen as int);
+                Self::free_replace(
+                    *self,
+                    old_self,
+                    i as int,
+                    off as int,
+                    n as int,
+                    foff as int,
+                    flen as int,
+                );
             }
         } else {
             let foff = self.free[i - 1].0;
@@ -1222,8 +1373,15 @@ impl<const N: usize> FreeList<N> {
             self.free[i - 1] = (foff, flen);
             self.remove_at(i);
             proof {
-                Self::free_both(*self, old_self, i as int, off as int, n as int,
-                    foff as int, flen as int);
+                Self::free_both(
+                    *self,
+                    old_self,
+                    i as int,
+                    off as int,
+                    n as int,
+                    foff as int,
+                    flen as int,
+                );
             }
         }
     }
@@ -1256,7 +1414,11 @@ proof fn lemma_two_allocs_disjoint<const N: usize>(
         // The intervals would overlap; max(a, b) is an integer in both, so it is
         // simultaneously covered (it lies in [b, b+nb)) and not (it lies in
         // [a, a+na)) — a contradiction, so this branch is vacuous.
-        let p: int = if a >= b { a } else { b };
+        let p: int = if a >= b {
+            a
+        } else {
+            b
+        };
         assert(fl1.covers(p));
         assert(!fl1.covers(p));
     }
@@ -1269,8 +1431,8 @@ proof fn lemma_two_allocs_disjoint<const N: usize>(
 /// `requires` from code rather than from a doc comment. A drift in `alloc`'s
 /// coverage `ensures` breaks verification here, which the `dma-pool`/`urt`
 /// runtime wrapper-corollary proptests cannot catch.
-#[allow(dead_code)] // run by the `two_allocs_disjoint` host test; the verify/normal
-                    // build cfg's that caller out (cf. the `len` field above).
+#[allow(dead_code)]  // run by the `two_allocs_disjoint` host test; the verify/normal
+// build cfg's that caller out (cf. the `len` field above).
 fn two_allocs_disjoint_teeth<const N: usize>(
     fl: &mut FreeList<N>,
     na: usize,
@@ -1286,7 +1448,7 @@ fn two_allocs_disjoint_teeth<const N: usize>(
         align_b > 0,
 {
     let r1 = fl.alloc(na, align_a);
-    let ghost fl1 = *fl; // post-carve-#1 == pre-carve-#2 state
+    let ghost fl1 = *fl;  // post-carve-#1 == pre-carve-#2 state
     let r2 = fl.alloc(nb, align_b);
     if r1.is_some() && r2.is_some() {
         // Both carves succeeded; `a`/`b` are their returned offsets, ghost since
@@ -1309,7 +1471,6 @@ fn two_allocs_disjoint_teeth<const N: usize>(
 }
 
 } // verus!
-
 #[cfg(test)]
 mod tests {
     use super::*;

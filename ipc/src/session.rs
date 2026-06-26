@@ -25,7 +25,6 @@
 //! mask/shift arithmetic (not `to_le_bytes`/`copy_from_slice`, which Verus does
 //! not spec), so `vstd` stays ghost-only and erases into the alloc-free user
 //! binaries; the bytes produced are unchanged.
-
 use vstd::prelude::*;
 
 verus! {
@@ -35,13 +34,20 @@ verus! {
 // so the `pub open spec` codec models below can name them (the `verus!{}`
 // rule: an open spec body cannot reference a private item; cf. `header::HEADER_SIZE`).
 pub const TAG_REQ: u8 = 0xC0;
+
 pub const TAG_GRANT: u8 = 0x01;
+
 pub const TAG_REFUSED: u8 = 0x00;
 
-pub const REQ_LEN: usize = 7; // tag + u32 window + u8 min_version + u8 max_version
-pub const GRANT_LEN: usize = 10; // tag + u32 window + u32 size + u8 version
-pub const REFUSED_LEN: usize = 1; // tag
+pub const REQ_LEN: usize = 7;
 
+// tag + u32 window + u8 min_version + u8 max_version
+pub const GRANT_LEN: usize = 10;
+
+// tag + u32 window + u32 size + u8 version
+pub const REFUSED_LEN: usize = 1;
+
+// tag
 /// The sole wire version this build of the connect layer offers today
 /// (rev2§3.7). The connect layer negotiates a version even though exactly one is
 /// deployed — the mechanism is fully present, so a future second version (and the
@@ -128,7 +134,6 @@ pub enum ConnectErr {
 }
 
 // ── Ghost models of the codecs (the little-endian byte layout as a `Seq`) ──
-
 /// Ghost model of [`ConnectReq::encode`]: tag byte, the requested-window `u32`
 /// split low-to-high (matching `to_le_bytes`), then the offered version range as
 /// two raw bytes (`min`, `max`). The version bytes sit at the end, so the
@@ -150,11 +155,13 @@ pub open spec fn req_encode(r: ConnectReq) -> Seq<u8> {
 /// bytes; `None` otherwise. Total over every byte string.
 pub open spec fn req_decode(s: Seq<u8>) -> Option<ConnectReq> {
     if s.len() == REQ_LEN && s[0] == TAG_REQ {
-        Some(ConnectReq {
-            requested_window: (s[1] as u32) | ((s[2] as u32) << 8) | ((s[3] as u32) << 16)
-                | ((s[4] as u32) << 24),
-            versions: VersionRange { min: s[5], max: s[6] },
-        })
+        Some(
+            ConnectReq {
+                requested_window: (s[1] as u32) | ((s[2] as u32) << 8) | ((s[3] as u32) << 16) | ((
+                s[4] as u32) << 24),
+                versions: VersionRange { min: s[5], max: s[6] },
+            },
+        )
     } else {
         None
     }
@@ -187,15 +194,17 @@ pub open spec fn grant_encode(g: GrantReply) -> Seq<u8> {
 /// `None` otherwise. Total.
 pub open spec fn grant_decode(s: Seq<u8>) -> Option<GrantReply> {
     if s.len() == GRANT_LEN && s[0] == TAG_GRANT {
-        Some(GrantReply::Grant(
-            WindowGrant {
-                window: (s[1] as u32) | ((s[2] as u32) << 8) | ((s[3] as u32) << 16)
-                    | ((s[4] as u32) << 24),
-                size: (s[5] as u32) | ((s[6] as u32) << 8) | ((s[7] as u32) << 16)
-                    | ((s[8] as u32) << 24),
-            },
-            s[9],
-        ))
+        Some(
+            GrantReply::Grant(
+                WindowGrant {
+                    window: (s[1] as u32) | ((s[2] as u32) << 8) | ((s[3] as u32) << 16) | ((
+                    s[4] as u32) << 24),
+                    size: (s[5] as u32) | ((s[6] as u32) << 8) | ((s[7] as u32) << 16) | ((
+                    s[8] as u32) << 24),
+                },
+                s[9],
+            ),
+        )
     } else if s.len() == REFUSED_LEN && s[0] == TAG_REFUSED {
         Some(GrantReply::Refused)
     } else {
@@ -225,9 +234,11 @@ impl ConnectReq {
     }
 
     pub fn encode(&self) -> (b: [u8; REQ_LEN])
-        ensures b@ == req_encode(*self),
+        ensures
+            b@ == req_encode(*self),
     {
         broadcast use vstd::array::group_array_axioms;
+
         let b: [u8; REQ_LEN] = [
             TAG_REQ,
             (self.requested_window & 0xff) as u8,
@@ -249,14 +260,17 @@ impl ConnectReq {
             r is Some <==> (buf@.len() == REQ_LEN && buf@[0] == TAG_REQ),
     {
         broadcast use vstd::slice::group_slice_axioms;
+
         if buf.len() != REQ_LEN || buf[0] != TAG_REQ {
             return None;
         }
-        Some(ConnectReq {
-            requested_window: (buf[1] as u32) | ((buf[2] as u32) << 8) | ((buf[3] as u32) << 16)
-                | ((buf[4] as u32) << 24),
-            versions: VersionRange { min: buf[5], max: buf[6] },
-        })
+        Some(
+            ConnectReq {
+                requested_window: (buf[1] as u32) | ((buf[2] as u32) << 8) | ((buf[3] as u32) << 16)
+                    | ((buf[4] as u32) << 24),
+                versions: VersionRange { min: buf[5], max: buf[6] },
+            },
+        )
     }
 }
 
@@ -267,6 +281,7 @@ impl GrantReply {
             res.0@.subrange(0, res.1 as int) == grant_encode(*self),
     {
         broadcast use vstd::array::group_array_axioms;
+
         match *self {
             GrantReply::Grant(g, ver) => {
                 let b: [u8; GRANT_LEN] = [
@@ -283,12 +298,12 @@ impl GrantReply {
                 ];
                 assert(b@.subrange(0, GRANT_LEN as int) =~= grant_encode(*self));
                 (b, GRANT_LEN)
-            }
+            },
             GrantReply::Refused => {
                 let b: [u8; GRANT_LEN] = [TAG_REFUSED, 0, 0, 0, 0, 0, 0, 0, 0, 0];
                 assert(b@.subrange(0, REFUSED_LEN as int) =~= grant_encode(*self));
                 (b, REFUSED_LEN)
-            }
+            },
         }
     }
 
@@ -297,20 +312,23 @@ impl GrantReply {
     pub fn decode(buf: &[u8]) -> (r: Option<GrantReply>)
         ensures
             r == grant_decode(buf@),
-            r is Some <==> ((buf@.len() == GRANT_LEN && buf@[0] == TAG_GRANT)
-                || (buf@.len() == REFUSED_LEN && buf@[0] == TAG_REFUSED)),
+            r is Some <==> ((buf@.len() == GRANT_LEN && buf@[0] == TAG_GRANT) || (buf@.len()
+                == REFUSED_LEN && buf@[0] == TAG_REFUSED)),
     {
         broadcast use vstd::slice::group_slice_axioms;
+
         if buf.len() == GRANT_LEN && buf[0] == TAG_GRANT {
-            Some(GrantReply::Grant(
-                WindowGrant {
-                    window: (buf[1] as u32) | ((buf[2] as u32) << 8) | ((buf[3] as u32) << 16)
-                        | ((buf[4] as u32) << 24),
-                    size: (buf[5] as u32) | ((buf[6] as u32) << 8) | ((buf[7] as u32) << 16)
-                        | ((buf[8] as u32) << 24),
-                },
-                buf[9],
-            ))
+            Some(
+                GrantReply::Grant(
+                    WindowGrant {
+                        window: (buf[1] as u32) | ((buf[2] as u32) << 8) | ((buf[3] as u32) << 16)
+                            | ((buf[4] as u32) << 24),
+                        size: (buf[5] as u32) | ((buf[6] as u32) << 8) | ((buf[7] as u32) << 16) | (
+                        (buf[8] as u32) << 24),
+                    },
+                    buf[9],
+                ),
+            )
         } else if buf.len() == REFUSED_LEN && buf[0] == TAG_REFUSED {
             Some(GrantReply::Refused)
         } else {
@@ -365,8 +383,10 @@ impl Admission {
     /// Window bytes still available to grant. Non-underflowing under the quota
     /// invariant (`granted <= budget`).
     pub fn remaining(&self) -> (r: u32)
-        requires self.well_formed(),
-        ensures r == self.spec_remaining(),
+        requires
+            self.well_formed(),
+        ensures
+            r == self.spec_remaining(),
     {
         self.budget - self.granted
     }
@@ -377,7 +397,8 @@ impl Admission {
     /// holds after every call, for *any* `requested`, so a flood of connects can
     /// never push `granted` past `budget` (the unbounded never-over-grant theorem).
     pub fn admit(&mut self, requested: u32) -> (res: Result<WindowGrant, ConnectErr>)
-        requires self.well_formed(),
+        requires
+            self.well_formed(),
         ensures
             final(self).well_formed(),
             res is Ok ==> {
@@ -406,7 +427,8 @@ impl Admission {
     /// quota invariant is preserved either way (the returned bytes only ever
     /// raise the remaining quota).
     pub fn release(&mut self, grant: WindowGrant)
-        requires self.well_formed(),
+        requires
+            self.well_formed(),
         ensures
             final(self).well_formed(),
             final(self).spec_remaining() >= old(self).spec_remaining(),
@@ -439,8 +461,16 @@ pub fn negotiate(client: VersionRange, server: VersionRange) -> (r: Option<u8>)
 {
     // lo/hi bound the intersection: lo = max of the mins, hi = min of the maxes.
     // Non-empty iff lo <= hi, and then hi is the highest common version.
-    let lo = if client.min >= server.min { client.min } else { server.min };
-    let hi = if client.max <= server.max { client.max } else { server.max };
+    let lo = if client.min >= server.min {
+        client.min
+    } else {
+        server.min
+    };
+    let hi = if client.max <= server.max {
+        client.max
+    } else {
+        server.max
+    };
     if lo <= hi {
         Some(hi)
     } else {
@@ -454,7 +484,8 @@ pub fn negotiate(client: VersionRange, server: VersionRange) -> (r: Option<u8>)
 /// codec, so the header layout and its bijection proofs are untouched (rev2§3.7).
 /// Inert until the dispatch site is wired.
 pub fn version_ok(header_version: u8, negotiated: u8) -> (ok: bool)
-    ensures ok == (header_version == negotiated),
+    ensures
+        ok == (header_version == negotiated),
 {
     header_version == negotiated
 }
@@ -469,8 +500,10 @@ pub fn version_ok(header_version: u8, negotiated: u8) -> (ok: bool)
 /// `send_nb` the `encode`d reply — inside its reactor loop, the same shape as
 /// serving any other request. Preserves the quota invariant.
 pub fn admit_connect(adm: &mut Admission, server: VersionRange, req_bytes: &[u8]) -> (r: GrantReply)
-    requires adm.well_formed(),
-    ensures final(adm).well_formed(),
+    requires
+        adm.well_formed(),
+    ensures
+        final(adm).well_formed(),
 {
     // Decode → negotiate version → admit window. Each failure is an internal
     // `ConnectErr` (for diagnosability) collapsed to the single wire refusal.
@@ -491,7 +524,6 @@ pub fn admit_connect(adm: &mut Admission, server: VersionRange, req_bytes: &[u8]
 }
 
 // ── Codec bijection lemmas (∀; the bit_vector split/reassemble identities) ──
-
 /// `decode`∘`encode` is the identity on `ConnectReq`: every request round-trips.
 /// The `u32` window reassembles by the same `bit_vector` split identity as
 /// before; the two version bytes are carried verbatim, so they need no reasoning.
@@ -515,7 +547,10 @@ pub proof fn lemma_req_encode_decode(s: Seq<u8>)
     ensures
         req_encode(req_decode(s)->Some_0) == s,
 {
-    let s1 = s[1]; let s2 = s[2]; let s3 = s[3]; let s4 = s[4];
+    let s1 = s[1];
+    let s2 = s[2];
+    let s3 = s[3];
+    let s4 = s[4];
     crate::le_bytes::lemma_u32_le_split_bytes(s1, s2, s3, s4);
     // s[5], s[6] (the version bytes) are reproduced directly; extensionality closes it.
     assert(req_encode(req_decode(s)->Some_0) =~= s);
@@ -530,11 +565,12 @@ pub proof fn lemma_grant_decode_encode(g: GrantReply)
 {
     match g {
         GrantReply::Grant(w, _ver) => {
-            let win = w.window; let sz = w.size;
+            let win = w.window;
+            let sz = w.size;
             crate::le_bytes::lemma_u32_le_reassemble(win);
             crate::le_bytes::lemma_u32_le_reassemble(sz);
-        }
-        GrantReply::Refused => {}
+        },
+        GrantReply::Refused => {},
     }
 }
 
@@ -543,13 +579,20 @@ pub proof fn lemma_grant_decode_encode(g: GrantReply)
 /// between `GrantReply` values and their accepted byte strings.
 pub proof fn lemma_grant_encode_decode(s: Seq<u8>)
     requires
-        (s.len() == GRANT_LEN && s[0] == TAG_GRANT) || (s.len() == REFUSED_LEN && s[0] == TAG_REFUSED),
+        (s.len() == GRANT_LEN && s[0] == TAG_GRANT) || (s.len() == REFUSED_LEN && s[0]
+            == TAG_REFUSED),
     ensures
         grant_encode(grant_decode(s)->Some_0) == s,
 {
     if s.len() == GRANT_LEN && s[0] == TAG_GRANT {
-        let s1 = s[1]; let s2 = s[2]; let s3 = s[3]; let s4 = s[4];
-        let s5 = s[5]; let s6 = s[6]; let s7 = s[7]; let s8 = s[8];
+        let s1 = s[1];
+        let s2 = s[2];
+        let s3 = s[3];
+        let s4 = s[4];
+        let s5 = s[5];
+        let s6 = s[6];
+        let s7 = s[7];
+        let s8 = s[8];
         crate::le_bytes::lemma_u32_le_split_bytes(s1, s2, s3, s4);
         crate::le_bytes::lemma_u32_le_split_bytes(s5, s6, s7, s8);
         assert(grant_encode(grant_decode(s)->Some_0) =~= s);
@@ -560,7 +603,6 @@ pub proof fn lemma_grant_encode_decode(s: Seq<u8>)
 }
 
 } // verus!
-
 #[cfg(test)]
 mod tests {
     use super::*;

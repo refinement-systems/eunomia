@@ -24,7 +24,6 @@
 //! `ldr` on AArch64, the compiler cannot const-fold a "read-only" mapping,
 //! and the host stress test (a writer thread tearing the page on purpose)
 //! stays data-race-free under Miri.
-
 // The seqlock's atomics come through a single cfg-selected seam: `--cfg loom`
 // (the certifying interleaving model) gets loom's instrumented atomics;
 // `--cfg shuttle` (the non-certifying breadth-smoke) gets
@@ -161,11 +160,19 @@ impl Sample {
         // `.max(1)` / `.saturating_sub(..)` are spelled as explicit branches so
         // Verus reasons about them (the std combinators are unspecced); the
         // exec behaviour is identical and the proptests below witness it.
-        let f: u64 = if self.cntfrq == 0 { 1 } else { self.cntfrq };
+        let f: u64 = if self.cntfrq == 0 {
+            1
+        } else {
+            self.cntfrq
+        };
         // The counter is monotone and cntvct_base was sampled at boot, so an
         // earlier cntvct is a caller bug; saturate to "boot time" rather than
         // wrapping into year ~2500.
-        let delta: u64 = if cntvct >= self.cntvct_base { cntvct - self.cntvct_base } else { 0 };
+        let delta: u64 = if cntvct >= self.cntvct_base {
+            cntvct - self.cntvct_base
+        } else {
+            0
+        };
 
         assert(f >= 1);
         let secs: u64 = delta / f;
@@ -185,8 +192,7 @@ impl Sample {
             lemma_decompose(delta, f);
         }
 
-        let total: i128 = self.wall_base_ns as i128
-            + secs as i128 * NANOS_PER_SEC as i128
+        let total: i128 = self.wall_base_ns as i128 + secs as i128 * NANOS_PER_SEC as i128
             + frac_ns as i128;
 
         // Saturation is ~year 2262 + centuries of uptime — unreachable with the
@@ -233,9 +239,8 @@ proof fn lemma_decompose(delta: u64, f: u64)
     requires
         1 <= f,
     ensures
-        (delta / f) as int * NANOS_PER_SEC as int
-            + ((delta % f) as int * NANOS_PER_SEC as int) / (f as int)
-            == (delta as int * NANOS_PER_SEC as int) / (f as int),
+        (delta / f) as int * NANOS_PER_SEC as int + ((delta % f) as int * NANOS_PER_SEC as int) / (
+        f as int) == (delta as int * NANOS_PER_SEC as int) / (f as int),
 {
     let n = NANOS_PER_SEC as int;
     let d = delta as int;
@@ -246,7 +251,9 @@ proof fn lemma_decompose(delta: u64, f: u64)
     vstd::arithmetic::div_mod::lemma_fundamental_div_mod(d, ff);
     // d·n == r·n + (q·n)·ff, so (d·n)/ff hoists q·n out of the denominator.
     assert(d * n == r * n + (q * n) * ff) by (nonlinear_arith)
-        requires d == q * ff + r;
+        requires
+            d == q * ff + r,
+    ;
     vstd::arithmetic::div_mod::lemma_hoist_over_denominator(r * n, q * n, f as nat);
 }
 
@@ -275,7 +282,6 @@ proof fn lemma_secs_term_fits(secs: u64)
 }
 
 } // verus!
-
 impl TimePage {
     // loom's / shuttle's `Atomic*::new` is not `const`, so a model build drops
     // `const`; the body is identical. The real page is built once at boot, where

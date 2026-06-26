@@ -26,7 +26,6 @@
 //! the per-slot `SlotAlloc::is_free_spec` predicate by `by (bit_vector)` frame
 //! lemmas, and the `.find().map()` combinators are restructured into explicit
 //! invariant-carrying loops (the shape kcore's `aspace` walk-loops already take).
-
 use vstd::prelude::*;
 
 verus! {
@@ -82,7 +81,8 @@ impl<const WORDS: usize> SlotAlloc<WORDS> {
             forall|j: int| 0 <= j < cap ==> a.is_free_spec(j),
     {
         broadcast use vstd::array::group_array_axioms;
-        let mut a = SlotAlloc { base, cap, free: [0u64; WORDS] };
+
+        let mut a = SlotAlloc { base, cap, free: [0u64;WORDS] };
         let mut i = 0;
         while i < cap
             invariant
@@ -107,7 +107,10 @@ impl<const WORDS: usize> SlotAlloc<WORDS> {
             r == self.is_free_spec(i as int),
     {
         broadcast use vstd::array::group_array_axioms;
-        proof { lemma_index_split(i, WORDS); }
+
+        proof {
+            lemma_index_split(i, WORDS);
+        }
         let wi: usize = i / 64;
         let bi: u64 = (i % 64) as u64;
         self.free[wi] & (1u64 << bi) != 0
@@ -122,11 +125,16 @@ impl<const WORDS: usize> SlotAlloc<WORDS> {
             final(self).base == old(self).base,
             final(self).cap == old(self).cap,
             final(self).is_free_spec(i as int) == free,
-            forall|j: int| 0 <= j < old(self).cap && j != i as int
-                ==> final(self).is_free_spec(j) == old(self).is_free_spec(j),
+            forall|j: int|
+                0 <= j < old(self).cap && j != i as int ==> final(self).is_free_spec(j) == old(
+                    self,
+                ).is_free_spec(j),
     {
         broadcast use vstd::array::group_array_axioms;
-        proof { lemma_index_split(i, WORDS); }
+
+        proof {
+            lemma_index_split(i, WORDS);
+        }
         let w: usize = i / 64;
         let bi: u64 = (i % 64) as u64;
         let b: u64 = 1u64 << bi;
@@ -140,13 +148,15 @@ impl<const WORDS: usize> SlotAlloc<WORDS> {
             // The written word now reads `free` at bit `bi`, and every other
             // bit of that word is untouched; words other than `w` are untouched.
             lemma_set_bit(old_word, bi);
-            assert forall|j: int| 0 <= j < old(self).cap && j != i as int implies
-                self.is_free_spec(j) == old(self).is_free_spec(j) by {
+            assert forall|j: int| 0 <= j < old(self).cap && j != i as int implies self.is_free_spec(
+                j,
+            ) == old(self).is_free_spec(j) by {
                 lemma_index_split(j as usize, WORDS);
                 if j / 64 == w as int {
                     // same word, different bit position
                     lemma_bit_other(old_word, bi, (j % 64) as u64);
-                } // else: a different word, untouched by the assignment
+                }  // else: a different word, untouched by the assignment
+
             }
         }
     }
@@ -165,13 +175,16 @@ impl<const WORDS: usize> SlotAlloc<WORDS> {
                     &&& (s - old(self).spec_base()) < old(self).spec_cap()
                     &&& old(self).is_free_spec((s - old(self).spec_base()) as int)
                     &&& !final(self).is_free_spec((s - old(self).spec_base()) as int)
-                    &&& forall|j: int| 0 <= j < old(self).spec_cap() && j != (s - old(self).spec_base()) as int
+                    &&& forall|j: int|
+                        0 <= j < old(self).spec_cap() && j != (s - old(self).spec_base()) as int
                             ==> final(self).is_free_spec(j) == old(self).is_free_spec(j)
                 },
                 None => {
                     &&& forall|j: int| 0 <= j < old(self).spec_cap() ==> !old(self).is_free_spec(j)
-                    &&& forall|j: int| 0 <= j < old(self).spec_cap()
-                            ==> final(self).is_free_spec(j) == old(self).is_free_spec(j)
+                    &&& forall|j: int|
+                        0 <= j < old(self).spec_cap() ==> final(self).is_free_spec(j) == old(
+                            self,
+                        ).is_free_spec(j)
                 },
             },
     {
@@ -197,9 +210,8 @@ impl<const WORDS: usize> SlotAlloc<WORDS> {
         proof {
             assert(self.free@ == old(self).free@);
             assert(i == self.cap);
-            assert forall|j: int| 0 <= j < self.cap implies
-                (!old(self).is_free_spec(j)
-                    && self.is_free_spec(j) == old(self).is_free_spec(j)) by {
+            assert forall|j: int| 0 <= j < self.cap implies (!old(self).is_free_spec(j)
+                && self.is_free_spec(j) == old(self).is_free_spec(j)) by {
                 assert(self.free@[j / 64] == old(self).free@[j / 64]);
                 assert(!self.is_free_spec(j));
             }
@@ -222,16 +234,22 @@ impl<const WORDS: usize> SlotAlloc<WORDS> {
                     &&& n > 0
                     &&& old(self).spec_base() <= start
                     &&& (start - old(self).spec_base()) + n <= old(self).spec_cap()
-                    &&& forall|j: int| (start - old(self).spec_base()) <= j < (start - old(self).spec_base()) + n
+                    &&& forall|j: int|
+                        (start - old(self).spec_base()) <= j < (start - old(self).spec_base()) + n
                             ==> old(self).is_free_spec(j)
-                    &&& forall|j: int| (start - old(self).spec_base()) <= j < (start - old(self).spec_base()) + n
+                    &&& forall|j: int|
+                        (start - old(self).spec_base()) <= j < (start - old(self).spec_base()) + n
                             ==> !final(self).is_free_spec(j)
-                    &&& forall|j: int| 0 <= j < old(self).spec_cap()
-                            && !((start - old(self).spec_base()) <= j < (start - old(self).spec_base()) + n)
-                            ==> final(self).is_free_spec(j) == old(self).is_free_spec(j)
+                    &&& forall|j: int|
+                        0 <= j < old(self).spec_cap() && !((start - old(self).spec_base()) <= j < (
+                        start - old(self).spec_base()) + n) ==> final(self).is_free_spec(j) == old(
+                            self,
+                        ).is_free_spec(j)
                 },
-                None => forall|j: int| 0 <= j < old(self).spec_cap()
-                            ==> final(self).is_free_spec(j) == old(self).is_free_spec(j),
+                None => forall|j: int|
+                    0 <= j < old(self).spec_cap() ==> final(self).is_free_spec(j) == old(
+                        self,
+                    ).is_free_spec(j),
             },
     {
         let n_us = n as usize;
@@ -270,12 +288,12 @@ impl<const WORDS: usize> SlotAlloc<WORDS> {
                 // wrote `self` (free@ unchanged), so `is_free_spec` agrees with
                 // entry everywhere — pin that, and that the run was free at entry.
                 proof {
-                    assert forall|j: int| 0 <= j < self.cap implies
-                        self.is_free_spec(j) == old(self).is_free_spec(j) by {
-                    }
-                    assert forall|j: int| start <= j < start + n_us implies
-                        old(self).is_free_spec(j) by {
-                    }
+                    assert forall|j: int| 0 <= j < self.cap implies self.is_free_spec(j) == old(
+                        self,
+                    ).is_free_spec(j) by {}
+                    assert forall|j: int| start <= j < start + n_us implies old(self).is_free_spec(
+                        j,
+                    ) by {}
                 }
                 let mut m: usize = 0;
                 while m < n_us
@@ -289,8 +307,10 @@ impl<const WORDS: usize> SlotAlloc<WORDS> {
                         0 <= m <= n_us,
                         forall|j: int| start <= j < start + n_us ==> old(self).is_free_spec(j),
                         forall|j: int| start <= j < start + m ==> !self.is_free_spec(j),
-                        forall|j: int| 0 <= j < self.cap && !(start <= j < start + n_us)
-                            ==> self.is_free_spec(j) == old(self).is_free_spec(j),
+                        forall|j: int|
+                            0 <= j < self.cap && !(start <= j < start + n_us) ==> self.is_free_spec(
+                                j,
+                            ) == old(self).is_free_spec(j),
                     decreases n_us - m,
                 {
                     self.set(start + m, false);
@@ -324,8 +344,9 @@ impl<const WORDS: usize> SlotAlloc<WORDS> {
             final(self).spec_base() == old(self).spec_base(),
             final(self).spec_cap() == old(self).spec_cap(),
             final(self).is_free_spec((slot - old(self).spec_base()) as int),
-            forall|j: int| 0 <= j < old(self).spec_cap() && j != (slot - old(self).spec_base()) as int
-                ==> final(self).is_free_spec(j) == old(self).is_free_spec(j),
+            forall|j: int|
+                0 <= j < old(self).spec_cap() && j != (slot - old(self).spec_base()) as int
+                    ==> final(self).is_free_spec(j) == old(self).is_free_spec(j),
     {
         let i = (slot - self.base) as usize;
         self.debug_check_free(i);
@@ -349,8 +370,10 @@ impl<const WORDS: usize> SlotAlloc<WORDS> {
             old(self).wf(),
             old(self).spec_base() <= first,
             (first - old(self).spec_base()) + n <= old(self).spec_cap(),
-            forall|j: int| (first - old(self).spec_base()) <= j < (first - old(self).spec_base()) + n
-                ==> !old(self).is_free_spec(j),
+            forall|j: int|
+                (first - old(self).spec_base()) <= j < (first - old(self).spec_base()) + n ==> !old(
+                    self,
+                ).is_free_spec(j),
         ensures
             final(self).wf(),
             final(self).spec_base() == old(self).spec_base(),
@@ -365,8 +388,9 @@ impl<const WORDS: usize> SlotAlloc<WORDS> {
                 k <= n,
                 old(self).base <= first,
                 (first - old(self).base) + n <= self.cap,
-                forall|j: int| (first - old(self).base) + k <= j < (first - old(self).base) + n
-                    ==> !self.is_free_spec(j),
+                forall|j: int|
+                    (first - old(self).base) + k <= j < (first - old(self).base) + n
+                        ==> !self.is_free_spec(j),
             decreases n - k,
         {
             self.free(first + k);
@@ -376,7 +400,6 @@ impl<const WORDS: usize> SlotAlloc<WORDS> {
 }
 
 // ── Bit-frame lemmas (the bitmap ↔ free-set bridge, `by (bit_vector)`) ──
-
 /// Splitting an in-range slot index: the word index is in bounds and the bit
 /// position is `< 64`. (`i < WORDS*64 ⟹ i/64 < WORDS`, and `i%64 < 64`.)
 proof fn lemma_index_split(i: usize, words: usize)
@@ -387,11 +410,14 @@ proof fn lemma_index_split(i: usize, words: usize)
         i % 64 < 64,
 {
     assert(i / 64 < words) by (nonlinear_arith)
-        requires i < words * 64;
+        requires
+            i < words * 64,
+    ;
 }
 
 /// Writing bit `k` of `x` reads back set when ORed in, clear when masked out.
-proof fn lemma_set_bit(x: u64, k: u64) by (bit_vector)
+proof fn lemma_set_bit(x: u64, k: u64)
+    by (bit_vector)
     requires
         k < 64,
     ensures
@@ -401,7 +427,8 @@ proof fn lemma_set_bit(x: u64, k: u64) by (bit_vector)
 }
 
 /// Writing bit `k` of `x` leaves every other bit `m != k` of the word untouched.
-proof fn lemma_bit_other(x: u64, k: u64, m: u64) by (bit_vector)
+proof fn lemma_bit_other(x: u64, k: u64, m: u64)
+    by (bit_vector)
     requires
         k < 64,
         m < 64,
@@ -413,7 +440,6 @@ proof fn lemma_bit_other(x: u64, k: u64, m: u64) by (bit_vector)
 }
 
 } // verus!
-
 impl<const WORDS: usize> SlotAlloc<WORDS> {
     /// Free-slot count — for tests and the on-OS leak assertion. Bookkeeping
     /// only (not a verified obligation), so it keeps its iterator form outside

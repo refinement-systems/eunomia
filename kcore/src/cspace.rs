@@ -20,7 +20,6 @@
 //! deductive re-check of the CapRevocation TLA+ invariants on the real
 //! implementation. Each op carries its contract as a pre/post comment; the
 //! proofs turn those into `cdt_wf` assertions.
-
 use crate::id::{ObjId, SlotId};
 use crate::store::{Binding, Store};
 #[allow(unused_imports)] // NUM_PRIOS: referenced only in spec/proof code
@@ -39,24 +38,34 @@ pub struct Rights(pub u8);
 // via a standalone `assume_specification` — its trivial body is verified, not
 // assumed.
 verus! {
+
 impl Rights {
-    pub const READ: u8 = 1 << 0; // recv / wait
-    pub const WRITE: u8 = 1 << 1; // send / signal
+    pub const READ: u8 = 1 << 0;
+
+    // recv / wait
+    pub const WRITE: u8 = 1 << 1;
+
+    // send / signal
     /// phys-read (rev2§2.5): gates frame_paddr and device mappings. Granted
     /// only on boot-created device/DMA caps — ALL deliberately excludes
     /// it so ordinary derivation chains can never reach a PA.
     pub const PHYS: u8 = 1 << 2;
+
     /// bind-reports (rev2§2.3): configure a thread's on-exit/on-fault
     /// binding slots (rev2§5.1).
     pub const BIND_REPORTS: u8 = 1 << 3;
+
     /// read-report (rev2§2.3): read a thread's terminal report record;
     /// later also the debugger's register access (deferred, rev2§8).
     pub const READ_REPORT: u8 = 1 << 4;
+
     pub const ALL: Rights = Rights(0b11);
+
     /// The creator's thread cap (rev2§2.3 thread bits; kill is deliberately
     /// not on the list — destruction is resource ancestry, rev2§2.2).
-    pub const THREAD_ALL: Rights =
-        Rights(Rights::READ | Rights::WRITE | Rights::BIND_REPORTS | Rights::READ_REPORT);
+    pub const THREAD_ALL: Rights = Rights(
+        Rights::READ | Rights::WRITE | Rights::BIND_REPORTS | Rights::READ_REPORT,
+    );
 
     pub fn has(self, bits: u8) -> bool {
         self.0 & bits == bits
@@ -65,13 +74,14 @@ impl Rights {
     // The bit-level spec is what makes monotone derivation (and the
     // sub-untyped-never-PHYS theorem) provable.
     pub fn masked(self, mask: u8) -> (out: Rights)
-        ensures out.0 == (self.0 & mask),
+        ensures
+            out.0 == (self.0 & mask),
     {
         Rights(self.0 & mask)
     }
 }
-} // verus!
 
+} // verus!
 /// Common header at the start of every kernel object. `refs` counts every
 /// kernel reference that keeps the object alive: cap slots, channel-event
 /// bindings, blocked waiters, armed timers. Retained as the production
@@ -259,12 +269,12 @@ impl CSpaceObj {
 verus! {
 
 broadcast use {vstd::map::group_map_axioms, vstd::set::group_set_axioms};
-
 // The opaque handles and the cap/slot value types are plain Rust (shared with
 // the kernel shell); give them Verus type-specs so they can appear in spec
 // expressions. `ext_equal` makes `==` mean structural equality in spec code.
 // (`allow(dead_code)`: these wrappers are Verus-only scaffolding — after the
 // macro erases ghost code in a normal build they are unread tuple structs.)
+
 #[verifier::external_type_specification]
 #[verifier::ext_equal]
 #[allow(dead_code)]
@@ -387,8 +397,8 @@ pub struct TcbView {
     // view is what lets `set_priority` carry a machine-checked
     // `priority == prio (≤ ceiling)`.
     pub priority: u8,
-    pub bind_bits: Seq<u64>,     // len 2
-    pub bind_slots: Seq<SlotId>, // len 2 — immutable handles into slot_view
+    pub bind_bits: Seq<u64>,  // len 2
+    pub bind_slots: Seq<SlotId>,  // len 2 — immutable handles into slot_view
 }
 
 #[verifier::ext_equal]
@@ -429,9 +439,9 @@ pub struct IrqView {
 // `BlockedNotif` there) — so a thread is on at most one of the two.
 #[verifier::ext_equal]
 pub struct ReadyView {
-    pub heads: Map<int, Option<ObjId>>, // level (0..NUM_PRIOS) → list head
-    pub tails: Map<int, Option<ObjId>>, // level (0..NUM_PRIOS) → list tail
-    pub bitmap: u32,                     // bit `level` set ⇔ level's chain non-empty
+    pub heads: Map<int, Option<ObjId>>,  // level (0..NUM_PRIOS) → list head
+    pub tails: Map<int, Option<ObjId>>,  // level (0..NUM_PRIOS) → list tail
+    pub bitmap: u32,  // bit `level` set ⇔ level's chain non-empty
 }
 
 // Cspace residency — the slot-handle list a cspace object owns. The
@@ -460,8 +470,10 @@ pub trait ExStore {
 
     // The slot arena: handle → slot. Its domain is the set of live slots.
     spec fn slot_view(&self) -> Map<SlotId, CapSlot>;
+
     // Object refcounts: handle → count.
     spec fn refs_view(&self) -> Map<ObjId, nat>;
+
     // Cspace residency: handle → the slot-handle list the cspace owns.
     // Immutable (the residency getters have no setter); every mutator frames it
     // unchanged, so `destroy_cspace`'s resident loop (6c) and revoke-root-survival
@@ -471,30 +483,38 @@ pub trait ExStore {
     // are over the slot/chan/notif/tcb/timer views — so the sweep is forward-looking
     // for the resident-walk reasoning, not a census dependency.)
     spec fn cspace_view(&self) -> Map<ObjId, CSpaceView>;
+
     // Channel state: handle → ghost view. The third independent view;
     // the slot/refs setters frame it unchanged and the channel setters frame
     // slot/refs unchanged, so the channel ops can reason about one without the others.
     spec fn chan_view(&self) -> Map<ObjId, ChanView>;
+
     // Notification / TCB / timer state — three more independent views.
     // Every setter frames the *other* five views (+ the `timer_head_view` scalar)
     // unchanged, so a notification op reasons about one without re-establishing the rest
     // (the mutual-frame discipline, extended to a six-view world).
     spec fn notif_view(&self) -> Map<ObjId, NotifView>;
+
     spec fn tcb_view(&self) -> Map<ObjId, TcbView>;
+
     spec fn timer_view(&self) -> Map<ObjId, TimerView>;
+
     // The armed-timer list head — a `Store`-seam scalar (the kernel static,
     // store.rs:130); the list *logic* is in `crate::timer`.
     spec fn timer_head_view(&self) -> Option<ObjId>;
+
     // The IRQ-handler arena: handle → ghost view, the `timer_view` twin minus the
     // armed-list scalar (delivery is by direct INTID lookup, not a chain). Framed unchanged
     // by every object setter exactly as `timer_view` is; changed only by the verified
     // `crate::irq` bind/unbind/destroy ops. The `irq_binding_refs` census term reads it.
     spec fn irq_view(&self) -> Map<ObjId, IrqView>;
+
     // The 32-level ready queue (per-level head/tail + presence bitmap) — `Store`-seam
     // state (the `READY`/`READY_BITMAP` kernel statics); the list *logic* is the
     // verified `crate::ready` ops. Framed unchanged by every object setter
     // exactly as `timer_head_view` is; changed only by the enqueue/dequeue/unqueue ops.
     spec fn ready_view(&self) -> ReadyView;
+
     // The TLBI effect log: the ordered sequence of `(asid, va)` TLB
     // invalidations issued through this store. The seventh view — pure hardware
     // effect, not object state — so `aspace::unmap_in` can prove "one TLBI per
@@ -505,11 +525,15 @@ pub trait ExStore {
     spec fn tlb_log_view(&self) -> Seq<(u16, u64)>;
 
     fn slot(&self, s: SlotId) -> (r: CapSlot)
-        requires self.slot_view().dom().contains(s),
-        ensures r == self.slot_view()[s];
+        requires
+            self.slot_view().dom().contains(s),
+        ensures
+            r == self.slot_view()[s],
+    ;
 
     fn set_slot(&mut self, s: SlotId, v: CapSlot)
-        requires old(self).slot_view().dom().contains(s),
+        requires
+            old(self).slot_view().dom().contains(s),
         ensures
             final(self).slot_view() == old(self).slot_view().insert(s, v),
             final(self).refs_view() == old(self).refs_view(),
@@ -520,14 +544,19 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     fn obj_refs(&self, o: ObjId) -> (r: u32)
-        requires self.refs_view().dom().contains(o),
-        ensures r as nat == self.refs_view()[o];
+        requires
+            self.refs_view().dom().contains(o),
+        ensures
+            r as nat == self.refs_view()[o],
+    ;
 
     fn set_obj_refs(&mut self, o: ObjId, r: u32)
-        requires old(self).refs_view().dom().contains(o),
+        requires
+            old(self).refs_view().dom().contains(o),
         ensures
             final(self).refs_view() == old(self).refs_view().insert(o, r as nat),
             final(self).slot_view() == old(self).slot_view(),
@@ -538,7 +567,8 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     // ── cspace residents ─────────────────────────────────────────
     //
@@ -551,14 +581,18 @@ pub trait ExStore {
         requires
             self.cspace_view().dom().contains(cs),
             self.cspace_view()[cs].slots.len() == self.cspace_view()[cs].num_slots,
-        ensures r as nat == self.cspace_view()[cs].num_slots;
+        ensures
+            r as nat == self.cspace_view()[cs].num_slots,
+    ;
 
     fn cspace_slot(&self, cs: ObjId, i: u32) -> (r: SlotId)
         requires
             self.cspace_view().dom().contains(cs),
             (i as nat) < self.cspace_view()[cs].num_slots,
             self.cspace_view()[cs].slots.len() == self.cspace_view()[cs].num_slots,
-        ensures r == self.cspace_view()[cs].slots[i as int];
+        ensures
+            r == self.cspace_view()[cs].slots[i as int],
+    ;
 
     // ── channel accessors ────────────────────────────────────────
     //
@@ -567,14 +601,19 @@ pub trait ExStore {
     // *other* two views unchanged. Index bounds (end/ring < 2, ev < 3) mirror the
     // production fixed-array bounds.
     fn chan_depth(&self, ch: ObjId) -> (r: u32)
-        requires self.chan_view().dom().contains(ch),
-        ensures r as nat == self.chan_view()[ch].depth;
+        requires
+            self.chan_view().dom().contains(ch),
+        ensures
+            r as nat == self.chan_view()[ch].depth,
+    ;
 
     fn chan_end_caps(&self, ch: ObjId, end: usize) -> (r: u32)
         requires
             self.chan_view().dom().contains(ch),
             end < 2,
-        ensures r as nat == self.chan_view()[ch].end_caps[end as int];
+        ensures
+            r as nat == self.chan_view()[ch].end_caps[end as int],
+    ;
 
     fn set_chan_end_caps(&mut self, ch: ObjId, end: usize, v: u32)
         requires
@@ -587,7 +626,8 @@ pub trait ExStore {
                 ChanView {
                     end_caps: old(self).chan_view()[ch].end_caps.update(end as int, v as nat),
                     ..old(self).chan_view()[ch]
-                }),
+                },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).notif_view() == old(self).notif_view(),
@@ -596,13 +636,16 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     fn chan_head(&self, ch: ObjId, ring: usize) -> (r: u32)
         requires
             self.chan_view().dom().contains(ch),
             ring < 2,
-        ensures r as nat == self.chan_view()[ch].head[ring as int];
+        ensures
+            r as nat == self.chan_view()[ch].head[ring as int],
+    ;
 
     fn set_chan_head(&mut self, ch: ObjId, ring: usize, v: u32)
         requires
@@ -615,7 +658,8 @@ pub trait ExStore {
                 ChanView {
                     head: old(self).chan_view()[ch].head.update(ring as int, v as nat),
                     ..old(self).chan_view()[ch]
-                }),
+                },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).notif_view() == old(self).notif_view(),
@@ -624,13 +668,16 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     fn chan_count(&self, ch: ObjId, ring: usize) -> (r: u32)
         requires
             self.chan_view().dom().contains(ch),
             ring < 2,
-        ensures r as nat == self.chan_view()[ch].count[ring as int];
+        ensures
+            r as nat == self.chan_view()[ch].count[ring as int],
+    ;
 
     fn set_chan_count(&mut self, ch: ObjId, ring: usize, v: u32)
         requires
@@ -643,7 +690,8 @@ pub trait ExStore {
                 ChanView {
                     count: old(self).chan_view()[ch].count.update(ring as int, v as nat),
                     ..old(self).chan_view()[ch]
-                }),
+                },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).notif_view() == old(self).notif_view(),
@@ -652,14 +700,17 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     fn chan_binding(&self, ch: ObjId, end: usize, ev: usize) -> (r: Binding)
         requires
             self.chan_view().dom().contains(ch),
             end < 2,
             ev < 3,
-        ensures r == self.chan_view()[ch].bindings[(end as int, ev as int)];
+        ensures
+            r == self.chan_view()[ch].bindings[(end as int, ev as int)],
+    ;
 
     fn set_chan_binding(&mut self, ch: ObjId, end: usize, ev: usize, b: Binding)
         requires
@@ -672,7 +723,8 @@ pub trait ExStore {
                 ChanView {
                     bindings: old(self).chan_view()[ch].bindings.insert((end as int, ev as int), b),
                     ..old(self).chan_view()[ch]
-                }),
+                },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).notif_view() == old(self).notif_view(),
@@ -681,7 +733,8 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     // The ring cap-slot handle — immutable channel layout, so getter only.
     fn chan_ring_cap(&self, ch: ObjId, ring: usize, i: u32, c: usize) -> (r: SlotId)
@@ -689,13 +742,17 @@ pub trait ExStore {
             self.chan_view().dom().contains(ch),
             ring < 2,
             c < 4,
-        ensures r == self.chan_view()[ch].ring_cap[(ring as int, i as int, c as int)];
+        ensures
+            r == self.chan_view()[ch].ring_cap[(ring as int, i as int, c as int)],
+    ;
 
     fn chan_msg_len(&self, ch: ObjId, ring: usize, i: u32) -> (r: u16)
         requires
             self.chan_view().dom().contains(ch),
             ring < 2,
-        ensures r as nat == self.chan_view()[ch].msg_len[(ring as int, i as int)];
+        ensures
+            r as nat == self.chan_view()[ch].msg_len[(ring as int, i as int)],
+    ;
 
     fn set_chan_msg_len(&mut self, ch: ObjId, ring: usize, i: u32, v: u16)
         requires
@@ -705,9 +762,13 @@ pub trait ExStore {
             final(self).chan_view() == old(self).chan_view().insert(
                 ch,
                 ChanView {
-                    msg_len: old(self).chan_view()[ch].msg_len.insert((ring as int, i as int), v as nat),
+                    msg_len: old(self).chan_view()[ch].msg_len.insert(
+                        (ring as int, i as int),
+                        v as nat,
+                    ),
                     ..old(self).chan_view()[ch]
-                }),
+                },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).notif_view() == old(self).notif_view(),
@@ -716,7 +777,8 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     // Payload is abstracted out, so the write is a frame-only no-op on the
     // abstract state; `chan_msg_read` is `&self` (no obligation, omitted).
@@ -731,7 +793,8 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     // `&self` (only `buf` is written), so the store is unchanged automatically; the
     // payload is abstracted out, so no spec on `buf`. Needed in `verus!` since 3d's
@@ -744,14 +807,20 @@ pub trait ExStore {
     // `slot_view`: getters project a field; setters update one key and frame the
     // *other* five views + the `timer_head_view` scalar unchanged.
     fn notif_word(&self, n: ObjId) -> (r: u64)
-        requires self.notif_view().dom().contains(n),
-        ensures r == self.notif_view()[n].word;
+        requires
+            self.notif_view().dom().contains(n),
+        ensures
+            r == self.notif_view()[n].word,
+    ;
 
     fn set_notif_word(&mut self, n: ObjId, v: u64)
-        requires old(self).notif_view().dom().contains(n),
+        requires
+            old(self).notif_view().dom().contains(n),
         ensures
             final(self).notif_view() == old(self).notif_view().insert(
-                n, NotifView { word: v, ..old(self).notif_view()[n] }),
+                n,
+                NotifView { word: v, ..old(self).notif_view()[n] },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).chan_view() == old(self).chan_view(),
@@ -760,17 +829,24 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     fn notif_wait_head(&self, n: ObjId) -> (r: Option<ObjId>)
-        requires self.notif_view().dom().contains(n),
-        ensures r == self.notif_view()[n].wait_head;
+        requires
+            self.notif_view().dom().contains(n),
+        ensures
+            r == self.notif_view()[n].wait_head,
+    ;
 
     fn set_notif_wait_head(&mut self, n: ObjId, t: Option<ObjId>)
-        requires old(self).notif_view().dom().contains(n),
+        requires
+            old(self).notif_view().dom().contains(n),
         ensures
             final(self).notif_view() == old(self).notif_view().insert(
-                n, NotifView { wait_head: t, ..old(self).notif_view()[n] }),
+                n,
+                NotifView { wait_head: t, ..old(self).notif_view()[n] },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).chan_view() == old(self).chan_view(),
@@ -779,17 +855,24 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     fn notif_wait_tail(&self, n: ObjId) -> (r: Option<ObjId>)
-        requires self.notif_view().dom().contains(n),
-        ensures r == self.notif_view()[n].wait_tail;
+        requires
+            self.notif_view().dom().contains(n),
+        ensures
+            r == self.notif_view()[n].wait_tail,
+    ;
 
     fn set_notif_wait_tail(&mut self, n: ObjId, t: Option<ObjId>)
-        requires old(self).notif_view().dom().contains(n),
+        requires
+            old(self).notif_view().dom().contains(n),
         ensures
             final(self).notif_view() == old(self).notif_view().insert(
-                n, NotifView { wait_tail: t, ..old(self).notif_view()[n] }),
+                n,
+                NotifView { wait_tail: t, ..old(self).notif_view()[n] },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).chan_view() == old(self).chan_view(),
@@ -798,7 +881,8 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     // ── thread (TCB) accessors ───────────────────────────────────
     //
@@ -808,14 +892,20 @@ pub trait ExStore {
     // contents live in `slot_view`); `set_tcb_retval` is a setter only (the seam
     // has no `tcb_retval` getter — it writes `frame.x[0]`).
     fn tcb_state(&self, t: ObjId) -> (r: ThreadState)
-        requires self.tcb_view().dom().contains(t),
-        ensures r == self.tcb_view()[t].state;
+        requires
+            self.tcb_view().dom().contains(t),
+        ensures
+            r == self.tcb_view()[t].state,
+    ;
 
     fn set_tcb_state(&mut self, t: ObjId, s: ThreadState)
-        requires old(self).tcb_view().dom().contains(t),
+        requires
+            old(self).tcb_view().dom().contains(t),
         ensures
             final(self).tcb_view() == old(self).tcb_view().insert(
-                t, TcbView { state: s, ..old(self).tcb_view()[t] }),
+                t,
+                TcbView { state: s, ..old(self).tcb_view()[t] },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).chan_view() == old(self).chan_view(),
@@ -824,17 +914,24 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     fn tcb_qnext(&self, t: ObjId) -> (r: Option<ObjId>)
-        requires self.tcb_view().dom().contains(t),
-        ensures r == self.tcb_view()[t].qnext;
+        requires
+            self.tcb_view().dom().contains(t),
+        ensures
+            r == self.tcb_view()[t].qnext,
+    ;
 
     fn set_tcb_qnext(&mut self, t: ObjId, q: Option<ObjId>)
-        requires old(self).tcb_view().dom().contains(t),
+        requires
+            old(self).tcb_view().dom().contains(t),
         ensures
             final(self).tcb_view() == old(self).tcb_view().insert(
-                t, TcbView { qnext: q, ..old(self).tcb_view()[t] }),
+                t,
+                TcbView { qnext: q, ..old(self).tcb_view()[t] },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).chan_view() == old(self).chan_view(),
@@ -843,17 +940,24 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     fn tcb_wait_notif(&self, t: ObjId) -> (r: Option<ObjId>)
-        requires self.tcb_view().dom().contains(t),
-        ensures r == self.tcb_view()[t].wait_notif;
+        requires
+            self.tcb_view().dom().contains(t),
+        ensures
+            r == self.tcb_view()[t].wait_notif,
+    ;
 
     fn set_tcb_wait_notif(&mut self, t: ObjId, n: Option<ObjId>)
-        requires old(self).tcb_view().dom().contains(t),
+        requires
+            old(self).tcb_view().dom().contains(t),
         ensures
             final(self).tcb_view() == old(self).tcb_view().insert(
-                t, TcbView { wait_notif: n, ..old(self).tcb_view()[t] }),
+                t,
+                TcbView { wait_notif: n, ..old(self).tcb_view()[t] },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).chan_view() == old(self).chan_view(),
@@ -862,17 +966,24 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     fn tcb_report(&self, t: ObjId) -> (r: Report)
-        requires self.tcb_view().dom().contains(t),
-        ensures r == self.tcb_view()[t].report;
+        requires
+            self.tcb_view().dom().contains(t),
+        ensures
+            r == self.tcb_view()[t].report,
+    ;
 
     fn set_tcb_report(&mut self, t: ObjId, r: Report)
-        requires old(self).tcb_view().dom().contains(t),
+        requires
+            old(self).tcb_view().dom().contains(t),
         ensures
             final(self).tcb_view() == old(self).tcb_view().insert(
-                t, TcbView { report: r, ..old(self).tcb_view()[t] }),
+                t,
+                TcbView { report: r, ..old(self).tcb_view()[t] },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).chan_view() == old(self).chan_view(),
@@ -881,17 +992,24 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     fn tcb_priority(&self, t: ObjId) -> (r: u8)
-        requires self.tcb_view().dom().contains(t),
-        ensures r == self.tcb_view()[t].priority;
+        requires
+            self.tcb_view().dom().contains(t),
+        ensures
+            r == self.tcb_view()[t].priority,
+    ;
 
     fn set_tcb_priority(&mut self, t: ObjId, p: u8)
-        requires old(self).tcb_view().dom().contains(t),
+        requires
+            old(self).tcb_view().dom().contains(t),
         ensures
             final(self).tcb_view() == old(self).tcb_view().insert(
-                t, TcbView { priority: p, ..old(self).tcb_view()[t] }),
+                t,
+                TcbView { priority: p, ..old(self).tcb_view()[t] },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).chan_view() == old(self).chan_view(),
@@ -900,19 +1018,24 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     fn tcb_bind_slot(&self, t: ObjId, which: usize) -> (r: SlotId)
         requires
             self.tcb_view().dom().contains(t),
             which < 2,
-        ensures r == self.tcb_view()[t].bind_slots[which as int];
+        ensures
+            r == self.tcb_view()[t].bind_slots[which as int],
+    ;
 
     fn tcb_bind_bits(&self, t: ObjId, which: usize) -> (r: u64)
         requires
             self.tcb_view().dom().contains(t),
             which < 2,
-        ensures r == self.tcb_view()[t].bind_bits[which as int];
+        ensures
+            r == self.tcb_view()[t].bind_bits[which as int],
+    ;
 
     fn set_tcb_bind_bits(&mut self, t: ObjId, which: usize, b: u64)
         requires
@@ -921,10 +1044,12 @@ pub trait ExStore {
             old(self).tcb_view()[t].bind_bits.len() == 2,
         ensures
             final(self).tcb_view() == old(self).tcb_view().insert(
-                t, TcbView {
+                t,
+                TcbView {
                     bind_bits: old(self).tcb_view()[t].bind_bits.update(which as int, b),
                     ..old(self).tcb_view()[t]
-                }),
+                },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).chan_view() == old(self).chan_view(),
@@ -933,17 +1058,24 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     fn tcb_cspace(&self, t: ObjId) -> (r: Option<ObjId>)
-        requires self.tcb_view().dom().contains(t),
-        ensures r == self.tcb_view()[t].cspace;
+        requires
+            self.tcb_view().dom().contains(t),
+        ensures
+            r == self.tcb_view()[t].cspace,
+    ;
 
     fn set_tcb_cspace(&mut self, t: ObjId, cs: Option<ObjId>)
-        requires old(self).tcb_view().dom().contains(t),
+        requires
+            old(self).tcb_view().dom().contains(t),
         ensures
             final(self).tcb_view() == old(self).tcb_view().insert(
-                t, TcbView { cspace: cs, ..old(self).tcb_view()[t] }),
+                t,
+                TcbView { cspace: cs, ..old(self).tcb_view()[t] },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).chan_view() == old(self).chan_view(),
@@ -952,17 +1084,24 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     fn tcb_aspace(&self, t: ObjId) -> (r: Option<ObjId>)
-        requires self.tcb_view().dom().contains(t),
-        ensures r == self.tcb_view()[t].aspace;
+        requires
+            self.tcb_view().dom().contains(t),
+        ensures
+            r == self.tcb_view()[t].aspace,
+    ;
 
     fn set_tcb_aspace(&mut self, t: ObjId, a: Option<ObjId>)
-        requires old(self).tcb_view().dom().contains(t),
+        requires
+            old(self).tcb_view().dom().contains(t),
         ensures
             final(self).tcb_view() == old(self).tcb_view().insert(
-                t, TcbView { aspace: a, ..old(self).tcb_view()[t] }),
+                t,
+                TcbView { aspace: a, ..old(self).tcb_view()[t] },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).chan_view() == old(self).chan_view(),
@@ -971,13 +1110,17 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     fn set_tcb_retval(&mut self, t: ObjId, v: u64)
-        requires old(self).tcb_view().dom().contains(t),
+        requires
+            old(self).tcb_view().dom().contains(t),
         ensures
             final(self).tcb_view() == old(self).tcb_view().insert(
-                t, TcbView { retval: v, ..old(self).tcb_view()[t] }),
+                t,
+                TcbView { retval: v, ..old(self).tcb_view()[t] },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).chan_view() == old(self).chan_view(),
@@ -986,21 +1129,28 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     // ── timer accessors (the armed-list logic) ──────────────────────────────
     //
     // Setters update one `timer_view` field (or the `timer_head_view` scalar) and
     // frame the other five views unchanged.
     fn timer_armed(&self, t: ObjId) -> (r: bool)
-        requires self.timer_view().dom().contains(t),
-        ensures r == self.timer_view()[t].armed;
+        requires
+            self.timer_view().dom().contains(t),
+        ensures
+            r == self.timer_view()[t].armed,
+    ;
 
     fn set_timer_armed(&mut self, t: ObjId, v: bool)
-        requires old(self).timer_view().dom().contains(t),
+        requires
+            old(self).timer_view().dom().contains(t),
         ensures
             final(self).timer_view() == old(self).timer_view().insert(
-                t, TimerView { armed: v, ..old(self).timer_view()[t] }),
+                t,
+                TimerView { armed: v, ..old(self).timer_view()[t] },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).chan_view() == old(self).chan_view(),
@@ -1009,17 +1159,24 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     fn timer_deadline(&self, t: ObjId) -> (r: u64)
-        requires self.timer_view().dom().contains(t),
-        ensures r == self.timer_view()[t].deadline;
+        requires
+            self.timer_view().dom().contains(t),
+        ensures
+            r == self.timer_view()[t].deadline,
+    ;
 
     fn set_timer_deadline(&mut self, t: ObjId, v: u64)
-        requires old(self).timer_view().dom().contains(t),
+        requires
+            old(self).timer_view().dom().contains(t),
         ensures
             final(self).timer_view() == old(self).timer_view().insert(
-                t, TimerView { deadline: v, ..old(self).timer_view()[t] }),
+                t,
+                TimerView { deadline: v, ..old(self).timer_view()[t] },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).chan_view() == old(self).chan_view(),
@@ -1028,17 +1185,24 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     fn timer_notif(&self, t: ObjId) -> (r: Option<ObjId>)
-        requires self.timer_view().dom().contains(t),
-        ensures r == self.timer_view()[t].notif;
+        requires
+            self.timer_view().dom().contains(t),
+        ensures
+            r == self.timer_view()[t].notif,
+    ;
 
     fn set_timer_notif(&mut self, t: ObjId, n: Option<ObjId>)
-        requires old(self).timer_view().dom().contains(t),
+        requires
+            old(self).timer_view().dom().contains(t),
         ensures
             final(self).timer_view() == old(self).timer_view().insert(
-                t, TimerView { notif: n, ..old(self).timer_view()[t] }),
+                t,
+                TimerView { notif: n, ..old(self).timer_view()[t] },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).chan_view() == old(self).chan_view(),
@@ -1047,17 +1211,24 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     fn timer_bits(&self, t: ObjId) -> (r: u64)
-        requires self.timer_view().dom().contains(t),
-        ensures r == self.timer_view()[t].bits;
+        requires
+            self.timer_view().dom().contains(t),
+        ensures
+            r == self.timer_view()[t].bits,
+    ;
 
     fn set_timer_bits(&mut self, t: ObjId, v: u64)
-        requires old(self).timer_view().dom().contains(t),
+        requires
+            old(self).timer_view().dom().contains(t),
         ensures
             final(self).timer_view() == old(self).timer_view().insert(
-                t, TimerView { bits: v, ..old(self).timer_view()[t] }),
+                t,
+                TimerView { bits: v, ..old(self).timer_view()[t] },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).chan_view() == old(self).chan_view(),
@@ -1066,17 +1237,24 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     fn timer_next(&self, t: ObjId) -> (r: Option<ObjId>)
-        requires self.timer_view().dom().contains(t),
-        ensures r == self.timer_view()[t].next;
+        requires
+            self.timer_view().dom().contains(t),
+        ensures
+            r == self.timer_view()[t].next,
+    ;
 
     fn set_timer_next(&mut self, t: ObjId, n: Option<ObjId>)
-        requires old(self).timer_view().dom().contains(t),
+        requires
+            old(self).timer_view().dom().contains(t),
         ensures
             final(self).timer_view() == old(self).timer_view().insert(
-                t, TimerView { next: n, ..old(self).timer_view()[t] }),
+                t,
+                TimerView { next: n, ..old(self).timer_view()[t] },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).chan_view() == old(self).chan_view(),
@@ -1085,10 +1263,13 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     fn timer_armed_head(&self) -> (r: Option<ObjId>)
-        ensures r == self.timer_head_view();
+        ensures
+            r == self.timer_head_view(),
+    ;
 
     fn set_timer_armed_head(&mut self, h: Option<ObjId>)
         ensures
@@ -1101,7 +1282,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     // ── IRQ-handler object ──────────────────────────────────────────────────
     //
@@ -1111,18 +1293,27 @@ pub trait ExStore {
     // `crate::irq` ops run against these; production derefs an `IrqObj` (kernel/src/store.rs),
     // host tests use the array backing (`test_store`).
     fn irq_intid(&self, i: ObjId) -> (r: u32)
-        requires self.irq_view().dom().contains(i),
-        ensures r == self.irq_view()[i].intid;
+        requires
+            self.irq_view().dom().contains(i),
+        ensures
+            r == self.irq_view()[i].intid,
+    ;
 
     fn irq_notif(&self, i: ObjId) -> (r: Option<ObjId>)
-        requires self.irq_view().dom().contains(i),
-        ensures r == self.irq_view()[i].notif;
+        requires
+            self.irq_view().dom().contains(i),
+        ensures
+            r == self.irq_view()[i].notif,
+    ;
 
     fn set_irq_notif(&mut self, i: ObjId, n: Option<ObjId>)
-        requires old(self).irq_view().dom().contains(i),
+        requires
+            old(self).irq_view().dom().contains(i),
         ensures
             final(self).irq_view() == old(self).irq_view().insert(
-                i, IrqView { notif: n, ..old(self).irq_view()[i] }),
+                i,
+                IrqView { notif: n, ..old(self).irq_view()[i] },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).chan_view() == old(self).chan_view(),
@@ -1131,17 +1322,24 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+    ;
 
     fn irq_bits(&self, i: ObjId) -> (r: u64)
-        requires self.irq_view().dom().contains(i),
-        ensures r == self.irq_view()[i].bits;
+        requires
+            self.irq_view().dom().contains(i),
+        ensures
+            r == self.irq_view()[i].bits,
+    ;
 
     fn set_irq_bits(&mut self, i: ObjId, v: u64)
-        requires old(self).irq_view().dom().contains(i),
+        requires
+            old(self).irq_view().dom().contains(i),
         ensures
             final(self).irq_view() == old(self).irq_view().insert(
-                i, IrqView { bits: v, ..old(self).irq_view()[i] }),
+                i,
+                IrqView { bits: v, ..old(self).irq_view()[i] },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).chan_view() == old(self).chan_view(),
@@ -1150,17 +1348,24 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+    ;
 
     fn irq_bound(&self, i: ObjId) -> (r: bool)
-        requires self.irq_view().dom().contains(i),
-        ensures r == self.irq_view()[i].bound;
+        requires
+            self.irq_view().dom().contains(i),
+        ensures
+            r == self.irq_view()[i].bound,
+    ;
 
     fn set_irq_bound(&mut self, i: ObjId, v: bool)
-        requires old(self).irq_view().dom().contains(i),
+        requires
+            old(self).irq_view().dom().contains(i),
         ensures
             final(self).irq_view() == old(self).irq_view().insert(
-                i, IrqView { bound: v, ..old(self).irq_view()[i] }),
+                i,
+                IrqView { bound: v, ..old(self).irq_view()[i] },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).chan_view() == old(self).chan_view(),
@@ -1169,17 +1374,24 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+    ;
 
     fn irq_masked(&self, i: ObjId) -> (r: bool)
-        requires self.irq_view().dom().contains(i),
-        ensures r == self.irq_view()[i].masked;
+        requires
+            self.irq_view().dom().contains(i),
+        ensures
+            r == self.irq_view()[i].masked,
+    ;
 
     fn set_irq_masked(&mut self, i: ObjId, v: bool)
-        requires old(self).irq_view().dom().contains(i),
+        requires
+            old(self).irq_view().dom().contains(i),
         ensures
             final(self).irq_view() == old(self).irq_view().insert(
-                i, IrqView { masked: v, ..old(self).irq_view()[i] }),
+                i,
+                IrqView { masked: v, ..old(self).irq_view()[i] },
+            ),
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
             final(self).chan_view() == old(self).chan_view(),
@@ -1188,7 +1400,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
-            final(self).cspace_view() == old(self).cspace_view();
+            final(self).cspace_view() == old(self).cspace_view(),
+    ;
 
     // ── ready queue ────────────────────────────────────────────────────────
     //
@@ -1199,11 +1412,15 @@ pub trait ExStore {
     // the by-handle accessors they run against (kernel statics in production, the array
     // backing in `test_store`). `level < NUM_PRIOS` mirrors the production fixed-array bound.
     fn ready_head(&self, level: usize) -> (r: Option<ObjId>)
-        requires level < crate::sysabi::NUM_PRIOS,
-        ensures r == self.ready_view().heads[level as int];
+        requires
+            level < crate::sysabi::NUM_PRIOS,
+        ensures
+            r == self.ready_view().heads[level as int],
+    ;
 
     fn set_ready_head(&mut self, level: usize, h: Option<ObjId>)
-        requires level < crate::sysabi::NUM_PRIOS,
+        requires
+            level < crate::sysabi::NUM_PRIOS,
         ensures
             final(self).ready_view() == (ReadyView {
                 heads: old(self).ready_view().heads.insert(level as int, h),
@@ -1217,14 +1434,19 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     fn ready_tail(&self, level: usize) -> (r: Option<ObjId>)
-        requires level < crate::sysabi::NUM_PRIOS,
-        ensures r == self.ready_view().tails[level as int];
+        requires
+            level < crate::sysabi::NUM_PRIOS,
+        ensures
+            r == self.ready_view().tails[level as int],
+    ;
 
     fn set_ready_tail(&mut self, level: usize, t: Option<ObjId>)
-        requires level < crate::sysabi::NUM_PRIOS,
+        requires
+            level < crate::sysabi::NUM_PRIOS,
         ensures
             final(self).ready_view() == (ReadyView {
                 tails: old(self).ready_view().tails.insert(level as int, t),
@@ -1238,10 +1460,13 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     fn ready_bitmap(&self) -> (r: u32)
-        ensures r == self.ready_view().bitmap;
+        ensures
+            r == self.ready_view().bitmap,
+    ;
 
     fn set_ready_bitmap(&mut self, b: u32)
         ensures
@@ -1254,7 +1479,8 @@ pub trait ExStore {
             final(self).timer_view() == old(self).timer_view(),
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     // ── scheduler seam (faithful ready-queue ops) ──────────────────────────
     //
@@ -1292,24 +1518,31 @@ pub trait ExStore {
                 qnext: None,
                 ..old(self).tcb_view()[t]
             }),
-            forall|x: ObjId| #![trigger final(self).tcb_view()[x]]
-                x != t
-                && old(self).ready_view().tails[old(self).tcb_view()[t].priority as int] != Some(x)
-                ==> final(self).tcb_view()[x] == old(self).tcb_view()[x],
+            forall|x: ObjId|
+                #![trigger final(self).tcb_view()[x]]
+                x != t && old(self).ready_view().tails[old(self).tcb_view()[t].priority as int]
+                    != Some(x) ==> final(self).tcb_view()[x] == old(self).tcb_view()[x],
             // global frame: only `state` (on the woken `t`, specified above) and `qnext` (on `t`
             // + the old tail) change. Every thread *but* `t` changes **only its `qnext`** — its
             // `state`/`wait_notif`/`cspace`/`aspace`/`bind_*`/`priority`/`retval` are preserved.
             // So the old ready-tail stays Runnable with `wait_notif None`; `signal`'s caps/
             // waiter-coherence proofs read that off this (a Runnable tail is never `BlockedNotif`).
-            forall|x: ObjId| #![trigger final(self).tcb_view()[x]]
+            forall|x: ObjId|
+                #![trigger final(self).tcb_view()[x]]
                 x != t ==> final(self).tcb_view()[x] == (TcbView {
                     qnext: final(self).tcb_view()[x].qnext,
                     ..old(self).tcb_view()[x]
                 }),
-            ready_seq(final(self).ready_view(), final(self).tcb_view(),
-                old(self).tcb_view()[t].priority as int)
-                == ready_seq(old(self).ready_view(), old(self).tcb_view(),
-                    old(self).tcb_view()[t].priority as int).push(t);
+            ready_seq(
+                final(self).ready_view(),
+                final(self).tcb_view(),
+                old(self).tcb_view()[t].priority as int,
+            ) == ready_seq(
+                old(self).ready_view(),
+                old(self).tcb_view(),
+                old(self).tcb_view()[t].priority as int,
+            ).push(t),
+    ;
 
     // `unqueue_ready` — the seam lift of the verified `ready::ready_unqueue`: the
     // arbitrary-position splice walk. Removes a Runnable `t` from its level's chain
@@ -1341,34 +1574,40 @@ pub trait ExStore {
                 let level = old(self).tcb_view()[t].priority as int;
                 let rs0 = ready_seq(old(self).ready_view(), old(self).tcb_view(), level);
                 &&& ready_seq(final(self).ready_view(), final(self).tcb_view(), level)
-                        == rs0.remove(rs0.index_of(t))
+                    == rs0.remove(rs0.index_of(t))
                 &&& final(self).tcb_view()[t].qnext is None
                 &&& final(self).tcb_view()[t].state == old(self).tcb_view()[t].state
                 &&& final(self).tcb_view()[t].priority == old(self).tcb_view()[t].priority
                 &&& final(self).tcb_view()[t].wait_notif == old(self).tcb_view()[t].wait_notif
                 &&& final(self).tcb_view()[t].cspace == old(self).tcb_view()[t].cspace
                 &&& final(self).tcb_view()[t].aspace == old(self).tcb_view()[t].aspace
-                &&& final(self).tcb_view()[t].bind_slots == old(self).tcb_view()[t].bind_slots
+                &&& final(self).tcb_view()[t].bind_slots == old(
+                    self,
+                ).tcb_view()[t].bind_slots
                 // `t`'s report survives the splice (only `qnext` is written) —
                 // `destroy_tcb` reads it off to preserve the halted subject's report (rev2§5.1).
-                &&& final(self).tcb_view()[t].report == old(self).tcb_view()[t].report
+                &&& final(self).tcb_view()[t].report == old(
+                    self,
+                ).tcb_view()[t].report
                 // signal-shaped frame: only level's chain nodes (t + predecessor) moved, each
                 // Runnable (off every waiter chain), and each preserves the home fields
                 // `destroy_tcb`'s census/caps reasoning needs — `wait_notif` (waiter census),
                 // `cspace`/`aspace` (`thread_hold_refs`), `bind_slots` (`caps_consistent`).
                 // Extends the part-2 frame with `cspace`/`aspace`.
-                &&& forall|x: ObjId| #![trigger final(self).tcb_view()[x]]
-                        final(self).tcb_view()[x] != old(self).tcb_view()[x]
-                        ==> old(self).tcb_view()[x].state == ThreadState::Runnable
-                            && final(self).tcb_view()[x].state == old(self).tcb_view()[x].state
-                            && old(self).tcb_view()[x].priority as int == level
-                            && final(self).tcb_view()[x].wait_notif
-                                == old(self).tcb_view()[x].wait_notif
-                            && final(self).tcb_view()[x].cspace == old(self).tcb_view()[x].cspace
-                            && final(self).tcb_view()[x].aspace == old(self).tcb_view()[x].aspace
-                            && final(self).tcb_view()[x].bind_slots
-                                == old(self).tcb_view()[x].bind_slots
-            });
+                &&& forall|x: ObjId|
+                    #![trigger final(self).tcb_view()[x]]
+                    final(self).tcb_view()[x] != old(self).tcb_view()[x] ==> old(
+                        self,
+                    ).tcb_view()[x].state == ThreadState::Runnable
+                        && final(self).tcb_view()[x].state == old(self).tcb_view()[x].state && old(
+                        self,
+                    ).tcb_view()[x].priority as int == level && final(self).tcb_view()[x].wait_notif
+                        == old(self).tcb_view()[x].wait_notif && final(self).tcb_view()[x].cspace
+                        == old(self).tcb_view()[x].cspace && final(self).tcb_view()[x].aspace
+                        == old(self).tcb_view()[x].aspace && final(self).tcb_view()[x].bind_slots
+                        == old(self).tcb_view()[x].bind_slots
+            }),
+    ;
 
     // ── aspace hardware seam (the `aspace::map_in` post-map barrier) ──────────
     //
@@ -1392,7 +1631,8 @@ pub trait ExStore {
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
             final(self).irq_view() == old(self).irq_view(),
-            final(self).tlb_log_view() == old(self).tlb_log_view();
+            final(self).tlb_log_view() == old(self).tlb_log_view(),
+    ;
 
     // ── unmap hardware seam (the `aspace::unmap_in` TLBI ordering) ────────────
     //
@@ -1413,7 +1653,8 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     // The trailing `dsb`/`isb` after the per-page TLBIs — a pure fence, framing
     // every object view *and* the accumulated TLBI log (so the loop's final log
@@ -1430,7 +1671,8 @@ pub trait ExStore {
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
             final(self).irq_view() == old(self).irq_view(),
-            final(self).tlb_log_view() == old(self).tlb_log_view();
+            final(self).tlb_log_view() == old(self).tlb_log_view(),
+    ;
 
     // ── aspace teardown seam (the cross-object-teardown seam) ──────
     //
@@ -1454,7 +1696,8 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     // The map-time twin of `aspace_unmap` (rev2§6.1(c)). Like the unmap, it is page-table
     // maintenance — no object state — so it frames every object view + `refs_view` +
@@ -1462,8 +1705,10 @@ pub trait ExStore {
     // like the other hardware effects). It is *fallible* (the unmap is not): the table pool may
     // be exhausted. `map_frame` consumes it exactly as `delete`'s frame branch consumes
     // `aspace_unmap` — page-table side here, the verified cap-side record + `ref_aspace` there.
-    fn aspace_map(&mut self, a: ObjId, pa: u64, va: u64, pages: u64, perms: u64)
-        -> (res: Result<(), crate::aspace::MapError>)
+    fn aspace_map(&mut self, a: ObjId, pa: u64, va: u64, pages: u64, perms: u64) -> (res: Result<
+        (),
+        crate::aspace::MapError,
+    >)
         ensures
             final(self).slot_view() == old(self).slot_view(),
             final(self).refs_view() == old(self).refs_view(),
@@ -1474,7 +1719,8 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 
     fn aspace_destroy(&mut self, a: ObjId)
         requires
@@ -1490,7 +1736,8 @@ pub trait ExStore {
             final(self).timer_head_view() == old(self).timer_head_view(),
             final(self).ready_view() == old(self).ready_view(),
             final(self).cspace_view() == old(self).cspace_view(),
-            final(self).irq_view() == old(self).irq_view();
+            final(self).irq_view() == old(self).irq_view(),
+    ;
 }
 
 // The refcounted object a cap designates (the spec mirror of `Cap::obj`).
@@ -1581,7 +1828,14 @@ pub fn cap_is_empty(c: Cap) -> (r: bool)
 pub open spec fn derived_kind(k: CapKind, prio_ceiling: u8) -> CapKind {
     match k {
         CapKind::Frame { base, pages, mapping: _ } => CapKind::Frame { base, pages, mapping: None },
-        CapKind::Thread(o, mp) => CapKind::Thread(o, if mp <= prio_ceiling { mp } else { prio_ceiling }),
+        CapKind::Thread(o, mp) => CapKind::Thread(
+            o,
+            if mp <= prio_ceiling {
+                mp
+            } else {
+                prio_ceiling
+            },
+        ),
         _ => k,
     }
 }
@@ -1589,23 +1843,22 @@ pub open spec fn derived_kind(k: CapKind, prio_ceiling: u8) -> CapKind {
 // `Rights::masked` carries its bit-level `ensures` on the verified method itself
 // (see the `impl Rights` verus block above), so it needs no standalone
 // `assume_specification`.
-
 // `CapSlot::empty` is a plain-Rust const fn (shared with the kernel shell); state
 // what it builds so `slot_move`'s final clear can be verified — an empty cap with
 // all CDT links detached.
-pub assume_specification [ CapSlot::empty ]() -> (r: CapSlot)
+pub assume_specification[ CapSlot::empty ]() -> (r: CapSlot)
     ensures
         is_empty_cap(r.cap),
         r.parent is None,
         r.first_child is None,
         r.next_sib is None,
         r.prev_sib is None,
-        !r.revoking;
+        !r.revoking,
+;
 
 // ── Structural well-formedness of the CDT (the executable `TypeOK`, now total
 // and unbounded). Acyclicity is tracked separately where termination needs
 // it; this is the structural invariant the op proofs preserve. ──
-
 pub open spec fn link_in_dom(m: Map<SlotId, CapSlot>, o: Option<SlotId>) -> bool {
     match o {
         None => true,
@@ -1615,20 +1868,22 @@ pub open spec fn link_in_dom(m: Map<SlotId, CapSlot>, o: Option<SlotId>) -> bool
 
 // Every CDT link is None or points at a live slot.
 pub open spec fn links_in_domain(m: Map<SlotId, CapSlot>) -> bool {
-    forall|k: SlotId| #[trigger] m.dom().contains(k) ==> {
-        &&& link_in_dom(m, m[k].parent)
-        &&& link_in_dom(m, m[k].first_child)
-        &&& link_in_dom(m, m[k].next_sib)
-        &&& link_in_dom(m, m[k].prev_sib)
-    }
+    forall|k: SlotId| #[trigger]
+        m.dom().contains(k) ==> {
+            &&& link_in_dom(m, m[k].parent)
+            &&& link_in_dom(m, m[k].first_child)
+            &&& link_in_dom(m, m[k].next_sib)
+            &&& link_in_dom(m, m[k].prev_sib)
+        }
 }
 
 // The sibling list is doubly consistent in both directions.
 pub open spec fn siblings_doubly_consistent(m: Map<SlotId, CapSlot>) -> bool {
-    forall|a: SlotId| #[trigger] m.dom().contains(a) ==> {
-        &&& (m[a].next_sib matches Some(b) ==> m.dom().contains(b) && m[b].prev_sib == Some(a))
-        &&& (m[a].prev_sib matches Some(b) ==> m.dom().contains(b) && m[b].next_sib == Some(a))
-    }
+    forall|a: SlotId| #[trigger]
+        m.dom().contains(a) ==> {
+            &&& (m[a].next_sib matches Some(b) ==> m.dom().contains(b) && m[b].prev_sib == Some(a))
+            &&& (m[a].prev_sib matches Some(b) ==> m.dom().contains(b) && m[b].next_sib == Some(a))
+        }
 }
 
 // Siblings in a next/prev chain share the same parent. Combined with
@@ -1637,15 +1892,15 @@ pub open spec fn siblings_doubly_consistent(m: Map<SlotId, CapSlot>) -> bool {
 // construction-side acyclicity proofs need: without it a
 // node could name a parent while being absent from that parent's child list.
 pub open spec fn siblings_share_parent(m: Map<SlotId, CapSlot>) -> bool {
-    forall|a: SlotId| #[trigger] m.dom().contains(a) ==>
-        (m[a].next_sib matches Some(b) ==> m[b].parent == m[a].parent)
+    forall|a: SlotId| #[trigger]
+        m.dom().contains(a) ==> (m[a].next_sib matches Some(b) ==> m[b].parent == m[a].parent)
 }
 
 // A node's first child claims it as parent and heads the sibling list.
 pub open spec fn first_child_parent_agree(m: Map<SlotId, CapSlot>) -> bool {
-    forall|p: SlotId| #[trigger] m.dom().contains(p) ==>
-        (m[p].first_child matches Some(c) ==>
-            m.dom().contains(c) && m[c].parent == Some(p) && m[c].prev_sib == None)
+    forall|p: SlotId| #[trigger]
+        m.dom().contains(p) ==> (m[p].first_child matches Some(c) ==> m.dom().contains(c)
+            && m[c].parent == Some(p) && m[c].prev_sib == None)
 }
 
 // The converse: a list-head node (parent set, no prev sibling) IS its parent's
@@ -1653,9 +1908,9 @@ pub open spec fn first_child_parent_agree(m: Map<SlotId, CapSlot>) -> bool {
 // an orphan-head the revoke walk would never reach. (Restores parity with the
 // pre-rewrite predicate.)
 pub open spec fn head_is_first_child(m: Map<SlotId, CapSlot>) -> bool {
-    forall|c: SlotId| #[trigger] m.dom().contains(c) ==>
-        (m[c].parent matches Some(p) ==> (m[c].prev_sib is None ==>
-            m.dom().contains(p) && m[p].first_child == Some(c)))
+    forall|c: SlotId| #[trigger]
+        m.dom().contains(c) ==> (m[c].parent matches Some(p) ==> (m[c].prev_sib is None
+            ==> m.dom().contains(p) && m[p].first_child == Some(c)))
 }
 
 // A node with a parent has that parent set as non-childless: `first_child` is
@@ -1664,18 +1919,19 @@ pub open spec fn head_is_first_child(m: Map<SlotId, CapSlot>) -> bool {
 // lets a fresh detached leaf take the lowest acyclicity rank without a
 // still-lower phantom child needing to exist.
 pub open spec fn parent_has_first_child(m: Map<SlotId, CapSlot>) -> bool {
-    forall|k: SlotId| #[trigger] m.dom().contains(k) ==>
-        (m[k].parent matches Some(p) ==> m[p].first_child is Some)
+    forall|k: SlotId| #[trigger]
+        m.dom().contains(k) ==> (m[k].parent matches Some(p) ==> m[p].first_child is Some)
 }
 
 // Empty slots are fully detached.
 pub open spec fn empty_slots_detached(m: Map<SlotId, CapSlot>) -> bool {
-    forall|k: SlotId| #[trigger] m.dom().contains(k) ==> (is_empty_cap(m[k].cap) ==> {
-        &&& m[k].parent == None
-        &&& m[k].first_child == None
-        &&& m[k].next_sib == None
-        &&& m[k].prev_sib == None
-    })
+    forall|k: SlotId| #[trigger]
+        m.dom().contains(k) ==> (is_empty_cap(m[k].cap) ==> {
+            &&& m[k].parent == None
+            &&& m[k].first_child == None
+            &&& m[k].next_sib == None
+            &&& m[k].prev_sib == None
+        })
 }
 
 // ── CDT descendant reachability (the rev2§3.4 "sees through queues" obligation) ────
@@ -1686,22 +1942,21 @@ pub open spec fn empty_slots_detached(m: Map<SlotId, CapSlot>) -> bool {
 // edge into the ring slot). The structural predicates above pin only the *direct* child
 // relation; these add the transitive closure so `revoke` can export "the subtree is gone"
 // as a named obligation rather than leaving it structurally implied.
-
 // `path` is a child→parent walk in `m`: every entry is live and each entry's `parent`
 // points at the next. Length ≥ 1.
 pub open spec fn is_parent_path(m: Map<SlotId, CapSlot>, path: Seq<SlotId>) -> bool {
     &&& path.len() >= 1
     &&& (forall|i: int| 0 <= i < path.len() ==> m.dom().contains(#[trigger] path[i]))
-    &&& (forall|i: int| 0 <= i < path.len() - 1 ==>
-            m[#[trigger] path[i]].parent == Some(path[i + 1]))
+    &&& (forall|i: int|
+        0 <= i < path.len() - 1 ==> m[#[trigger] path[i]].parent == Some(path[i + 1]))
 }
 
 // `d` is a strict CDT descendant of `anc`: a non-trivial parent-walk leads from `d` up to
 // `anc`. A queued in-flight cap derived under `anc` satisfies this (its ring slot's parent
 // edge was inherited from the source by `slot_move`).
 pub open spec fn is_descendant(m: Map<SlotId, CapSlot>, d: SlotId, anc: SlotId) -> bool {
-    exists|path: Seq<SlotId>| #[trigger] is_parent_path(m, path)
-        && path.len() >= 2 && path[0] == d && path.last() == anc
+    exists|path: Seq<SlotId>| #[trigger]
+        is_parent_path(m, path) && path.len() >= 2 && path[0] == d && path.last() == anc
 }
 
 // No live slot (resident *or* in-flight ring cap) is a CDT descendant of `anc` — the
@@ -1724,15 +1979,15 @@ pub proof fn lemma_childless_no_descendant(m: Map<SlotId, CapSlot>, anc: SlotId)
 {
     assert forall|d: SlotId| m.dom().contains(d) implies !is_descendant(m, d, anc) by {
         if is_descendant(m, d, anc) {
-            let path = choose|path: Seq<SlotId>| #[trigger] is_parent_path(m, path)
-                && path.len() >= 2 && path[0] == d && path.last() == anc;
+            let path = choose|path: Seq<SlotId>| #[trigger]
+                is_parent_path(m, path) && path.len() >= 2 && path[0] == d && path.last() == anc;
             let n = path.len();
             // The node just below `anc` on the path: its parent edge points at `anc`.
             let c = path[n - 2];
             assert(path[n - 1] == path.last());
             assert(m[c].parent == Some(path[n - 1]));  // is_parent_path link clause @ i = n-2
-            assert(m.dom().contains(c));               // is_parent_path liveness clause @ i = n-2
-            assert(m[anc].first_child is Some);        // parent_has_first_child @ k = c
+            assert(m.dom().contains(c));  // is_parent_path liveness clause @ i = n-2
+            assert(m[anc].first_child is Some);  // parent_has_first_child @ k = c
             assert(false);
         }
     }
@@ -1761,8 +2016,8 @@ pub open spec fn cdt_wf(m: Map<SlotId, CapSlot>) -> bool {
 // descending to a leaf via `first_child` strictly lowers it.
 pub open spec fn valid_prank(m: Map<SlotId, CapSlot>, r: Map<SlotId, nat>) -> bool {
     &&& r.dom() == m.dom()
-    &&& forall|k: SlotId| #[trigger] m.dom().contains(k) ==>
-            (m[k].parent matches Some(p) ==> m.dom().contains(p) && r[k] < r[p])
+    &&& forall|k: SlotId| #[trigger]
+        m.dom().contains(k) ==> (m[k].parent matches Some(p) ==> m.dom().contains(p) && r[k] < r[p])
 }
 
 pub open spec fn acyclic(m: Map<SlotId, CapSlot>) -> bool {
@@ -1778,8 +2033,9 @@ pub open spec fn acyclic(m: Map<SlotId, CapSlot>) -> bool {
 // into `cspace_wf` and preserved by the construction ops.
 pub open spec fn valid_srank(m: Map<SlotId, CapSlot>, s: Map<SlotId, nat>) -> bool {
     &&& s.dom() == m.dom()
-    &&& forall|k: SlotId| #[trigger] m.dom().contains(k) ==>
-            (m[k].next_sib matches Some(n) ==> m.dom().contains(n) && s[n] < s[k])
+    &&& forall|k: SlotId| #[trigger]
+        m.dom().contains(k) ==> (m[k].next_sib matches Some(n) ==> m.dom().contains(n) && s[n]
+            < s[k])
 }
 
 pub open spec fn sib_acyclic(m: Map<SlotId, CapSlot>) -> bool {
@@ -1800,7 +2056,8 @@ pub open spec fn cspace_wf(m: Map<SlotId, CapSlot>) -> bool {
 // existential so the modular arithmetic stays out of the predicate (the
 // discipline: quarantine non-linear `%` into 3d's helpers, not the invariant).
 pub open spec fn in_live_window(c: ChanView, ring: int, i: int) -> bool {
-    exists|j: int| #![trigger (c.head[ring] + j) % (c.depth as int)]
+    exists|j: int|
+        #![trigger (c.head[ring] + j) % (c.depth as int)]
         0 <= j < c.count[ring] && i == (c.head[ring] + j) % (c.depth as int)
 }
 
@@ -1817,7 +2074,8 @@ pub open spec fn in_live_window(c: ChanView, ring: int, i: int) -> bool {
 // `send`/`recv` need them; not part of the shape, so not asserted here).
 pub open spec fn chan_wf(cv: Map<ObjId, ChanView>, sv: Map<SlotId, CapSlot>, ch: ObjId) -> bool {
     &&& cv.dom().contains(ch)
-    &&& cv[ch].depth > 0
+    &&& cv[ch].depth
+        > 0
     // `send` forms `(head + count) % depth` in u32; with head < depth and
     // count <= depth this bound keeps the sum within u32 (a channel cannot have
     // 2^31 256-byte message slots — that is 500+ GiB of ring).
@@ -1828,28 +2086,33 @@ pub open spec fn chan_wf(cv: Map<ObjId, ChanView>, sv: Map<SlotId, CapSlot>, ch:
     &&& forall|r: int| #![trigger cv[ch].count[r]] 0 <= r < 2 ==> cv[ch].count[r] <= cv[ch].depth
     &&& forall|r: int| #![trigger cv[ch].head[r]] 0 <= r < 2 ==> cv[ch].head[r] < cv[ch].depth
     &&& forall|r: int, i: int, c: int|
-            (0 <= r < 2 && 0 <= i < cv[ch].depth && 0 <= c < 4)
-                ==> #[trigger] cv[ch].ring_cap.dom().contains((r, i, c))
+        (0 <= r < 2 && 0 <= i < cv[ch].depth && 0 <= c < 4)
+            ==> #[trigger] cv[ch].ring_cap.dom().contains((r, i, c))
     &&& forall|r: int, i: int, c: int|
-            (0 <= r < 2 && 0 <= i < cv[ch].depth && 0 <= c < 4)
-                ==> sv.dom().contains(#[trigger] cv[ch].ring_cap[(r, i, c)])
+        (0 <= r < 2 && 0 <= i < cv[ch].depth && 0 <= c < 4) ==> sv.dom().contains(
+            #[trigger] cv[ch].ring_cap[(r, i, c)],
+        )
     &&& forall|r: int, i: int, c: int|
-            (0 <= r < 2 && 0 <= i < cv[ch].depth && 0 <= c < 4 && !in_live_window(cv[ch], r, i))
-                ==> is_empty_cap(sv[#[trigger] cv[ch].ring_cap[(r, i, c)]].cap)
+        (0 <= r < 2 && 0 <= i < cv[ch].depth && 0 <= c < 4 && !in_live_window(cv[ch], r, i))
+            ==> is_empty_cap(
+            sv[#[trigger] cv[ch].ring_cap[(r, i, c)]].cap,
+        )
     // Ring-cap injectivity: distinct ring positions map to distinct arena handles
     // Load-bearing for `send`/`recv` — it is
     // what lets filling the new tail slot (or emptying the head slot) leave every
     // other in-window message untouched.
     &&& forall|r1: int, i1: int, c1: int, r2: int, i2: int, c2: int|
-            #![trigger cv[ch].ring_cap[(r1, i1, c1)], cv[ch].ring_cap[(r2, i2, c2)]]
-            (0 <= r1 < 2 && 0 <= i1 < cv[ch].depth && 0 <= c1 < 4
-                && 0 <= r2 < 2 && 0 <= i2 < cv[ch].depth && 0 <= c2 < 4
-                && cv[ch].ring_cap[(r1, i1, c1)] == cv[ch].ring_cap[(r2, i2, c2)])
-                ==> (r1 == r2 && i1 == i2 && c1 == c2)
+        #![trigger cv[ch].ring_cap[(r1, i1, c1)], cv[ch].ring_cap[(r2, i2, c2)]]
+        (0 <= r1 < 2 && 0 <= i1 < cv[ch].depth && 0 <= c1 < 4 && 0 <= r2 < 2 && 0 <= i2
+            < cv[ch].depth && 0 <= c2 < 4 && cv[ch].ring_cap[(r1, i1, c1)] == cv[ch].ring_cap[(
+            r2,
+            i2,
+            c2,
+        )]) ==> (r1 == r2 && i1 == i2 && c1 == c2)
     &&& forall|r: int, i: int|
-            (0 <= r < 2 && 0 <= i < cv[ch].depth) ==> #[trigger] cv[ch].msg_len.dom().contains((r, i))
+        (0 <= r < 2 && 0 <= i < cv[ch].depth) ==> #[trigger] cv[ch].msg_len.dom().contains((r, i))
     &&& forall|e: int, v: int|
-            (0 <= e < 2 && 0 <= v < 3) ==> #[trigger] cv[ch].bindings.dom().contains((e, v))
+        (0 <= e < 2 && 0 <= v < 3) ==> #[trigger] cv[ch].bindings.dom().contains((e, v))
 }
 
 // `chan_wf` reads only `ch`'s `depth`/`end_caps.len()`/`head`/`count`/`ring_cap`/`msg_len`/
@@ -1881,14 +2144,14 @@ pub proof fn lemma_chan_wf_frame(
         sv1.dom() == sv0.dom(),
         // Each live slot is either unchanged or emptied — `chan_wf`'s only slot requirement is
         // that out-of-window ring slots (always in dom) are empty, which emptying preserves.
-        forall|s: SlotId| #[trigger] sv1.dom().contains(s)
-            ==> (sv1[s].cap == sv0[s].cap || is_empty_cap(sv1[s].cap)),
+        forall|s: SlotId| #[trigger]
+            sv1.dom().contains(s) ==> (sv1[s].cap == sv0[s].cap || is_empty_cap(sv1[s].cap)),
     ensures
         chan_wf(cv1, sv1, ch),
 {
     // `in_live_window` reads only `head`/`count`/`depth`, all framed, so the window is identical.
-    assert forall|r: int, i: int| #[trigger] in_live_window(cv1[ch], r, i)
-        == in_live_window(cv0[ch], r, i) by {}
+    assert forall|r: int, i: int| #[trigger]
+        in_live_window(cv1[ch], r, i) == in_live_window(cv0[ch], r, i) by {}
 }
 
 // `chan_wf` carried across an edit that fixes the `ChanView` and each slot's *emptiness*
@@ -1914,15 +2177,15 @@ pub proof fn lemma_chan_wf_emptiness_frame(
         cv1[ch].msg_len == cv0[ch].msg_len,
         cv1[ch].bindings.dom() == cv0[ch].bindings.dom(),
         sv1.dom() == sv0.dom(),
-        forall|s: SlotId| #[trigger] sv1.dom().contains(s)
-            ==> is_empty_cap(sv1[s].cap) == is_empty_cap(sv0[s].cap),
+        forall|s: SlotId| #[trigger]
+            sv1.dom().contains(s) ==> is_empty_cap(sv1[s].cap) == is_empty_cap(sv0[s].cap),
     ensures
         chan_wf(cv1, sv1, ch),
 {
     // `in_live_window` reads only `head`/`count`/`depth`, all framed, so the window is identical;
     // the out-of-window ring slots stay empty because every slot's emptiness is fixed.
-    assert forall|r: int, i: int| #[trigger] in_live_window(cv1[ch], r, i)
-        == in_live_window(cv0[ch], r, i) by {}
+    assert forall|r: int, i: int| #[trigger]
+        in_live_window(cv1[ch], r, i) == in_live_window(cv0[ch], r, i) by {}
 }
 
 // ── The FIFO Seq model (the channel centerpiece) ─────────────────────────
@@ -1932,14 +2195,20 @@ pub proof fn lemma_chan_wf_emptiness_frame(
 // arena at the ring handles. `ring_fifo` projects a ring's live window
 // `[head, head+count) mod depth` to a `Seq` in FIFO order: `send` appends
 // (`Seq::push`), `recv` pops the head (`Seq::drop_first`).
-pub open spec fn ring_msg(cv: ChanView, sv: Map<SlotId, CapSlot>, ring: int, idx: int)
-    -> (nat, Seq<Cap>) {
+pub open spec fn ring_msg(cv: ChanView, sv: Map<SlotId, CapSlot>, ring: int, idx: int) -> (
+    nat,
+    Seq<Cap>,
+) {
     (cv.msg_len[(ring, idx)], Seq::new(4, |c: int| sv[cv.ring_cap[(ring, idx, c)]].cap))
 }
 
-pub open spec fn ring_fifo(cv: ChanView, sv: Map<SlotId, CapSlot>, ring: int)
-    -> Seq<(nat, Seq<Cap>)> {
-    Seq::new(cv.count[ring], |j: int| ring_msg(cv, sv, ring, (cv.head[ring] + j) % (cv.depth as int)))
+pub open spec fn ring_fifo(cv: ChanView, sv: Map<SlotId, CapSlot>, ring: int) -> Seq<
+    (nat, Seq<Cap>),
+> {
+    Seq::new(
+        cv.count[ring],
+        |j: int| ring_msg(cv, sv, ring, (cv.head[ring] + j) % (cv.depth as int)),
+    )
 }
 
 // ── Notification waiter-queue well-formedness + the FIFO Seq model ─
@@ -1952,7 +2221,6 @@ pub open spec fn ring_fifo(cv: ChanView, sv: Map<SlotId, CapSlot>, ring: int)
 // the tail (`Seq::push`, 4b), `signal` pops the head (`Seq::drop_first`, 4b),
 // `remove_waiter` splices out one element — so "wake order = block order"
 // is FIFO-ness of `waiter_seq`.
-
 // A generic singly-linked-list acyclicity rank over an abstract successor map — the
 // `valid_srank`/`sib_acyclic` analog, shared by the waiter queue (`succ` = `qnext`)
 // and the armed-timer list (`succ` = `timer_next`): a strict decrease
@@ -1963,8 +2231,9 @@ pub open spec fn ring_fifo(cv: ChanView, sv: Map<SlotId, CapSlot>, ring: int)
 // decreases mechanism instantiated here.
 pub open spec fn valid_list_rank(succ: Map<ObjId, Option<ObjId>>, r: Map<ObjId, nat>) -> bool {
     &&& r.dom() == succ.dom()
-    &&& forall|k: ObjId| #[trigger] succ.dom().contains(k) ==>
-            (succ[k] matches Some(nx) ==> succ.dom().contains(nx) && r[nx] < r[k])
+    &&& forall|k: ObjId| #[trigger]
+        succ.dom().contains(k) ==> (succ[k] matches Some(nx) ==> succ.dom().contains(nx) && r[nx]
+            < r[k])
 }
 
 pub open spec fn list_acyclic(succ: Map<ObjId, Option<ObjId>>) -> bool {
@@ -1985,19 +2254,28 @@ pub open spec fn waiter_chain(
     &&& ws.no_duplicates()
     &&& forall|i: int| #![trigger ws[i]] 0 <= i < ws.len() ==> tv.dom().contains(ws[i])
     &&& (ws.len() == 0 ==> nv[n].wait_head is None && nv[n].wait_tail is None)
-    &&& (ws.len() > 0 ==> nv[n].wait_head == Some(ws[0])
-                       && nv[n].wait_tail == Some(ws[ws.len() - 1]))
-    &&& forall|i: int| #![trigger ws[i]] 0 <= i < ws.len() ==>
-            tv[ws[i]].qnext == (if i + 1 < ws.len() { Some(ws[i + 1]) } else { None })
-    &&& forall|i: int| #![trigger ws[i]] 0 <= i < ws.len() ==>
-            tv[ws[i]].wait_notif == Some(n) && tv[ws[i]].state == ThreadState::BlockedNotif
-    // A queued waiter's priority is a valid ready-queue level. This rides `notif_wf`
-    // (already threaded everywhere), so `signal` can discharge the woken head's
-    // `priority < NUM_PRIOS` precondition for the faithful `make_runnable`/`ready_enqueue`
-    // without a separate global `prio_bounded` invariant. Only `wait` (the sole appender)
-    // must establish it for the blocking thread — a leaf precondition the kernel supplies.
-    &&& forall|i: int| #![trigger ws[i]] 0 <= i < ws.len() ==>
-            (tv[ws[i]].priority as int) < NUM_PRIOS
+    &&& (ws.len() > 0 ==> nv[n].wait_head == Some(ws[0]) && nv[n].wait_tail == Some(
+        ws[ws.len() - 1],
+    ))
+    &&& forall|i: int|
+        #![trigger ws[i]]
+        0 <= i < ws.len() ==> tv[ws[i]].qnext == (if i + 1 < ws.len() {
+            Some(ws[i + 1])
+        } else {
+            None
+        })
+    &&& forall|i: int|
+        #![trigger ws[i]]
+        0 <= i < ws.len() ==> tv[ws[i]].wait_notif == Some(n) && tv[ws[i]].state
+            == ThreadState::BlockedNotif
+        // A queued waiter's priority is a valid ready-queue level. This rides `notif_wf`
+        // (already threaded everywhere), so `signal` can discharge the woken head's
+        // `priority < NUM_PRIOS` precondition for the faithful `make_runnable`/`ready_enqueue`
+        // without a separate global `prio_bounded` invariant. Only `wait` (the sole appender)
+        // must establish it for the blocking thread — a leaf precondition the kernel supplies.
+    &&& forall|i: int|
+        #![trigger ws[i]]
+        0 <= i < ws.len() ==> (tv[ws[i]].priority as int) < NUM_PRIOS
 }
 
 // Notification `n` is well-formed: empty-queue head/tail agreement, and a waiter
@@ -2012,8 +2290,9 @@ pub open spec fn notif_wf(nv: Map<ObjId, NotifView>, tv: Map<ObjId, TcbView>, n:
 // The FIFO waiter `Seq` — well-defined when `notif_wf` holds (the chain is unique
 // given the `qnext` threading). `wait` ⇒ `Seq::push`, `signal` ⇒ `Seq::drop_first`,
 // `remove_waiter` ⇒ a splice (4b/4c — where the push/pop/splice lemmas land).
-pub open spec fn waiter_seq(nv: Map<ObjId, NotifView>, tv: Map<ObjId, TcbView>, n: ObjId)
-    -> Seq<ObjId> {
+pub open spec fn waiter_seq(nv: Map<ObjId, NotifView>, tv: Map<ObjId, TcbView>, n: ObjId) -> Seq<
+    ObjId,
+> {
     choose|ws: Seq<ObjId>| waiter_chain(nv, tv, n, ws)
 }
 
@@ -2024,7 +2303,6 @@ pub open spec fn waiter_seq(nv: Map<ObjId, NotifView>, tv: Map<ObjId, TcbView>, 
 // `Some(·)` by the longer one). This is what lets 4b/4c state `signal`/`wait`/
 // `remove_waiter`'s effect as a `waiter_seq` equality (`drop_first`/`push`/splice) —
 // the analog of `ring_fifo` being a deterministic `Seq::new` rather than a `choose`.
-
 // `ws1[k] == ws2[k]` for any in-bounds `k`: heads agree (clause 4), then `qnext`
 // threads each step (clause 5).
 proof fn lemma_chain_eq_at(
@@ -2124,7 +2402,8 @@ pub open spec fn binding_notif_wf(
     tv: Map<ObjId, TcbView>,
     ch: ObjId,
 ) -> bool {
-    forall|e: int, v: int| #![trigger cv[ch].bindings[(e, v)]]
+    forall|e: int, v: int|
+        #![trigger cv[ch].bindings[(e, v)]]
         (0 <= e < 2 && 0 <= v < 3 && cv[ch].bindings[(e, v)].notif is Some) ==> {
             &&& nv.dom().contains(cv[ch].bindings[(e, v)].notif->Some_0)
             &&& notif_wf(nv, tv, cv[ch].bindings[(e, v)].notif->Some_0)
@@ -2144,10 +2423,12 @@ pub open spec fn binding_refs_ok(
     e: int,
     v: int,
 ) -> bool {
-    cv[ch].bindings[(e, v)].notif is Some ==> (
-        nv[cv[ch].bindings[(e, v)].notif->Some_0].wait_head is Some ==> (
-            rv.dom().contains(cv[ch].bindings[(e, v)].notif->Some_0)
-                && rv[cv[ch].bindings[(e, v)].notif->Some_0] > 0))
+    cv[ch].bindings[(e, v)].notif is Some ==> (nv[cv[ch].bindings[(
+        e,
+        v,
+    )].notif->Some_0].wait_head is Some ==> (rv.dom().contains(
+        cv[ch].bindings[(e, v)].notif->Some_0,
+    ) && rv[cv[ch].bindings[(e, v)].notif->Some_0] > 0))
 }
 
 // `notif_wf(m)` survives any edit that leaves `m`'s notification view and all of `m`'s
@@ -2171,16 +2452,16 @@ pub proof fn lemma_notif_wf_frame(
         // `m`'s head/tail thread, all in `tv.dom()`), so a caller need not reason about phantom
         // out-of-domain keys. A weakening of the precondition; every existing caller, which
         // supplied the un-guarded `forall`, satisfies it unchanged.
-        forall|k: ObjId| #[trigger] tv[k].wait_notif == Some(m) && tv.dom().contains(k)
-            ==> tv2[k] == tv[k],
+        forall|k: ObjId| #[trigger]
+            tv[k].wait_notif == Some(m) && tv.dom().contains(k) ==> tv2[k] == tv[k],
     ensures
         notif_wf(nv2, tv2, m),
 {
     let ws = choose|ws: Seq<ObjId>| waiter_chain(nv, tv, m, ws);
     assert(waiter_chain(nv, tv, m, ws));
     assert(waiter_chain(nv2, tv2, m, ws)) by {
-        assert forall|i: int| #![trigger ws[i]] 0 <= i < ws.len() implies
-            tv2.dom().contains(ws[i]) && tv2[ws[i]] == tv[ws[i]] by {
+        assert forall|i: int| #![trigger ws[i]] 0 <= i < ws.len() implies tv2.dom().contains(ws[i])
+            && tv2[ws[i]] == tv[ws[i]] by {
             assert(tv[ws[i]].wait_notif == Some(m));
         }
     }
@@ -2212,14 +2493,19 @@ pub proof fn lemma_drop_first_chain(
         // waiters of `n`). Weakened from `k != t ==> unchanged` so `signal`'s faithful enqueue —
         // which also re-threads the Runnable old ready-tail `p` (`wait_notif None`, not a
         // waiter of `n`) — can still discharge it.
-        forall|k: ObjId| #![trigger tvf[k]]
+        forall|k: ObjId|
+            #![trigger tvf[k]]
             k != t && tv0[k].wait_notif == Some(n) ==> tvf[k] == tv0[k],
     ensures
         waiter_chain(nvf, tvf, n, ws0.drop_first()),
 {
     let dws = ws0.drop_first();
     // `tv0[t].qnext == (if 1 < len { Some(ws0[1]) } else { None })` — ws0 clause 5 at 0.
-    assert(tv0[ws0[0]].qnext == (if 1 < ws0.len() { Some(ws0[1]) } else { None }));
+    assert(tv0[ws0[0]].qnext == (if 1 < ws0.len() {
+        Some(ws0[1])
+    } else {
+        None
+    }));
     assert(dws.no_duplicates()) by {
         assert forall|i: int, j: int|
             0 <= i < dws.len() && 0 <= j < dws.len() && i != j implies dws[i] != dws[j] by {
@@ -2230,16 +2516,21 @@ pub proof fn lemma_drop_first_chain(
     assert forall|i: int| #![trigger dws[i]] 0 <= i < dws.len() implies dws[i] != t by {
         assert(dws[i] == ws0[i + 1]);
     }
-    assert forall|i: int| #![trigger dws[i]] 0 <= i < dws.len() implies
-        tvf.dom().contains(dws[i])
-        && tvf[dws[i]].qnext == (if i + 1 < dws.len() { Some(dws[i + 1]) } else { None })
-        && tvf[dws[i]].wait_notif == Some(n)
-        && tvf[dws[i]].state == ThreadState::BlockedNotif by {
+    assert forall|i: int| #![trigger dws[i]] 0 <= i < dws.len() implies tvf.dom().contains(dws[i])
+        && tvf[dws[i]].qnext == (if i + 1 < dws.len() {
+        Some(dws[i + 1])
+    } else {
+        None
+    }) && tvf[dws[i]].wait_notif == Some(n) && tvf[dws[i]].state == ThreadState::BlockedNotif by {
         assert(dws[i] == ws0[i + 1]);
         // `dws[i]` is a waiter of `n` (covenant) and `!= t`, so the weakened frame freezes it.
         assert(tv0[ws0[i + 1]].wait_notif == Some(n));
         assert(tvf[dws[i]] == tv0[dws[i]]);
-        assert(tv0[ws0[i + 1]].qnext == (if i + 2 < ws0.len() { Some(ws0[i + 2]) } else { None }));
+        assert(tv0[ws0[i + 1]].qnext == (if i + 2 < ws0.len() {
+            Some(ws0[i + 2])
+        } else {
+            None
+        }));
     }
 }
 
@@ -2265,8 +2556,7 @@ pub proof fn lemma_chain_frame_set(
     ensures
         waiter_chain(bnv, btv, o, ws),
 {
-    assert forall|i: int| #![trigger ws[i]] 0 <= i < ws.len() implies
-        btv[ws[i]] == atv[ws[i]] by {
+    assert forall|i: int| #![trigger ws[i]] 0 <= i < ws.len() implies btv[ws[i]] == atv[ws[i]] by {
         assert(atv[ws[i]].wait_notif == Some(o));
         if btv[ws[i]] != atv[ws[i]] {
             assert(false);
@@ -2294,8 +2584,8 @@ pub proof fn lemma_waiter_refs_frame(
         o != n,
         nvf[o] == nv0[o],
         tvf.dom() == tv0.dom(),
-        forall|k: ObjId| #[trigger] tvf[k] != tv0[k]
-            ==> tv0[k].wait_notif != Some(o) && tvf[k].wait_notif != Some(o),
+        forall|k: ObjId| #[trigger]
+            tvf[k] != tv0[k] ==> tv0[k].wait_notif != Some(o) && tvf[k].wait_notif != Some(o),
     ensures
         waiter_refs(nvf, tvf, o) == waiter_refs(nv0, tv0, o),
 {
@@ -2335,8 +2625,8 @@ pub proof fn lemma_waiter_refs_frame_nv(
     ensures
         waiter_refs(nvf, tv, o) == waiter_refs(nv0, tv, o),
 {
-    assert forall|ws: Seq<ObjId>| #[trigger] waiter_chain(nv0, tv, o, ws)
-        == waiter_chain(nvf, tv, o, ws) by {}
+    assert forall|ws: Seq<ObjId>| #[trigger]
+        waiter_chain(nv0, tv, o, ws) == waiter_chain(nvf, tv, o, ws) by {}
     if exists|ws: Seq<ObjId>| waiter_chain(nv0, tv, o, ws) {
         let a = waiter_seq(nv0, tv, o);
         let b = waiter_seq(nvf, tv, o);
@@ -2375,13 +2665,13 @@ proof fn lemma_chain_frame_offchain(
         waiter_chain(anv, atv, o, ws),
         bnv[o] == anv[o],
         btv.dom() == atv.dom(),
-        forall|k: ObjId| #[trigger] btv[k] != atv[k]
-            ==> (atv[k].wait_notif is None || atv[k].state != ThreadState::BlockedNotif),
+        forall|k: ObjId| #[trigger]
+            btv[k] != atv[k] ==> (atv[k].wait_notif is None || atv[k].state
+                != ThreadState::BlockedNotif),
     ensures
         waiter_chain(bnv, btv, o, ws),
 {
-    assert forall|i: int| #![trigger ws[i]] 0 <= i < ws.len() implies
-        btv[ws[i]] == atv[ws[i]] by {
+    assert forall|i: int| #![trigger ws[i]] 0 <= i < ws.len() implies btv[ws[i]] == atv[ws[i]] by {
         // `ws[i]` is on `o`'s chain (clause 6), so it is `BlockedNotif` *and* names `o` —
         // hence not in the changed set (which is off-chain on both counts).
         assert(atv[ws[i]].wait_notif == Some(o));
@@ -2406,10 +2696,11 @@ pub proof fn lemma_waiter_refs_frame_offchain(
 )
     requires
         tvf.dom() == tv0.dom(),
-        forall|k: ObjId| #[trigger] tvf[k] != tv0[k] ==> {
-            &&& (tv0[k].wait_notif is None || tv0[k].state != ThreadState::BlockedNotif)
-            &&& (tvf[k].wait_notif is None || tvf[k].state != ThreadState::BlockedNotif)
-        },
+        forall|k: ObjId| #[trigger]
+            tvf[k] != tv0[k] ==> {
+                &&& (tv0[k].wait_notif is None || tv0[k].state != ThreadState::BlockedNotif)
+                &&& (tvf[k].wait_notif is None || tvf[k].state != ThreadState::BlockedNotif)
+            },
     ensures
         waiter_refs(nv, tvf, o) == waiter_refs(nv, tv0, o),
 {
@@ -2456,8 +2747,8 @@ pub proof fn lemma_waiter_refs_frame_dequeued(
         assert(waiter_chain(nv, tv0, o, a));
         assert(!a.contains(t));
         assert(waiter_chain(nv, tvf, o, a)) by {
-            assert forall|i: int| #![trigger a[i]] 0 <= i < a.len() implies
-                tvf[a[i]] == tv0[a[i]] by {
+            assert forall|i: int| #![trigger a[i]] 0 <= i < a.len() implies tvf[a[i]]
+                == tv0[a[i]] by {
                 assert(a.contains(a[i]));
             }
         }
@@ -2470,8 +2761,8 @@ pub proof fn lemma_waiter_refs_frame_dequeued(
                 let w = choose|ws: Seq<ObjId>| waiter_chain(nv, tvf, o, ws);
                 assert(!w.contains(t));
                 assert(waiter_chain(nv, tv0, o, w)) by {
-                    assert forall|i: int| #![trigger w[i]] 0 <= i < w.len() implies
-                        tv0[w[i]] == tvf[w[i]] by {
+                    assert forall|i: int| #![trigger w[i]] 0 <= i < w.len() implies tv0[w[i]]
+                        == tvf[w[i]] by {
                         assert(w.contains(w[i]));
                     }
                 }
@@ -2540,28 +2831,40 @@ pub proof fn lemma_caps_consistent_frame_thread_offchain<S: Store>(s0: &S, s1: &
         s1.tcb_view().dom() == s0.tcb_view().dom(),
         forall|k: ObjId| #[trigger] s1.tcb_view()[k].bind_slots == s0.tcb_view()[k].bind_slots,
         forall|k: ObjId| #[trigger] s1.tcb_view()[k].cspace == s0.tcb_view()[k].cspace,
-        forall|k: ObjId| #[trigger] s1.tcb_view()[k] != s0.tcb_view()[k] ==> {
-            &&& (s0.tcb_view()[k].wait_notif is None
-                    || s0.tcb_view()[k].state != ThreadState::BlockedNotif)
-            &&& (s1.tcb_view()[k].wait_notif is None
-                    || s1.tcb_view()[k].state != ThreadState::BlockedNotif)
-        },
+        forall|k: ObjId| #[trigger]
+            s1.tcb_view()[k] != s0.tcb_view()[k] ==> {
+                &&& (s0.tcb_view()[k].wait_notif is None || s0.tcb_view()[k].state
+                    != ThreadState::BlockedNotif)
+                &&& (s1.tcb_view()[k].wait_notif is None || s1.tcb_view()[k].state
+                    != ThreadState::BlockedNotif)
+            },
     ensures
         caps_consistent(s1),
 {
     // `notif_wf` carries for every notification: its chain nodes are on-chain (BlockedNotif and
     // naming it), so they are *unchanged* (the off-chain hypothesis), so the chain is preserved.
-    assert forall|m: ObjId| #[trigger] s0.notif_view().dom().contains(m)
-        && notif_wf(s0.notif_view(), s0.tcb_view(), m) implies
-        notif_wf(s1.notif_view(), s1.tcb_view(), m) by {
+    assert forall|m: ObjId| #[trigger]
+        s0.notif_view().dom().contains(m) && notif_wf(
+            s0.notif_view(),
+            s0.tcb_view(),
+            m,
+        ) implies notif_wf(s1.notif_view(), s1.tcb_view(), m) by {
         let ws = waiter_seq(s0.notif_view(), s0.tcb_view(), m);
         assert(waiter_chain(s0.notif_view(), s0.tcb_view(), m, ws));
-        lemma_chain_frame_offchain(s0.notif_view(), s0.tcb_view(), s1.notif_view(),
-            s1.tcb_view(), m, ws);
+        lemma_chain_frame_offchain(
+            s0.notif_view(),
+            s0.tcb_view(),
+            s1.notif_view(),
+            s1.tcb_view(),
+            m,
+            ws,
+        );
     }
-    assert forall|s: SlotId| #![trigger s1.slot_view()[s]]
-        s1.slot_view().dom().contains(s) && !is_empty_cap(s1.slot_view()[s].cap)
-        implies cap_consistent(s1, s1.slot_view()[s].cap) by {
+    assert forall|s: SlotId|
+        #![trigger s1.slot_view()[s]]
+        s1.slot_view().dom().contains(s) && !is_empty_cap(
+            s1.slot_view()[s].cap,
+        ) implies cap_consistent(s1, s1.slot_view()[s].cap) by {
         let c = s1.slot_view()[s].cap;
         assert(c == s0.slot_view()[s].cap);
         assert(cap_consistent(s0, c));
@@ -2569,7 +2872,7 @@ pub proof fn lemma_caps_consistent_frame_thread_offchain<S: Store>(s0: &S, s1: &
             CapKind::Notification(m) => {
                 assert(s0.notif_view().dom().contains(m));
                 assert(notif_wf(s0.notif_view(), s0.tcb_view(), m));
-            }
+            },
             CapKind::Thread(m, _) => {
                 if let Some(cs) = s1.tcb_view()[m].cspace {
                     assert(s0.tcb_view()[m].cspace == Some(cs));
@@ -2585,22 +2888,23 @@ pub proof fn lemma_caps_consistent_frame_thread_offchain<S: Store>(s0: &S, s1: &
                         assert(notif_wf(s0.notif_view(), s0.tcb_view(), wn));
                     }
                 }
-            }
+            },
             CapKind::Channel(co, _) => {
                 assert forall|e: int, v: int|
-                    (0 <= e < 2 && 0 <= v < 3
-                        && #[trigger] s1.chan_view()[co].bindings[(e, v)].notif is Some) implies {
-                        let m = s1.chan_view()[co].bindings[(e, v)].notif->Some_0;
-                        s1.notif_view().dom().contains(m)
-                            && notif_wf(s1.notif_view(), s1.tcb_view(), m)
-                    } by {
+                    (0 <= e < 2 && 0 <= v < 3 && #[trigger] s1.chan_view()[co].bindings[(
+                        e,
+                        v,
+                    )].notif is Some) implies {
+                    let m = s1.chan_view()[co].bindings[(e, v)].notif->Some_0;
+                    s1.notif_view().dom().contains(m) && notif_wf(s1.notif_view(), s1.tcb_view(), m)
+                } by {
                     let m = s1.chan_view()[co].bindings[(e, v)].notif->Some_0;
                     assert(s0.chan_view()[co].bindings[(e, v)].notif == Some(m));
                     assert(s0.notif_view().dom().contains(m));
                     assert(notif_wf(s0.notif_view(), s0.tcb_view(), m));
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 }
@@ -2627,8 +2931,7 @@ pub proof fn lemma_caps_consistent_frame_thread_dequeued<S: Store>(s0: &S, s1: &
         forall|k: ObjId| #[trigger] s1.tcb_view()[k].cspace == s0.tcb_view()[k].cspace,
         // `t` after the edit is off-chain by predicate (its `wait_notif` was cleared), so its
         // own Thread-cap coherence clause is vacuous.
-        s1.tcb_view()[t].wait_notif is None
-            || s1.tcb_view()[t].state != ThreadState::BlockedNotif,
+        s1.tcb_view()[t].wait_notif is None || s1.tcb_view()[t].state != ThreadState::BlockedNotif,
         // `t` is a node of no waiter chain in either state.
         forall|o: ObjId, ws: Seq<ObjId>|
             waiter_chain(s0.notif_view(), s0.tcb_view(), o, ws) ==> !ws.contains(t),
@@ -2639,22 +2942,27 @@ pub proof fn lemma_caps_consistent_frame_thread_dequeued<S: Store>(s0: &S, s1: &
 {
     // `notif_wf(m)` carries: `m`'s chain nodes name `m` and `t` is on no chain, so every node
     // differs from `t`, hence is unchanged — the chain is preserved.
-    assert forall|m: ObjId| #[trigger] s0.notif_view().dom().contains(m)
-        && notif_wf(s0.notif_view(), s0.tcb_view(), m) implies
-        notif_wf(s1.notif_view(), s1.tcb_view(), m) by {
+    assert forall|m: ObjId| #[trigger]
+        s0.notif_view().dom().contains(m) && notif_wf(
+            s0.notif_view(),
+            s0.tcb_view(),
+            m,
+        ) implies notif_wf(s1.notif_view(), s1.tcb_view(), m) by {
         let ws = waiter_seq(s0.notif_view(), s0.tcb_view(), m);
         assert(waiter_chain(s0.notif_view(), s0.tcb_view(), m, ws));
         assert(!ws.contains(t));
         assert(waiter_chain(s1.notif_view(), s1.tcb_view(), m, ws)) by {
-            assert forall|i: int| #![trigger ws[i]] 0 <= i < ws.len() implies
-                s1.tcb_view()[ws[i]] == s0.tcb_view()[ws[i]] by {
+            assert forall|i: int| #![trigger ws[i]] 0 <= i < ws.len() implies s1.tcb_view()[ws[i]]
+                == s0.tcb_view()[ws[i]] by {
                 assert(ws.contains(ws[i]));
             }
         }
     }
-    assert forall|s: SlotId| #![trigger s1.slot_view()[s]]
-        s1.slot_view().dom().contains(s) && !is_empty_cap(s1.slot_view()[s].cap)
-        implies cap_consistent(s1, s1.slot_view()[s].cap) by {
+    assert forall|s: SlotId|
+        #![trigger s1.slot_view()[s]]
+        s1.slot_view().dom().contains(s) && !is_empty_cap(
+            s1.slot_view()[s].cap,
+        ) implies cap_consistent(s1, s1.slot_view()[s].cap) by {
         let c = s1.slot_view()[s].cap;
         assert(c == s0.slot_view()[s].cap);
         assert(cap_consistent(s0, c));
@@ -2662,7 +2970,7 @@ pub proof fn lemma_caps_consistent_frame_thread_dequeued<S: Store>(s0: &S, s1: &
             CapKind::Notification(m) => {
                 assert(s0.notif_view().dom().contains(m));
                 assert(notif_wf(s0.notif_view(), s0.tcb_view(), m));
-            }
+            },
             CapKind::Thread(m, _) => {
                 if let Some(cs) = s1.tcb_view()[m].cspace {
                     assert(s0.tcb_view()[m].cspace == Some(cs));
@@ -2679,22 +2987,23 @@ pub proof fn lemma_caps_consistent_frame_thread_dequeued<S: Store>(s0: &S, s1: &
                         assert(notif_wf(s0.notif_view(), s0.tcb_view(), wn));
                     }
                 }
-            }
+            },
             CapKind::Channel(co, _) => {
                 assert forall|e: int, v: int|
-                    (0 <= e < 2 && 0 <= v < 3
-                        && #[trigger] s1.chan_view()[co].bindings[(e, v)].notif is Some) implies {
-                        let m = s1.chan_view()[co].bindings[(e, v)].notif->Some_0;
-                        s1.notif_view().dom().contains(m)
-                            && notif_wf(s1.notif_view(), s1.tcb_view(), m)
-                    } by {
+                    (0 <= e < 2 && 0 <= v < 3 && #[trigger] s1.chan_view()[co].bindings[(
+                        e,
+                        v,
+                    )].notif is Some) implies {
+                    let m = s1.chan_view()[co].bindings[(e, v)].notif->Some_0;
+                    s1.notif_view().dom().contains(m) && notif_wf(s1.notif_view(), s1.tcb_view(), m)
+                } by {
                     let m = s1.chan_view()[co].bindings[(e, v)].notif->Some_0;
                     assert(s0.chan_view()[co].bindings[(e, v)].notif == Some(m));
                     assert(s0.notif_view().dom().contains(m));
                     assert(notif_wf(s0.notif_view(), s0.tcb_view(), m));
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 }
@@ -2719,9 +3028,9 @@ pub proof fn lemma_caps_consistent_frame_thread_halt_clear<S: Store>(s0: &S, s1:
         s1.tcb_view().dom() == s0.tcb_view().dom(),
         forall|k: ObjId| k != t ==> #[trigger] s1.tcb_view()[k] == s0.tcb_view()[k],
         // `t` is designated by no live cap (sourced from `refs[t] == 0` at the call site).
-        forall|s: SlotId| #[trigger] s0.slot_view().dom().contains(s)
-            && !is_empty_cap(s0.slot_view()[s].cap)
-            ==> !is_thread_cap_for(s0.slot_view()[s].cap, t),
+        forall|s: SlotId| #[trigger]
+            s0.slot_view().dom().contains(s) && !is_empty_cap(s0.slot_view()[s].cap)
+                ==> !is_thread_cap_for(s0.slot_view()[s].cap, t),
         // `t` is a node of no waiter chain in either state.
         forall|o: ObjId, ws: Seq<ObjId>|
             waiter_chain(s0.notif_view(), s0.tcb_view(), o, ws) ==> !ws.contains(t),
@@ -2732,22 +3041,27 @@ pub proof fn lemma_caps_consistent_frame_thread_halt_clear<S: Store>(s0: &S, s1:
 {
     // `notif_wf(m)` carries: `m`'s chain nodes name `m` and `t` is on no chain, so every node
     // differs from `t`, hence is unchanged — the chain is preserved (same as `_dequeued`).
-    assert forall|m: ObjId| #[trigger] s0.notif_view().dom().contains(m)
-        && notif_wf(s0.notif_view(), s0.tcb_view(), m) implies
-        notif_wf(s1.notif_view(), s1.tcb_view(), m) by {
+    assert forall|m: ObjId| #[trigger]
+        s0.notif_view().dom().contains(m) && notif_wf(
+            s0.notif_view(),
+            s0.tcb_view(),
+            m,
+        ) implies notif_wf(s1.notif_view(), s1.tcb_view(), m) by {
         let ws = waiter_seq(s0.notif_view(), s0.tcb_view(), m);
         assert(waiter_chain(s0.notif_view(), s0.tcb_view(), m, ws));
         assert(!ws.contains(t));
         assert(waiter_chain(s1.notif_view(), s1.tcb_view(), m, ws)) by {
-            assert forall|i: int| #![trigger ws[i]] 0 <= i < ws.len() implies
-                s1.tcb_view()[ws[i]] == s0.tcb_view()[ws[i]] by {
+            assert forall|i: int| #![trigger ws[i]] 0 <= i < ws.len() implies s1.tcb_view()[ws[i]]
+                == s0.tcb_view()[ws[i]] by {
                 assert(ws.contains(ws[i]));
             }
         }
     }
-    assert forall|s: SlotId| #![trigger s1.slot_view()[s]]
-        s1.slot_view().dom().contains(s) && !is_empty_cap(s1.slot_view()[s].cap)
-        implies cap_consistent(s1, s1.slot_view()[s].cap) by {
+    assert forall|s: SlotId|
+        #![trigger s1.slot_view()[s]]
+        s1.slot_view().dom().contains(s) && !is_empty_cap(
+            s1.slot_view()[s].cap,
+        ) implies cap_consistent(s1, s1.slot_view()[s].cap) by {
         let c = s1.slot_view()[s].cap;
         assert(c == s0.slot_view()[s].cap);
         assert(cap_consistent(s0, c));
@@ -2757,7 +3071,7 @@ pub proof fn lemma_caps_consistent_frame_thread_halt_clear<S: Store>(s0: &S, s1:
             CapKind::Notification(m) => {
                 assert(s0.notif_view().dom().contains(m));
                 assert(notif_wf(s0.notif_view(), s0.tcb_view(), m));
-            }
+            },
             CapKind::Thread(m, _) => {
                 // `c` is a live `Thread(m)` cap, and no live cap is `Thread(t)`, so `m != t`;
                 // hence `tcb[m]` is unchanged and its coherence clauses carry.
@@ -2774,22 +3088,23 @@ pub proof fn lemma_caps_consistent_frame_thread_halt_clear<S: Store>(s0: &S, s1:
                         assert(notif_wf(s0.notif_view(), s0.tcb_view(), wn));
                     }
                 }
-            }
+            },
             CapKind::Channel(co, _) => {
                 assert forall|e: int, v: int|
-                    (0 <= e < 2 && 0 <= v < 3
-                        && #[trigger] s1.chan_view()[co].bindings[(e, v)].notif is Some) implies {
-                        let m = s1.chan_view()[co].bindings[(e, v)].notif->Some_0;
-                        s1.notif_view().dom().contains(m)
-                            && notif_wf(s1.notif_view(), s1.tcb_view(), m)
-                    } by {
+                    (0 <= e < 2 && 0 <= v < 3 && #[trigger] s1.chan_view()[co].bindings[(
+                        e,
+                        v,
+                    )].notif is Some) implies {
+                    let m = s1.chan_view()[co].bindings[(e, v)].notif->Some_0;
+                    s1.notif_view().dom().contains(m) && notif_wf(s1.notif_view(), s1.tcb_view(), m)
+                } by {
                     let m = s1.chan_view()[co].bindings[(e, v)].notif->Some_0;
                     assert(s0.chan_view()[co].bindings[(e, v)].notif == Some(m));
                     assert(s0.notif_view().dom().contains(m));
                     assert(notif_wf(s0.notif_view(), s0.tcb_view(), m));
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 }
@@ -2801,11 +3116,12 @@ pub proof fn lemma_caps_consistent_frame_thread_halt_clear<S: Store>(s0: &S, s1:
 // `notif_wf`-absent from that one chain, it is on no chain at all.
 pub proof fn lemma_thread_off_all_chains<S: Store>(s: &S, t: ObjId)
     requires
-        s.tcb_view()[t].state != ThreadState::BlockedNotif
-        || s.tcb_view()[t].wait_notif is None
-        || (s.tcb_view()[t].wait_notif matches Some(wn)
-            && notif_wf(s.notif_view(), s.tcb_view(), wn)
-            && !waiter_seq(s.notif_view(), s.tcb_view(), wn).contains(t)),
+        s.tcb_view()[t].state != ThreadState::BlockedNotif || s.tcb_view()[t].wait_notif is None
+            || (s.tcb_view()[t].wait_notif matches Some(wn) && notif_wf(
+            s.notif_view(),
+            s.tcb_view(),
+            wn,
+        ) && !waiter_seq(s.notif_view(), s.tcb_view(), wn).contains(t)),
     ensures
         forall|o: ObjId, ws: Seq<ObjId>|
             waiter_chain(s.notif_view(), s.tcb_view(), o, ws) ==> !ws.contains(t),
@@ -2816,8 +3132,8 @@ pub proof fn lemma_thread_off_all_chains<S: Store>(s: &S, t: ObjId)
             let i = ws.index_of(t);
             assert(0 <= i < ws.len() && ws[i] == t);
             // A chain node names `o` and is `BlockedNotif`, so the first two disjuncts are out.
-            assert(s.tcb_view()[t].wait_notif == Some(o)
-                && s.tcb_view()[t].state == ThreadState::BlockedNotif);
+            assert(s.tcb_view()[t].wait_notif == Some(o) && s.tcb_view()[t].state
+                == ThreadState::BlockedNotif);
             // The third disjunct then has `wn == o`, and `t` is absent from `o`'s *unique* chain —
             // but `ws` is that chain (uniqueness), contradicting `ws.contains(t)`.
             let wsq = waiter_seq(s.notif_view(), s.tcb_view(), o);
@@ -2863,15 +3179,19 @@ pub proof fn lemma_remove_chain(
         // priority (the splice writes only its `qnext`), so the result chain stays bounded.
         k > 0 ==> tvf[ws0[k - 1]].priority == tv0[ws0[k - 1]].priority,
         // every other TCB unchanged.
-        forall|j: ObjId| #![trigger tvf[j]]
+        forall|j: ObjId|
+            #![trigger tvf[j]]
             j != t && (k == 0 || j != ws0[k - 1]) ==> tvf[j] == tv0[j],
         // head fix: k==0 ⇒ new head is `t`'s old qnext; else unchanged.
         k == 0 ==> nvf[n].wait_head == tv0[t].qnext,
         k > 0 ==> nvf[n].wait_head == nv0[n].wait_head,
         // tail fix: `t` was the tail (k==len-1) ⇒ tail drops to the predecessor; else
         // unchanged.
-        k == ws0.len() - 1 ==> nvf[n].wait_tail
-            == (if k == 0 { None::<ObjId> } else { Some(ws0[k - 1]) }),
+        k == ws0.len() - 1 ==> nvf[n].wait_tail == (if k == 0 {
+            None::<ObjId>
+        } else {
+            Some(ws0[k - 1])
+        }),
         k < ws0.len() - 1 ==> nvf[n].wait_tail == nv0[n].wait_tail,
     ensures
         waiter_chain(nvf, tvf, n, ws0.remove(k)),
@@ -2885,40 +3205,66 @@ pub proof fn lemma_remove_chain(
     assert(dws.no_duplicates()) by {
         assert forall|i: int, j: int|
             0 <= i < dws.len() && 0 <= j < dws.len() && i != j implies dws[i] != dws[j] by {
-            let ii = if i < k { i } else { i + 1 };
-            let jj = if j < k { j } else { j + 1 };
+            let ii = if i < k {
+                i
+            } else {
+                i + 1
+            };
+            let jj = if j < k {
+                j
+            } else {
+                j + 1
+            };
             assert(dws[i] == ws0[ii] && dws[j] == ws0[jj]);
             assert(ii != jj);
         }
     }
 
     // Clauses 2, 5, 6: per-node domain / qnext-threading / wait_notif+state.
-    assert forall|i: int| #![trigger dws[i]] 0 <= i < dws.len() implies
-        tvf.dom().contains(dws[i])
-        && tvf[dws[i]].qnext == (if i + 1 < dws.len() { Some(dws[i + 1]) } else { None::<ObjId> })
-        && tvf[dws[i]].wait_notif == Some(n)
-        && tvf[dws[i]].state == ThreadState::BlockedNotif by {
-        let ii = if i < k { i } else { i + 1 };
+    assert forall|i: int| #![trigger dws[i]] 0 <= i < dws.len() implies tvf.dom().contains(dws[i])
+        && tvf[dws[i]].qnext == (if i + 1 < dws.len() {
+        Some(dws[i + 1])
+    } else {
+        None::<ObjId>
+    }) && tvf[dws[i]].wait_notif == Some(n) && tvf[dws[i]].state == ThreadState::BlockedNotif by {
+        let ii = if i < k {
+            i
+        } else {
+            i + 1
+        };
         assert(dws[i] == ws0[ii]);
         // ws0 chain facts at index `ii` (clauses 2/5/6 of the source chain).
         assert(tv0.dom().contains(ws0[ii]));
-        assert(tv0[ws0[ii]].qnext == (if ii + 1 < len { Some(ws0[ii + 1]) } else { None::<ObjId> }));
-        assert(tv0[ws0[ii]].wait_notif == Some(n) && tv0[ws0[ii]].state == ThreadState::BlockedNotif);
+        assert(tv0[ws0[ii]].qnext == (if ii + 1 < len {
+            Some(ws0[ii + 1])
+        } else {
+            None::<ObjId>
+        }));
+        assert(tv0[ws0[ii]].wait_notif == Some(n) && tv0[ws0[ii]].state
+            == ThreadState::BlockedNotif);
         if k > 0 && i == k - 1 {
             // dws[i] is the predecessor ws0[k-1]; qnext re-threaded to tv0[t].qnext.
             assert(ii == k - 1);
-            assert(tv0[t].qnext == (if k + 1 < len { Some(ws0[k + 1]) } else { None::<ObjId> }));
-            if i + 1 < dws.len() {
-                assert(dws[i + 1] == ws0[k + 1]);   // i+1 == k, k <= k so dws[k] = ws0[k+1]
+            assert(tv0[t].qnext == (if k + 1 < len {
+                Some(ws0[k + 1])
             } else {
-                assert(k + 1 == len);               // i+1 == k == dws.len() == len-1
+                None::<ObjId>
+            }));
+            if i + 1 < dws.len() {
+                assert(dws[i + 1] == ws0[k + 1]);  // i+1 == k, k <= k so dws[k] = ws0[k+1]
+            } else {
+                assert(k + 1 == len);  // i+1 == k == dws.len() == len-1
             }
         } else {
             // tvf[dws[i]] == tv0[dws[i]] (not `t`, not the predecessor).
             assert(tvf[ws0[ii]] == tv0[ws0[ii]]);
             if i + 1 < dws.len() {
-                let i1 = if i + 1 < k { i + 1 } else { i + 2 };
-                assert(dws[i + 1] == ws0[i1]);      // and i1 == ii + 1
+                let i1 = if i + 1 < k {
+                    i + 1
+                } else {
+                    i + 2
+                };
+                assert(dws[i + 1] == ws0[i1]);  // and i1 == ii + 1
             }
         }
     }
@@ -2941,13 +3287,13 @@ pub proof fn lemma_remove_chain(
         }
         let last = dws.len() - 1;
         if k == len - 1 {
-            assert(k > 0);                          // dws nonempty ⇒ len>=2 ⇒ k>=1
+            assert(k > 0);  // dws nonempty ⇒ len>=2 ⇒ k>=1
             assert(last == k - 1);
             assert(dws[last] == ws0[k - 1]);
             assert(nvf[n].wait_tail == Some(dws[last]));
         } else {
             assert(nv0[n].wait_tail == Some(ws0[len - 1]));
-            assert(dws[last] == ws0[len - 1]);      // last >= k ⇒ dws[last] = ws0[last+1]
+            assert(dws[last] == ws0[len - 1]);  // last >= k ⇒ dws[last] = ws0[last+1]
             assert(nvf[n].wait_tail == Some(dws[last]));
         }
     }
@@ -2966,7 +3312,6 @@ pub proof fn lemma_remove_chain(
 // (what `top_ready` bit-scans). The link is the same `Tcb.qnext`, disambiguated by
 // state — a thread is on the ready chain (Runnable) or a waiter chain (BlockedNotif),
 // never both.
-
 // `rs` is level `level`'s ready list in head-to-tail (FIFO) order. The `waiter_chain`
 // analog: distinct (acyclic — index IS the rank), head/tail agree with the ends, `qnext`
 // threads each to the next (last to `None`), every charted node is `Runnable` at
@@ -2980,12 +3325,20 @@ pub open spec fn ready_chain(
     &&& rs.no_duplicates()
     &&& forall|i: int| #![trigger rs[i]] 0 <= i < rs.len() ==> tv.dom().contains(rs[i])
     &&& (rs.len() == 0 ==> rv.heads[level] is None && rv.tails[level] is None)
-    &&& (rs.len() > 0 ==> rv.heads[level] == Some(rs[0])
-                       && rv.tails[level] == Some(rs[rs.len() - 1]))
-    &&& forall|i: int| #![trigger rs[i]] 0 <= i < rs.len() ==>
-            tv[rs[i]].qnext == (if i + 1 < rs.len() { Some(rs[i + 1]) } else { None })
-    &&& forall|i: int| #![trigger rs[i]] 0 <= i < rs.len() ==>
-            tv[rs[i]].state == ThreadState::Runnable && tv[rs[i]].priority as int == level
+    &&& (rs.len() > 0 ==> rv.heads[level] == Some(rs[0]) && rv.tails[level] == Some(
+        rs[rs.len() - 1],
+    ))
+    &&& forall|i: int|
+        #![trigger rs[i]]
+        0 <= i < rs.len() ==> tv[rs[i]].qnext == (if i + 1 < rs.len() {
+            Some(rs[i + 1])
+        } else {
+            None
+        })
+    &&& forall|i: int|
+        #![trigger rs[i]]
+        0 <= i < rs.len() ==> tv[rs[i]].state == ThreadState::Runnable && tv[rs[i]].priority as int
+            == level
 }
 
 // The FIFO ready `Seq` at `level` — well-defined when a chain exists (unique by the
@@ -3102,15 +3455,19 @@ pub proof fn lemma_ready_remove_chain(
         k > 0 ==> tvf[rs0[k - 1]].state == tv0[rs0[k - 1]].state,
         k > 0 ==> tvf[rs0[k - 1]].priority == tv0[rs0[k - 1]].priority,
         // every other TCB unchanged (`t` excepted — the scheduler leaves it alone).
-        forall|j: ObjId| #![trigger tvf[j]]
+        forall|j: ObjId|
+            #![trigger tvf[j]]
             j != t && (k == 0 || j != rs0[k - 1]) ==> tvf[j] == tv0[j],
         // head fix: k==0 ⇒ new head is `t`'s old qnext; else unchanged.
         k == 0 ==> rvf.heads[level] == tv0[t].qnext,
         k > 0 ==> rvf.heads[level] == rv0.heads[level],
         // tail fix: `t` was the tail (k==len-1) ⇒ tail drops to the predecessor; else
         // unchanged.
-        k == rs0.len() - 1 ==> rvf.tails[level]
-            == (if k == 0 { None::<ObjId> } else { Some(rs0[k - 1]) }),
+        k == rs0.len() - 1 ==> rvf.tails[level] == (if k == 0 {
+            None::<ObjId>
+        } else {
+            Some(rs0[k - 1])
+        }),
         k < rs0.len() - 1 ==> rvf.tails[level] == rv0.tails[level],
     ensures
         ready_chain(rvf, tvf, level, rs0.remove(k)),
@@ -3123,27 +3480,49 @@ pub proof fn lemma_ready_remove_chain(
     assert(drs.no_duplicates()) by {
         assert forall|i: int, j: int|
             0 <= i < drs.len() && 0 <= j < drs.len() && i != j implies drs[i] != drs[j] by {
-            let ii = if i < k { i } else { i + 1 };
-            let jj = if j < k { j } else { j + 1 };
+            let ii = if i < k {
+                i
+            } else {
+                i + 1
+            };
+            let jj = if j < k {
+                j
+            } else {
+                j + 1
+            };
             assert(drs[i] == rs0[ii] && drs[j] == rs0[jj]);
             assert(ii != jj);
         }
     }
 
     // Clauses 2, 5, 6: per-node domain / qnext-threading / state+priority covenant.
-    assert forall|i: int| #![trigger drs[i]] 0 <= i < drs.len() implies
-        tvf.dom().contains(drs[i])
-        && tvf[drs[i]].qnext == (if i + 1 < drs.len() { Some(drs[i + 1]) } else { None::<ObjId> })
-        && tvf[drs[i]].state == ThreadState::Runnable
-        && tvf[drs[i]].priority as int == level by {
-        let ii = if i < k { i } else { i + 1 };
+    assert forall|i: int| #![trigger drs[i]] 0 <= i < drs.len() implies tvf.dom().contains(drs[i])
+        && tvf[drs[i]].qnext == (if i + 1 < drs.len() {
+        Some(drs[i + 1])
+    } else {
+        None::<ObjId>
+    }) && tvf[drs[i]].state == ThreadState::Runnable && tvf[drs[i]].priority as int == level by {
+        let ii = if i < k {
+            i
+        } else {
+            i + 1
+        };
         assert(drs[i] == rs0[ii]);
         assert(tv0.dom().contains(rs0[ii]));
-        assert(tv0[rs0[ii]].qnext == (if ii + 1 < len { Some(rs0[ii + 1]) } else { None::<ObjId> }));
-        assert(tv0[rs0[ii]].state == ThreadState::Runnable && tv0[rs0[ii]].priority as int == level);
+        assert(tv0[rs0[ii]].qnext == (if ii + 1 < len {
+            Some(rs0[ii + 1])
+        } else {
+            None::<ObjId>
+        }));
+        assert(tv0[rs0[ii]].state == ThreadState::Runnable && tv0[rs0[ii]].priority as int
+            == level);
         if k > 0 && i == k - 1 {
             assert(ii == k - 1);
-            assert(tv0[t].qnext == (if k + 1 < len { Some(rs0[k + 1]) } else { None::<ObjId> }));
+            assert(tv0[t].qnext == (if k + 1 < len {
+                Some(rs0[k + 1])
+            } else {
+                None::<ObjId>
+            }));
             if i + 1 < drs.len() {
                 assert(drs[i + 1] == rs0[k + 1]);
             } else {
@@ -3152,7 +3531,11 @@ pub proof fn lemma_ready_remove_chain(
         } else {
             assert(tvf[rs0[ii]] == tv0[rs0[ii]]);
             if i + 1 < drs.len() {
-                let i1 = if i + 1 < k { i + 1 } else { i + 2 };
+                let i1 = if i + 1 < k {
+                    i + 1
+                } else {
+                    i + 2
+                };
                 assert(drs[i + 1] == rs0[i1]);
             }
         }
@@ -3226,11 +3609,11 @@ pub proof fn lemma_ready_chain_frame_fields(
         rvf.heads[level] == rv0.heads[level],
         rvf.tails[level] == rv0.tails[level],
         tvf.dom() == tv0.dom(),
-        forall|i: int| #![trigger tvf[rs[i]]] 0 <= i < rs.len()
-            ==> tvf.dom().contains(rs[i])
-                && tvf[rs[i]].qnext == tv0[rs[i]].qnext
-                && tvf[rs[i]].state == tv0[rs[i]].state
-                && tvf[rs[i]].priority == tv0[rs[i]].priority,
+        forall|i: int|
+            #![trigger tvf[rs[i]]]
+            0 <= i < rs.len() ==> tvf.dom().contains(rs[i]) && tvf[rs[i]].qnext == tv0[rs[i]].qnext
+                && tvf[rs[i]].state == tv0[rs[i]].state && tvf[rs[i]].priority
+                == tv0[rs[i]].priority,
     ensures
         ready_chain(rvf, tvf, level, rs),
 {
@@ -3251,9 +3634,10 @@ pub proof fn lemma_ready_seq_frame(
         rvf.tails[level] == rv0.tails[level],
         tvf.dom() == tv0.dom(),
         exists|rs: Seq<ObjId>| ready_chain(rv0, tv0, level, rs),
-        forall|i: int| #![trigger tv0[ready_seq(rv0, tv0, level)[i]]]
-            0 <= i < ready_seq(rv0, tv0, level).len()
-            ==> tvf[ready_seq(rv0, tv0, level)[i]] == tv0[ready_seq(rv0, tv0, level)[i]],
+        forall|i: int|
+            #![trigger tv0[ready_seq(rv0, tv0, level)[i]]]
+            0 <= i < ready_seq(rv0, tv0, level).len() ==> tvf[ready_seq(rv0, tv0, level)[i]]
+                == tv0[ready_seq(rv0, tv0, level)[i]],
     ensures
         ready_chain(rvf, tvf, level, ready_seq(rv0, tv0, level)),
         ready_seq(rvf, tvf, level) == ready_seq(rv0, tv0, level),
@@ -3270,16 +3654,18 @@ pub proof fn lemma_ready_seq_frame(
 // `t` Runnable-and-off-chain (until `destroy_tcb` halts it), so it preserves only the
 // `except t` form.
 pub open spec fn ready_complete(rv: ReadyView, tv: Map<ObjId, TcbView>) -> bool {
-    forall|t: ObjId| #[trigger] tv.dom().contains(t) && tv[t].state == ThreadState::Runnable
-        ==> (tv[t].priority as int) < NUM_PRIOS
-            && ready_seq(rv, tv, tv[t].priority as int).contains(t)
-            // A Runnable thread is not waiting on any notification. Folded in (rather
-            // than threaded as a global `runnable_not_waiting` invariant) so `signal`'s census
-            // frame can discharge `wait_notif != Some(o)` for the *old level-tail* `p` that a
-            // faithful `make_runnable` re-threads — `p` is Runnable, hence charted here. The
-            // sole appender (`make_runnable`/`ready_enqueue`) carries the matching leaf
-            // precondition; `signal` supplies it by clearing `wait_notif` before the enqueue.
-            && tv[t].wait_notif is None
+    forall|t: ObjId| #[trigger]
+        tv.dom().contains(t) && tv[t].state == ThreadState::Runnable ==> (tv[t].priority as int)
+            < NUM_PRIOS && ready_seq(rv, tv, tv[t].priority as int).contains(
+            t,
+        )
+        // A Runnable thread is not waiting on any notification. Folded in (rather
+        // than threaded as a global `runnable_not_waiting` invariant) so `signal`'s census
+        // frame can discharge `wait_notif != Some(o)` for the *old level-tail* `p` that a
+        // faithful `make_runnable` re-threads — `p` is Runnable, hence charted here. The
+        // sole appender (`make_runnable`/`ready_enqueue`) carries the matching leaf
+        // precondition; `signal` supplies it by clearing `wait_notif` before the enqueue.
+         && tv[t].wait_notif is None
 }
 
 // `ready_complete` with one Runnable thread `t` excepted — the liveness `ready_unqueue`
@@ -3287,18 +3673,19 @@ pub open spec fn ready_complete(rv: ReadyView, tv: Map<ObjId, TcbView>) -> bool 
 // holds for every *other* Runnable thread; `destroy_tcb` closes the gap by halting
 // `t`. Kept a separate predicate (not a `ready_wf` conjunct) per the off-chain-`t` carve-out.
 pub open spec fn ready_complete_except(rv: ReadyView, tv: Map<ObjId, TcbView>, t: ObjId) -> bool {
-    forall|x: ObjId| #[trigger] tv.dom().contains(x) && tv[x].state == ThreadState::Runnable
-        && x != t
-        ==> (tv[x].priority as int) < NUM_PRIOS
-            && ready_seq(rv, tv, tv[x].priority as int).contains(x)
+    forall|x: ObjId| #[trigger]
+        tv.dom().contains(x) && tv[x].state == ThreadState::Runnable && x != t ==> (
+        tv[x].priority as int) < NUM_PRIOS && ready_seq(rv, tv, tv[x].priority as int).contains(x)
             && tv[x].wait_notif is None
 }
 
 // The presence bitmap is coherent: bit `level` set ⇔ level `level`'s chain is non-empty.
 // Links the `u32` map `top_ready` bit-scans to the per-level chains.
 pub open spec fn ready_bitmap_coherent(rv: ReadyView, tv: Map<ObjId, TcbView>) -> bool {
-    forall|level: int| #![trigger ready_seq(rv, tv, level)] 0 <= level < NUM_PRIOS as int ==>
-        ((rv.bitmap & (1u32 << (level as u32))) != 0 <==> ready_seq(rv, tv, level).len() > 0)
+    forall|level: int|
+        #![trigger ready_seq(rv, tv, level)]
+        0 <= level < NUM_PRIOS as int ==> ((rv.bitmap & (1u32 << (level as u32))) != 0
+            <==> ready_seq(rv, tv, level).len() > 0)
 }
 
 // The ready queue is well-formed: per-level head/tail domain + empty-agreement, a chain
@@ -3307,13 +3694,16 @@ pub open spec fn ready_bitmap_coherent(rv: ReadyView, tv: Map<ObjId, TcbView>) -
 pub open spec fn ready_wf(rv: ReadyView, tv: Map<ObjId, TcbView>) -> bool {
     &&& rv.heads.dom() == Set::new(|i: int| 0 <= i < NUM_PRIOS as int)
     &&& rv.tails.dom() == Set::new(|i: int| 0 <= i < NUM_PRIOS as int)
-    &&& forall|level: int| #![trigger rv.heads[level]] 0 <= level < NUM_PRIOS as int ==>
-            (rv.heads[level] is None <==> rv.tails[level] is None)
-    // The chain witness *is* `ready_seq` — stated directly (rather than `exists rs`) so the
-    // conjunct has a trigger anchor (`ready_seq`) in its body and is re-provable without a
-    // witness-surfacing by-block. Equivalent: `ready_chain(.., ready_seq(..))` ⟺ a chain exists.
-    &&& forall|level: int| #![trigger ready_seq(rv, tv, level)] 0 <= level < NUM_PRIOS as int ==>
-            ready_chain(rv, tv, level, ready_seq(rv, tv, level))
+    &&& forall|level: int|
+        #![trigger rv.heads[level]]
+        0 <= level < NUM_PRIOS as int ==> (rv.heads[level] is None
+            <==> rv.tails[level] is None)
+        // The chain witness *is* `ready_seq` — stated directly (rather than `exists rs`) so the
+        // conjunct has a trigger anchor (`ready_seq`) in its body and is re-provable without a
+        // witness-surfacing by-block. Equivalent: `ready_chain(.., ready_seq(..))` ⟺ a chain exists.
+    &&& forall|level: int|
+        #![trigger ready_seq(rv, tv, level)]
+        0 <= level < NUM_PRIOS as int ==> ready_chain(rv, tv, level, ready_seq(rv, tv, level))
     &&& ready_bitmap_coherent(rv, tv)
 }
 
@@ -3326,7 +3716,6 @@ pub open spec fn ready_wf(rv: ReadyView, tv: Map<ObjId, TcbView>) -> bool {
 // per-object key): `arm` prepends the head, `disarm` splices out one element,
 // `check_expired` walks it. Acyclicity is `valid_list_rank` over the `next` projection,
 // implied by `timer_chain`'s `no_duplicates` (rank = position) exactly as for `qnext`.
-
 // `ts` is the armed-timer list in head-to-tail order. Pins the imperative
 // `timer_head_view`/`timer_next` links to the `Seq`: distinct elements (acyclicity —
 // the index IS the rank), the head agrees with `ts[0]`, `next` threads each element to
@@ -3342,10 +3731,16 @@ pub open spec fn timer_chain(
     &&& forall|i: int| #![trigger ts[i]] 0 <= i < ts.len() ==> tmv.dom().contains(ts[i])
     &&& (ts.len() == 0 ==> head is None)
     &&& (ts.len() > 0 ==> head == Some(ts[0]))
-    &&& forall|i: int| #![trigger ts[i]] 0 <= i < ts.len() ==>
-            tmv[ts[i]].next == (if i + 1 < ts.len() { Some(ts[i + 1]) } else { None })
-    &&& forall|i: int| #![trigger ts[i]] 0 <= i < ts.len() ==>
-            tmv[ts[i]].armed && tmv[ts[i]].notif is Some
+    &&& forall|i: int|
+        #![trigger ts[i]]
+        0 <= i < ts.len() ==> tmv[ts[i]].next == (if i + 1 < ts.len() {
+            Some(ts[i + 1])
+        } else {
+            None
+        })
+    &&& forall|i: int|
+        #![trigger ts[i]]
+        0 <= i < ts.len() ==> tmv[ts[i]].armed && tmv[ts[i]].notif is Some
 }
 
 // Every armed timer is charted on `ts` (the completeness clause — armed ⇒ on the list).
@@ -3472,10 +3867,18 @@ pub proof fn lemma_seq_remove_no_dup<A>(s: Seq<A>, k: int)
 {
     let r = s.remove(k);
     s.remove_ensures(k);
-    assert forall|i: int, j: int|
-        0 <= i < r.len() && 0 <= j < r.len() && i != j implies r[i] != r[j] by {
-        let ii = if i < k { i } else { i + 1 };
-        let jj = if j < k { j } else { j + 1 };
+    assert forall|i: int, j: int| 0 <= i < r.len() && 0 <= j < r.len() && i != j implies r[i]
+        != r[j] by {
+        let ii = if i < k {
+            i
+        } else {
+            i + 1
+        };
+        let jj = if j < k {
+            j
+        } else {
+            j + 1
+        };
         assert(r[i] == s[ii] && r[j] == s[jj]);
         assert(ii != jj);
     }
@@ -3494,9 +3897,13 @@ pub proof fn lemma_seq_remove_drops<A>(s: Seq<A>, k: int)
     let r = s.remove(k);
     s.remove_ensures(k);
     assert forall|j: int| 0 <= j < r.len() implies r[j] != s[k] by {
-        let jj = if j < k { j } else { j + 1 };
+        let jj = if j < k {
+            j
+        } else {
+            j + 1
+        };
         assert(r[j] == s[jj]);
-        assert(jj != k);   // `no_duplicates` ⇒ `s[jj] != s[k]`
+        assert(jj != k);  // `no_duplicates` ⇒ `s[jj] != s[k]`
     }
 }
 
@@ -3524,7 +3931,8 @@ pub proof fn lemma_timer_remove_chain(
         k > 0 ==> tmvf[ts0[k - 1]].armed == tmv0[ts0[k - 1]].armed,
         k > 0 ==> tmvf[ts0[k - 1]].notif == tmv0[ts0[k - 1]].notif,
         // every node other than `t` and the predecessor unchanged.
-        forall|j: ObjId| #![trigger tmvf[j]]
+        forall|j: ObjId|
+            #![trigger tmvf[j]]
             j != t && (k == 0 || j != ts0[k - 1]) ==> tmvf[j] == tmv0[j],
         // head fix: k==0 ⇒ new head is `t`'s old next; else unchanged.
         k == 0 ==> headf == tmv0[t].next,
@@ -3542,19 +3950,33 @@ pub proof fn lemma_timer_remove_chain(
     lemma_seq_remove_no_dup(ts0, k);
 
     // Per-node: domain, next-threading, armed+notif.
-    assert forall|i: int| #![trigger dts[i]] 0 <= i < dts.len() implies
-        tmvf.dom().contains(dts[i])
-        && tmvf[dts[i]].next == (if i + 1 < dts.len() { Some(dts[i + 1]) } else { None::<ObjId> })
-        && tmvf[dts[i]].armed && tmvf[dts[i]].notif is Some by {
-        let ii = if i < k { i } else { i + 1 };
+    assert forall|i: int| #![trigger dts[i]] 0 <= i < dts.len() implies tmvf.dom().contains(dts[i])
+        && tmvf[dts[i]].next == (if i + 1 < dts.len() {
+        Some(dts[i + 1])
+    } else {
+        None::<ObjId>
+    }) && tmvf[dts[i]].armed && tmvf[dts[i]].notif is Some by {
+        let ii = if i < k {
+            i
+        } else {
+            i + 1
+        };
         assert(dts[i] == ts0[ii]);
         assert(tmv0.dom().contains(ts0[ii]));
-        assert(tmv0[ts0[ii]].next == (if ii + 1 < len { Some(ts0[ii + 1]) } else { None::<ObjId> }));
+        assert(tmv0[ts0[ii]].next == (if ii + 1 < len {
+            Some(ts0[ii + 1])
+        } else {
+            None::<ObjId>
+        }));
         assert(tmv0[ts0[ii]].armed && tmv0[ts0[ii]].notif is Some);
         if k > 0 && i == k - 1 {
             // dts[i] is the predecessor ts0[k-1]; next re-threaded to tmv0[t].next.
             assert(ii == k - 1);
-            assert(tmv0[t].next == (if k + 1 < len { Some(ts0[k + 1]) } else { None::<ObjId> }));
+            assert(tmv0[t].next == (if k + 1 < len {
+                Some(ts0[k + 1])
+            } else {
+                None::<ObjId>
+            }));
             if i + 1 < dts.len() {
                 assert(dts[i + 1] == ts0[k + 1]);
             } else {
@@ -3563,7 +3985,11 @@ pub proof fn lemma_timer_remove_chain(
         } else {
             assert(tmvf[ts0[ii]] == tmv0[ts0[ii]]);
             if i + 1 < dts.len() {
-                let i1 = if i + 1 < k { i + 1 } else { i + 2 };
+                let i1 = if i + 1 < k {
+                    i + 1
+                } else {
+                    i + 2
+                };
                 assert(dts[i + 1] == ts0[i1]);
             }
         }
@@ -3601,8 +4027,8 @@ proof fn lemma_push_head_nodup(ts0: Seq<ObjId>, t: ObjId, pts: Seq<ObjId>)
     ensures
         pts.no_duplicates(),
 {
-    assert forall|i: int, j: int|
-        0 <= i < pts.len() && 0 <= j < pts.len() && i != j implies pts[i] != pts[j] by {
+    assert forall|i: int, j: int| 0 <= i < pts.len() && 0 <= j < pts.len() && i != j implies pts[i]
+        != pts[j] by {
         if i >= 1 && j >= 1 {
             assert(pts[i] == ts0[i - 1] && pts[j] == ts0[j - 1]);
         } else if i == 0 {
@@ -3657,13 +4083,18 @@ pub proof fn lemma_timer_push_head_chain(
 {
     lemma_push_head_nodup(ts0, t, pts);
     // Domain.
-    assert forall|i: int| #![trigger pts[i]] 0 <= i < pts.len() implies
-        tmvf.dom().contains(pts[i]) by {
-        if i == 0 { assert(pts[0] == t); } else { assert(pts[i] == ts0[i - 1]); }
+    assert forall|i: int| #![trigger pts[i]] 0 <= i < pts.len() implies tmvf.dom().contains(
+        pts[i],
+    ) by {
+        if i == 0 {
+            assert(pts[0] == t);
+        } else {
+            assert(pts[i] == ts0[i - 1]);
+        }
     }
     // Armed + bound notification.
-    assert forall|i: int| #![trigger pts[i]] 0 <= i < pts.len() implies
-        tmvf[pts[i]].armed && tmvf[pts[i]].notif is Some by {
+    assert forall|i: int| #![trigger pts[i]] 0 <= i < pts.len() implies tmvf[pts[i]].armed
+        && tmvf[pts[i]].notif is Some by {
         if i == 0 {
             assert(pts[0] == t);
         } else {
@@ -3672,8 +4103,12 @@ pub proof fn lemma_timer_push_head_chain(
         }
     }
     // `next`-threading.
-    assert forall|i: int| #![trigger pts[i]] 0 <= i < pts.len() implies
-        tmvf[pts[i]].next == (if i + 1 < pts.len() { Some(pts[i + 1]) } else { None::<ObjId> }) by {
+    assert forall|i: int| #![trigger pts[i]] 0 <= i < pts.len() implies tmvf[pts[i]].next == (if i
+        + 1 < pts.len() {
+        Some(pts[i + 1])
+    } else {
+        None::<ObjId>
+    }) by {
         if i == 0 {
             assert(tmvf[t].next == head0);
             if 1 < pts.len() {
@@ -3685,9 +4120,16 @@ pub proof fn lemma_timer_push_head_chain(
         } else {
             assert(pts[i] == ts0[i - 1] && ts0[i - 1] != t);
             assert(tmvf[ts0[i - 1]] == tmv0[ts0[i - 1]]);
-            assert(tmv0[ts0[i - 1]].next
-                == (if i < ts0.len() { Some(ts0[i]) } else { None::<ObjId> }));
-            if i + 1 < pts.len() { assert(pts[i + 1] == ts0[i]); } else { assert(i == ts0.len()); }
+            assert(tmv0[ts0[i - 1]].next == (if i < ts0.len() {
+                Some(ts0[i])
+            } else {
+                None::<ObjId>
+            }));
+            if i + 1 < pts.len() {
+                assert(pts[i + 1] == ts0[i]);
+            } else {
+                assert(i == ts0.len());
+            }
         }
     }
 }
@@ -3755,7 +4197,8 @@ pub open spec fn timer_signal_ok(
 // queued message. Stated as an existential; its negation is the universal that
 // auto-instantiates on a `ring_cap[(r,i,c)]` term.
 pub open spec fn is_ring_cap_of(cv: ChanView, s: SlotId) -> bool {
-    exists|r: int, i: int, c: int| #![trigger cv.ring_cap[(r, i, c)]]
+    exists|r: int, i: int, c: int|
+        #![trigger cv.ring_cap[(r, i, c)]]
         0 <= r < 2 && 0 <= i < cv.depth && 0 <= c < 4 && cv.ring_cap[(r, i, c)] == s
 }
 
@@ -3811,14 +4254,21 @@ pub proof fn lemma_self_mod(x: int, depth: int)
 // agree — the per-message congruence the FIFO `Seq`-extensionality steps in
 // `send`/`recv` lean on (a message unchanged by a move stays put in the queue).
 pub proof fn lemma_ring_msg_eq(
-    cva: ChanView, sva: Map<SlotId, CapSlot>,
-    cvb: ChanView, svb: Map<SlotId, CapSlot>,
-    ring: int, idx: int,
+    cva: ChanView,
+    sva: Map<SlotId, CapSlot>,
+    cvb: ChanView,
+    svb: Map<SlotId, CapSlot>,
+    ring: int,
+    idx: int,
 )
     requires
         cva.msg_len[(ring, idx)] == cvb.msg_len[(ring, idx)],
-        forall|c: int| 0 <= c < 4 ==>
-            sva[#[trigger] cva.ring_cap[(ring, idx, c)]].cap == svb[cvb.ring_cap[(ring, idx, c)]].cap,
+        forall|c: int|
+            0 <= c < 4 ==> sva[#[trigger] cva.ring_cap[(ring, idx, c)]].cap == svb[cvb.ring_cap[(
+                ring,
+                idx,
+                c,
+            )]].cap,
     ensures
         ring_msg(cva, sva, ring, idx) == ring_msg(cvb, svb, ring, idx),
 {
@@ -3867,7 +4317,6 @@ pub proof fn lemma_only_empties_trans(
 // plus the non-slot references (bindings/waiters/armed timers) the later
 // phases add. The census is the slot count; the cross-home and
 // non-slot terms land with channel/notification/thread. ──
-
 pub open spec fn slot_refs(m: Map<SlotId, CapSlot>, obj: ObjId) -> nat {
     m.dom().filter(|k: SlotId| cap_obj(m[k].cap) == Some(obj)).len()
 }
@@ -3931,14 +4380,15 @@ pub proof fn lemma_no_live_thread_cap_from_dead<S: Store>(s: &S, t: ObjId)
         s.refs_view().dom().contains(t),
         s.refs_view()[t] == 0,
     ensures
-        forall|sl: SlotId| #[trigger] s.slot_view().dom().contains(sl)
-            && !is_empty_cap(s.slot_view()[sl].cap)
-            ==> !is_thread_cap_for(s.slot_view()[sl].cap, t),
+        forall|sl: SlotId| #[trigger]
+            s.slot_view().dom().contains(sl) && !is_empty_cap(s.slot_view()[sl].cap)
+                ==> !is_thread_cap_for(s.slot_view()[sl].cap, t),
 {
     assert(s.refs_view()[t] == obj_census(s, t));
-    assert forall|sl: SlotId| #[trigger] s.slot_view().dom().contains(sl)
-        && !is_empty_cap(s.slot_view()[sl].cap)
-        implies !is_thread_cap_for(s.slot_view()[sl].cap, t) by {
+    assert forall|sl: SlotId| #[trigger]
+        s.slot_view().dom().contains(sl) && !is_empty_cap(
+            s.slot_view()[sl].cap,
+        ) implies !is_thread_cap_for(s.slot_view()[sl].cap, t) by {
         if is_thread_cap_for(s.slot_view()[sl].cap, t) {
             assert(cap_obj(s.slot_view()[sl].cap) == Some(t));
             lemma_slot_refs_positive(s.slot_view(), sl, t);
@@ -3965,13 +4415,8 @@ pub proof fn lemma_frame_map_positive(m: Map<SlotId, CapSlot>, s: SlotId, o: Obj
 
 // Two census lemmas (the spec basis for refcount soundness — the stored
 // refcount must move in lockstep with the count of designating slots):
-
 // Link-only edits (same domain, same caps) leave the census untouched.
-proof fn lemma_same_caps_same_census(
-    m1: Map<SlotId, CapSlot>,
-    m2: Map<SlotId, CapSlot>,
-    obj: ObjId,
-)
+proof fn lemma_same_caps_same_census(m1: Map<SlotId, CapSlot>, m2: Map<SlotId, CapSlot>, obj: ObjId)
     requires
         m1.dom() == m2.dom(),
         forall|k: SlotId| #[trigger] m1.dom().contains(k) ==> m1[k].cap == m2[k].cap,
@@ -3993,7 +4438,11 @@ proof fn lemma_same_caps_same_census(
 // Same-dom, same-caps arenas have the same `frame_map_refs` (the `lemma_same_caps_same_census`
 // companion over `cap_frame_aspace`). `delete`/`cdt_unlink` link-only edits preserve caps, so
 // the frame-mapping census carries.
-proof fn lemma_same_caps_same_frame_map(m1: Map<SlotId, CapSlot>, m2: Map<SlotId, CapSlot>, o: ObjId)
+proof fn lemma_same_caps_same_frame_map(
+    m1: Map<SlotId, CapSlot>,
+    m2: Map<SlotId, CapSlot>,
+    o: ObjId,
+)
     requires
         m1.dom() == m2.dom(),
         forall|k: SlotId| #[trigger] m1.dom().contains(k) ==> m1[k].cap == m2[k].cap,
@@ -4032,8 +4481,8 @@ pub proof fn lemma_cap_move_census(
         is_empty_cap(pre[b].cap),
         is_empty_cap(post[a].cap),
         post[b].cap == pre[a].cap,
-        forall|x: SlotId| #[trigger] pre.dom().contains(x) && x != a && x != b
-            ==> post[x].cap == pre[x].cap,
+        forall|x: SlotId| #[trigger]
+            pre.dom().contains(x) && x != a && x != b ==> post[x].cap == pre[x].cap,
     ensures
         slot_refs(post, o) == slot_refs(pre, o),
         frame_map_refs(post, o) == frame_map_refs(pre, o),
@@ -4043,9 +4492,12 @@ pub proof fn lemma_cap_move_census(
     let s2 = post.dom().filter(|k: SlotId| cap_obj(post[k].cap) == Some(o));
     assert(s1.finite());
     if cap_obj(pre[a].cap) == Some(o) {
-        assert forall|k: SlotId| #![trigger s2.contains(k)]
+        assert forall|k: SlotId|
+            #![trigger s2.contains(k)]
             s2.contains(k) <==> s1.remove(a).insert(b).contains(k) by {
-            if pre.dom().contains(k) && k != a && k != b { assert(post[k].cap == pre[k].cap); }
+            if pre.dom().contains(k) && k != a && k != b {
+                assert(post[k].cap == pre[k].cap);
+            }
         }
         assert(s2 =~= s1.remove(a).insert(b));
         assert(s1.contains(a));
@@ -4053,7 +4505,9 @@ pub proof fn lemma_cap_move_census(
         assert(!s1.remove(a).contains(b));
     } else {
         assert forall|k: SlotId| #![trigger s2.contains(k)] s2.contains(k) <==> s1.contains(k) by {
-            if pre.dom().contains(k) && k != a && k != b { assert(post[k].cap == pre[k].cap); }
+            if pre.dom().contains(k) && k != a && k != b {
+                assert(post[k].cap == pre[k].cap);
+            }
         }
         assert(s2 =~= s1);
     }
@@ -4061,9 +4515,12 @@ pub proof fn lemma_cap_move_census(
     let g2 = post.dom().filter(|k: SlotId| cap_frame_aspace(post[k].cap) == Some(o));
     assert(g1.finite());
     if cap_frame_aspace(pre[a].cap) == Some(o) {
-        assert forall|k: SlotId| #![trigger g2.contains(k)]
+        assert forall|k: SlotId|
+            #![trigger g2.contains(k)]
             g2.contains(k) <==> g1.remove(a).insert(b).contains(k) by {
-            if pre.dom().contains(k) && k != a && k != b { assert(post[k].cap == pre[k].cap); }
+            if pre.dom().contains(k) && k != a && k != b {
+                assert(post[k].cap == pre[k].cap);
+            }
         }
         assert(g2 =~= g1.remove(a).insert(b));
         assert(g1.contains(a));
@@ -4071,7 +4528,9 @@ pub proof fn lemma_cap_move_census(
         assert(!g1.remove(a).contains(b));
     } else {
         assert forall|k: SlotId| #![trigger g2.contains(k)] g2.contains(k) <==> g1.contains(k) by {
-            if pre.dom().contains(k) && k != a && k != b { assert(post[k].cap == pre[k].cap); }
+            if pre.dom().contains(k) && k != a && k != b {
+                assert(post[k].cap == pre[k].cap);
+            }
         }
         assert(g2 =~= g1);
     }
@@ -4102,12 +4561,7 @@ proof fn lemma_same_caps_same_end_cap(
 
 // Re-pointing one slot from designating nothing-of-`obj` to designating `obj`
 // raises `obj`'s census by exactly one.
-proof fn lemma_designation_bump(
-    m: Map<SlotId, CapSlot>,
-    k: SlotId,
-    v: CapSlot,
-    obj: ObjId,
-)
+proof fn lemma_designation_bump(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot, obj: ObjId)
     requires
         m.dom().finite(),
         m.dom().contains(k),
@@ -4120,7 +4574,9 @@ proof fn lemma_designation_bump(
     let f1 = m.dom().filter(|j: SlotId| cap_obj(m[j].cap) == Some(obj));
     let f2 = m2.dom().filter(|j: SlotId| cap_obj(m2[j].cap) == Some(obj));
     assert(m2.dom() =~= m.dom());
-    assert forall|j: SlotId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.insert(k).contains(j) by {
+    assert forall|j: SlotId|
+        #![trigger f2.contains(j)]
+        f2.contains(j) <==> f1.insert(k).contains(j) by {
         if j != k {
             assert(m2[j] == m[j]);
         }
@@ -4138,7 +4594,6 @@ proof fn lemma_designation_bump(
 // assembled. Each term is a `slot_refs`-style filter/length (or a `waiter_seq`
 // length). `refcount_sound` is the system invariant the teardown family (6c/6d)
 // and the ref-touching construction ops (6f) preserve. ──
-
 // The aspace a mapped Frame cap holds a (non-cap) reference on — the mapping's
 // target. `None` for an unmapped frame or any non-Frame cap. A mapped frame holds
 // its aspace ref through this field, *not* via cap designation (`cap_obj` is `None`
@@ -4157,8 +4612,10 @@ pub open spec fn cap_frame_aspace(c: Cap) -> Option<ObjId> {
 pub open spec fn binding_refs(cv: Map<ObjId, ChanView>, o: ObjId) -> nat {
     Set::new(
         |t: (ObjId, int, int)|
-            cv.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3
-                && cv[t.0].bindings[(t.1, t.2)].notif == Some(o),
+            cv.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3 && cv[t.0].bindings[(
+                t.1,
+                t.2,
+            )].notif == Some(o),
     ).len()
 }
 
@@ -4166,7 +4623,11 @@ pub open spec fn binding_refs(cv: Map<ObjId, ChanView>, o: ObjId) -> nat {
 // that leaves every live channel's `bindings` unchanged (whatever else it touches —
 // `end_caps`, `head`, `count`, …) frames the term. The frame `endpoint_cap_dropped`'s
 // `refcount_sound` preservation needs: its `set_chan_end_caps` moves only `end_caps`.
-pub proof fn lemma_binding_refs_frame(cv0: Map<ObjId, ChanView>, cvf: Map<ObjId, ChanView>, o: ObjId)
+pub proof fn lemma_binding_refs_frame(
+    cv0: Map<ObjId, ChanView>,
+    cvf: Map<ObjId, ChanView>,
+    o: ObjId,
+)
     requires
         cvf.dom() == cv0.dom(),
         forall|c: ObjId| #[trigger] cv0.dom().contains(c) ==> cvf[c].bindings == cv0[c].bindings,
@@ -4175,12 +4636,16 @@ pub proof fn lemma_binding_refs_frame(cv0: Map<ObjId, ChanView>, cvf: Map<ObjId,
 {
     assert(Set::new(
         |t: (ObjId, int, int)|
-            cvf.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3
-                && cvf[t.0].bindings[(t.1, t.2)].notif == Some(o),
+            cvf.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3 && cvf[t.0].bindings[(
+                t.1,
+                t.2,
+            )].notif == Some(o),
     ) =~= Set::new(
         |t: (ObjId, int, int)|
-            cv0.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3
-                && cv0[t.0].bindings[(t.1, t.2)].notif == Some(o),
+            cv0.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3 && cv0[t.0].bindings[(
+                t.1,
+                t.2,
+            )].notif == Some(o),
     ));
 }
 
@@ -4197,8 +4662,9 @@ pub proof fn lemma_binding_refs_frame(cv0: Map<ObjId, ChanView>, cvf: Map<ObjId,
 // for free.
 pub open spec fn chan_struct_frame(cv0: Map<ObjId, ChanView>, cvf: Map<ObjId, ChanView>) -> bool {
     &&& cvf.dom() == cv0.dom()
-    &&& forall|ch: ObjId| #[trigger] cv0.dom().contains(ch)
-            ==> cvf[ch].ring_cap == cv0[ch].ring_cap && cvf[ch].depth == cv0[ch].depth
+    &&& forall|ch: ObjId| #[trigger]
+        cv0.dom().contains(ch) ==> cvf[ch].ring_cap == cv0[ch].ring_cap && cvf[ch].depth
+            == cv0[ch].depth
 }
 
 // `chan_struct_frame` is reflexive and transitive — the loop/recursion composition the
@@ -4355,8 +4821,9 @@ pub open spec fn frame_map_refs(sv: Map<SlotId, CapSlot>, o: ObjId) -> nat {
 // Thread holds on `o`: a bound thread holds one ref on its cspace and one on its
 // aspace — released by `destroy_tcb`'s `unref_cspace`/`unref_aspace`.
 pub open spec fn thread_hold_refs(tv: Map<ObjId, TcbView>, o: ObjId) -> nat {
-    tv.dom().filter(|k: ObjId| tv[k].cspace == Some(o)).len()
-        + tv.dom().filter(|k: ObjId| tv[k].aspace == Some(o)).len()
+    tv.dom().filter(|k: ObjId| tv[k].cspace == Some(o)).len() + tv.dom().filter(
+        |k: ObjId| tv[k].aspace == Some(o),
+    ).len()
 }
 
 // `thread_hold_refs(o)` depends only on every TCB's `cspace`/`aspace` fields, so any edit
@@ -4372,10 +4839,12 @@ pub proof fn lemma_thread_hold_frame(tv0: Map<ObjId, TcbView>, tvf: Map<ObjId, T
     ensures
         thread_hold_refs(tvf, o) == thread_hold_refs(tv0, o),
 {
-    assert(tv0.dom().filter(|k: ObjId| tv0[k].cspace == Some(o))
-        =~= tvf.dom().filter(|k: ObjId| tvf[k].cspace == Some(o)));
-    assert(tv0.dom().filter(|k: ObjId| tv0[k].aspace == Some(o))
-        =~= tvf.dom().filter(|k: ObjId| tvf[k].aspace == Some(o)));
+    assert(tv0.dom().filter(|k: ObjId| tv0[k].cspace == Some(o)) =~= tvf.dom().filter(
+        |k: ObjId| tvf[k].cspace == Some(o),
+    ));
+    assert(tv0.dom().filter(|k: ObjId| tv0[k].aspace == Some(o)) =~= tvf.dom().filter(
+        |k: ObjId| tvf[k].aspace == Some(o),
+    ));
 }
 
 // The recount: `refs[o]` must equal this over the whole store.
@@ -4431,13 +4900,15 @@ pub proof fn lemma_in_refs_from_census<S: Store>(store: &S, o: ObjId)
 // off by one at the channel object, so `refcount_sound` is *false* — and must still carry
 // the off-by-one across the peer-closed fire (`lemma_off_by_one_frozen`).
 pub open spec fn census_delta_frozen<S: Store>(s0: &S, s1: &S) -> bool {
-    &&& s1.refs_view().dom() == s0.refs_view().dom()
+    &&& s1.refs_view().dom()
+        == s0.refs_view().dom()
     // Trigger on `obj_census(s1, x)` — the *final* census — so the quantifier instantiates
     // only where someone reasons about the census (the teardown ops), not in census-agnostic
     // callers that merely carry the ensures (e.g. `check_expired`'s `signal`-in-a-loop, which
     // would otherwise blow the rlimit instantiating `obj_census` per object per iteration).
-    &&& forall|x: ObjId| s0.refs_view().dom().contains(x)
-            ==> s1.refs_view()[x] + obj_census(s0, x) == s0.refs_view()[x] + #[trigger] obj_census(s1, x)
+    &&& forall|x: ObjId|
+        s0.refs_view().dom().contains(x) ==> s1.refs_view()[x] + obj_census(s0, x)
+            == s0.refs_view()[x] + #[trigger] obj_census(s1, x)
 }
 
 // The census is sound everywhere **except** off by one at `z` (`refs[z] == census(z) + 1`):
@@ -4448,8 +4919,11 @@ pub open spec fn census_delta_frozen<S: Store>(s0: &S, s1: &S) -> bool {
 pub open spec fn census_off_by_one<S: Store>(store: &S, z: ObjId) -> bool {
     &&& store.refs_view().dom().contains(z)
     &&& store.refs_view()[z] == obj_census(store, z) + 1
-    &&& forall|x: ObjId| x != z && store.refs_view().dom().contains(x)
-            ==> store.refs_view()[x] == obj_census(store, x)
+    &&& forall|x: ObjId|
+        x != z && store.refs_view().dom().contains(x) ==> store.refs_view()[x] == obj_census(
+            store,
+            x,
+        )
 }
 
 // A teardown-stable frame for "dead, queue-detached" TCBs (the `tcb_view` frame the
@@ -4474,11 +4948,10 @@ pub open spec fn dead_tcb_frozen_at<S: Store>(s0: &S, s1: &S, x: ObjId) -> bool 
     // membership carries no refcount). The teardown consumers only ever freeze Halted/Blocked
     // dead threads (`destroy_tcb` halts its subject before recursing), so excluding Runnable
     // threads here is sound and weakens the obligation precisely where the scheduler edits land.
-    (s0.tcb_view().dom().contains(x) && s0.refs_view().dom().contains(x)
-        && s0.refs_view()[x] == 0 && s0.tcb_view()[x].wait_notif is None
-        && s0.tcb_view()[x].state != ThreadState::Runnable)
+    (s0.tcb_view().dom().contains(x) && s0.refs_view().dom().contains(x) && s0.refs_view()[x] == 0
+        && s0.tcb_view()[x].wait_notif is None && s0.tcb_view()[x].state != ThreadState::Runnable)
         ==> (s1.tcb_view().dom().contains(x) && s1.refs_view().dom().contains(x)
-            && s1.refs_view()[x] == 0 && s1.tcb_view()[x] == s0.tcb_view()[x])
+        && s1.refs_view()[x] == 0 && s1.tcb_view()[x] == s0.tcb_view()[x])
 }
 
 pub open spec fn dead_tcb_frozen<S: Store>(s0: &S, s1: &S) -> bool {
@@ -4501,9 +4974,9 @@ pub proof fn lemma_dead_tcb_frozen_trans<S: Store>(s0: &S, s1: &S, s2: &S)
         assert(dead_tcb_frozen_at(s1, s2, x));
         // Chain: if `x` is dead+detached in s0, frame 1 makes it dead+detached in s1 (with
         // `tcb[x] == s0.tcb[x]`, so still `wait_notif is None`), then frame 2 reaches s2.
-        if s0.tcb_view().dom().contains(x) && s0.refs_view().dom().contains(x)
-            && s0.refs_view()[x] == 0 && s0.tcb_view()[x].wait_notif is None
-            && s0.tcb_view()[x].state != ThreadState::Runnable {
+        if s0.tcb_view().dom().contains(x) && s0.refs_view().dom().contains(x) && s0.refs_view()[x]
+            == 0 && s0.tcb_view()[x].wait_notif is None && s0.tcb_view()[x].state
+            != ThreadState::Runnable {
             // The antecedent matches the weakened `dead_tcb_frozen_at` (Runnable
             // excluded), so frame 1 fires and pins `s1.tcb[x] == s0.tcb[x]`; that carries
             // `wait_notif is None` *and* `state != Runnable` into s1, firing frame 2 to s2.
@@ -4524,25 +4997,25 @@ pub proof fn lemma_dead_tcb_frozen_signal_shaped<S: Store>(s0: &S, s1: &S, n: Ob
     requires
         s1.refs_view().dom() == s0.refs_view().dom(),
         s1.tcb_view().dom() == s0.tcb_view().dom(),
-        forall|x: ObjId| s0.refs_view().dom().contains(x) && s0.refs_view()[x] == 0
-            ==> #[trigger] s1.refs_view()[x] == 0,
+        forall|x: ObjId|
+            s0.refs_view().dom().contains(x) && s0.refs_view()[x] == 0
+                ==> #[trigger] s1.refs_view()[x] == 0,
         // A changed TCB is either an `n`-waiter (the woken/spliced head) OR a Runnable
         // node (the enqueue's re-threaded old ready-tail). A *dead* `x` (refs 0, detached,
         // non-Runnable per the weakened `dead_tcb_frozen_at`) is neither, so it is frozen.
-        forall|k: ObjId| #[trigger] s1.tcb_view()[k] == s0.tcb_view()[k]
-            || s0.tcb_view()[k].wait_notif == Some(n)
-            || s0.tcb_view()[k].state == ThreadState::Runnable,
+        forall|k: ObjId| #[trigger]
+            s1.tcb_view()[k] == s0.tcb_view()[k] || s0.tcb_view()[k].wait_notif == Some(n)
+                || s0.tcb_view()[k].state == ThreadState::Runnable,
     ensures
         dead_tcb_frozen(s0, s1),
 {
     assert forall|x: ObjId| #[trigger] dead_tcb_frozen_at(s0, s1, x) by {
-        if s0.tcb_view().dom().contains(x) && s0.refs_view().dom().contains(x)
-            && s0.refs_view()[x] == 0 && s0.tcb_view()[x].wait_notif is None
-            && s0.tcb_view()[x].state != ThreadState::Runnable {
+        if s0.tcb_view().dom().contains(x) && s0.refs_view().dom().contains(x) && s0.refs_view()[x]
+            == 0 && s0.tcb_view()[x].wait_notif is None && s0.tcb_view()[x].state
+            != ThreadState::Runnable {
             // Dead `x`: `wait_notif None != Some(n)` and not Runnable, so the right two
             // disjuncts fail and the left (`tcb` frozen) holds; refs keeps it dead-in-domain.
-            assert(s1.tcb_view()[x] == s0.tcb_view()[x]
-                || s0.tcb_view()[x].wait_notif == Some(n)
+            assert(s1.tcb_view()[x] == s0.tcb_view()[x] || s0.tcb_view()[x].wait_notif == Some(n)
                 || s0.tcb_view()[x].state == ThreadState::Runnable);
         }
     }
@@ -4562,12 +5035,13 @@ pub proof fn lemma_dead_tcb_frozen_dec_ref<S: Store>(s0: &S, s1: &S, o: ObjId)
 {
     // `insert` at the in-domain `o` keeps the refs domain (set extensionality).
     assert(s1.refs_view().dom() =~= s0.refs_view().dom());
-    assert forall|x: ObjId| s0.refs_view().dom().contains(x) && s0.refs_view()[x] == 0
-        implies #[trigger] s1.refs_view()[x] == 0 by {
+    assert forall|x: ObjId|
+        s0.refs_view().dom().contains(x) && s0.refs_view()[x]
+            == 0 implies #[trigger] s1.refs_view()[x] == 0 by {
         assert(x != o);
     }
-    assert forall|k: ObjId| #[trigger] s1.tcb_view()[k] == s0.tcb_view()[k]
-        || s0.tcb_view()[k].wait_notif == Some(o) by {}
+    assert forall|k: ObjId| #[trigger]
+        s1.tcb_view()[k] == s0.tcb_view()[k] || s0.tcb_view()[k].wait_notif == Some(o) by {}
     lemma_dead_tcb_frozen_signal_shaped(s0, s1, o);
 }
 
@@ -4593,7 +5067,6 @@ pub proof fn lemma_dead_tcb_frozen_refl<S: Store>(s0: &S, s1: &S)
 // the except-`t` frame of `t`'s own halt/clear edits (which touch only `tcb[t]`); `_except_trans`
 // composes two except-`t` segments. The body threads a running `forall x != t.
 // dead_tcb_frozen_at(old, store, x)` invariant across its segments with these.
-
 pub proof fn lemma_dead_tcb_frozen_to_except<S: Store>(s0: &S, s1: &S, t: ObjId)
     requires
         dead_tcb_frozen(s0, s1),
@@ -4642,7 +5115,6 @@ pub proof fn lemma_dead_tcb_frozen_except_trans<S: Store>(s0: &S, s1: &S, s2: &S
 // three home maps are immutable across teardown (`cspace_view` framed equal, `ring_cap` via
 // `chan_struct_frame`, `bind_slots` has no setter), so `is_homed` is stable; `home_views_frozen`
 // packages exactly that stability for the composition lemmas.
-
 pub open spec fn homed_in_cspace<S: Store>(s: &S, x: SlotId) -> bool {
     exists|cs: ObjId, i: int|
         #![trigger s.cspace_view()[cs].slots[i]]
@@ -4681,8 +5153,8 @@ pub open spec fn unhomed_frozen<S: Store>(s0: &S, s1: &S, target: SlotId) -> boo
 // clear is one of their residents/ring-caps/bind-slots or the recursive closure of those).
 pub open spec fn unhomed_frozen_free<S: Store>(s0: &S, s1: &S) -> bool {
     forall|x: SlotId|
-        s1.slot_view().dom().contains(x) && !is_homed(s0, x)
-            ==> #[trigger] s1.slot_view()[x].cap == s0.slot_view()[x].cap
+        s1.slot_view().dom().contains(x) && !is_homed(s0, x) ==> #[trigger] s1.slot_view()[x].cap
+            == s0.slot_view()[x].cap
 }
 
 // ── Death-provenance: the **provenance** frame — *which* homing object died when a homed slot is emptied.
@@ -4701,7 +5173,6 @@ pub open spec fn unhomed_frozen_free<S: Store>(s0: &S, s1: &S) -> bool {
 // domain, or in it with zero refs — which (a) covers both seams and (b) is **monotone** across the
 // whole teardown cluster (no teardown op ever re-refs or re-adds a dead object), the property
 // `refs_death_persist` packages for the composition lemmas.
-
 // `o` homes `x` *as a resident of cspace `o`* — the object-indexed `homed_in_cspace` (the witness
 // `o` is fixed, not existentially chosen).
 pub open spec fn homes_in_cspace<S: Store>(s: &S, o: ObjId, x: SlotId) -> bool {
@@ -4761,6 +5232,7 @@ pub proof fn lemma_is_homed_iff_homes<S: Store>(s: &S, x: SlotId)
         }
     }
     // (⟸) a homing object `o` witnesses the matching `homed_in_*`.
+
     if exists|o: ObjId| homes(s, o, x) {
         let o = choose|o: ObjId| homes(s, o, x);
         if homes_in_cspace(s, o, x) {
@@ -4793,17 +5265,20 @@ pub proof fn lemma_homes_stable<S: Store>(s0: &S, s1: &S, o: ObjId, x: SlotId)
     // Channel disjunct: dom equal and `ring_cap` equal per channel, so a witness transfers.
     if homes_in_chan(s0, o, x) {
         let k = choose|k: (int, int, int)|
-            #![trigger s0.chan_view()[o].ring_cap[k]] s0.chan_view()[o].ring_cap[k] == x;
+            #![trigger s0.chan_view()[o].ring_cap[k]]
+            s0.chan_view()[o].ring_cap[k] == x;
         assert(s1.chan_view()[o].ring_cap == s0.chan_view()[o].ring_cap);
         assert(s1.chan_view()[o].ring_cap[k] == x);
     }
     if homes_in_chan(s1, o, x) {
         let k = choose|k: (int, int, int)|
-            #![trigger s1.chan_view()[o].ring_cap[k]] s1.chan_view()[o].ring_cap[k] == x;
+            #![trigger s1.chan_view()[o].ring_cap[k]]
+            s1.chan_view()[o].ring_cap[k] == x;
         assert(s1.chan_view()[o].ring_cap == s0.chan_view()[o].ring_cap);
         assert(s0.chan_view()[o].ring_cap[k] == x);
     }
     // TCB disjunct: dom equal and `bind_slots` equal per TCB.
+
     if homes_in_tcb(s0, o, x) {
         let j = choose|j: int|
             #![trigger s0.tcb_view()[o].bind_slots[j]]
@@ -4882,9 +5357,9 @@ pub proof fn lemma_refs_death_persist_dec_ref<S: Store>(s0: &S, s1: &S, o: ObjId
 // clear is a resident / ring cap / bind slot of an object whose `refs` reached zero.)
 pub open spec fn emptied_via_dead_home_free<S: Store>(s0: &S, s1: &S) -> bool {
     forall|x: SlotId|
-        s1.slot_view().dom().contains(x) && !is_empty_cap(s0.slot_view()[x].cap)
-            && is_empty_cap(#[trigger] s1.slot_view()[x].cap)
-            ==> exists|o: ObjId| homes(s0, o, x) && dead_obj(s1, o)
+        s1.slot_view().dom().contains(x) && !is_empty_cap(s0.slot_view()[x].cap) && is_empty_cap(
+            #[trigger] s1.slot_view()[x].cap,
+        ) ==> exists|o: ObjId| homes(s0, o, x) && dead_obj(s1, o)
 }
 
 // The **target-aware** provenance frame (`delete` exports this): the directly-deleted `target` is
@@ -4893,8 +5368,8 @@ pub open spec fn emptied_via_dead_home_free<S: Store>(s0: &S, s1: &S) -> bool {
 pub open spec fn emptied_via_dead_home<S: Store>(s0: &S, s1: &S, target: SlotId) -> bool {
     forall|x: SlotId|
         s1.slot_view().dom().contains(x) && x != target && !is_empty_cap(s0.slot_view()[x].cap)
-            && is_empty_cap(#[trigger] s1.slot_view()[x].cap)
-            ==> exists|o: ObjId| homes(s0, o, x) && dead_obj(s1, o)
+            && is_empty_cap(#[trigger] s1.slot_view()[x].cap) ==> exists|o: ObjId|
+            homes(s0, o, x) && dead_obj(s1, o)
 }
 
 // A slot-view-framing step (no cap moves) trivially satisfies the free frame (no slot is emptied,
@@ -4906,9 +5381,9 @@ pub proof fn lemma_emptied_via_dead_home_free_from_slot_eq<S: Store>(s0: &S, s1:
         emptied_via_dead_home_free(s0, s1),
 {
     assert forall|x: SlotId|
-        s1.slot_view().dom().contains(x) && !is_empty_cap(s0.slot_view()[x].cap)
-            && is_empty_cap(#[trigger] s1.slot_view()[x].cap)
-        implies exists|o: ObjId| homes(s0, o, x) && dead_obj(s1, o) by {
+        s1.slot_view().dom().contains(x) && !is_empty_cap(s0.slot_view()[x].cap) && is_empty_cap(
+            #[trigger] s1.slot_view()[x].cap,
+        ) implies exists|o: ObjId| homes(s0, o, x) && dead_obj(s1, o) by {
         assert(s1.slot_view()[x].cap == s0.slot_view()[x].cap);
     }
 }
@@ -4918,7 +5393,11 @@ pub proof fn lemma_emptied_via_dead_home_free_from_slot_eq<S: Store>(s0: &S, s1:
 // whose destruction cleared it), and every other emptied slot already had one. The destructors use
 // this to lift each resident / ring / bind `delete` to the free frame.
 pub proof fn lemma_emptied_via_dead_home_free_from_homed<S: Store>(
-    s0: &S, s1: &S, target: SlotId, o_w: ObjId)
+    s0: &S,
+    s1: &S,
+    target: SlotId,
+    o_w: ObjId,
+)
     requires
         emptied_via_dead_home(s0, s1, target),
         homes(s0, o_w, target),
@@ -4927,9 +5406,9 @@ pub proof fn lemma_emptied_via_dead_home_free_from_homed<S: Store>(
         emptied_via_dead_home_free(s0, s1),
 {
     assert forall|x: SlotId|
-        s1.slot_view().dom().contains(x) && !is_empty_cap(s0.slot_view()[x].cap)
-            && is_empty_cap(#[trigger] s1.slot_view()[x].cap)
-        implies exists|o: ObjId| homes(s0, o, x) && dead_obj(s1, o) by {
+        s1.slot_view().dom().contains(x) && !is_empty_cap(s0.slot_view()[x].cap) && is_empty_cap(
+            #[trigger] s1.slot_view()[x].cap,
+        ) implies exists|o: ObjId| homes(s0, o, x) && dead_obj(s1, o) by {
         if x == target {
             assert(homes(s0, o_w, target) && dead_obj(s1, o_w));
         }
@@ -4952,9 +5431,9 @@ pub proof fn lemma_emptied_via_dead_home_free_trans<S: Store>(a: &S, b: &S, c: &
         emptied_via_dead_home_free(a, c),
 {
     assert forall|x: SlotId|
-        c.slot_view().dom().contains(x) && !is_empty_cap(a.slot_view()[x].cap)
-            && is_empty_cap(#[trigger] c.slot_view()[x].cap)
-        implies exists|o: ObjId| homes(a, o, x) && dead_obj(c, o) by {
+        c.slot_view().dom().contains(x) && !is_empty_cap(a.slot_view()[x].cap) && is_empty_cap(
+            #[trigger] c.slot_view()[x].cap,
+        ) implies exists|o: ObjId| homes(a, o, x) && dead_obj(c, o) by {
         if is_empty_cap(b.slot_view()[x].cap) {
             // Emptied already by `a → b`: its witness `o` homes `x` at `a`, dead at `b`, and the
             // death persists to `c`.
@@ -4988,8 +5467,8 @@ pub proof fn lemma_emptied_via_dead_home_compose<S: Store>(a: &S, b: &S, c: &S, 
 {
     assert forall|x: SlotId|
         c.slot_view().dom().contains(x) && x != target && !is_empty_cap(a.slot_view()[x].cap)
-            && is_empty_cap(#[trigger] c.slot_view()[x].cap)
-        implies exists|o: ObjId| homes(a, o, x) && dead_obj(c, o) by {
+            && is_empty_cap(#[trigger] c.slot_view()[x].cap) implies exists|o: ObjId|
+        homes(a, o, x) && dead_obj(c, o) by {
         if is_empty_cap(b.slot_view()[x].cap) {
             assert(b.slot_view().dom().contains(x));
             let o = choose|o: ObjId| homes(a, o, x) && dead_obj(b, o);
@@ -5066,6 +5545,7 @@ pub proof fn lemma_is_homed_stable<S: Store>(s0: &S, s1: &S, x: SlotId)
         assert(s0.chan_view()[ch].ring_cap[k] == x);
     }
     // TCB: dom equal and `bind_slots` equal per TCB.
+
     if homed_in_tcb(s0, x) {
         let (t, j) = choose|t: ObjId, j: int|
             #![trigger s0.tcb_view()[t].bind_slots[j]]
@@ -5103,8 +5583,11 @@ pub proof fn lemma_unhomed_frozen_free_from_homed<S: Store>(s0: &S, s1: &S, targ
     ensures
         unhomed_frozen_free(s0, s1),
 {
-    assert forall|x: SlotId| s1.slot_view().dom().contains(x) && !is_homed(s0, x) implies
-        #[trigger] s1.slot_view()[x].cap == s0.slot_view()[x].cap by {
+    assert forall|x: SlotId|
+        s1.slot_view().dom().contains(x) && !is_homed(
+            s0,
+            x,
+        ) implies #[trigger] s1.slot_view()[x].cap == s0.slot_view()[x].cap by {
         assert(x != target);
     }
 }
@@ -5121,8 +5604,9 @@ pub proof fn lemma_unhomed_frozen_free_trans<S: Store>(a: &S, b: &S, c: &S)
     ensures
         unhomed_frozen_free(a, c),
 {
-    assert forall|x: SlotId| c.slot_view().dom().contains(x) && !is_homed(a, x) implies
-        #[trigger] c.slot_view()[x].cap == a.slot_view()[x].cap by {
+    assert forall|x: SlotId|
+        c.slot_view().dom().contains(x) && !is_homed(a, x) implies #[trigger] c.slot_view()[x].cap
+        == a.slot_view()[x].cap by {
         lemma_is_homed_stable(a, b, x);
     }
 }
@@ -5139,8 +5623,10 @@ pub proof fn lemma_unhomed_frozen_compose<S: Store>(a: &S, b: &S, c: &S, target:
         unhomed_frozen(a, c, target),
 {
     assert forall|x: SlotId|
-        c.slot_view().dom().contains(x) && x != target && !is_homed(a, x) implies
-        #[trigger] c.slot_view()[x].cap == a.slot_view()[x].cap by {
+        c.slot_view().dom().contains(x) && x != target && !is_homed(
+            a,
+            x,
+        ) implies #[trigger] c.slot_view()[x].cap == a.slot_view()[x].cap by {
         lemma_is_homed_stable(a, b, x);
     }
 }
@@ -5187,16 +5673,19 @@ pub proof fn lemma_sysinv_frame_equal_views<S: Store>(s0: &S, s1: &S)
 {
     assert forall|o: ObjId| #[trigger] obj_census(s1, o) == obj_census(s0, o) by {}
     lemma_refcount_sound_from_census_eq(s0, s1);
-    assert forall|o: ObjId| #[trigger] obj_census(s1, o) >= 1
-        implies s1.refs_view().dom().contains(o) by {
+    assert forall|o: ObjId| #[trigger] obj_census(s1, o) >= 1 implies s1.refs_view().dom().contains(
+        o,
+    ) by {
         lemma_in_refs_from_census(s0, o);
     }
     // Every object view is equal to `s0`'s, so each live cap's (view-only) consistency carries
     // (the `unref_aspace`-body pattern — a per-slot forall avoids the bare-`caps_consistent`
     // existential/`choose` triggers).
-    assert forall|s: SlotId| #![trigger s1.slot_view()[s]]
-        s1.slot_view().dom().contains(s) && !is_empty_cap(s1.slot_view()[s].cap)
-        implies cap_consistent(s1, s1.slot_view()[s].cap) by {
+    assert forall|s: SlotId|
+        #![trigger s1.slot_view()[s]]
+        s1.slot_view().dom().contains(s) && !is_empty_cap(
+            s1.slot_view()[s].cap,
+        ) implies cap_consistent(s1, s1.slot_view()[s].cap) by {
         assert(cap_consistent(s0, s0.slot_view()[s].cap));
     }
     assert(end_caps_sound(s1));
@@ -5234,8 +5723,8 @@ pub proof fn lemma_ready_inv_frame_offchain<S: Store>(s0: &S, s1: &S)
         ready_complete(s0.ready_view(), s0.tcb_view()),
         s1.ready_view() == s0.ready_view(),
         s1.tcb_view().dom() == s0.tcb_view().dom(),
-        forall|x: ObjId| #[trigger] s1.tcb_view()[x] != s0.tcb_view()[x]
-            ==> s0.tcb_view()[x].state != ThreadState::Runnable
+        forall|x: ObjId| #[trigger]
+            s1.tcb_view()[x] != s0.tcb_view()[x] ==> s0.tcb_view()[x].state != ThreadState::Runnable
                 && s1.tcb_view()[x].state != ThreadState::Runnable,
     ensures
         ready_wf(s1.ready_view(), s1.tcb_view()),
@@ -5246,9 +5735,10 @@ pub proof fn lemma_ready_inv_frame_offchain<S: Store>(s0: &S, s1: &S)
     let tv1 = s1.tcb_view();
     // Each level's chain is unchanged: its members are Runnable, hence not among the changed
     // (non-Runnable) threads, so framed; `lemma_ready_seq_frame` transfers the chain + seq.
-    assert forall|level: int| #![trigger ready_seq(rv, tv1, level)] 0 <= level < NUM_PRIOS as int
-        implies ready_seq(rv, tv1, level) == ready_seq(rv, tv0, level)
-            && ready_chain(rv, tv1, level, ready_seq(rv, tv1, level)) by {
+    assert forall|level: int|
+        #![trigger ready_seq(rv, tv1, level)]
+        0 <= level < NUM_PRIOS as int implies ready_seq(rv, tv1, level) == ready_seq(rv, tv0, level)
+        && ready_chain(rv, tv1, level, ready_seq(rv, tv1, level)) by {
         let rs = ready_seq(rv, tv0, level);
         assert(ready_chain(rv, tv0, level, rs));
         assert forall|i: int| 0 <= i < rs.len() implies #[trigger] tv1[rs[i]] == tv0[rs[i]] by {
@@ -5261,10 +5751,10 @@ pub proof fn lemma_ready_inv_frame_offchain<S: Store>(s0: &S, s1: &S)
     assert(ready_wf(rv, tv1));
     // ready_complete: a Runnable `x` in `tv1` is unchanged (a changed thread is non-Runnable),
     // so it kept its level/`wait_notif` and its (unchanged) chain still charts it.
-    assert forall|x: ObjId| #[trigger] tv1.dom().contains(x) && tv1[x].state == ThreadState::Runnable
-        implies (tv1[x].priority as int) < NUM_PRIOS
-            && ready_seq(rv, tv1, tv1[x].priority as int).contains(x)
-            && tv1[x].wait_notif is None by {
+    assert forall|x: ObjId| #[trigger]
+        tv1.dom().contains(x) && tv1[x].state == ThreadState::Runnable implies (
+    tv1[x].priority as int) < NUM_PRIOS && ready_seq(rv, tv1, tv1[x].priority as int).contains(x)
+        && tv1[x].wait_notif is None by {
         assert(tv1[x] == tv0[x]);
         let px = tv0[x].priority as int;
         assert(ready_seq(rv, tv1, px) == ready_seq(rv, tv0, px));
@@ -5281,10 +5771,10 @@ pub proof fn lemma_ready_inv_frame_fields<S: Store>(s0: &S, s1: &S)
         ready_complete(s0.ready_view(), s0.tcb_view()),
         s1.ready_view() == s0.ready_view(),
         s1.tcb_view().dom() == s0.tcb_view().dom(),
-        forall|x: ObjId| #[trigger] s1.tcb_view()[x].state == s0.tcb_view()[x].state
-            && s1.tcb_view()[x].priority == s0.tcb_view()[x].priority
-            && s1.tcb_view()[x].qnext == s0.tcb_view()[x].qnext
-            && s1.tcb_view()[x].wait_notif == s0.tcb_view()[x].wait_notif,
+        forall|x: ObjId| #[trigger]
+            s1.tcb_view()[x].state == s0.tcb_view()[x].state && s1.tcb_view()[x].priority
+                == s0.tcb_view()[x].priority && s1.tcb_view()[x].qnext == s0.tcb_view()[x].qnext
+                && s1.tcb_view()[x].wait_notif == s0.tcb_view()[x].wait_notif,
     ensures
         ready_wf(s1.ready_view(), s1.tcb_view()),
         ready_complete(s1.ready_view(), s1.tcb_view()),
@@ -5294,9 +5784,10 @@ pub proof fn lemma_ready_inv_frame_fields<S: Store>(s0: &S, s1: &S)
     let tv1 = s1.tcb_view();
     // Each level's chain carries: the field-based chain frame needs only qnext/state/priority,
     // all preserved; uniqueness then transfers `ready_seq`.
-    assert forall|level: int| #![trigger ready_seq(rv, tv1, level)] 0 <= level < NUM_PRIOS as int
-        implies ready_seq(rv, tv1, level) == ready_seq(rv, tv0, level)
-            && ready_chain(rv, tv1, level, ready_seq(rv, tv1, level)) by {
+    assert forall|level: int|
+        #![trigger ready_seq(rv, tv1, level)]
+        0 <= level < NUM_PRIOS as int implies ready_seq(rv, tv1, level) == ready_seq(rv, tv0, level)
+        && ready_chain(rv, tv1, level, ready_seq(rv, tv1, level)) by {
         let rs = ready_seq(rv, tv0, level);
         assert(ready_chain(rv, tv0, level, rs));
         lemma_ready_chain_frame_fields(rv, tv0, rv, tv1, level, rs);
@@ -5305,10 +5796,10 @@ pub proof fn lemma_ready_inv_frame_fields<S: Store>(s0: &S, s1: &S)
     assert(ready_wf(rv, tv1));
     // ready_complete: each Runnable `x` (same state/priority/wait_notif as in `tv0`) is still
     // Runnable in `tv0` and charted by its (unchanged) level chain.
-    assert forall|x: ObjId| #[trigger] tv1.dom().contains(x) && tv1[x].state == ThreadState::Runnable
-        implies (tv1[x].priority as int) < NUM_PRIOS
-            && ready_seq(rv, tv1, tv1[x].priority as int).contains(x)
-            && tv1[x].wait_notif is None by {
+    assert forall|x: ObjId| #[trigger]
+        tv1.dom().contains(x) && tv1[x].state == ThreadState::Runnable implies (
+    tv1[x].priority as int) < NUM_PRIOS && ready_seq(rv, tv1, tv1[x].priority as int).contains(x)
+        && tv1[x].wait_notif is None by {
         assert(tv0[x].state == ThreadState::Runnable);
         let px = tv0[x].priority as int;
         assert(tv1[x].priority == tv0[x].priority);
@@ -5325,17 +5816,26 @@ pub proof fn lemma_ready_inv_frame_fields<S: Store>(s0: &S, s1: &S)
 pub proof fn lemma_thread_off_all_ready_chains<S: Store>(s: &S, t: ObjId)
     requires
         ready_wf(s.ready_view(), s.tcb_view()),
-        s.tcb_view()[t].state != ThreadState::Runnable
-            || !ready_seq(s.ready_view(), s.tcb_view(),
-                    s.tcb_view()[t].priority as int).contains(t),
+        s.tcb_view()[t].state != ThreadState::Runnable || !ready_seq(
+            s.ready_view(),
+            s.tcb_view(),
+            s.tcb_view()[t].priority as int,
+        ).contains(t),
     ensures
-        forall|level: int| 0 <= level < NUM_PRIOS as int
-            ==> !(#[trigger] ready_seq(s.ready_view(), s.tcb_view(), level)).contains(t),
+        forall|level: int|
+            0 <= level < NUM_PRIOS as int ==> !(#[trigger] ready_seq(
+                s.ready_view(),
+                s.tcb_view(),
+                level,
+            )).contains(t),
 {
     let rv = s.ready_view();
     let tv = s.tcb_view();
-    assert forall|level: int| 0 <= level < NUM_PRIOS as int
-        implies !(#[trigger] ready_seq(rv, tv, level)).contains(t) by {
+    assert forall|level: int| 0 <= level < NUM_PRIOS as int implies !(#[trigger] ready_seq(
+        rv,
+        tv,
+        level,
+    )).contains(t) by {
         let rs = ready_seq(rv, tv, level);
         if rs.contains(t) {
             assert(ready_chain(rv, tv, level, rs));
@@ -5363,8 +5863,12 @@ pub proof fn lemma_ready_complete_halt_promote<S: Store>(s0: &S, s1: &S, t: ObjI
         s1.tcb_view().dom() == s0.tcb_view().dom(),
         forall|x: ObjId| x != t ==> #[trigger] s1.tcb_view()[x] == s0.tcb_view()[x],
         s1.tcb_view()[t].state != ThreadState::Runnable,
-        forall|level: int| 0 <= level < NUM_PRIOS as int
-            ==> !(#[trigger] ready_seq(s0.ready_view(), s0.tcb_view(), level)).contains(t),
+        forall|level: int|
+            0 <= level < NUM_PRIOS as int ==> !(#[trigger] ready_seq(
+                s0.ready_view(),
+                s0.tcb_view(),
+                level,
+            )).contains(t),
     ensures
         ready_wf(s1.ready_view(), s1.tcb_view()),
         ready_complete(s1.ready_view(), s1.tcb_view()),
@@ -5374,9 +5878,10 @@ pub proof fn lemma_ready_complete_halt_promote<S: Store>(s0: &S, s1: &S, t: ObjI
     let tv1 = s1.tcb_view();
     // Each level's chain is `t`-free, and `t` is the only changed thread, so every member is
     // unchanged → the chain + seq transfer (exactly the `_offchain` argument, keyed on `t`-absence).
-    assert forall|level: int| #![trigger ready_seq(rv, tv1, level)] 0 <= level < NUM_PRIOS as int
-        implies ready_seq(rv, tv1, level) == ready_seq(rv, tv0, level)
-            && ready_chain(rv, tv1, level, ready_seq(rv, tv1, level)) by {
+    assert forall|level: int|
+        #![trigger ready_seq(rv, tv1, level)]
+        0 <= level < NUM_PRIOS as int implies ready_seq(rv, tv1, level) == ready_seq(rv, tv0, level)
+        && ready_chain(rv, tv1, level, ready_seq(rv, tv1, level)) by {
         let rs = ready_seq(rv, tv0, level);
         assert(ready_chain(rv, tv0, level, rs));
         assert forall|i: int| 0 <= i < rs.len() implies #[trigger] tv1[rs[i]] == tv0[rs[i]] by {
@@ -5388,10 +5893,10 @@ pub proof fn lemma_ready_complete_halt_promote<S: Store>(s0: &S, s1: &S, t: ObjI
     assert(ready_wf(rv, tv1));
     // ready_complete: a Runnable `x` in `tv1` has `x != t` (t is non-Runnable in tv1), so `x` is
     // unchanged and Runnable in tv0 → charted by `ready_complete_except`; its chain is unchanged.
-    assert forall|x: ObjId| #[trigger] tv1.dom().contains(x) && tv1[x].state == ThreadState::Runnable
-        implies (tv1[x].priority as int) < NUM_PRIOS
-            && ready_seq(rv, tv1, tv1[x].priority as int).contains(x)
-            && tv1[x].wait_notif is None by {
+    assert forall|x: ObjId| #[trigger]
+        tv1.dom().contains(x) && tv1[x].state == ThreadState::Runnable implies (
+    tv1[x].priority as int) < NUM_PRIOS && ready_seq(rv, tv1, tv1[x].priority as int).contains(x)
+        && tv1[x].wait_notif is None by {
         assert(x != t);
         assert(tv1[x] == tv0[x]);
         let px = tv0[x].priority as int;
@@ -5423,17 +5928,20 @@ pub proof fn lemma_off_by_one_frozen<S: Store>(s0: &S, s1: &S, z: ObjId)
         census_delta_frozen(s0, s1),
         s0.refs_view().dom().contains(z),
         s0.refs_view()[z] == obj_census(s0, z) + 1,
-        forall|x: ObjId| x != z && s0.refs_view().dom().contains(x)
-            ==> #[trigger] s0.refs_view()[x] == obj_census(s0, x),
+        forall|x: ObjId|
+            x != z && s0.refs_view().dom().contains(x) ==> #[trigger] s0.refs_view()[x]
+                == obj_census(s0, x),
     ensures
         s1.refs_view().dom().contains(z),
         s1.refs_view()[z] == obj_census(s1, z) + 1,
-        forall|x: ObjId| x != z && s1.refs_view().dom().contains(x)
-            ==> #[trigger] s1.refs_view()[x] == obj_census(s1, x),
+        forall|x: ObjId|
+            x != z && s1.refs_view().dom().contains(x) ==> #[trigger] s1.refs_view()[x]
+                == obj_census(s1, x),
 {
     assert(s1.refs_view()[z] + obj_census(s0, z) == s0.refs_view()[z] + obj_census(s1, z));
-    assert forall|x: ObjId| x != z && s1.refs_view().dom().contains(x) implies
-        #[trigger] s1.refs_view()[x] == obj_census(s1, x) by {
+    assert forall|x: ObjId|
+        x != z && s1.refs_view().dom().contains(x) implies #[trigger] s1.refs_view()[x]
+        == obj_census(s1, x) by {
         assert(s0.refs_view().dom().contains(x));
         assert(s1.refs_view()[x] + obj_census(s0, x) == s0.refs_view()[x] + obj_census(s1, x));
     }
@@ -5448,7 +5956,8 @@ pub proof fn lemma_off_by_one_frozen<S: Store>(s0: &S, s1: &S, z: ObjId)
 pub open spec fn cspace_resident_wf<S: Store>(store: &S, cs: ObjId) -> bool {
     &&& store.cspace_view().dom().contains(cs)
     &&& store.cspace_view()[cs].slots.len() == store.cspace_view()[cs].num_slots
-    &&& forall|i: int| 0 <= i < store.cspace_view()[cs].slots.len()
+    &&& forall|i: int|
+        0 <= i < store.cspace_view()[cs].slots.len()
             ==> #[trigger] store.slot_view().dom().contains(store.cspace_view()[cs].slots[i])
 }
 
@@ -5465,7 +5974,6 @@ pub open spec fn cspace_resident_wf<S: Store>(store: &S, cs: ObjId) -> bool {
 // destroy leaves no cap designating the freed object, so no surviving cap's consistency
 // can depend on it (the refs-coupled clauses below — the Channel `end_caps`/`binding_refs_ok`
 // and the Timer armed-notif-live — are exactly that entanglement). ──
-
 // One cap's designated-object consistency, kind by kind. The clauses mirror `obj_unref`'s
 // per-`CapKind` `requires` (so the body proof maps `caps_consistent` to it mechanically),
 // plus the structural Channel facts `delete`'s `endpoint_cap_dropped` call needs beyond
@@ -5487,13 +5995,15 @@ pub open spec fn cap_consistent<S: Store>(store: &S, c: Cap) -> bool {
             &&& chan_wf(store.chan_view(), store.slot_view(), o)
             &&& store.chan_view()[o].end_caps[crate::channel::end_idx_spec(end)] > 0
             &&& binding_notif_wf(store.chan_view(), store.notif_view(), store.tcb_view(), o)
-        }
+        },
         CapKind::CSpace(o) => cspace_resident_wf(store, o),
         CapKind::Thread(o, _) => {
             &&& store.tcb_view().dom().contains(o)
             &&& store.tcb_view()[o].bind_slots.len() == 2
             &&& store.slot_view().dom().contains(store.tcb_view()[o].bind_slots[0])
-            &&& store.slot_view().dom().contains(store.tcb_view()[o].bind_slots[1])
+            &&& store.slot_view().dom().contains(
+                store.tcb_view()[o].bind_slots[1],
+            )
             // The bound cspace is resident-wf (the final-thread teardown — the fifth
             // system invariant). `destroy_tcb`'s `unref_cspace` needs `cspace_resident_wf(cs)`
             // to drive the at-zero `destroy_cspace`, but by the time the destructor runs the
@@ -5501,7 +6011,10 @@ pub open spec fn cap_consistent<S: Store>(store: &S, c: Cap) -> bool {
             // through `delete` from this clause. Refs-free like every other arm:
             // `cspace_resident_wf` reads only `cspace_view` + `slot_view` dom + `tcb_view`, all
             // framed through teardown, so the `dec_ref` `-1` preserves it.
-            &&& (store.tcb_view()[o].cspace matches Some(cs) ==> cspace_resident_wf(store, cs))
+            &&& (store.tcb_view()[o].cspace matches Some(cs) ==> cspace_resident_wf(
+                store,
+                cs,
+            ))
             // Waiter-coherence (the final-thread teardown, the sixth system invariant): a
             // BlockedNotif thread's `wait_notif` names a `notif_wf` notification — exactly the
             // precondition `destroy_tcb`'s `remove_waiter(wn, t)` needs (the refs side-condition
@@ -5510,16 +6023,19 @@ pub open spec fn cap_consistent<S: Store>(store: &S, c: Cap) -> bool {
             // notification never leaves `notif_view`, and a signal-shaped edit moves only
             // off-chain threads (`signal` wakes to `Runnable`, `remove_waiter` clears
             // `wait_notif`), neither of which can break a surviving blocked thread's `notif_wf`.
-            &&& (store.tcb_view()[o].state == ThreadState::BlockedNotif ==>
-                    (store.tcb_view()[o].wait_notif matches Some(wn) ==>
-                        notif_wf(store.notif_view(), store.tcb_view(), wn)))
-        }
+            &&& (store.tcb_view()[o].state == ThreadState::BlockedNotif ==> (
+            store.tcb_view()[o].wait_notif matches Some(wn) ==> notif_wf(
+                store.notif_view(),
+                store.tcb_view(),
+                wn,
+            )))
+        },
         CapKind::Notification(o) => notif_wf(store.notif_view(), store.tcb_view(), o),
         CapKind::Timer(o) => {
             &&& store.timer_view().dom().contains(o)
             &&& store.timer_view().dom().finite()
             &&& timer_wf(store.timer_view(), store.timer_head_view())
-        }
+        },
         CapKind::Irq(o) => {
             &&& store.irq_view().dom().contains(o)
             &&& store.irq_view().dom().finite()
@@ -5528,6 +6044,7 @@ pub open spec fn cap_consistent<S: Store>(store: &S, c: Cap) -> bool {
         // Empty / Untyped / Frame / Aspace designate no destructor-bearing object here:
         // `obj_unref` is a no-op (Frame/Untyped/Empty) or the `unref_aspace` leaf (Aspace),
         // neither of which reads an object well-formedness term.
+        ,
         _ => true,
     }
 }
@@ -5551,8 +6068,9 @@ pub open spec fn caps_consistent<S: Store>(store: &S) -> bool {
     // needs it. Refs-free and structural like the slot/chan/tcb companions; every mutator
     // frames `irq_view` or `insert`s one IRQ, both finiteness-preserving.
     &&& store.irq_view().dom().finite()
-    &&& forall|s: SlotId| #![trigger store.slot_view()[s]]
-            store.slot_view().dom().contains(s) && !is_empty_cap(store.slot_view()[s].cap)
+    &&& forall|s: SlotId|
+        #![trigger store.slot_view()[s]]
+        store.slot_view().dom().contains(s) && !is_empty_cap(store.slot_view()[s].cap)
             ==> cap_consistent(store, store.slot_view()[s].cap)
 }
 
@@ -5573,9 +6091,9 @@ pub open spec fn fire_safe<S: Store>(store: &S) -> bool {
     forall|t: ObjId, k: int|
         #![trigger store.tcb_view()[t].bind_slots[k]]
         store.tcb_view().dom().contains(t) && 0 <= k < store.tcb_view()[t].bind_slots.len()
-            && store.slot_view().dom().contains(store.tcb_view()[t].bind_slots[k])
-            ==> (cap_notif(store.slot_view()[store.tcb_view()[t].bind_slots[k]].cap)
-                    matches Some(nn) ==> store.notif_view().dom().contains(nn))
+            && store.slot_view().dom().contains(store.tcb_view()[t].bind_slots[k]) ==> (cap_notif(
+            store.slot_view()[store.tcb_view()[t].bind_slots[k]].cap,
+        ) matches Some(nn) ==> store.notif_view().dom().contains(nn))
 }
 
 /// `caps_consistent ⇒ fire_safe`: the rev2§5.1 LiveParent⇒FireSafe entailment, named
@@ -5592,9 +6110,9 @@ pub proof fn lemma_fire_safe_from_caps_consistent<S: Store>(store: &S)
     assert forall|t: ObjId, k: int|
         #![trigger store.tcb_view()[t].bind_slots[k]]
         store.tcb_view().dom().contains(t) && 0 <= k < store.tcb_view()[t].bind_slots.len()
-            && store.slot_view().dom().contains(store.tcb_view()[t].bind_slots[k]) implies (cap_notif(
-        store.slot_view()[store.tcb_view()[t].bind_slots[k]].cap,
-    ) matches Some(nn) ==> store.notif_view().dom().contains(nn)) by {
+            && store.slot_view().dom().contains(store.tcb_view()[t].bind_slots[k]) implies (
+    cap_notif(store.slot_view()[store.tcb_view()[t].bind_slots[k]].cap) matches Some(nn)
+        ==> store.notif_view().dom().contains(nn)) by {
         let s = store.tcb_view()[t].bind_slots[k];
         if let Some(nn) = cap_notif(store.slot_view()[s].cap) {
             // `cap_notif` is `Some` only on the `Notification` arm, never `Empty`, so the
@@ -5666,9 +6184,9 @@ pub proof fn lemma_caps_consistent_frame<S: Store>(s0: &S, s1: &S, n: ObjId)
         // needs only that *other notifications' waiters* are unchanged (to carry their `notif_wf`
         // via `lemma_notif_wf_frame`); a caller supplies it from `signal`'s contrapositive frame +
         // `ready_complete` (an `m`-waiter is `BlockedNotif`, non-Runnable, so not in the changed set).
-        forall|k: ObjId| #[trigger] s0.tcb_view()[k].wait_notif is Some
-            && s0.tcb_view()[k].wait_notif != Some(n) && s0.tcb_view().dom().contains(k)
-            ==> s1.tcb_view()[k] == s0.tcb_view()[k],
+        forall|k: ObjId| #[trigger]
+            s0.tcb_view()[k].wait_notif is Some && s0.tcb_view()[k].wait_notif != Some(n)
+                && s0.tcb_view().dom().contains(k) ==> s1.tcb_view()[k] == s0.tcb_view()[k],
         forall|k: ObjId| #[trigger] s1.tcb_view()[k].bind_slots == s0.tcb_view()[k].bind_slots,
         // Every TCB's bound cspace is framed too: the strengthened
         // `cap_consistent(Thread)` clause carries `cspace_resident_wf` of the bound cspace, and
@@ -5683,24 +6201,30 @@ pub proof fn lemma_caps_consistent_frame<S: Store>(s0: &S, s1: &S, n: ObjId)
         // BlockedNotif-on-`wn` in `s1` was either *unchanged* (so BlockedNotif-on-`wn` in `s0`,
         // where `caps_consistent(s0)` gave `notif_wf(wn)`) or changed with `wn == n` (where
         // `notif_wf(s1, n)` is a hypothesis); either way `notif_wf(s1, wn)` holds.
-        forall|k: ObjId| #[trigger] s1.tcb_view()[k] != s0.tcb_view()[k]
-            && s1.tcb_view()[k].state == ThreadState::BlockedNotif
-            ==> (s1.tcb_view()[k].wait_notif matches Some(wn) ==> wn == n),
+        forall|k: ObjId| #[trigger]
+            s1.tcb_view()[k] != s0.tcb_view()[k] && s1.tcb_view()[k].state
+                == ThreadState::BlockedNotif ==> (s1.tcb_view()[k].wait_notif matches Some(wn)
+                ==> wn == n),
     ensures
         caps_consistent(s1),
 {
     // `notif_wf` carries from `s0` to `s1` for every notification (`n` by hypothesis, the rest
     // by the frame lemma).
-    assert forall|m: ObjId| #[trigger] s0.notif_view().dom().contains(m)
-        && notif_wf(s0.notif_view(), s0.tcb_view(), m) implies
-        notif_wf(s1.notif_view(), s1.tcb_view(), m) by {
+    assert forall|m: ObjId| #[trigger]
+        s0.notif_view().dom().contains(m) && notif_wf(
+            s0.notif_view(),
+            s0.tcb_view(),
+            m,
+        ) implies notif_wf(s1.notif_view(), s1.tcb_view(), m) by {
         if m != n {
             lemma_notif_wf_frame(s0.notif_view(), s0.tcb_view(), s1.notif_view(), s1.tcb_view(), m);
         }
     }
-    assert forall|s: SlotId| #![trigger s1.slot_view()[s]]
-        s1.slot_view().dom().contains(s) && !is_empty_cap(s1.slot_view()[s].cap)
-        implies cap_consistent(s1, s1.slot_view()[s].cap) by {
+    assert forall|s: SlotId|
+        #![trigger s1.slot_view()[s]]
+        s1.slot_view().dom().contains(s) && !is_empty_cap(
+            s1.slot_view()[s].cap,
+        ) implies cap_consistent(s1, s1.slot_view()[s].cap) by {
         let c = s1.slot_view()[s].cap;
         assert(c == s0.slot_view()[s].cap);
         assert(cap_consistent(s0, c));
@@ -5708,7 +6232,7 @@ pub proof fn lemma_caps_consistent_frame<S: Store>(s0: &S, s1: &S, n: ObjId)
             CapKind::Notification(m) => {
                 assert(s0.notif_view().dom().contains(m));
                 assert(notif_wf(s0.notif_view(), s0.tcb_view(), m));
-            }
+            },
             CapKind::Thread(m, _) => {
                 // The strengthened Thread clause: re-derive `cspace_resident_wf(s1, cs)` from
                 // `s0`. The bound cspace is framed (`s1.tcb[m].cspace == s0.tcb[m].cspace`), and
@@ -5723,34 +6247,42 @@ pub proof fn lemma_caps_consistent_frame<S: Store>(s0: &S, s1: &S, n: ObjId)
                 // `notif_wf(s0, wn)`, carried to `s1` — at `n` by hypothesis, at `wn != n` by
                 // `lemma_notif_wf_frame`), or `m` changed (then the off-chain hypothesis forces
                 // `wn == n`, where `notif_wf(s1, n)` is a direct hypothesis).
+
                 if s1.tcb_view()[m].state == ThreadState::BlockedNotif {
                     if let Some(wn) = s1.tcb_view()[m].wait_notif {
                         if s1.tcb_view()[m] == s0.tcb_view()[m] {
                             assert(notif_wf(s0.notif_view(), s0.tcb_view(), wn));
                             if wn != n {
-                                lemma_notif_wf_frame(s0.notif_view(), s0.tcb_view(),
-                                    s1.notif_view(), s1.tcb_view(), wn);
+                                lemma_notif_wf_frame(
+                                    s0.notif_view(),
+                                    s0.tcb_view(),
+                                    s1.notif_view(),
+                                    s1.tcb_view(),
+                                    wn,
+                                );
                             }
                         } else {
                             assert(wn == n);
                         }
                     }
                 }
-            }
+            },
             CapKind::Channel(co, _) => {
                 assert forall|e: int, v: int|
-                    (0 <= e < 2 && 0 <= v < 3
-                        && #[trigger] s1.chan_view()[co].bindings[(e, v)].notif is Some) implies {
-                        let m = s1.chan_view()[co].bindings[(e, v)].notif->Some_0;
-                        s1.notif_view().dom().contains(m) && notif_wf(s1.notif_view(), s1.tcb_view(), m)
-                    } by {
+                    (0 <= e < 2 && 0 <= v < 3 && #[trigger] s1.chan_view()[co].bindings[(
+                        e,
+                        v,
+                    )].notif is Some) implies {
+                    let m = s1.chan_view()[co].bindings[(e, v)].notif->Some_0;
+                    s1.notif_view().dom().contains(m) && notif_wf(s1.notif_view(), s1.tcb_view(), m)
+                } by {
                     let m = s1.chan_view()[co].bindings[(e, v)].notif->Some_0;
                     assert(s0.chan_view()[co].bindings[(e, v)].notif == Some(m));
                     assert(s0.notif_view().dom().contains(m));
                     assert(notif_wf(s0.notif_view(), s0.tcb_view(), m));
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 }
@@ -5766,9 +6298,8 @@ pub proof fn lemma_caps_consistent_frame<S: Store>(s0: &S, s1: &S, n: ObjId)
 // siblings with `end_caps[end] >= 1`, so `delete`'s body re-proves `caps_consistent`.
 pub open spec fn end_caps_sound<S: Store>(store: &S) -> bool {
     forall|ch: ObjId, e: int|
-        store.chan_view().dom().contains(ch) && store.chan_view()[ch].end_caps.len() == 2
-            && 0 <= e < 2
-            ==> #[trigger] store.chan_view()[ch].end_caps[e] == end_cap_count(
+        store.chan_view().dom().contains(ch) && store.chan_view()[ch].end_caps.len() == 2 && 0 <= e
+            < 2 ==> #[trigger] store.chan_view()[ch].end_caps[e] == end_cap_count(
             store.slot_view(),
             ch,
             e,
@@ -5783,13 +6314,16 @@ pub open spec fn end_caps_sound<S: Store>(store: &S) -> bool {
 // stranded (a live sibling makes `end_cap_count ≥ 1`, so `end_caps == end_cap_count + 1 ≥ 2`).
 pub open spec fn end_caps_off_by_one<S: Store>(store: &S, co: ObjId, e0: int) -> bool {
     forall|ch: ObjId, e: int|
-        store.chan_view().dom().contains(ch) && store.chan_view()[ch].end_caps.len() == 2
-            && 0 <= e < 2
-            ==> #[trigger] store.chan_view()[ch].end_caps[e] == end_cap_count(
+        store.chan_view().dom().contains(ch) && store.chan_view()[ch].end_caps.len() == 2 && 0 <= e
+            < 2 ==> #[trigger] store.chan_view()[ch].end_caps[e] == end_cap_count(
             store.slot_view(),
             ch,
             e,
-        ) + (if ch == co && e == e0 { 1nat } else { 0nat })
+        ) + (if ch == co && e == e0 {
+            1nat
+        } else {
+            0nat
+        })
 }
 
 // ── Per-term recount lemmas. The single-key bump/drop building blocks
@@ -5804,7 +6338,6 @@ pub open spec fn end_caps_off_by_one<S: Store>(store: &S, co: ObjId, e0: int) ->
 // trigger hazard. It lands with `destroy_channel`'s binding
 // release, the op that consumes it (6d), per the "count steps single-purpose,
 // where consumed" discipline — recorded, not dropped. ──
-
 // Slot drop: clearing one slot's designation of `obj` lowers `obj`'s slot census.
 proof fn lemma_designation_drop(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot, obj: ObjId)
     requires
@@ -5819,7 +6352,9 @@ proof fn lemma_designation_drop(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot, 
     let f1 = m.dom().filter(|j: SlotId| cap_obj(m[j].cap) == Some(obj));
     let f2 = m2.dom().filter(|j: SlotId| cap_obj(m2[j].cap) == Some(obj));
     assert(m2.dom() =~= m.dom());
-    assert forall|j: SlotId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.remove(k).contains(j) by {
+    assert forall|j: SlotId|
+        #![trigger f2.contains(j)]
+        f2.contains(j) <==> f1.remove(k).contains(j) by {
         if j != k {
             assert(m2[j] == m[j]);
         }
@@ -5845,9 +6380,8 @@ proof fn lemma_clear_slot_census(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot,
         } else {
             0nat
         })) as nat,
-        frame_map_refs(m.insert(k, v), x) == (frame_map_refs(m, x) - (if cap_frame_aspace(
-            m[k].cap,
-        ) == Some(x) {
+        frame_map_refs(m.insert(k, v), x) == (frame_map_refs(m, x) - (if cap_frame_aspace(m[k].cap)
+            == Some(x) {
             1nat
         } else {
             0nat
@@ -5859,7 +6393,9 @@ proof fn lemma_clear_slot_census(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot,
     let fs2 = m2.dom().filter(|j: SlotId| cap_obj(m2[j].cap) == Some(x));
     assert(fs1.finite());
     if cap_obj(m[k].cap) == Some(x) {
-        assert forall|j: SlotId| #![trigger fs2.contains(j)] fs2.contains(j) <==> fs1.remove(k).contains(j) by {
+        assert forall|j: SlotId|
+            #![trigger fs2.contains(j)]
+            fs2.contains(j) <==> fs1.remove(k).contains(j) by {
             if j != k {
                 assert(m2[j] == m[j]);
             }
@@ -5867,7 +6403,9 @@ proof fn lemma_clear_slot_census(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot,
         assert(fs2 =~= fs1.remove(k));
         assert(fs1.contains(k));
     } else {
-        assert forall|j: SlotId| #![trigger fs2.contains(j)] fs2.contains(j) <==> fs1.contains(j) by {
+        assert forall|j: SlotId|
+            #![trigger fs2.contains(j)]
+            fs2.contains(j) <==> fs1.contains(j) by {
             if j != k {
                 assert(m2[j] == m[j]);
             }
@@ -5878,7 +6416,9 @@ proof fn lemma_clear_slot_census(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot,
     let fm2 = m2.dom().filter(|j: SlotId| cap_frame_aspace(m2[j].cap) == Some(x));
     assert(fm1.finite());
     if cap_frame_aspace(m[k].cap) == Some(x) {
-        assert forall|j: SlotId| #![trigger fm2.contains(j)] fm2.contains(j) <==> fm1.remove(k).contains(j) by {
+        assert forall|j: SlotId|
+            #![trigger fm2.contains(j)]
+            fm2.contains(j) <==> fm1.remove(k).contains(j) by {
             if j != k {
                 assert(m2[j] == m[j]);
             }
@@ -5886,7 +6426,9 @@ proof fn lemma_clear_slot_census(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot,
         assert(fm2 =~= fm1.remove(k));
         assert(fm1.contains(k));
     } else {
-        assert forall|j: SlotId| #![trigger fm2.contains(j)] fm2.contains(j) <==> fm1.contains(j) by {
+        assert forall|j: SlotId|
+            #![trigger fm2.contains(j)]
+            fm2.contains(j) <==> fm1.contains(j) by {
             if j != k {
                 assert(m2[j] == m[j]);
             }
@@ -5919,7 +6461,9 @@ proof fn lemma_clear_slot_end_cap(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot
     let f2 = m2.dom().filter(|j: SlotId| cap_chan_end(m2[j].cap) == Some((ch, e)));
     assert(f1.finite());
     if cap_chan_end(m[k].cap) == Some((ch, e)) {
-        assert forall|j: SlotId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.remove(k).contains(j) by {
+        assert forall|j: SlotId|
+            #![trigger f2.contains(j)]
+            f2.contains(j) <==> f1.remove(k).contains(j) by {
             if j != k {
                 assert(m2[j] == m[j]);
             }
@@ -5952,7 +6496,9 @@ proof fn lemma_clear_drops_count(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot)
     let f1 = m.dom().filter(|j: SlotId| !is_empty_cap(m[j].cap));
     let f2 = m2.dom().filter(|j: SlotId| !is_empty_cap(m2[j].cap));
     assert(m2.dom() =~= m.dom());
-    assert forall|j: SlotId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.remove(k).contains(j) by {
+    assert forall|j: SlotId|
+        #![trigger f2.contains(j)]
+        f2.contains(j) <==> f1.remove(k).contains(j) by {
         if j != k {
             assert(m2[j] == m[j]);
         }
@@ -5979,8 +6525,8 @@ pub proof fn lemma_clear_slot_obj_census<S: Store>(
     requires
         s_new.slot_view() == sv_mid.insert(slot, es),
         s_old.slot_view().dom() == sv_mid.dom(),
-        forall|k: SlotId| #[trigger] s_old.slot_view().dom().contains(k)
-            ==> s_old.slot_view()[k].cap == sv_mid[k].cap,
+        forall|k: SlotId| #[trigger]
+            s_old.slot_view().dom().contains(k) ==> s_old.slot_view()[k].cap == sv_mid[k].cap,
         sv_mid.dom().contains(slot),
         sv_mid.dom().finite(),
         sv_mid[slot].cap == cap,
@@ -5992,8 +6538,9 @@ pub proof fn lemma_clear_slot_obj_census<S: Store>(
         s_new.timer_view() == s_old.timer_view(),
         s_new.irq_view() == s_old.irq_view(),
     ensures
-        // Additive form (no `nat` underflow): the deleted designating slot accounts for exactly
-        // the one census unit lost — at `cap_obj(cap)`, else at `cap_frame_aspace(cap)`.
+// Additive form (no `nat` underflow): the deleted designating slot accounts for exactly
+// the one census unit lost — at `cap_obj(cap)`, else at `cap_frame_aspace(cap)`.
+
         obj_census(s_old, x) == obj_census(s_new, x) + (if cap_obj(cap) == Some(x)
             || cap_frame_aspace(cap) == Some(x) {
             1nat
@@ -6029,6 +6576,7 @@ pub proof fn lemma_clear_slot_obj_census<S: Store>(
     }
     // `sv_mid[slot].cap == cap` rewrites the lemma's `cap_obj(sv_mid[slot].cap)` deltas to
     // `cap_obj(cap)`/`cap_frame_aspace(cap)`; the four view terms read framed views (equal args).
+
 }
 
 // The dual of `lemma_clear_slot_census`: *installing* a cap into a previously EMPTY
@@ -6063,14 +6611,18 @@ proof fn lemma_set_slot_census(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot, x
     assert(fs1.finite());
     assert(!fs1.contains(k));
     if cap_obj(v.cap) == Some(x) {
-        assert forall|j: SlotId| #![trigger fs2.contains(j)] fs2.contains(j) <==> fs1.insert(k).contains(j) by {
+        assert forall|j: SlotId|
+            #![trigger fs2.contains(j)]
+            fs2.contains(j) <==> fs1.insert(k).contains(j) by {
             if j != k {
                 assert(m2[j] == m[j]);
             }
         }
         assert(fs2 =~= fs1.insert(k));
     } else {
-        assert forall|j: SlotId| #![trigger fs2.contains(j)] fs2.contains(j) <==> fs1.contains(j) by {
+        assert forall|j: SlotId|
+            #![trigger fs2.contains(j)]
+            fs2.contains(j) <==> fs1.contains(j) by {
             if j != k {
                 assert(m2[j] == m[j]);
             }
@@ -6082,14 +6634,18 @@ proof fn lemma_set_slot_census(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot, x
     assert(fm1.finite());
     assert(!fm1.contains(k));
     if cap_frame_aspace(v.cap) == Some(x) {
-        assert forall|j: SlotId| #![trigger fm2.contains(j)] fm2.contains(j) <==> fm1.insert(k).contains(j) by {
+        assert forall|j: SlotId|
+            #![trigger fm2.contains(j)]
+            fm2.contains(j) <==> fm1.insert(k).contains(j) by {
             if j != k {
                 assert(m2[j] == m[j]);
             }
         }
         assert(fm2 =~= fm1.insert(k));
     } else {
-        assert forall|j: SlotId| #![trigger fm2.contains(j)] fm2.contains(j) <==> fm1.contains(j) by {
+        assert forall|j: SlotId|
+            #![trigger fm2.contains(j)]
+            fm2.contains(j) <==> fm1.contains(j) by {
             if j != k {
                 assert(m2[j] == m[j]);
             }
@@ -6114,8 +6670,8 @@ pub proof fn lemma_set_slot_obj_census<S: Store>(
     requires
         sv_mid == s_old.slot_view().insert(slot, v),
         s_new.slot_view().dom() == sv_mid.dom(),
-        forall|k: SlotId| #[trigger] s_new.slot_view().dom().contains(k)
-            ==> s_new.slot_view()[k].cap == sv_mid[k].cap,
+        forall|k: SlotId| #[trigger]
+            s_new.slot_view().dom().contains(k) ==> s_new.slot_view()[k].cap == sv_mid[k].cap,
         s_old.slot_view().dom().contains(slot),
         s_old.slot_view().dom().finite(),
         is_empty_cap(s_old.slot_view()[slot].cap),
@@ -6135,8 +6691,8 @@ pub proof fn lemma_set_slot_obj_census<S: Store>(
 {
     // slot_refs/frame_map_refs: `s_old` → `sv_mid` (the install), then `sv_mid` → `s_new` (caps equal).
     lemma_set_slot_census(s_old.slot_view(), slot, v, x);
-    assert forall|k: SlotId| #[trigger] sv_mid.dom().contains(k)
-        implies sv_mid[k].cap == s_new.slot_view()[k].cap by {
+    assert forall|k: SlotId| #[trigger] sv_mid.dom().contains(k) implies sv_mid[k].cap
+        == s_new.slot_view()[k].cap by {
         assert(s_new.slot_view().dom().contains(k));
     }
     lemma_same_caps_same_census(sv_mid, s_new.slot_view(), x);
@@ -6151,7 +6707,6 @@ pub proof fn lemma_set_slot_obj_census<S: Store>(
 // — by one, the inverse of `delete_prepare` clearing it. `lemma_set_slot_census` keyed its
 // rise off `is_empty_cap(old)`; here the old cap is a (non-empty) unmapped Frame, so the
 // precondition relaxes to "designates and maps nothing" (both hold for `Frame{mapping:None}`).
-
 // The slot-term deltas for re-pointing a slot whose old cap designates/maps nothing to a new
 // cap `v` (the `lemma_set_slot_census` shape, old-cap precondition relaxed from `is_empty_cap`).
 proof fn lemma_map_frame_slot_census(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot, x: ObjId)
@@ -6180,14 +6735,18 @@ proof fn lemma_map_frame_slot_census(m: Map<SlotId, CapSlot>, k: SlotId, v: CapS
     assert(fs1.finite());
     assert(!fs1.contains(k));
     if cap_obj(v.cap) == Some(x) {
-        assert forall|j: SlotId| #![trigger fs2.contains(j)] fs2.contains(j) <==> fs1.insert(k).contains(j) by {
+        assert forall|j: SlotId|
+            #![trigger fs2.contains(j)]
+            fs2.contains(j) <==> fs1.insert(k).contains(j) by {
             if j != k {
                 assert(m2[j] == m[j]);
             }
         }
         assert(fs2 =~= fs1.insert(k));
     } else {
-        assert forall|j: SlotId| #![trigger fs2.contains(j)] fs2.contains(j) <==> fs1.contains(j) by {
+        assert forall|j: SlotId|
+            #![trigger fs2.contains(j)]
+            fs2.contains(j) <==> fs1.contains(j) by {
             if j != k {
                 assert(m2[j] == m[j]);
             }
@@ -6199,14 +6758,18 @@ proof fn lemma_map_frame_slot_census(m: Map<SlotId, CapSlot>, k: SlotId, v: CapS
     assert(fm1.finite());
     assert(!fm1.contains(k));
     if cap_frame_aspace(v.cap) == Some(x) {
-        assert forall|j: SlotId| #![trigger fm2.contains(j)] fm2.contains(j) <==> fm1.insert(k).contains(j) by {
+        assert forall|j: SlotId|
+            #![trigger fm2.contains(j)]
+            fm2.contains(j) <==> fm1.insert(k).contains(j) by {
             if j != k {
                 assert(m2[j] == m[j]);
             }
         }
         assert(fm2 =~= fm1.insert(k));
     } else {
-        assert forall|j: SlotId| #![trigger fm2.contains(j)] fm2.contains(j) <==> fm1.contains(j) by {
+        assert forall|j: SlotId|
+            #![trigger fm2.contains(j)]
+            fm2.contains(j) <==> fm1.contains(j) by {
             if j != k {
                 assert(m2[j] == m[j]);
             }
@@ -6309,16 +6872,19 @@ pub proof fn lemma_map_frame_caps_consistent<S: Store>(
     assert(sv1.dom() =~= sv0.dom());
     assert(!is_empty_cap(v.cap));
     // Emptiness is fixed at every slot: `slot` goes Frame→Frame (both non-empty); others equal.
-    assert forall|s: SlotId| #[trigger] sv1.dom().contains(s)
-        implies is_empty_cap(sv1[s].cap) == is_empty_cap(sv0[s].cap) by {
+    assert forall|s: SlotId| #[trigger] sv1.dom().contains(s) implies is_empty_cap(sv1[s].cap)
+        == is_empty_cap(sv0[s].cap) by {
         if s != slot {
             assert(sv1[s] == sv0[s]);
         }
     }
     assert(sv1.dom().finite());
-    assert forall|s: SlotId| #![trigger sv1[s]]
-        sv1.dom().contains(s) && !is_empty_cap(sv1[s].cap)
-        implies cap_consistent(s_new, sv1[s].cap) by {
+    assert forall|s: SlotId|
+        #![trigger sv1[s]]
+        sv1.dom().contains(s) && !is_empty_cap(sv1[s].cap) implies cap_consistent(
+        s_new,
+        sv1[s].cap,
+    ) by {
         if s == slot {
             // The recorded Frame cap is consistent unconditionally (`_ => true`).
         } else {
@@ -6337,13 +6903,7 @@ pub proof fn lemma_map_frame_caps_consistent<S: Store>(
 // cap lowers `end_cap_count(ch, e)` by one and leaves every other `(ch2, e2)` fixed.
 // The `lemma_designation_drop` shape over the `cap_chan_end` filter; `delete`'s body
 // (PR2) consumes it when it empties a deleted channel cap's slot.
-proof fn lemma_end_cap_count_drop(
-    m: Map<SlotId, CapSlot>,
-    k: SlotId,
-    v: CapSlot,
-    ch: ObjId,
-    e: int,
-)
+proof fn lemma_end_cap_count_drop(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot, ch: ObjId, e: int)
     requires
         m.dom().finite(),
         m.dom().contains(k),
@@ -6360,7 +6920,9 @@ proof fn lemma_end_cap_count_drop(
     // The (ch, e) drop: the filter loses exactly k.
     let f1 = m.dom().filter(|j: SlotId| cap_chan_end(m[j].cap) == Some((ch, e)));
     let f2 = m2.dom().filter(|j: SlotId| cap_chan_end(m2[j].cap) == Some((ch, e)));
-    assert forall|j: SlotId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.remove(k).contains(j) by {
+    assert forall|j: SlotId|
+        #![trigger f2.contains(j)]
+        f2.contains(j) <==> f1.remove(k).contains(j) by {
         if j != k {
             assert(m2[j] == m[j]);
         }
@@ -6370,8 +6932,11 @@ proof fn lemma_end_cap_count_drop(
     assert(f1.finite());
     // The others-fixed: for (ch2, e2) != (ch, e), k named (ch, e) in m and names
     // nothing in m2, so neither filter ever contained k — the set is unchanged.
-    assert forall|ch2: ObjId, e2: int| (ch2 != ch || e2 != e) implies
-        #[trigger] end_cap_count(m2, ch2, e2) == end_cap_count(m, ch2, e2) by {
+    assert forall|ch2: ObjId, e2: int| (ch2 != ch || e2 != e) implies #[trigger] end_cap_count(
+        m2,
+        ch2,
+        e2,
+    ) == end_cap_count(m, ch2, e2) by {
         let g1 = m.dom().filter(|j: SlotId| cap_chan_end(m[j].cap) == Some((ch2, e2)));
         let g2 = m2.dom().filter(|j: SlotId| cap_chan_end(m2[j].cap) == Some((ch2, e2)));
         assert forall|j: SlotId| #![trigger g2.contains(j)] g2.contains(j) <==> g1.contains(j) by {
@@ -6398,7 +6963,9 @@ proof fn lemma_frame_map_bump(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot, o:
     let f1 = m.dom().filter(|j: SlotId| cap_frame_aspace(m[j].cap) == Some(o));
     let f2 = m2.dom().filter(|j: SlotId| cap_frame_aspace(m2[j].cap) == Some(o));
     assert(m2.dom() =~= m.dom());
-    assert forall|j: SlotId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.insert(k).contains(j) by {
+    assert forall|j: SlotId|
+        #![trigger f2.contains(j)]
+        f2.contains(j) <==> f1.insert(k).contains(j) by {
         if j != k {
             assert(m2[j] == m[j]);
         }
@@ -6423,7 +6990,9 @@ proof fn lemma_frame_map_drop(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot, o:
     let f1 = m.dom().filter(|j: SlotId| cap_frame_aspace(m[j].cap) == Some(o));
     let f2 = m2.dom().filter(|j: SlotId| cap_frame_aspace(m2[j].cap) == Some(o));
     assert(m2.dom() =~= m.dom());
-    assert forall|j: SlotId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.remove(k).contains(j) by {
+    assert forall|j: SlotId|
+        #![trigger f2.contains(j)]
+        f2.contains(j) <==> f1.remove(k).contains(j) by {
         if j != k {
             assert(m2[j] == m[j]);
         }
@@ -6448,7 +7017,9 @@ proof fn lemma_armed_timer_bump(m: Map<ObjId, TimerView>, k: ObjId, v: TimerView
     let f1 = m.dom().filter(|j: ObjId| m[j].armed && m[j].notif == Some(o));
     let f2 = m2.dom().filter(|j: ObjId| m2[j].armed && m2[j].notif == Some(o));
     assert(m2.dom() =~= m.dom());
-    assert forall|j: ObjId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.insert(k).contains(j) by {
+    assert forall|j: ObjId|
+        #![trigger f2.contains(j)]
+        f2.contains(j) <==> f1.insert(k).contains(j) by {
         if j != k {
             assert(m2[j] == m[j]);
         }
@@ -6473,7 +7044,9 @@ proof fn lemma_armed_timer_drop(m: Map<ObjId, TimerView>, k: ObjId, v: TimerView
     let f1 = m.dom().filter(|j: ObjId| m[j].armed && m[j].notif == Some(o));
     let f2 = m2.dom().filter(|j: ObjId| m2[j].armed && m2[j].notif == Some(o));
     assert(m2.dom() =~= m.dom());
-    assert forall|j: ObjId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.remove(k).contains(j) by {
+    assert forall|j: ObjId|
+        #![trigger f2.contains(j)]
+        f2.contains(j) <==> f1.remove(k).contains(j) by {
         if j != k {
             assert(m2[j] == m[j]);
         }
@@ -6501,21 +7074,27 @@ pub proof fn lemma_armed_timer_disarm(
         post.dom() == pre.dom(),
         pre.dom().contains(t),
         !post[t].armed,
-        forall|j: ObjId| #![trigger post[j]]
+        forall|j: ObjId|
+            #![trigger post[j]]
             j != t ==> post[j].armed == pre[j].armed && post[j].notif == pre[j].notif,
     ensures
-        // `+1` form (not `(x-1) as nat`) so the consumer's census arithmetic has no
-        // saturation ambiguity: the pre-count is provably ≥ 1 here (`t` is in the set).
-        (pre[t].armed && pre[t].notif == Some(o)) ==>
-            armed_timer_refs(pre, o) == armed_timer_refs(post, o) + 1,
-        !(pre[t].armed && pre[t].notif == Some(o)) ==>
-            armed_timer_refs(post, o) == armed_timer_refs(pre, o),
+// `+1` form (not `(x-1) as nat`) so the consumer's census arithmetic has no
+// saturation ambiguity: the pre-count is provably ≥ 1 here (`t` is in the set).
+
+        (pre[t].armed && pre[t].notif == Some(o)) ==> armed_timer_refs(pre, o) == armed_timer_refs(
+            post,
+            o,
+        ) + 1,
+        !(pre[t].armed && pre[t].notif == Some(o)) ==> armed_timer_refs(post, o)
+            == armed_timer_refs(pre, o),
 {
     let f1 = pre.dom().filter(|j: ObjId| pre[j].armed && pre[j].notif == Some(o));
     let f2 = post.dom().filter(|j: ObjId| post[j].armed && post[j].notif == Some(o));
     assert(!f2.contains(t));
     if pre[t].armed && pre[t].notif == Some(o) {
-        assert forall|j: ObjId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.remove(t).contains(j) by {
+        assert forall|j: ObjId|
+            #![trigger f2.contains(j)]
+            f2.contains(j) <==> f1.remove(t).contains(j) by {
             if j != t {
                 assert(post[j].armed == pre[j].armed && post[j].notif == pre[j].notif);
             }
@@ -6552,13 +7131,19 @@ pub proof fn lemma_armed_timer_retarget(
         pre.dom().finite(),
         post.dom() == pre.dom(),
         pre.dom().contains(t),
-        forall|j: ObjId| #![trigger post[j]]
+        forall|j: ObjId|
+            #![trigger post[j]]
             j != t ==> post[j].armed == pre[j].armed && post[j].notif == pre[j].notif,
     ensures
-        armed_timer_refs(post, o)
-            + (if pre[t].armed && pre[t].notif == Some(o) { 1nat } else { 0nat })
-            == armed_timer_refs(pre, o)
-            + (if post[t].armed && post[t].notif == Some(o) { 1nat } else { 0nat }),
+        armed_timer_refs(post, o) + (if pre[t].armed && pre[t].notif == Some(o) {
+            1nat
+        } else {
+            0nat
+        }) == armed_timer_refs(pre, o) + (if post[t].armed && post[t].notif == Some(o) {
+            1nat
+        } else {
+            0nat
+        }),
 {
     let f1 = pre.dom().filter(|j: ObjId| pre[j].armed && pre[j].notif == Some(o));
     let f2 = post.dom().filter(|j: ObjId| post[j].armed && post[j].notif == Some(o));
@@ -6567,21 +7152,31 @@ pub proof fn lemma_armed_timer_retarget(
     // Off `t`, the two filters agree (both fields framed); they differ only on `t`.
     if pre_in && post_in {
         assert forall|j: ObjId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.contains(j) by {
-            if j != t { assert(post[j].armed == pre[j].armed && post[j].notif == pre[j].notif); }
+            if j != t {
+                assert(post[j].armed == pre[j].armed && post[j].notif == pre[j].notif);
+            }
         }
         assert(f2 =~= f1);
     } else if pre_in && !post_in {
         assert(!f2.contains(t));
-        assert forall|j: ObjId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.remove(t).contains(j) by {
-            if j != t { assert(post[j].armed == pre[j].armed && post[j].notif == pre[j].notif); }
+        assert forall|j: ObjId|
+            #![trigger f2.contains(j)]
+            f2.contains(j) <==> f1.remove(t).contains(j) by {
+            if j != t {
+                assert(post[j].armed == pre[j].armed && post[j].notif == pre[j].notif);
+            }
         }
         assert(f2 =~= f1.remove(t));
         assert(f1.contains(t));
         assert(f1.finite());
     } else if !pre_in && post_in {
         assert(!f1.contains(t));
-        assert forall|j: ObjId| #![trigger f1.contains(j)] f1.contains(j) <==> f2.remove(t).contains(j) by {
-            if j != t { assert(post[j].armed == pre[j].armed && post[j].notif == pre[j].notif); }
+        assert forall|j: ObjId|
+            #![trigger f1.contains(j)]
+            f1.contains(j) <==> f2.remove(t).contains(j) by {
+            if j != t {
+                assert(post[j].armed == pre[j].armed && post[j].notif == pre[j].notif);
+            }
         }
         assert(f1 =~= f2.remove(t));
         assert(f2.contains(t));
@@ -6590,7 +7185,9 @@ pub proof fn lemma_armed_timer_retarget(
         assert(!f1.contains(t));
         assert(!f2.contains(t));
         assert forall|j: ObjId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.contains(j) by {
-            if j != t { assert(post[j].armed == pre[j].armed && post[j].notif == pre[j].notif); }
+            if j != t {
+                assert(post[j].armed == pre[j].armed && post[j].notif == pre[j].notif);
+            }
         }
         assert(f2 =~= f1);
     }
@@ -6612,13 +7209,19 @@ pub proof fn lemma_irq_binding_retarget(
         pre.dom().finite(),
         post.dom() == pre.dom(),
         pre.dom().contains(i),
-        forall|j: ObjId| #![trigger post[j]]
+        forall|j: ObjId|
+            #![trigger post[j]]
             j != i ==> post[j].bound == pre[j].bound && post[j].notif == pre[j].notif,
     ensures
-        irq_binding_refs(post, o)
-            + (if pre[i].bound && pre[i].notif == Some(o) { 1nat } else { 0nat })
-            == irq_binding_refs(pre, o)
-            + (if post[i].bound && post[i].notif == Some(o) { 1nat } else { 0nat }),
+        irq_binding_refs(post, o) + (if pre[i].bound && pre[i].notif == Some(o) {
+            1nat
+        } else {
+            0nat
+        }) == irq_binding_refs(pre, o) + (if post[i].bound && post[i].notif == Some(o) {
+            1nat
+        } else {
+            0nat
+        }),
 {
     let f1 = pre.dom().filter(|j: ObjId| pre[j].bound && pre[j].notif == Some(o));
     let f2 = post.dom().filter(|j: ObjId| post[j].bound && post[j].notif == Some(o));
@@ -6626,21 +7229,31 @@ pub proof fn lemma_irq_binding_retarget(
     let post_in = post[i].bound && post[i].notif == Some(o);
     if pre_in && post_in {
         assert forall|j: ObjId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.contains(j) by {
-            if j != i { assert(post[j].bound == pre[j].bound && post[j].notif == pre[j].notif); }
+            if j != i {
+                assert(post[j].bound == pre[j].bound && post[j].notif == pre[j].notif);
+            }
         }
         assert(f2 =~= f1);
     } else if pre_in && !post_in {
         assert(!f2.contains(i));
-        assert forall|j: ObjId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.remove(i).contains(j) by {
-            if j != i { assert(post[j].bound == pre[j].bound && post[j].notif == pre[j].notif); }
+        assert forall|j: ObjId|
+            #![trigger f2.contains(j)]
+            f2.contains(j) <==> f1.remove(i).contains(j) by {
+            if j != i {
+                assert(post[j].bound == pre[j].bound && post[j].notif == pre[j].notif);
+            }
         }
         assert(f2 =~= f1.remove(i));
         assert(f1.contains(i));
         assert(f1.finite());
     } else if !pre_in && post_in {
         assert(!f1.contains(i));
-        assert forall|j: ObjId| #![trigger f1.contains(j)] f1.contains(j) <==> f2.remove(i).contains(j) by {
-            if j != i { assert(post[j].bound == pre[j].bound && post[j].notif == pre[j].notif); }
+        assert forall|j: ObjId|
+            #![trigger f1.contains(j)]
+            f1.contains(j) <==> f2.remove(i).contains(j) by {
+            if j != i {
+                assert(post[j].bound == pre[j].bound && post[j].notif == pre[j].notif);
+            }
         }
         assert(f1 =~= f2.remove(i));
         assert(f2.contains(i));
@@ -6649,7 +7262,9 @@ pub proof fn lemma_irq_binding_retarget(
         assert(!f1.contains(i));
         assert(!f2.contains(i));
         assert forall|j: ObjId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.contains(j) by {
-            if j != i { assert(post[j].bound == pre[j].bound && post[j].notif == pre[j].notif); }
+            if j != i {
+                assert(post[j].bound == pre[j].bound && post[j].notif == pre[j].notif);
+            }
         }
         assert(f2 =~= f1);
     }
@@ -6674,7 +7289,9 @@ proof fn lemma_thread_hold_cspace_bump(m: Map<ObjId, TcbView>, k: ObjId, v: TcbV
     let a2 = m2.dom().filter(|j: ObjId| m2[j].aspace == Some(o));
     assert(m2.dom() =~= m.dom());
     assert(m2[k] == v);
-    assert forall|j: ObjId| #![trigger c2.contains(j)] c2.contains(j) <==> c1.insert(k).contains(j) by {
+    assert forall|j: ObjId|
+        #![trigger c2.contains(j)]
+        c2.contains(j) <==> c1.insert(k).contains(j) by {
         if j != k {
             assert(m2[j] == m[j]);
         }
@@ -6694,7 +7311,12 @@ proof fn lemma_thread_hold_cspace_bump(m: Map<ObjId, TcbView>, k: ObjId, v: TcbV
 
 // Thread-hold drop (cspace edit): clearing a thread's `o` cspace hold lowers the
 // census (the term `destroy_tcb`'s `unref_cspace` releases; teardown, 6d).
-pub(crate) proof fn lemma_thread_hold_cspace_drop(m: Map<ObjId, TcbView>, k: ObjId, v: TcbView, o: ObjId)
+pub(crate) proof fn lemma_thread_hold_cspace_drop(
+    m: Map<ObjId, TcbView>,
+    k: ObjId,
+    v: TcbView,
+    o: ObjId,
+)
     requires
         m.dom().finite(),
         m.dom().contains(k),
@@ -6711,7 +7333,9 @@ pub(crate) proof fn lemma_thread_hold_cspace_drop(m: Map<ObjId, TcbView>, k: Obj
     let a2 = m2.dom().filter(|j: ObjId| m2[j].aspace == Some(o));
     assert(m2.dom() =~= m.dom());
     assert(m2[k] == v);
-    assert forall|j: ObjId| #![trigger c2.contains(j)] c2.contains(j) <==> c1.remove(k).contains(j) by {
+    assert forall|j: ObjId|
+        #![trigger c2.contains(j)]
+        c2.contains(j) <==> c1.remove(k).contains(j) by {
         if j != k {
             assert(m2[j] == m[j]);
         }
@@ -6749,7 +7373,9 @@ proof fn lemma_thread_hold_aspace_bump(m: Map<ObjId, TcbView>, k: ObjId, v: TcbV
     let a2 = m2.dom().filter(|j: ObjId| m2[j].aspace == Some(o));
     assert(m2.dom() =~= m.dom());
     assert(m2[k] == v);
-    assert forall|j: ObjId| #![trigger a2.contains(j)] a2.contains(j) <==> a1.insert(k).contains(j) by {
+    assert forall|j: ObjId|
+        #![trigger a2.contains(j)]
+        a2.contains(j) <==> a1.insert(k).contains(j) by {
         if j != k {
             assert(m2[j] == m[j]);
         }
@@ -6767,7 +7393,12 @@ proof fn lemma_thread_hold_aspace_bump(m: Map<ObjId, TcbView>, k: ObjId, v: TcbV
     assert(c2 =~= c1);
 }
 
-pub(crate) proof fn lemma_thread_hold_aspace_drop(m: Map<ObjId, TcbView>, k: ObjId, v: TcbView, o: ObjId)
+pub(crate) proof fn lemma_thread_hold_aspace_drop(
+    m: Map<ObjId, TcbView>,
+    k: ObjId,
+    v: TcbView,
+    o: ObjId,
+)
     requires
         m.dom().finite(),
         m.dom().contains(k),
@@ -6784,7 +7415,9 @@ pub(crate) proof fn lemma_thread_hold_aspace_drop(m: Map<ObjId, TcbView>, k: Obj
     let a2 = m2.dom().filter(|j: ObjId| m2[j].aspace == Some(o));
     assert(m2.dom() =~= m.dom());
     assert(m2[k] == v);
-    assert forall|j: ObjId| #![trigger a2.contains(j)] a2.contains(j) <==> a1.remove(k).contains(j) by {
+    assert forall|j: ObjId|
+        #![trigger a2.contains(j)]
+        a2.contains(j) <==> a1.remove(k).contains(j) by {
         if j != k {
             assert(m2[j] == m[j]);
         }
@@ -6815,7 +7448,6 @@ pub(crate) proof fn lemma_thread_hold_aspace_drop(m: Map<ObjId, TcbView>, k: Obj
 // `lemma_waiter_refs_frame_dequeued` because the halted subject `t` is off every chain — the
 // edited field, `cspace`/`aspace`, is one `waiter_chain` never reads); `refcount_sound(s0)` +
 // the unchanged `refs` then give the off-by-one at the held object and full soundness elsewhere.
-
 pub proof fn lemma_census_after_hold_clear<S: Store>(s0: &S, s1: &S, t: ObjId, cs: ObjId)
     requires
         refcount_sound(s0),
@@ -6829,8 +7461,7 @@ pub proof fn lemma_census_after_hold_clear<S: Store>(s0: &S, s1: &S, t: ObjId, c
         s1.timer_view() == s0.timer_view(),
         s1.irq_view() == s0.irq_view(),
         s1.refs_view() == s0.refs_view(),
-        s1.tcb_view() == s0.tcb_view().insert(
-            t, TcbView { cspace: None, ..s0.tcb_view()[t] }),
+        s1.tcb_view() == s0.tcb_view().insert(t, TcbView { cspace: None, ..s0.tcb_view()[t] }),
         // `t` is off every waiter chain (supplied by `lemma_thread_off_all_chains` once `t` is
         // halted with `wait_notif` cleared) — so the cspace clear perturbs no `waiter_refs`.
         forall|o: ObjId, ws: Seq<ObjId>|
@@ -6867,8 +7498,12 @@ pub proof fn lemma_census_after_hold_clear<S: Store>(s0: &S, s1: &S, t: ObjId, c
     }
     assert(obj_census(s0, cs) >= 1);
 
-    assert forall|o: ObjId| #[trigger] obj_census(s1, o)
-        == (if o == cs { (obj_census(s0, o) - 1) as nat } else { obj_census(s0, o) }) by {
+    assert forall|o: ObjId| #[trigger]
+        obj_census(s1, o) == (if o == cs {
+            (obj_census(s0, o) - 1) as nat
+        } else {
+            obj_census(s0, o)
+        }) by {
         // waiter term framed: `t` off every chain in both states (cspace ignored by the chain).
         assert forall|ws: Seq<ObjId>| waiter_chain(nv, tvf, o, ws) implies !ws.contains(t) by {
             assert(waiter_chain(nv, tv0, o, ws));
@@ -6879,15 +7514,23 @@ pub proof fn lemma_census_after_hold_clear<S: Store>(s0: &S, s1: &S, t: ObjId, c
             let c1 = tv0.dom().filter(|j: ObjId| tv0[j].cspace == Some(o));
             let c2 = tvf.dom().filter(|j: ObjId| tvf[j].cspace == Some(o));
             assert(c2 =~= c1) by {
-                assert forall|j: ObjId| #![trigger c2.contains(j)] c2.contains(j) <==> c1.contains(j) by {
-                    if j != t { assert(tvf[j] == tv0[j]); }
+                assert forall|j: ObjId|
+                    #![trigger c2.contains(j)]
+                    c2.contains(j) <==> c1.contains(j) by {
+                    if j != t {
+                        assert(tvf[j] == tv0[j]);
+                    }
                 }
             }
             let a1 = tv0.dom().filter(|j: ObjId| tv0[j].aspace == Some(o));
             let a2 = tvf.dom().filter(|j: ObjId| tvf[j].aspace == Some(o));
             assert(a2 =~= a1) by {
-                assert forall|j: ObjId| #![trigger a2.contains(j)] a2.contains(j) <==> a1.contains(j) by {
-                    if j != t { assert(tvf[j] == tv0[j]); }
+                assert forall|j: ObjId|
+                    #![trigger a2.contains(j)]
+                    a2.contains(j) <==> a1.contains(j) by {
+                    if j != t {
+                        assert(tvf[j] == tv0[j]);
+                    }
                 }
             }
             assert(thread_hold_refs(tvf, o) == thread_hold_refs(tv0, o));
@@ -6896,12 +7539,13 @@ pub proof fn lemma_census_after_hold_clear<S: Store>(s0: &S, s1: &S, t: ObjId, c
 
     lemma_in_refs_from_census(s0, cs);
     assert(s1.refs_view()[cs] == obj_census(s1, cs) + 1);
-    assert forall|x: ObjId| x != cs && s1.refs_view().dom().contains(x)
-        implies s1.refs_view()[x] == obj_census(s1, x) by {
+    assert forall|x: ObjId| x != cs && s1.refs_view().dom().contains(x) implies s1.refs_view()[x]
+        == obj_census(s1, x) by {
         assert(s0.refs_view()[x] == obj_census(s0, x));
     }
-    assert forall|o: ObjId| #[trigger] obj_census(s1, o) >= 1
-        implies s1.refs_view().dom().contains(o) by {
+    assert forall|o: ObjId| #[trigger] obj_census(s1, o) >= 1 implies s1.refs_view().dom().contains(
+        o,
+    ) by {
         if o != cs {
             assert(obj_census(s1, o) == obj_census(s0, o));
             lemma_in_refs_from_census(s0, o);
@@ -6922,8 +7566,7 @@ pub proof fn lemma_census_after_hold_clear_aspace<S: Store>(s0: &S, s1: &S, t: O
         s1.timer_view() == s0.timer_view(),
         s1.irq_view() == s0.irq_view(),
         s1.refs_view() == s0.refs_view(),
-        s1.tcb_view() == s0.tcb_view().insert(
-            t, TcbView { aspace: None, ..s0.tcb_view()[t] }),
+        s1.tcb_view() == s0.tcb_view().insert(t, TcbView { aspace: None, ..s0.tcb_view()[t] }),
         forall|o: ObjId, ws: Seq<ObjId>|
             waiter_chain(s0.notif_view(), s0.tcb_view(), o, ws) ==> !ws.contains(t),
     ensures
@@ -6952,8 +7595,12 @@ pub proof fn lemma_census_after_hold_clear_aspace<S: Store>(s0: &S, s1: &S, t: O
     }
     assert(obj_census(s0, a) >= 1);
 
-    assert forall|o: ObjId| #[trigger] obj_census(s1, o)
-        == (if o == a { (obj_census(s0, o) - 1) as nat } else { obj_census(s0, o) }) by {
+    assert forall|o: ObjId| #[trigger]
+        obj_census(s1, o) == (if o == a {
+            (obj_census(s0, o) - 1) as nat
+        } else {
+            obj_census(s0, o)
+        }) by {
         assert forall|ws: Seq<ObjId>| waiter_chain(nv, tvf, o, ws) implies !ws.contains(t) by {
             assert(waiter_chain(nv, tv0, o, ws));
         }
@@ -6962,15 +7609,23 @@ pub proof fn lemma_census_after_hold_clear_aspace<S: Store>(s0: &S, s1: &S, t: O
             let a1 = tv0.dom().filter(|j: ObjId| tv0[j].aspace == Some(o));
             let a2 = tvf.dom().filter(|j: ObjId| tvf[j].aspace == Some(o));
             assert(a2 =~= a1) by {
-                assert forall|j: ObjId| #![trigger a2.contains(j)] a2.contains(j) <==> a1.contains(j) by {
-                    if j != t { assert(tvf[j] == tv0[j]); }
+                assert forall|j: ObjId|
+                    #![trigger a2.contains(j)]
+                    a2.contains(j) <==> a1.contains(j) by {
+                    if j != t {
+                        assert(tvf[j] == tv0[j]);
+                    }
                 }
             }
             let c1 = tv0.dom().filter(|j: ObjId| tv0[j].cspace == Some(o));
             let c2 = tvf.dom().filter(|j: ObjId| tvf[j].cspace == Some(o));
             assert(c2 =~= c1) by {
-                assert forall|j: ObjId| #![trigger c2.contains(j)] c2.contains(j) <==> c1.contains(j) by {
-                    if j != t { assert(tvf[j] == tv0[j]); }
+                assert forall|j: ObjId|
+                    #![trigger c2.contains(j)]
+                    c2.contains(j) <==> c1.contains(j) by {
+                    if j != t {
+                        assert(tvf[j] == tv0[j]);
+                    }
                 }
             }
             assert(thread_hold_refs(tvf, o) == thread_hold_refs(tv0, o));
@@ -6979,12 +7634,13 @@ pub proof fn lemma_census_after_hold_clear_aspace<S: Store>(s0: &S, s1: &S, t: O
 
     lemma_in_refs_from_census(s0, a);
     assert(s1.refs_view()[a] == obj_census(s1, a) + 1);
-    assert forall|x: ObjId| x != a && s1.refs_view().dom().contains(x)
-        implies s1.refs_view()[x] == obj_census(s1, x) by {
+    assert forall|x: ObjId| x != a && s1.refs_view().dom().contains(x) implies s1.refs_view()[x]
+        == obj_census(s1, x) by {
         assert(s0.refs_view()[x] == obj_census(s0, x));
     }
-    assert forall|o: ObjId| #[trigger] obj_census(s1, o) >= 1
-        implies s1.refs_view().dom().contains(o) by {
+    assert forall|o: ObjId| #[trigger] obj_census(s1, o) >= 1 implies s1.refs_view().dom().contains(
+        o,
+    ) by {
         if o != a {
             assert(obj_census(s1, o) == obj_census(s0, o));
             lemma_in_refs_from_census(s0, o);
@@ -7022,10 +7678,12 @@ pub proof fn lemma_census_frame_thread_halt<S: Store>(s0: &S, s1: &S, t: ObjId)
     let tv0 = s0.tcb_view();
     let tvf = s1.tcb_view();
     assert forall|k: ObjId| #[trigger] tvf[k].cspace == tv0[k].cspace by {
-        if k != t {}
+        if k != t {
+        }
     }
     assert forall|k: ObjId| #[trigger] tvf[k].aspace == tv0[k].aspace by {
-        if k != t {}
+        if k != t {
+        }
     }
     assert forall|o: ObjId| #[trigger] obj_census(s1, o) == obj_census(s0, o) by {
         lemma_waiter_refs_frame_dequeued(s0.notif_view(), tv0, tvf, t, o);
@@ -7062,30 +7720,42 @@ pub proof fn lemma_waiter_dequeue_census<S: Store>(s0: &S, s1: &S, n: ObjId)
         // so for any `o != n` no changed node names `o`, the antecedent `lemma_waiter_refs_frame`
         // needs (the GLB across `signal`, whose changed Runnable ready-tail has `wait_notif None`,
         // and `remove_waiter`, whose changed nodes all name `n`).
-        forall|k: ObjId| #[trigger] s1.tcb_view()[k] != s0.tcb_view()[k]
-            ==> (s0.tcb_view()[k].wait_notif is None || s0.tcb_view()[k].wait_notif == Some(n))
-                && (s1.tcb_view()[k].wait_notif is None || s1.tcb_view()[k].wait_notif == Some(n)),
+        forall|k: ObjId| #[trigger]
+            s1.tcb_view()[k] != s0.tcb_view()[k] ==> (s0.tcb_view()[k].wait_notif is None
+                || s0.tcb_view()[k].wait_notif == Some(n)) && (s1.tcb_view()[k].wait_notif is None
+                || s1.tcb_view()[k].wait_notif == Some(n)),
         // exactly one waiter left `n`'s chain.
-        waiter_refs(s1.notif_view(), s1.tcb_view(), n) + 1
-            == waiter_refs(s0.notif_view(), s0.tcb_view(), n),
+        waiter_refs(s1.notif_view(), s1.tcb_view(), n) + 1 == waiter_refs(
+            s0.notif_view(),
+            s0.tcb_view(),
+            n,
+        ),
     ensures
-        forall|o: ObjId| #[trigger] obj_census(s1, o)
-            == (if o == n { (obj_census(s0, o) - 1) as nat } else { obj_census(s0, o) }),
+        forall|o: ObjId| #[trigger]
+            obj_census(s1, o) == (if o == n {
+                (obj_census(s0, o) - 1) as nat
+            } else {
+                obj_census(s0, o)
+            }),
 {
     let nv0 = s0.notif_view();
     let tv0 = s0.tcb_view();
     let nvf = s1.notif_view();
     let tvf = s1.tcb_view();
-    assert forall|o: ObjId| #[trigger] obj_census(s1, o)
-        == (if o == n { (obj_census(s0, o) - 1) as nat } else { obj_census(s0, o) }) by {
+    assert forall|o: ObjId| #[trigger]
+        obj_census(s1, o) == (if o == n {
+            (obj_census(s0, o) - 1) as nat
+        } else {
+            obj_census(s0, o)
+        }) by {
         // thread-hold term framed everywhere (cspace/aspace fixed); the four non-tcb terms ride
         // the view equalities; `waiter_refs` rides `lemma_waiter_refs_frame` off `n` and the
         // `-1` delta at `n`.
         lemma_thread_hold_frame(tv0, tvf, o);
         if o != n {
             assert(nvf[o] == nv0[o]);
-            assert forall|k: ObjId| #[trigger] tvf[k] != tv0[k]
-                implies tv0[k].wait_notif != Some(o) && tvf[k].wait_notif != Some(o) by {}
+            assert forall|k: ObjId| #[trigger] tvf[k] != tv0[k] implies tv0[k].wait_notif != Some(o)
+                && tvf[k].wait_notif != Some(o) by {}
             lemma_waiter_refs_frame(nv0, tv0, nvf, tvf, n, o);
         }
     }
@@ -7106,27 +7776,39 @@ pub proof fn lemma_waiter_enqueue_census<S: Store>(s0: &S, s1: &S, n: ObjId)
         s1.tcb_view().dom() == s0.tcb_view().dom(),
         forall|k: ObjId| #[trigger] s1.tcb_view()[k].cspace == s0.tcb_view()[k].cspace,
         forall|k: ObjId| #[trigger] s1.tcb_view()[k].aspace == s0.tcb_view()[k].aspace,
-        forall|k: ObjId| #[trigger] s1.tcb_view()[k] != s0.tcb_view()[k]
-            ==> (s0.tcb_view()[k].wait_notif is None || s0.tcb_view()[k].wait_notif == Some(n))
-                && (s1.tcb_view()[k].wait_notif is None || s1.tcb_view()[k].wait_notif == Some(n)),
+        forall|k: ObjId| #[trigger]
+            s1.tcb_view()[k] != s0.tcb_view()[k] ==> (s0.tcb_view()[k].wait_notif is None
+                || s0.tcb_view()[k].wait_notif == Some(n)) && (s1.tcb_view()[k].wait_notif is None
+                || s1.tcb_view()[k].wait_notif == Some(n)),
         // exactly one waiter joined `n`'s chain.
-        waiter_refs(s1.notif_view(), s1.tcb_view(), n)
-            == waiter_refs(s0.notif_view(), s0.tcb_view(), n) + 1,
+        waiter_refs(s1.notif_view(), s1.tcb_view(), n) == waiter_refs(
+            s0.notif_view(),
+            s0.tcb_view(),
+            n,
+        ) + 1,
     ensures
-        forall|o: ObjId| #[trigger] obj_census(s1, o)
-            == (if o == n { (obj_census(s0, o) + 1) as nat } else { obj_census(s0, o) }),
+        forall|o: ObjId| #[trigger]
+            obj_census(s1, o) == (if o == n {
+                (obj_census(s0, o) + 1) as nat
+            } else {
+                obj_census(s0, o)
+            }),
 {
     let nv0 = s0.notif_view();
     let tv0 = s0.tcb_view();
     let nvf = s1.notif_view();
     let tvf = s1.tcb_view();
-    assert forall|o: ObjId| #[trigger] obj_census(s1, o)
-        == (if o == n { (obj_census(s0, o) + 1) as nat } else { obj_census(s0, o) }) by {
+    assert forall|o: ObjId| #[trigger]
+        obj_census(s1, o) == (if o == n {
+            (obj_census(s0, o) + 1) as nat
+        } else {
+            obj_census(s0, o)
+        }) by {
         lemma_thread_hold_frame(tv0, tvf, o);
         if o != n {
             assert(nvf[o] == nv0[o]);
-            assert forall|k: ObjId| #[trigger] tvf[k] != tv0[k]
-                implies tv0[k].wait_notif != Some(o) && tvf[k].wait_notif != Some(o) by {}
+            assert forall|k: ObjId| #[trigger] tvf[k] != tv0[k] implies tv0[k].wait_notif != Some(o)
+                && tvf[k].wait_notif != Some(o) by {}
             lemma_waiter_refs_frame(nv0, tv0, nvf, tvf, n, o);
         }
     }
@@ -7143,7 +7825,6 @@ pub proof fn lemma_waiter_enqueue_census<S: Store>(s0: &S, s1: &S, n: ObjId)
 // `set_slot`'s view-frame at the call site. Two "unchanged" helpers (the
 // `lemma_same_caps_same_census` analog for a single *changed* key whose designation
 // of `o` is absent on both sides) plus the proven `lemma_frame_map_drop` compose it.
-
 // A single-slot edit whose old and new caps both designate nothing-of-`obj` leaves
 // `obj`'s slot census fixed (no finiteness needed — a pure set-extensionality step).
 proof fn lemma_nondesignating_edit_slot_refs(
@@ -7175,12 +7856,7 @@ proof fn lemma_nondesignating_edit_slot_refs(
 
 // The frame-mapping mirror: an edit whose old and new caps both target nothing-of-`o`
 // leaves `o`'s frame-mapping census fixed.
-proof fn lemma_nontargeting_edit_frame_map(
-    m: Map<SlotId, CapSlot>,
-    k: SlotId,
-    v: CapSlot,
-    o: ObjId,
-)
+proof fn lemma_nontargeting_edit_frame_map(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot, o: ObjId)
     requires
         m.dom().contains(k),
         cap_frame_aspace(m[k].cap) != Some(o),
@@ -7215,7 +7891,8 @@ proof fn lemma_frame_clear_census(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot
         cap_frame_aspace(v.cap) is None,
     ensures
         frame_map_refs(m.insert(k, v), asp) == (frame_map_refs(m, asp) - 1) as nat,
-        forall|o: ObjId| o != asp ==> #[trigger] frame_map_refs(m.insert(k, v), o) == frame_map_refs(m, o),
+        forall|o: ObjId|
+            o != asp ==> #[trigger] frame_map_refs(m.insert(k, v), o) == frame_map_refs(m, o),
         forall|o: ObjId| #[trigger] slot_refs(m.insert(k, v), o) == slot_refs(m, o),
 {
     // A Frame designates no object, so the old cap at `k` designates nothing.
@@ -7238,7 +7915,6 @@ proof fn lemma_frame_clear_census(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot
 // needs the triple set's **finiteness** established by hand (the five `filter`-of-a-
 // finite-map terms get it for free from `group_set_axioms`). `destroy_channel`'s
 // binding-release loop is the op that consumes it (6d), so it lands here.
-
 // The universe of in-bounds binding triples over a finite channel domain is finite:
 // it is `⋃` of the six maps `d ↦ (c, e, ev)` (one per `(e, ev) ∈ {0,1}×{0,1,2}`), each
 // finite because `d` is. `binding_refs`'s set is a subset of this, hence finite.
@@ -7320,31 +7996,39 @@ pub(crate) proof fn lemma_binding_drop(
             cv.insert(ch, ChanView { bindings: cv[ch].bindings.insert((e, ev), b), ..cv[ch] }),
             o,
         ) == (binding_refs(cv, o) - 1) as nat,
-        forall|x: ObjId| x != o ==> binding_refs(
-            cv.insert(ch, ChanView { bindings: cv[ch].bindings.insert((e, ev), b), ..cv[ch] }),
-            x,
-        ) == #[trigger] binding_refs(cv, x),
+        forall|x: ObjId|
+            x != o ==> binding_refs(
+                cv.insert(ch, ChanView { bindings: cv[ch].bindings.insert((e, ev), b), ..cv[ch] }),
+                x,
+            ) == #[trigger] binding_refs(cv, x),
 {
     let v = ChanView { bindings: cv[ch].bindings.insert((e, ev), b), ..cv[ch] };
     let cv2 = cv.insert(ch, v);
     let s1 = Set::new(
         |t: (ObjId, int, int)|
-            cv.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3 && cv[t.0].bindings[(t.1, t.2)].notif
-                == Some(o),
+            cv.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3 && cv[t.0].bindings[(
+                t.1,
+                t.2,
+            )].notif == Some(o),
     );
     let s2 = Set::new(
         |t: (ObjId, int, int)|
-            cv2.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3 && cv2[t.0].bindings[(t.1, t.2)].notif
-                == Some(o),
+            cv2.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3 && cv2[t.0].bindings[(
+                t.1,
+                t.2,
+            )].notif == Some(o),
     );
-    let univ = Set::new(|t: (ObjId, int, int)| cv.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3);
+    let univ = Set::new(
+        |t: (ObjId, int, int)| cv.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3,
+    );
     lemma_binding_triples_finite(cv.dom());
     assert(s1.subset_of(univ));
     vstd::set_lib::lemma_set_subset_finite(univ, s1);
     let x = (ch, e, ev);
     assert(cv2.dom() =~= cv.dom());
     assert(cv2[ch] == v);
-    assert forall|t: (ObjId, int, int)| #![trigger s2.contains(t)]
+    assert forall|t: (ObjId, int, int)|
+        #![trigger s2.contains(t)]
         s2.contains(t) <==> s1.remove(x).contains(t) by {
         if t != x {
             if t.0 == ch {
@@ -7360,18 +8044,27 @@ pub(crate) proof fn lemma_binding_drop(
     assert(s1.contains(x));
     // Every other object's binding census is fixed: the cleared triple named `o`, never any
     // `y != o`, so neither its old nor its new value is in `y`'s set — pure extensionality.
-    assert forall|y: ObjId| y != o implies #[trigger] binding_refs(cv2, y) == binding_refs(cv, y) by {
+    assert forall|y: ObjId| y != o implies #[trigger] binding_refs(cv2, y) == binding_refs(
+        cv,
+        y,
+    ) by {
         let g1 = Set::new(
             |t: (ObjId, int, int)|
-                cv.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3 && cv[t.0].bindings[(t.1, t.2)].notif
-                    == Some(y),
+                cv.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3 && cv[t.0].bindings[(
+                    t.1,
+                    t.2,
+                )].notif == Some(y),
         );
         let g2 = Set::new(
             |t: (ObjId, int, int)|
-                cv2.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3 && cv2[t.0].bindings[(t.1, t.2)].notif
-                    == Some(y),
+                cv2.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3 && cv2[t.0].bindings[(
+                    t.1,
+                    t.2,
+                )].notif == Some(y),
         );
-        assert forall|t: (ObjId, int, int)| #![trigger g2.contains(t)] g2.contains(t) <==> g1.contains(t) by {
+        assert forall|t: (ObjId, int, int)|
+            #![trigger g2.contains(t)]
+            g2.contains(t) <==> g1.contains(t) by {
             if t.0 == ch {
                 if (t.1, t.2) != (e, ev) {
                     assert(v.bindings[(t.1, t.2)] == cv[ch].bindings[(t.1, t.2)]);
@@ -7410,22 +8103,35 @@ pub proof fn lemma_binding_replace(
         binding_refs(
             cv.insert(ch, ChanView { bindings: cv[ch].bindings.insert((e, ev), b), ..cv[ch] }),
             x,
-        ) + (if cv[ch].bindings[(e, ev)].notif == Some(x) { 1nat } else { 0nat })
-            == binding_refs(cv, x) + (if b.notif == Some(x) { 1nat } else { 0nat }),
+        ) + (if cv[ch].bindings[(e, ev)].notif == Some(x) {
+            1nat
+        } else {
+            0nat
+        }) == binding_refs(cv, x) + (if b.notif == Some(x) {
+            1nat
+        } else {
+            0nat
+        }),
 {
     let v = ChanView { bindings: cv[ch].bindings.insert((e, ev), b), ..cv[ch] };
     let cv2 = cv.insert(ch, v);
     let s1 = Set::new(
         |t: (ObjId, int, int)|
-            cv.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3 && cv[t.0].bindings[(t.1, t.2)].notif
-                == Some(x),
+            cv.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3 && cv[t.0].bindings[(
+                t.1,
+                t.2,
+            )].notif == Some(x),
     );
     let s2 = Set::new(
         |t: (ObjId, int, int)|
-            cv2.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3 && cv2[t.0].bindings[(t.1, t.2)].notif
-                == Some(x),
+            cv2.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3 && cv2[t.0].bindings[(
+                t.1,
+                t.2,
+            )].notif == Some(x),
     );
-    let univ = Set::new(|t: (ObjId, int, int)| cv.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3);
+    let univ = Set::new(
+        |t: (ObjId, int, int)| cv.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3,
+    );
     lemma_binding_triples_finite(cv.dom());
     assert(s1.subset_of(univ));
     vstd::set_lib::lemma_set_subset_finite(univ, s1);
@@ -7433,7 +8139,9 @@ pub proof fn lemma_binding_replace(
     assert(cv2.dom() =~= cv.dom());
     assert(cv2[ch] == v);
     // `x0` is the only triple whose binding moved; off it the two sets agree.
-    assert forall|t: (ObjId, int, int)| t != x0 implies (#[trigger] s2.contains(t) <==> s1.contains(t)) by {
+    assert forall|t: (ObjId, int, int)| t != x0 implies (#[trigger] s2.contains(t) <==> s1.contains(
+        t,
+    )) by {
         if t.0 == ch {
             if (t.1, t.2) != (e, ev) {
                 assert(v.bindings[(t.1, t.2)] == cv[ch].bindings[(t.1, t.2)]);
@@ -7448,14 +8156,16 @@ pub proof fn lemma_binding_replace(
         if b.notif == Some(x) {
             assert(s2 =~= s1);
         } else {
-            assert forall|t: (ObjId, int, int)| #![trigger s2.contains(t)]
+            assert forall|t: (ObjId, int, int)|
+                #![trigger s2.contains(t)]
                 s2.contains(t) <==> s1.remove(x0).contains(t) by {}
             assert(s2 =~= s1.remove(x0));
             assert(s1.contains(x0));
         }
     } else {
         if b.notif == Some(x) {
-            assert forall|t: (ObjId, int, int)| #![trigger s2.contains(t)]
+            assert forall|t: (ObjId, int, int)|
+                #![trigger s2.contains(t)]
                 s2.contains(t) <==> s1.insert(x0).contains(t) by {}
             assert(s2 =~= s1.insert(x0));
             assert(!s1.contains(x0));
@@ -7481,10 +8191,14 @@ pub proof fn lemma_binding_refs_pos(cv: Map<ObjId, ChanView>, ch: ObjId, e: int,
 {
     let s = Set::new(
         |t: (ObjId, int, int)|
-            cv.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3
-                && cv[t.0].bindings[(t.1, t.2)].notif == Some(o),
+            cv.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3 && cv[t.0].bindings[(
+                t.1,
+                t.2,
+            )].notif == Some(o),
     );
-    let univ = Set::new(|t: (ObjId, int, int)| cv.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3);
+    let univ = Set::new(
+        |t: (ObjId, int, int)| cv.dom().contains(t.0) && 0 <= t.1 < 2 && 0 <= t.2 < 3,
+    );
     lemma_binding_triples_finite(cv.dom());
     assert(s.subset_of(univ));
     vstd::set_lib::lemma_set_subset_finite(univ, s);
@@ -7520,8 +8234,8 @@ proof fn lemma_reparent_preserves_acyclic(
         parent != child,
         m0[child].first_child is None,
         m1[child].parent == Some(parent),
-        forall|k: SlotId| m0.dom().contains(k) && k != child
-            ==> #[trigger] m1[k].parent == m0[k].parent,
+        forall|k: SlotId|
+            m0.dom().contains(k) && k != child ==> #[trigger] m1[k].parent == m0[k].parent,
     ensures
         acyclic(m1),
 {
@@ -7529,19 +8243,25 @@ proof fn lemma_reparent_preserves_acyclic(
     // No slot names `child` as parent: `child` is childless, and
     // parent_has_first_child(m0) maps a resident's parent to a non-childless
     // node — `child` cannot be one.
-    assert forall|k: SlotId| #[trigger] m0.dom().contains(k)
-        implies m0[k].parent != Some(child) by {
+    assert forall|k: SlotId| #[trigger] m0.dom().contains(k) implies m0[k].parent != Some(
+        child,
+    ) by {
         if m0[k].parent == Some(child) {
             assert(m0[child].first_child is Some);
         }
     }
     let r1 = Map::<SlotId, nat>::new(
         |k: SlotId| m1.dom().contains(k),
-        |k: SlotId| if k == child { 0nat } else { (r0[k] + 1) as nat },
+        |k: SlotId|
+            if k == child {
+                0nat
+            } else {
+                (r0[k] + 1) as nat
+            },
     );
     assert(r1.dom() =~= m1.dom());
-    assert forall|k: SlotId| #[trigger] m1.dom().contains(k)
-        implies (m1[k].parent matches Some(pp) ==> m1.dom().contains(pp) && r1[k] < r1[pp]) by {
+    assert forall|k: SlotId| #[trigger] m1.dom().contains(k) implies (m1[k].parent matches Some(pp)
+        ==> m1.dom().contains(pp) && r1[k] < r1[pp]) by {
         if let Some(pp) = m1[k].parent {
             if k == child {
                 // child.parent == Some(parent); parent != child ⟹ r1[parent] ≥ 1 > 0.
@@ -7575,8 +8295,8 @@ proof fn lemma_insert_preserves_sib_acyclic(
         m1.dom() == m0.dom(),
         m0.dom().contains(child),
         m1[child].next_sib matches Some(n) ==> m0.dom().contains(n) && n != child,
-        forall|k: SlotId| m0.dom().contains(k) && k != child
-            ==> #[trigger] m1[k].next_sib == m0[k].next_sib,
+        forall|k: SlotId|
+            m0.dom().contains(k) && k != child ==> #[trigger] m1[k].next_sib == m0[k].next_sib,
         forall|k: SlotId| m0.dom().contains(k) ==> #[trigger] m1[k].next_sib != Some(child),
     ensures
         sib_acyclic(m1),
@@ -7584,18 +8304,19 @@ proof fn lemma_insert_preserves_sib_acyclic(
     let s0 = choose|s: Map<SlotId, nat>| valid_srank(m0, s);
     let s1 = Map::<SlotId, nat>::new(
         |k: SlotId| m1.dom().contains(k),
-        |k: SlotId| if k == child {
-            match m1[child].next_sib {
-                Some(n) => (s0[n] + 1) as nat,
-                None => 0nat,
-            }
-        } else {
-            s0[k]
-        },
+        |k: SlotId|
+            if k == child {
+                match m1[child].next_sib {
+                    Some(n) => (s0[n] + 1) as nat,
+                    None => 0nat,
+                }
+            } else {
+                s0[k]
+            },
     );
     assert(s1.dom() =~= m1.dom());
-    assert forall|k: SlotId| #[trigger] m1.dom().contains(k)
-        implies (m1[k].next_sib matches Some(n) ==> m1.dom().contains(n) && s1[n] < s1[k]) by {
+    assert forall|k: SlotId| #[trigger] m1.dom().contains(k) implies (m1[k].next_sib matches Some(n)
+        ==> m1.dom().contains(n) && s1[n] < s1[k]) by {
         if let Some(n) = m1[k].next_sib {
             // n != child: nothing names child as a next sibling.
             assert(m1[k].next_sib != Some(child));
@@ -7737,9 +8458,14 @@ pub(crate) proof fn lemma_clear_detached_preserves_cspace_wf(
 // whole map: swap the slot *contents* at src/dst and rename every link through π.
 // A transposition is an involution and a bijection on slot identities, so it
 // preserves every structural clause, and the acyclicity ranks transfer through π.
-
 pub open spec fn swap_id(k: SlotId, src: SlotId, dst: SlotId) -> SlotId {
-    if k == src { dst } else if k == dst { src } else { k }
+    if k == src {
+        dst
+    } else if k == dst {
+        src
+    } else {
+        k
+    }
 }
 
 pub open spec fn ren(o: Option<SlotId>, src: SlotId, dst: SlotId) -> Option<SlotId> {
@@ -7751,20 +8477,24 @@ pub open spec fn ren(o: Option<SlotId>, src: SlotId, dst: SlotId) -> Option<Slot
 
 // `m` with identities `src` and `dst` transposed (contents swapped, every link
 // renamed through π). `relabeled(relabeled(m)) == m`.
-pub open spec fn relabeled(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId) -> Map<SlotId, CapSlot> {
+pub open spec fn relabeled(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId) -> Map<
+    SlotId,
+    CapSlot,
+> {
     Map::new(
         |k: SlotId| m.dom().contains(k),
-        |k: SlotId| {
-            let b = m[swap_id(k, src, dst)];
-            CapSlot {
-                cap: b.cap,
-                parent: ren(b.parent, src, dst),
-                first_child: ren(b.first_child, src, dst),
-                next_sib: ren(b.next_sib, src, dst),
-                prev_sib: ren(b.prev_sib, src, dst),
-                revoking: b.revoking,
-            }
-        },
+        |k: SlotId|
+            {
+                let b = m[swap_id(k, src, dst)];
+                CapSlot {
+                    cap: b.cap,
+                    parent: ren(b.parent, src, dst),
+                    first_child: ren(b.first_child, src, dst),
+                    next_sib: ren(b.next_sib, src, dst),
+                    prev_sib: ren(b.prev_sib, src, dst),
+                    revoking: b.revoking,
+                }
+            },
     )
 }
 
@@ -7772,10 +8502,13 @@ pub open spec fn relabeled(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId) ->
 // context blows the rlimit, so each clause gets its own solver call. Every helper
 // shares the same shape — un-rename a link via the π-involution, apply m's
 // corresponding clause, re-rename — over `mf = relabeled(m, src, dst)`.
-
 proof fn lemma_transpose_links(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId)
-    requires links_in_domain(m), m.dom().contains(src), m.dom().contains(dst),
-    ensures links_in_domain(relabeled(m, src, dst)),
+    requires
+        links_in_domain(m),
+        m.dom().contains(src),
+        m.dom().contains(dst),
+    ensures
+        links_in_domain(relabeled(m, src, dst)),
 {
     let mf = relabeled(m, src, dst);
     assert(mf.dom() =~= m.dom());
@@ -7791,8 +8524,10 @@ proof fn lemma_transpose_links(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId
 
 proof fn lemma_transpose_siblings(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId)
     requires
-        siblings_doubly_consistent(m), siblings_share_parent(m),
-        m.dom().contains(src), m.dom().contains(dst),
+        siblings_doubly_consistent(m),
+        siblings_share_parent(m),
+        m.dom().contains(src),
+        m.dom().contains(dst),
     ensures
         siblings_doubly_consistent(relabeled(m, src, dst)),
         siblings_share_parent(relabeled(m, src, dst)),
@@ -7819,8 +8554,11 @@ proof fn lemma_transpose_siblings(m: Map<SlotId, CapSlot>, src: SlotId, dst: Slo
 proof fn lemma_transpose_children(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId)
     requires
         links_in_domain(m),
-        first_child_parent_agree(m), head_is_first_child(m), parent_has_first_child(m),
-        m.dom().contains(src), m.dom().contains(dst),
+        first_child_parent_agree(m),
+        head_is_first_child(m),
+        parent_has_first_child(m),
+        m.dom().contains(src),
+        m.dom().contains(dst),
     ensures
         first_child_parent_agree(relabeled(m, src, dst)),
         head_is_first_child(relabeled(m, src, dst)),
@@ -7828,9 +8566,9 @@ proof fn lemma_transpose_children(m: Map<SlotId, CapSlot>, src: SlotId, dst: Slo
 {
     let mf = relabeled(m, src, dst);
     assert(mf.dom() =~= m.dom());
-    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies
-        (mf[k].first_child matches Some(c) ==>
-            mf.dom().contains(c) && mf[c].parent == Some(k) && mf[c].prev_sib == None) by {
+    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies (
+    mf[k].first_child matches Some(c) ==> mf.dom().contains(c) && mf[c].parent == Some(k)
+        && mf[c].prev_sib == None) by {
         let jk = swap_id(k, src, dst);
         if let Some(c) = mf[k].first_child {
             // m[jk].first_child == Some(swap(c)); first_child_parent_agree(m) gives
@@ -7841,9 +8579,8 @@ proof fn lemma_transpose_children(m: Map<SlotId, CapSlot>, src: SlotId, dst: Slo
             assert(swap_id(swap_id(k, src, dst), src, dst) == k);
         }
     }
-    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies
-        (mf[k].parent matches Some(p) ==> (mf[k].prev_sib is None ==>
-            mf.dom().contains(p) && mf[p].first_child == Some(k))) by {
+    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies (mf[k].parent matches Some(p)
+        ==> (mf[k].prev_sib is None ==> mf.dom().contains(p) && mf[p].first_child == Some(k))) by {
         let jk = swap_id(k, src, dst);
         if let Some(p) = mf[k].parent {
             assert(m[jk].parent == Some(swap_id(p, src, dst)));
@@ -7852,8 +8589,8 @@ proof fn lemma_transpose_children(m: Map<SlotId, CapSlot>, src: SlotId, dst: Slo
             assert(swap_id(swap_id(k, src, dst), src, dst) == k);
         }
     }
-    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies
-        (mf[k].parent matches Some(p) ==> mf[p].first_child is Some) by {
+    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies (mf[k].parent matches Some(p)
+        ==> mf[p].first_child is Some) by {
         let jk = swap_id(k, src, dst);
         if let Some(p) = mf[k].parent {
             assert(m[jk].parent == Some(swap_id(p, src, dst)));
@@ -7864,17 +8601,21 @@ proof fn lemma_transpose_children(m: Map<SlotId, CapSlot>, src: SlotId, dst: Slo
 }
 
 proof fn lemma_transpose_empty(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId)
-    requires empty_slots_detached(m), m.dom().contains(src), m.dom().contains(dst),
-    ensures empty_slots_detached(relabeled(m, src, dst)),
+    requires
+        empty_slots_detached(m),
+        m.dom().contains(src),
+        m.dom().contains(dst),
+    ensures
+        empty_slots_detached(relabeled(m, src, dst)),
 {
     let mf = relabeled(m, src, dst);
     assert(mf.dom() =~= m.dom());
     assert forall|k: SlotId| #[trigger] mf.dom().contains(k) && is_empty_cap(mf[k].cap) implies {
-            &&& mf[k].parent == None
-            &&& mf[k].first_child == None
-            &&& mf[k].next_sib == None
-            &&& mf[k].prev_sib == None
-        } by {
+        &&& mf[k].parent == None
+        &&& mf[k].first_child == None
+        &&& mf[k].next_sib == None
+        &&& mf[k].prev_sib == None
+    } by {
         // mf[k].cap == m[swap(k)].cap; if empty, m[swap(k)] is detached, so each
         // link is None and ren(None) == None.
         assert(m.dom().contains(swap_id(k, src, dst)));
@@ -7882,16 +8623,23 @@ proof fn lemma_transpose_empty(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId
 }
 
 proof fn lemma_transpose_acyclic(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId)
-    requires acyclic(m), m.dom().contains(src), m.dom().contains(dst),
-    ensures acyclic(relabeled(m, src, dst)),
+    requires
+        acyclic(m),
+        m.dom().contains(src),
+        m.dom().contains(dst),
+    ensures
+        acyclic(relabeled(m, src, dst)),
 {
     let mf = relabeled(m, src, dst);
     assert(mf.dom() =~= m.dom());
     let r0 = choose|r: Map<SlotId, nat>| valid_prank(m, r);
-    let rf = Map::<SlotId, nat>::new(|k: SlotId| mf.dom().contains(k), |k: SlotId| r0[swap_id(k, src, dst)]);
+    let rf = Map::<SlotId, nat>::new(
+        |k: SlotId| mf.dom().contains(k),
+        |k: SlotId| r0[swap_id(k, src, dst)],
+    );
     assert(rf.dom() =~= mf.dom());
-    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies
-        (mf[k].parent matches Some(p) ==> mf.dom().contains(p) && rf[k] < rf[p]) by {
+    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies (mf[k].parent matches Some(p)
+        ==> mf.dom().contains(p) && rf[k] < rf[p]) by {
         let jk = swap_id(k, src, dst);
         if let Some(p) = mf[k].parent {
             assert(m[jk].parent == Some(swap_id(p, src, dst)));
@@ -7901,16 +8649,23 @@ proof fn lemma_transpose_acyclic(m: Map<SlotId, CapSlot>, src: SlotId, dst: Slot
 }
 
 proof fn lemma_transpose_sib(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId)
-    requires sib_acyclic(m), m.dom().contains(src), m.dom().contains(dst),
-    ensures sib_acyclic(relabeled(m, src, dst)),
+    requires
+        sib_acyclic(m),
+        m.dom().contains(src),
+        m.dom().contains(dst),
+    ensures
+        sib_acyclic(relabeled(m, src, dst)),
 {
     let mf = relabeled(m, src, dst);
     assert(mf.dom() =~= m.dom());
     let s0 = choose|s: Map<SlotId, nat>| valid_srank(m, s);
-    let sf = Map::<SlotId, nat>::new(|k: SlotId| mf.dom().contains(k), |k: SlotId| s0[swap_id(k, src, dst)]);
+    let sf = Map::<SlotId, nat>::new(
+        |k: SlotId| mf.dom().contains(k),
+        |k: SlotId| s0[swap_id(k, src, dst)],
+    );
     assert(sf.dom() =~= mf.dom());
-    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies
-        (mf[k].next_sib matches Some(n) ==> mf.dom().contains(n) && sf[n] < sf[k]) by {
+    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies (mf[k].next_sib matches Some(n)
+        ==> mf.dom().contains(n) && sf[n] < sf[k]) by {
         let jk = swap_id(k, src, dst);
         if let Some(n) = mf[k].next_sib {
             assert(m[jk].next_sib == Some(swap_id(n, src, dst)));
@@ -7946,10 +8701,14 @@ proof fn lemma_transpose_preserves_cspace_wf(m: Map<SlotId, CapSlot>, src: SlotI
 // ── Child-chain reachability: the keystone for the
 // children-walk loops' *completeness* — every child of a node lies on its
 // `first_child → next_sib` chain, so a walk re-parents all of them. ──
-
 // `k` is reachable from `from` by 0+ `next_sib` steps. Well-founded on a sibling
 // rank `s` (the walk strictly lowers it), so this terminates.
-pub open spec fn next_reach(m: Map<SlotId, CapSlot>, from: SlotId, k: SlotId, s: Map<SlotId, nat>) -> bool
+pub open spec fn next_reach(
+    m: Map<SlotId, CapSlot>,
+    from: SlotId,
+    k: SlotId,
+    s: Map<SlotId, nat>,
+) -> bool
     decreases s[from],
 {
     if from == k {
@@ -7966,8 +8725,10 @@ pub open spec fn next_reach(m: Map<SlotId, CapSlot>, from: SlotId, k: SlotId, s:
 // reach a strictly higher-ranked node (used to show the just-processed `cur` is
 // not reachable from its successor).
 proof fn lemma_next_reach_sr(m: Map<SlotId, CapSlot>, from: SlotId, k: SlotId, s: Map<SlotId, nat>)
-    requires next_reach(m, from, k, s),
-    ensures s[k] <= s[from],
+    requires
+        next_reach(m, from, k, s),
+    ensures
+        s[k] <= s[from],
     decreases s[from],
 {
     if from == k {
@@ -7978,7 +8739,13 @@ proof fn lemma_next_reach_sr(m: Map<SlotId, CapSlot>, from: SlotId, k: SlotId, s
 }
 
 // Append one `next_sib` edge at the tail of a reach-path.
-proof fn lemma_next_reach_extend(m: Map<SlotId, CapSlot>, h: SlotId, j: SlotId, k: SlotId, s: Map<SlotId, nat>)
+proof fn lemma_next_reach_extend(
+    m: Map<SlotId, CapSlot>,
+    h: SlotId,
+    j: SlotId,
+    k: SlotId,
+    s: Map<SlotId, nat>,
+)
     requires
         next_reach(m, h, j, s),
         m[j].next_sib == Some(k),
@@ -8057,15 +8824,25 @@ proof fn lemma_child_on_chain(m: Map<SlotId, CapSlot>, src: SlotId, k: SlotId, s
 // reachability unchanged for every other node. For `x != cur`,
 // `next_reach(m0, cur, x, srk)` unfolds one step through `m0[cur].next_sib == Some(nn)`,
 // and `srk[nn] < srk[cur]` collapses the rank guard, leaving `next_reach(m0, nn, x, srk)`.
-proof fn lemma_children_walk_peel(m0: Map<SlotId, CapSlot>, cur: SlotId, nn: SlotId, srk: Map<SlotId, nat>)
+proof fn lemma_children_walk_peel(
+    m0: Map<SlotId, CapSlot>,
+    cur: SlotId,
+    nn: SlotId,
+    srk: Map<SlotId, nat>,
+)
     requires
         m0[cur].next_sib == Some(nn),
         srk[nn] < srk[cur],
     ensures
-        forall|x: SlotId| x != cur ==> #[trigger] next_reach(m0, cur, x, srk) == next_reach(m0, nn, x, srk),
+        forall|x: SlotId|
+            x != cur ==> #[trigger] next_reach(m0, cur, x, srk) == next_reach(m0, nn, x, srk),
 {
-    assert forall|x: SlotId| x != cur
-        implies #[trigger] next_reach(m0, cur, x, srk) == next_reach(m0, nn, x, srk) by {}
+    assert forall|x: SlotId| x != cur implies #[trigger] next_reach(m0, cur, x, srk) == next_reach(
+        m0,
+        nn,
+        x,
+        srk,
+    ) by {}
 }
 
 // Replacing a slot's empty cap with another empty cap of the *same links* is
@@ -8105,7 +8882,12 @@ proof fn lemma_replace_empty_cap(mf: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot
 
 // A move's live-slot count is unchanged: the non-empty set loses `src` and gains
 // `dst` (every other slot's emptiness is untouched).
-proof fn lemma_move_count(m0: Map<SlotId, CapSlot>, mfin: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId)
+proof fn lemma_move_count(
+    m0: Map<SlotId, CapSlot>,
+    mfin: Map<SlotId, CapSlot>,
+    src: SlotId,
+    dst: SlotId,
+)
     requires
         m0.dom().finite(),
         m0.dom() == mfin.dom(),
@@ -8116,8 +8898,9 @@ proof fn lemma_move_count(m0: Map<SlotId, CapSlot>, mfin: Map<SlotId, CapSlot>, 
         is_empty_cap(m0[dst].cap),
         is_empty_cap(mfin[src].cap),
         !is_empty_cap(mfin[dst].cap),
-        forall|k: SlotId| m0.dom().contains(k) && k != src && k != dst
-            ==> #[trigger] is_empty_cap(mfin[k].cap) == is_empty_cap(m0[k].cap),
+        forall|k: SlotId|
+            m0.dom().contains(k) && k != src && k != dst ==> #[trigger] is_empty_cap(mfin[k].cap)
+                == is_empty_cap(m0[k].cap),
     ensures
         count_nonempty(mfin) == count_nonempty(m0),
 {
@@ -8142,7 +8925,6 @@ proof fn lemma_move_count(m0: Map<SlotId, CapSlot>, mfin: Map<SlotId, CapSlot>, 
 // All follow from `cspace_wf(m0)` + `dst` empty/detached; kept as small
 // lemmas so each SMT call starts with a tiny context (the
 // per-clause discipline). ──
-
 // Nothing in a well-formed store references a detached empty slot `e`. So the
 // transposition's `ren(·, src, e)` only ever rewrites `src → e`, never `e → src`
 // (the empty `dst` is never a link *target* in `m0`).
@@ -8152,12 +8934,13 @@ proof fn lemma_nothing_points_to_empty(m: Map<SlotId, CapSlot>, e: SlotId)
         m.dom().contains(e),
         is_empty_cap(m[e].cap),
     ensures
-        forall|k: SlotId| #[trigger] m.dom().contains(k) ==> {
-            &&& m[k].parent != Some(e)
-            &&& m[k].first_child != Some(e)
-            &&& m[k].next_sib != Some(e)
-            &&& m[k].prev_sib != Some(e)
-        },
+        forall|k: SlotId| #[trigger]
+            m.dom().contains(k) ==> {
+                &&& m[k].parent != Some(e)
+                &&& m[k].first_child != Some(e)
+                &&& m[k].next_sib != Some(e)
+                &&& m[k].prev_sib != Some(e)
+            },
 {
     assert(empty_slots_detached(m));
     assert(m[e].parent is None);
@@ -8178,14 +8961,17 @@ proof fn lemma_nothing_points_to_empty(m: Map<SlotId, CapSlot>, e: SlotId)
             assert(m[e].first_child is Some);
         }
         // first_child==e ⟹ e.parent==Some(k) (first_child_parent_agree); e detached.
+
         if m[k].first_child == Some(e) {
             assert(m[e].parent == Some(k));
         }
         // next_sib==e ⟹ e.prev_sib==Some(k) (doubly); e detached.
+
         if m[k].next_sib == Some(e) {
             assert(m[e].prev_sib == Some(k));
         }
         // prev_sib==e ⟹ e.next_sib==Some(k) (doubly); e detached.
+
         if m[k].prev_sib == Some(e) {
             assert(m[e].next_sib == Some(k));
         }
@@ -8271,6 +9057,7 @@ proof fn lemma_child_relabeled(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId
     }
     // x's next_sib/prev_sib != Some(src): doubly-consistency + share_parent would
     // force m[src].parent == m[x].parent == Some(src), impossible by the rank.
+
     if m[x].next_sib == Some(src) {
         assert(m[src].parent == m[x].parent);
         assert(m[src].parent == Some(src));
@@ -8283,6 +9070,7 @@ proof fn lemma_child_relabeled(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId
         assert(r[src] < r[src]);
     }
     // none of x's links name dst (lemma_nothing_points_to_empty).
+
     assert(m[x].first_child != Some(dst));
     assert(m[x].next_sib != Some(dst));
     assert(m[x].prev_sib != Some(dst));
@@ -8298,16 +9086,47 @@ proof fn lemma_child_relabeled(m: Map<SlotId, CapSlot>, src: SlotId, dst: SlotId
 // etc. (kept explicit rather than `..` struct-update to stay portable across
 // the Verus spec subset). Used to write the straight-line intermediate maps.
 pub open spec fn set_parent(s: CapSlot, p: Option<SlotId>) -> CapSlot {
-    CapSlot { cap: s.cap, parent: p, first_child: s.first_child, next_sib: s.next_sib, prev_sib: s.prev_sib, revoking: s.revoking }
+    CapSlot {
+        cap: s.cap,
+        parent: p,
+        first_child: s.first_child,
+        next_sib: s.next_sib,
+        prev_sib: s.prev_sib,
+        revoking: s.revoking,
+    }
 }
+
 pub open spec fn set_first_child(s: CapSlot, f: Option<SlotId>) -> CapSlot {
-    CapSlot { cap: s.cap, parent: s.parent, first_child: f, next_sib: s.next_sib, prev_sib: s.prev_sib, revoking: s.revoking }
+    CapSlot {
+        cap: s.cap,
+        parent: s.parent,
+        first_child: f,
+        next_sib: s.next_sib,
+        prev_sib: s.prev_sib,
+        revoking: s.revoking,
+    }
 }
+
 pub open spec fn set_next_sib(s: CapSlot, n: Option<SlotId>) -> CapSlot {
-    CapSlot { cap: s.cap, parent: s.parent, first_child: s.first_child, next_sib: n, prev_sib: s.prev_sib, revoking: s.revoking }
+    CapSlot {
+        cap: s.cap,
+        parent: s.parent,
+        first_child: s.first_child,
+        next_sib: n,
+        prev_sib: s.prev_sib,
+        revoking: s.revoking,
+    }
 }
+
 pub open spec fn set_prev_sib(s: CapSlot, p: Option<SlotId>) -> CapSlot {
-    CapSlot { cap: s.cap, parent: s.parent, first_child: s.first_child, next_sib: s.next_sib, prev_sib: p, revoking: s.revoking }
+    CapSlot {
+        cap: s.cap,
+        parent: s.parent,
+        first_child: s.first_child,
+        next_sib: s.next_sib,
+        prev_sib: p,
+        revoking: s.revoking,
+    }
 }
 
 // The transposition value at `dst`: exactly `m[src]` (unrenamed). `src`'s links
@@ -8349,14 +9168,26 @@ proof fn lemma_generic_relabeled(m: Map<SlotId, CapSlot>, src: SlotId, dst: Slot
         k != dst,
     ensures
         relabeled(m, src, dst)[k].cap == m[k].cap,
-        relabeled(m, src, dst)[k].parent
-            == (if m[k].parent == Some(src) { Some(dst) } else { m[k].parent }),
-        relabeled(m, src, dst)[k].first_child
-            == (if m[k].first_child == Some(src) { Some(dst) } else { m[k].first_child }),
-        relabeled(m, src, dst)[k].next_sib
-            == (if m[k].next_sib == Some(src) { Some(dst) } else { m[k].next_sib }),
-        relabeled(m, src, dst)[k].prev_sib
-            == (if m[k].prev_sib == Some(src) { Some(dst) } else { m[k].prev_sib }),
+        relabeled(m, src, dst)[k].parent == (if m[k].parent == Some(src) {
+            Some(dst)
+        } else {
+            m[k].parent
+        }),
+        relabeled(m, src, dst)[k].first_child == (if m[k].first_child == Some(src) {
+            Some(dst)
+        } else {
+            m[k].first_child
+        }),
+        relabeled(m, src, dst)[k].next_sib == (if m[k].next_sib == Some(src) {
+            Some(dst)
+        } else {
+            m[k].next_sib
+        }),
+        relabeled(m, src, dst)[k].prev_sib == (if m[k].prev_sib == Some(src) {
+            Some(dst)
+        } else {
+            m[k].prev_sib
+        }),
 {
     lemma_nothing_points_to_empty(m, dst);
     assert(swap_id(k, src, dst) == k);
@@ -8364,14 +9195,26 @@ proof fn lemma_generic_relabeled(m: Map<SlotId, CapSlot>, src: SlotId, dst: Slot
     assert(m[k].first_child != Some(dst));
     assert(m[k].next_sib != Some(dst));
     assert(m[k].prev_sib != Some(dst));
-    assert(ren(m[k].parent, src, dst)
-        == (if m[k].parent == Some(src) { Some(dst) } else { m[k].parent }));
-    assert(ren(m[k].first_child, src, dst)
-        == (if m[k].first_child == Some(src) { Some(dst) } else { m[k].first_child }));
-    assert(ren(m[k].next_sib, src, dst)
-        == (if m[k].next_sib == Some(src) { Some(dst) } else { m[k].next_sib }));
-    assert(ren(m[k].prev_sib, src, dst)
-        == (if m[k].prev_sib == Some(src) { Some(dst) } else { m[k].prev_sib }));
+    assert(ren(m[k].parent, src, dst) == (if m[k].parent == Some(src) {
+        Some(dst)
+    } else {
+        m[k].parent
+    }));
+    assert(ren(m[k].first_child, src, dst) == (if m[k].first_child == Some(src) {
+        Some(dst)
+    } else {
+        m[k].first_child
+    }));
+    assert(ren(m[k].next_sib, src, dst) == (if m[k].next_sib == Some(src) {
+        Some(dst)
+    } else {
+        m[k].next_sib
+    }));
+    assert(ren(m[k].prev_sib, src, dst) == (if m[k].prev_sib == Some(src) {
+        Some(dst)
+    } else {
+        m[k].prev_sib
+    }));
 }
 
 // ── cdt_unlink body-match support: the sibling-list *merge*.
@@ -8382,7 +9225,6 @@ proof fn lemma_generic_relabeled(m: Map<SlotId, CapSlot>, src: SlotId, dst: Slot
 // SMT discipline of the transpose family); the sibling-acyclicity witness is
 // the crux (a constant additive shift fails — the child band must be rescaled
 // into the `prev..next` gap). ──
-
 // A rank map over a finite domain has a strict upper bound. The sib-acyclicity
 // splice witness scales non-children by `b+1` to open a gap wide enough to drop
 // the re-parented child band into; `b` is that bound.
@@ -8405,7 +9247,11 @@ proof fn lemma_rank_bounded(dom: Set<SlotId>, s: Map<SlotId, nat>) -> (b: nat)
             assert(dom.contains(k));
         }
         let b0 = lemma_rank_bounded(rest, s);
-        let b: nat = if s[x] < b0 { b0 } else { (s[x] + 1) as nat };
+        let b: nat = if s[x] < b0 {
+            b0
+        } else {
+            (s[x] + 1) as nat
+        };
         assert forall|k: SlotId| dom.contains(k) implies s[k] < b by {
             if k != x {
                 assert(rest.contains(k));
@@ -8423,39 +9269,74 @@ proof fn lemma_rank_bounded(dom: Set<SlotId>, s: Map<SlotId, nat>) -> (b: nat)
 // child with `next_sib is None`, or `None` when `slot` is childless) — it appears
 // only in `next`'s `prev_sib`, so `next_sib` structure (hence sib-acyclicity) is
 // independent of it.
-pub open spec fn unlinked(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<SlotId>) -> Map<SlotId, CapSlot> {
+pub open spec fn unlinked(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<SlotId>) -> Map<
+    SlotId,
+    CapSlot,
+> {
     let p = m[slot].parent;
     let pv = m[slot].prev_sib;
     let nx = m[slot].next_sib;
     let fc = m[slot].first_child;
-    let head = if fc is None { nx } else { fc };
+    let head = if fc is None {
+        nx
+    } else {
+        fc
+    };
     Map::new(
         |k: SlotId| m.dom().contains(k),
-        |k: SlotId| if k == slot {
-            CapSlot { cap: m[slot].cap, parent: None, first_child: None, next_sib: None, prev_sib: None, revoking: m[slot].revoking }
-        } else if m[k].parent == Some(slot) {
-            CapSlot {
-                cap: m[k].cap,
-                parent: p,
-                first_child: m[k].first_child,
-                next_sib: if m[k].next_sib is None { nx } else { m[k].next_sib },
-                prev_sib: if m[k].prev_sib is None { pv } else { m[k].prev_sib },
-                revoking: m[k].revoking,
-            }
-        } else {
-            CapSlot {
-                cap: m[k].cap,
-                parent: m[k].parent,
-                first_child: if m[k].first_child == Some(slot) { head } else { m[k].first_child },
-                next_sib: if m[k].next_sib == Some(slot) { head } else { m[k].next_sib },
-                prev_sib: if m[k].prev_sib == Some(slot) {
-                    if fc is None { pv } else { last }
-                } else {
-                    m[k].prev_sib
-                },
-                revoking: m[k].revoking,
-            }
-        },
+        |k: SlotId|
+            if k == slot {
+                CapSlot {
+                    cap: m[slot].cap,
+                    parent: None,
+                    first_child: None,
+                    next_sib: None,
+                    prev_sib: None,
+                    revoking: m[slot].revoking,
+                }
+            } else if m[k].parent == Some(slot) {
+                CapSlot {
+                    cap: m[k].cap,
+                    parent: p,
+                    first_child: m[k].first_child,
+                    next_sib: if m[k].next_sib is None {
+                        nx
+                    } else {
+                        m[k].next_sib
+                    },
+                    prev_sib: if m[k].prev_sib is None {
+                        pv
+                    } else {
+                        m[k].prev_sib
+                    },
+                    revoking: m[k].revoking,
+                }
+            } else {
+                CapSlot {
+                    cap: m[k].cap,
+                    parent: m[k].parent,
+                    first_child: if m[k].first_child == Some(slot) {
+                        head
+                    } else {
+                        m[k].first_child
+                    },
+                    next_sib: if m[k].next_sib == Some(slot) {
+                        head
+                    } else {
+                        m[k].next_sib
+                    },
+                    prev_sib: if m[k].prev_sib == Some(slot) {
+                        if fc is None {
+                            pv
+                        } else {
+                            last
+                        }
+                    } else {
+                        m[k].prev_sib
+                    },
+                    revoking: m[k].revoking,
+                }
+            },
     )
 }
 
@@ -8501,6 +9382,7 @@ proof fn lemma_unlink_roles(m: Map<SlotId, CapSlot>, slot: SlotId)
         }
     }
     // prev == next would give pv.next == slot and slot.next == pv: a srank 2-cycle.
+
     if let Some(pv) = m[slot].prev_sib {
         if m[slot].next_sib == Some(pv) {
             assert(sr[pv] < sr[slot]);
@@ -8533,6 +9415,7 @@ proof fn lemma_band_below(d: nat, e: nat, r: nat, w: nat)
 {
     broadcast use vstd::arithmetic::mul::group_mul_is_commutative_and_distributive;
     // (d+1)*w + (e+1) < (d+1)*w + w == (d+2)*w <= (r+1)*w
+
     assert((d + 1) * w + w == (d + 2) * w);
     vstd::arithmetic::mul::lemma_mul_inequality((d + 2) as int, (r + 1) as int, w as int);
 }
@@ -8566,11 +9449,12 @@ proof fn lemma_unlink_sib(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<Sl
     let bb: nat = (bnd + 1) as nat;
     let sf = Map::<SlotId, nat>::new(
         |k: SlotId| mf.dom().contains(k),
-        |k: SlotId| if k != slot && m[k].parent == Some(slot) {
-            ((d + 1) * bb + s0[k] + 1) as nat
-        } else {
-            ((s0[k] + 1) * bb) as nat
-        },
+        |k: SlotId|
+            if k != slot && m[k].parent == Some(slot) {
+                ((d + 1) * bb + s0[k] + 1) as nat
+            } else {
+                ((s0[k] + 1) * bb) as nat
+            },
     );
     assert(sf.dom() =~= mf.dom());
     assert(links_in_domain(m));
@@ -8582,10 +9466,14 @@ proof fn lemma_unlink_sib(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<Sl
     assert(nx is Some ==> m[nx->0].parent == m[slot].parent);
     assert(nx is Some ==> m[nx->0].parent != Some(slot));
     let fc = m[slot].first_child;
-    let head = if fc is None { nx } else { fc };
+    let head = if fc is None {
+        nx
+    } else {
+        fc
+    };
 
-    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies
-        (mf[k].next_sib matches Some(n) ==> mf.dom().contains(n) && sf[n] < sf[k]) by {
+    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies (mf[k].next_sib matches Some(n)
+        ==> mf.dom().contains(n) && sf[n] < sf[k]) by {
         if let Some(n) = mf[k].next_sib {
             if k == slot {
                 assert(mf[slot].next_sib is None);
@@ -8593,14 +9481,14 @@ proof fn lemma_unlink_sib(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<Sl
                 // ── k is a child of slot ──
                 if let Some(c) = m[k].next_sib {
                     assert(n == c);
-                    assert(m[c].parent == Some(slot));   // share_parent
-                    assert(m.dom().contains(c));         // links_in_domain
-                    assert(s0[c] < s0[k]);               // valid_srank
+                    assert(m[c].parent == Some(slot));  // share_parent
+                    assert(m.dom().contains(c));  // links_in_domain
+                    assert(s0[c] < s0[k]);  // valid_srank
                     // both children: same `(d+1)*bb` term, ordered by s0.
                 } else {
                     // last child: next_sib rewired to nx == Some(n), a non-child.
                     assert(nx == Some(n));
-                    assert(m[n].parent != Some(slot));   // roles: slot.next non-child
+                    assert(m[n].parent != Some(slot));  // roles: slot.next non-child
                     assert(m.dom().contains(n));
                     assert(d == s0[n]);
                     // sf[n] == (s0[n]+1)*bb == (d+1)*bb < (d+1)*bb + s0[k] + 1 == sf[k].
@@ -8610,33 +9498,33 @@ proof fn lemma_unlink_sib(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<Sl
                 if m[k].next_sib == Some(slot) {
                     // k == prev; next_sib rewired to head == Some(n).
                     assert(m[slot].prev_sib == Some(k));  // doubly (k.next == slot)
-                    assert(s0[slot] < s0[k]);             // valid_srank
+                    assert(s0[slot] < s0[k]);  // valid_srank
                     assert(d < s0[k]) by {
                         if let Some(nn) = nx {
-                            assert(s0[nn] < s0[slot]);    // valid_srank slot.next
+                            assert(s0[nn] < s0[slot]);  // valid_srank slot.next
                         }
                     }
                     if let Some(f) = fc {
                         assert(head == Some(f));
                         assert(n == f);
-                        assert(m[f].parent == Some(slot)); // first_child_parent_agree
+                        assert(m[f].parent == Some(slot));  // first_child_parent_agree
                         assert(m.dom().contains(f));
-                        assert(s0[f] < bnd);               // bound
+                        assert(s0[f] < bnd);  // bound
                         lemma_band_below(d, s0[f], s0[k], bb);
                     } else {
                         // fc None ⟹ head == nx == Some(n), a non-child below prev.
                         assert(nx == Some(n));
-                        assert(m[n].parent != Some(slot)); // roles
+                        assert(m[n].parent != Some(slot));  // roles
                         assert(m.dom().contains(n));
-                        assert(s0[n] < s0[k]);             // s0[n] < s0[slot] < s0[k]
+                        assert(s0[n] < s0[k]);  // s0[n] < s0[slot] < s0[k]
                         lemma_scaled_lt((s0[n] + 1) as nat, (s0[k] + 1) as nat, bb);
                     }
                 } else {
                     // next_sib unchanged: n is a non-child below k.
                     assert(m[k].next_sib == Some(n));
-                    assert(m.dom().contains(n));           // links_in_domain
-                    assert(s0[n] < s0[k]);                 // valid_srank
-                    assert(m[k].parent == m[n].parent);    // share_parent ⟹ n non-child
+                    assert(m.dom().contains(n));  // links_in_domain
+                    assert(s0[n] < s0[k]);  // valid_srank
+                    assert(m[k].parent == m[n].parent);  // share_parent ⟹ n non-child
                     assert(m[n].parent != Some(slot));
                     lemma_scaled_lt((s0[n] + 1) as nat, (s0[k] + 1) as nat, bb);
                 }
@@ -8654,9 +9542,12 @@ proof fn lemma_unlink_sib(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<Sl
 // `lemma_child_on_chain` (the chain is linear, so its tail is unique).
 pub open spec fn last_wf(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<SlotId>) -> bool {
     &&& (m[slot].first_child is None <==> last is None)
-    &&& (last matches Some(l) ==> m.dom().contains(l) && m[l].parent == Some(slot) && m[l].next_sib is None)
-    &&& (forall|x: SlotId| #[trigger] m.dom().contains(x) && m[x].parent == Some(slot) && m[x].next_sib is None
-            ==> last == Some(x))
+    &&& (last matches Some(l) ==> m.dom().contains(l) && m[l].parent == Some(slot)
+        && m[l].next_sib is None)
+    &&& (forall|x: SlotId| #[trigger]
+        m.dom().contains(x) && m[x].parent == Some(slot) && m[x].next_sib is None ==> last == Some(
+            x,
+        ))
 }
 
 // Parent-acyclicity survives with the *same* witness `r0` (the nice asymmetry vs.
@@ -8675,18 +9566,18 @@ proof fn lemma_unlink_acyclic(m: Map<SlotId, CapSlot>, slot: SlotId, last: Optio
     assert(mf.dom() =~= m.dom());
     let r0 = choose|r: Map<SlotId, nat>| valid_prank(m, r);
     assert(valid_prank(m, r0));
-    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies
-        (mf[k].parent matches Some(pp) ==> mf.dom().contains(pp) && r0[k] < r0[pp]) by {
+    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies (mf[k].parent matches Some(pp)
+        ==> mf.dom().contains(pp) && r0[k] < r0[pp]) by {
         if let Some(pp) = mf[k].parent {
             if k == slot {
                 assert(mf[slot].parent is None);
             } else if m[k].parent == Some(slot) {
                 // child: parent rewired to slot's parent (the grandparent) == pp.
                 assert(m[slot].parent == Some(pp));
-                assert(r0[k] < r0[slot]);    // k.parent == slot
-                assert(r0[slot] < r0[pp]);   // slot.parent == pp
+                assert(r0[k] < r0[slot]);  // k.parent == slot
+                assert(r0[slot] < r0[pp]);  // slot.parent == pp
             } else {
-                assert(m[k].parent == Some(pp));   // non-child: parent unchanged
+                assert(m[k].parent == Some(pp));  // non-child: parent unchanged
             }
         }
     }
@@ -8706,11 +9597,11 @@ proof fn lemma_unlink_empty(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<
     let mf = unlinked(m, slot, last);
     assert(mf.dom() =~= m.dom());
     assert forall|k: SlotId| #[trigger] mf.dom().contains(k) && is_empty_cap(mf[k].cap) implies {
-            &&& mf[k].parent == None
-            &&& mf[k].first_child == None
-            &&& mf[k].next_sib == None
-            &&& mf[k].prev_sib == None
-        } by {
+        &&& mf[k].parent == None
+        &&& mf[k].first_child == None
+        &&& mf[k].next_sib == None
+        &&& mf[k].prev_sib == None
+    } by {
         if is_empty_cap(mf[k].cap) {
             // cap is framed: mf[k].cap == m[k].cap, so m[k] is empty ⟹ detached.
             assert(m[k].cap == mf[k].cap);
@@ -8774,7 +9665,11 @@ proof fn lemma_unlink_siblings(m: Map<SlotId, CapSlot>, slot: SlotId, last: Opti
     let pv = m[slot].prev_sib;
     let nx = m[slot].next_sib;
     let fc = m[slot].first_child;
-    let head = if fc is None { nx } else { fc };
+    let head = if fc is None {
+        nx
+    } else {
+        fc
+    };
     assert(siblings_doubly_consistent(m));
     assert(siblings_share_parent(m));
     assert(first_child_parent_agree(m));
@@ -8793,32 +9688,32 @@ proof fn lemma_unlink_siblings(m: Map<SlotId, CapSlot>, slot: SlotId, last: Opti
             } else if m[a].parent == Some(slot) {
                 if let Some(c) = m[a].next_sib {
                     assert(b == c);
-                    assert(m[c].parent == Some(slot));    // share_parent
-                    assert(m[c].prev_sib == Some(a));      // doubly
+                    assert(m[c].parent == Some(slot));  // share_parent
+                    assert(m[c].prev_sib == Some(a));  // doubly
                     assert(c != slot);
                     assert(mf[c].prev_sib == Some(a));
                 } else {
-                    assert(nx == Some(b));                  // last child → nx
+                    assert(nx == Some(b));  // last child → nx
                     assert(m[b].parent == m[slot].parent);  // share_parent slot.next
-                    assert(m[b].prev_sib == Some(slot));    // doubly slot.next
+                    assert(m[b].prev_sib == Some(slot));  // doubly slot.next
                     assert(b != slot);
                     assert(fc is Some);
-                    assert(last == Some(a));                // uniqueness: a is a tail child
+                    assert(last == Some(a));  // uniqueness: a is a tail child
                     assert(mf[b].prev_sib == Some(a));
                 }
             } else {
                 if m[a].next_sib == Some(slot) {
-                    assert(m[slot].prev_sib == Some(a));    // doubly: a == prev
+                    assert(m[slot].prev_sib == Some(a));  // doubly: a == prev
                     if let Some(f) = fc {
                         assert(head == Some(f) && b == f);
                         assert(m[f].parent == Some(slot));  // agree
-                        assert(m[f].prev_sib is None);       // agree
+                        assert(m[f].prev_sib is None);  // agree
                         assert(f != slot);
                         assert(pv == Some(a));
                         assert(mf[f].prev_sib == Some(a));
                     } else {
-                        assert(nx == Some(b));               // head == nx
-                        assert(m[b].prev_sib == Some(slot)); // doubly slot.next
+                        assert(nx == Some(b));  // head == nx
+                        assert(m[b].prev_sib == Some(slot));  // doubly slot.next
                         assert(m[b].parent != Some(slot));
                         assert(b != slot);
                         assert(pv == Some(a));
@@ -8827,28 +9722,29 @@ proof fn lemma_unlink_siblings(m: Map<SlotId, CapSlot>, slot: SlotId, last: Opti
                 } else {
                     assert(m[a].next_sib == Some(b));
                     assert(b != slot);
-                    assert(m[b].prev_sib == Some(a));        // doubly
-                    assert(m[b].parent == m[a].parent);      // share_parent
+                    assert(m[b].prev_sib == Some(a));  // doubly
+                    assert(m[b].parent == m[a].parent);  // share_parent
                     assert(m[b].parent != Some(slot));
                     assert(mf[b].prev_sib == Some(a));
                 }
             }
         }
         // prev direction
+
         if let Some(b) = mf[a].prev_sib {
             if a == slot {
                 assert(mf[slot].prev_sib is None);
             } else if m[a].parent == Some(slot) {
                 if let Some(c) = m[a].prev_sib {
                     assert(b == c);
-                    assert(m[c].next_sib == Some(a));        // doubly
-                    assert(m[c].parent == Some(slot));        // share_parent (c.next==a)
+                    assert(m[c].next_sib == Some(a));  // doubly
+                    assert(m[c].parent == Some(slot));  // share_parent (c.next==a)
                     assert(c != slot);
                     assert(mf[c].next_sib == Some(a));
                 } else {
-                    assert(pv == Some(b));                    // first child → pv
-                    assert(fc == Some(a));                    // head_is_first_child
-                    assert(m[b].next_sib == Some(slot));      // doubly slot.prev
+                    assert(pv == Some(b));  // first child → pv
+                    assert(fc == Some(a));  // head_is_first_child
+                    assert(m[b].next_sib == Some(slot));  // doubly slot.prev
                     assert(b != slot);
                     assert(m[b].parent != Some(slot));
                     assert(head == Some(a));
@@ -8856,17 +9752,17 @@ proof fn lemma_unlink_siblings(m: Map<SlotId, CapSlot>, slot: SlotId, last: Opti
                 }
             } else {
                 if m[a].prev_sib == Some(slot) {
-                    assert(m[slot].next_sib == Some(a));      // doubly: a == next
+                    assert(m[slot].next_sib == Some(a));  // doubly: a == next
                     if fc is Some {
-                        assert(last == Some(b));               // a==next.prev rewired to last
-                        assert(m[b].parent == Some(slot));     // last_wf
-                        assert(m[b].next_sib is None);          // last_wf
+                        assert(last == Some(b));  // a==next.prev rewired to last
+                        assert(m[b].parent == Some(slot));  // last_wf
+                        assert(m[b].next_sib is None);  // last_wf
                         assert(b != slot);
                         assert(nx == Some(a));
                         assert(mf[b].next_sib == Some(a));
                     } else {
                         assert(pv == Some(b));
-                        assert(m[b].next_sib == Some(slot));   // doubly slot.prev
+                        assert(m[b].next_sib == Some(slot));  // doubly slot.prev
                         assert(b != slot);
                         assert(m[b].parent != Some(slot));
                         assert(head == nx && nx == Some(a));
@@ -8875,8 +9771,8 @@ proof fn lemma_unlink_siblings(m: Map<SlotId, CapSlot>, slot: SlotId, last: Opti
                 } else {
                     assert(m[a].prev_sib == Some(b));
                     assert(b != slot);
-                    assert(m[b].next_sib == Some(a));          // doubly
-                    assert(m[a].parent == m[b].parent);        // share_parent (b.next==a)
+                    assert(m[b].next_sib == Some(a));  // doubly
+                    assert(m[a].parent == m[b].parent);  // share_parent (b.next==a)
                     assert(m[b].parent != Some(slot));
                     assert(mf[b].next_sib == Some(a));
                 }
@@ -8885,8 +9781,8 @@ proof fn lemma_unlink_siblings(m: Map<SlotId, CapSlot>, slot: SlotId, last: Opti
     }
 
     // ── share parent: merged-chain nodes all share the grandparent ──
-    assert forall|a: SlotId| #[trigger] mf.dom().contains(a) implies
-        (mf[a].next_sib matches Some(b) ==> mf[b].parent == mf[a].parent) by {
+    assert forall|a: SlotId| #[trigger] mf.dom().contains(a) implies (mf[a].next_sib matches Some(b)
+        ==> mf[b].parent == mf[a].parent) by {
         if let Some(b) = mf[a].next_sib {
             if a == slot {
                 assert(mf[slot].next_sib is None);
@@ -8911,7 +9807,7 @@ proof fn lemma_unlink_siblings(m: Map<SlotId, CapSlot>, slot: SlotId, last: Opti
                 }
             } else {
                 assert(m[a].next_sib == Some(b) && b != slot);
-                assert(m[b].parent == m[a].parent);     // share_parent
+                assert(m[b].parent == m[a].parent);  // share_parent
                 assert(m[b].parent != Some(slot) && m[a].parent != Some(slot));
                 assert(mf[a].parent == m[a].parent && mf[b].parent == m[b].parent);
             }
@@ -8941,7 +9837,11 @@ proof fn lemma_unlink_children(m: Map<SlotId, CapSlot>, slot: SlotId, last: Opti
     let pv = m[slot].prev_sib;
     let nx = m[slot].next_sib;
     let fc = m[slot].first_child;
-    let head = if fc is None { nx } else { fc };
+    let head = if fc is None {
+        nx
+    } else {
+        fc
+    };
     assert(siblings_doubly_consistent(m));
     assert(siblings_share_parent(m));
     assert(first_child_parent_agree(m));
@@ -8952,9 +9852,9 @@ proof fn lemma_unlink_children(m: Map<SlotId, CapSlot>, slot: SlotId, last: Opti
     assert(valid_srank(m, srk));
 
     // ── first_child_parent_agree ──
-    assert forall|q: SlotId| #[trigger] mf.dom().contains(q) implies
-        (mf[q].first_child matches Some(c) ==>
-            mf.dom().contains(c) && mf[c].parent == Some(q) && mf[c].prev_sib == None) by {
+    assert forall|q: SlotId| #[trigger] mf.dom().contains(q) implies (
+    mf[q].first_child matches Some(c) ==> mf.dom().contains(c) && mf[c].parent == Some(q)
+        && mf[c].prev_sib == None) by {
         if let Some(c) = mf[q].first_child {
             if q == slot {
                 assert(mf[slot].first_child is None);
@@ -8965,8 +9865,8 @@ proof fn lemma_unlink_children(m: Map<SlotId, CapSlot>, slot: SlotId, last: Opti
                 assert(c != slot && m[c].parent != Some(slot));
             } else if m[q].first_child == Some(slot) {
                 // q's first child was slot ⟹ slot.parent == Some(q), slot.prev None.
-                assert(m[slot].parent == Some(q));   // agree(m)
-                assert(m[slot].prev_sib is None);     // agree(m)
+                assert(m[slot].parent == Some(q));  // agree(m)
+                assert(m[slot].prev_sib is None);  // agree(m)
                 assert(head == Some(c));
                 if let Some(f) = fc {
                     assert(c == f && m[f].parent == Some(slot) && m[f].prev_sib is None);
@@ -8986,33 +9886,38 @@ proof fn lemma_unlink_children(m: Map<SlotId, CapSlot>, slot: SlotId, last: Opti
     }
 
     // ── head_is_first_child ──
-    assert forall|c: SlotId| #[trigger] mf.dom().contains(c) implies
-        (mf[c].parent matches Some(pp) ==> (mf[c].prev_sib is None ==>
-            mf.dom().contains(pp) && mf[pp].first_child == Some(c))) by {
+    assert forall|c: SlotId| #[trigger] mf.dom().contains(c) implies (mf[c].parent matches Some(pp)
+        ==> (mf[c].prev_sib is None ==> mf.dom().contains(pp) && mf[pp].first_child == Some(
+        c,
+    ))) by {
         if let Some(pp) = mf[c].parent {
             if mf[c].prev_sib is None {
                 if c == slot {
                     assert(mf[slot].parent is None);
                 } else if m[c].parent == Some(slot) {
                     // child c with no prev ⟹ slot's first child; pp == grandparent.
-                    assert(mf[c].prev_sib == (if m[c].prev_sib is None { pv } else { m[c].prev_sib }));
+                    assert(mf[c].prev_sib == (if m[c].prev_sib is None {
+                        pv
+                    } else {
+                        m[c].prev_sib
+                    }));
                     assert(m[c].prev_sib is None && pv is None);
-                    assert(fc == Some(c));                  // head_is_first_child(m)
+                    assert(fc == Some(c));  // head_is_first_child(m)
                     assert(m[slot].parent == Some(pp));
-                    assert(m[pp].parent != Some(slot));      // pp non-child (roles)
-                    assert(m[pp].first_child == Some(slot)); // slot is pp's first child
+                    assert(m[pp].parent != Some(slot));  // pp non-child (roles)
+                    assert(m[pp].first_child == Some(slot));  // slot is pp's first child
                     assert(head == Some(c));
                 } else if m[c].prev_sib == Some(slot) {
                     // c == next, became the new first child (pv None, fc None).
                     assert(pv is None && fc is None);
                     assert(m[c].parent == m[slot].parent && m[slot].parent == Some(pp));
                     assert(m[pp].parent != Some(slot));
-                    assert(m[pp].first_child == Some(slot)); // slot first child of pp
+                    assert(m[pp].first_child == Some(slot));  // slot first child of pp
                     assert(nx == Some(c) && head == Some(c));
                 } else {
                     // c unchanged head in m.
                     assert(m[c].parent == Some(pp) && m[c].prev_sib is None && c != slot);
-                    assert(m[pp].first_child == Some(c));    // head_is_first_child(m)
+                    assert(m[pp].first_child == Some(c));  // head_is_first_child(m)
                     assert(pp != slot);
                     if m[pp].parent == Some(slot) {
                         // pp child of slot keeps first_child.
@@ -9025,26 +9930,26 @@ proof fn lemma_unlink_children(m: Map<SlotId, CapSlot>, slot: SlotId, last: Opti
     }
 
     // ── parent_has_first_child ──
-    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies
-        (mf[k].parent matches Some(pp) ==> mf[pp].first_child is Some) by {
+    assert forall|k: SlotId| #[trigger] mf.dom().contains(k) implies (mf[k].parent matches Some(pp)
+        ==> mf[pp].first_child is Some) by {
         if let Some(pp) = mf[k].parent {
             if k == slot {
                 assert(mf[slot].parent is None);
             } else if m[k].parent == Some(slot) {
                 // child k ⟹ pp == grandparent; slot has children ⟹ head Some.
                 assert(m[slot].parent == Some(pp) && fc is Some);
-                assert(m[pp].parent != Some(slot));   // roles
-                assert(m[pp].first_child is Some);     // parent_has_first_child(m)
+                assert(m[pp].parent != Some(slot));  // roles
+                assert(m[pp].first_child is Some);  // parent_has_first_child(m)
             } else {
                 // non-child k; pp == m[k].parent, has a first child in m.
                 assert(m[k].parent == Some(pp) && pp != slot);
-                assert(m[pp].first_child is Some);     // parent_has_first_child(m)
+                assert(m[pp].first_child is Some);  // parent_has_first_child(m)
                 if m[pp].parent == Some(slot) {
                     // pp child of slot keeps its (Some) first_child.
                 } else if m[pp].first_child == Some(slot) {
                     // slot was pp's first child; if slot childless, its next sibling
                     // (which exists, since k is another child of pp) is the new head.
-                    assert(m[slot].parent == Some(pp));   // agree(m)
+                    assert(m[slot].parent == Some(pp));  // agree(m)
                     if fc is None {
                         lemma_child_on_chain(m, pp, k, srk);
                         // every child of pp is reachable from pp.first_child == slot;
@@ -9071,15 +9976,20 @@ proof fn lemma_unlink_count(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<
     let mf = unlinked(m, slot, last);
     assert(mf.dom() =~= m.dom());
     assert forall|k: SlotId| #[trigger] m.dom().contains(k) implies mf[k].cap == m[k].cap by {}
-    assert(m.dom().filter(|k: SlotId| !is_empty_cap(m[k].cap))
-        =~= mf.dom().filter(|k: SlotId| !is_empty_cap(mf[k].cap)));
+    assert(m.dom().filter(|k: SlotId| !is_empty_cap(m[k].cap)) =~= mf.dom().filter(
+        |k: SlotId| !is_empty_cap(mf[k].cap),
+    ));
 }
 
 // Unlinking preserves the full well-formedness — composed per-clause (the
 // transpose family's per-clause SMT discipline). The parent-rank witness is
 // reused unchanged (children move up, the gap shrinks); the sibling-rank witness
 // is rescaled (lemma_unlink_sib).
-proof fn lemma_unlink_preserves_cspace_wf(m: Map<SlotId, CapSlot>, slot: SlotId, last: Option<SlotId>)
+proof fn lemma_unlink_preserves_cspace_wf(
+    m: Map<SlotId, CapSlot>,
+    slot: SlotId,
+    last: Option<SlotId>,
+)
     requires
         cspace_wf(m),
         m.dom().finite(),
@@ -9091,7 +10001,7 @@ proof fn lemma_unlink_preserves_cspace_wf(m: Map<SlotId, CapSlot>, slot: SlotId,
         unlinked(m, slot, last).dom().finite(),
 {
     assert(unlinked(m, slot, last).dom() =~= m.dom());
-    lemma_src_no_self_link(m, slot);   // m[slot].parent != Some(slot) for lemma_unlink_sib
+    lemma_src_no_self_link(m, slot);  // m[slot].parent != Some(slot) for lemma_unlink_sib
     lemma_unlink_links(m, slot, last);
     lemma_unlink_siblings(m, slot, last);
     lemma_unlink_children(m, slot, last);
@@ -9134,11 +10044,20 @@ proof fn lemma_unlink_merge(
         prev == m0[slot].prev_sib,
         next == m0[slot].next_sib,
         first == m0[slot].first_child,
-        head == (if first is None { next } else { first }),
+        head == (if first is None {
+            next
+        } else {
+            first
+        }),
         // The all-children-re-parented arena (the children walk's postcondition).
         mw == Map::<SlotId, CapSlot>::new(
             |k: SlotId| m0.dom().contains(k),
-            |k: SlotId| if m0[k].parent == Some(slot) { set_parent(m0[k], parent) } else { m0[k] },
+            |k: SlotId|
+                if m0[k].parent == Some(slot) {
+                    set_parent(m0[k], parent)
+                } else {
+                    m0[k]
+                },
         ),
         // The four straight-line splice steps (one `Map::insert` each, §10).
         ma == match prev {
@@ -9184,7 +10103,7 @@ proof fn lemma_unlink_merge(
         } else if m0[k].parent == Some(slot) {
             // ── a child: re-parented; first child gains prev=pv, tail next=nx ──
             assert(m0[k].parent != Some(slot) == false);
-            assert(first is Some && head == first);   // slot has children
+            assert(first is Some && head == first);  // slot has children
             // k is none of the non-child / slot fixup targets.
             assert(k != slot);
             // k == first ⟺ k has no prev; k is the tail ⟺ k has no next.
@@ -9200,13 +10119,13 @@ proof fn lemma_unlink_merge(
         } else {
             // ── a non-child (≠ slot): apply the matching neighbour fixup ──
             if m0[k].next_sib == Some(slot) {
-                assert(prev == Some(k));               // k == slot's prev
+                assert(prev == Some(k));  // k == slot's prev
             } else if m0[k].prev_sib == Some(slot) {
-                assert(next == Some(k));               // k == slot's next
+                assert(next == Some(k));  // k == slot's next
                 assert(m0[slot].next_sib == Some(k));  // doubly
             } else if m0[k].first_child == Some(slot) {
-                assert(m0[slot].parent == Some(k));    // k == grandparent
-                assert(m0[slot].prev_sib is None);     // slot is k's first child
+                assert(m0[slot].parent == Some(k));  // k == grandparent
+                assert(m0[slot].prev_sib is None);  // slot is k's first child
                 assert(prev is None);
             } else {
                 // untouched: no link names slot.
@@ -9217,7 +10136,13 @@ proof fn lemma_unlink_merge(
 
 // Two nodes reachable from a common start are comparable along the chain — the
 // `next_sib` graph is functional, so the walks cannot branch.
-proof fn lemma_reach_comparable(m: Map<SlotId, CapSlot>, a: SlotId, x: SlotId, y: SlotId, s: Map<SlotId, nat>)
+proof fn lemma_reach_comparable(
+    m: Map<SlotId, CapSlot>,
+    a: SlotId,
+    x: SlotId,
+    y: SlotId,
+    s: Map<SlotId, nat>,
+)
     requires
         next_reach(m, a, x, s),
         next_reach(m, a, y, s),
@@ -9239,7 +10164,13 @@ proof fn lemma_reach_comparable(m: Map<SlotId, CapSlot>, a: SlotId, x: SlotId, y
 // The child chain's tail (the child with no next sibling) is unique: any two such
 // are comparable (both reachable from the first child), and a node with no next
 // reaches only itself.
-proof fn lemma_unique_tail(m: Map<SlotId, CapSlot>, slot: SlotId, x: SlotId, y: SlotId, s: Map<SlotId, nat>)
+proof fn lemma_unique_tail(
+    m: Map<SlotId, CapSlot>,
+    slot: SlotId,
+    x: SlotId,
+    y: SlotId,
+    s: Map<SlotId, nat>,
+)
     requires
         cdt_wf(m),
         valid_srank(m, s),
@@ -9263,7 +10194,6 @@ proof fn lemma_unique_tail(m: Map<SlotId, CapSlot>, slot: SlotId, x: SlotId, y: 
 
 // ── Verified operations (moved here from plain Rust; bodies are unchanged
 // modulo verus-friendly control flow). ──
-
 /// Bump the refcount of the object a cap designates (no-op for bare caps).
 ///
 /// pre: if the cap designates an object, that object is live and its refcount
@@ -9273,12 +10203,15 @@ proof fn lemma_unique_tail(m: Map<SlotId, CapSlot>, slot: SlotId, x: SlotId, y: 
 /// untouched.
 pub fn obj_ref<S: Store>(store: &mut S, cap: Cap)
     requires
-        cap_obj(cap) matches Some(o) ==> old(store).refs_view().dom().contains(o)
-            && old(store).refs_view()[o] < u32::MAX as nat,
+        cap_obj(cap) matches Some(o) ==> old(store).refs_view().dom().contains(o) && old(
+            store,
+        ).refs_view()[o] < u32::MAX as nat,
     ensures
         final(store).slot_view() == old(store).slot_view(),
-        cap_obj(cap) matches Some(o) ==> final(store).refs_view()
-            =~= old(store).refs_view().insert(o, (old(store).refs_view()[o] + 1) as nat),
+        cap_obj(cap) matches Some(o) ==> final(store).refs_view() =~= old(store).refs_view().insert(
+            o,
+            (old(store).refs_view()[o] + 1) as nat,
+        ),
         cap_obj(cap) is None ==> final(store).refs_view() == old(store).refs_view(),
         // The non-refs views are framed (the body is a single `set_obj_refs`, or nothing) — the
         // frame `derive`'s census reasoning composes to carry the four census-bearing views
@@ -9288,7 +10221,7 @@ pub fn obj_ref<S: Store>(store: &mut S, cap: Cap)
         final(store).tcb_view() == old(store).tcb_view(),
         final(store).timer_view() == old(store).timer_view(),
         final(store).timer_head_view() == old(store).timer_head_view(),
-            final(store).ready_view() == old(store).ready_view(),
+        final(store).ready_view() == old(store).ready_view(),
         final(store).cspace_view() == old(store).cspace_view(),
         final(store).irq_view() == old(store).irq_view(),
 {
@@ -9302,8 +10235,8 @@ pub fn obj_ref<S: Store>(store: &mut S, cap: Cap)
         | CapKind::Irq(o) => {
             let r = store.obj_refs(o);
             store.set_obj_refs(o, r + 1);
-        }
-        CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => {}
+        },
+        CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => {},
     }
 }
 
@@ -9344,11 +10277,13 @@ pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
         final(store).tcb_view() == old(store).tcb_view(),
         final(store).timer_view() == old(store).timer_view(),
         final(store).timer_head_view() == old(store).timer_head_view(),
-            final(store).ready_view() == old(store).ready_view(),
+        final(store).ready_view() == old(store).ready_view(),
         final(store).cspace_view() == old(store).cspace_view(),
         final(store).irq_view() == old(store).irq_view(),
-        forall|k: SlotId| #[trigger] old(store).slot_view().dom().contains(k)
-            ==> final(store).slot_view()[k].cap == old(store).slot_view()[k].cap,
+        forall|k: SlotId| #[trigger]
+            old(store).slot_view().dom().contains(k) ==> final(store).slot_view()[k].cap == old(
+                store,
+            ).slot_view()[k].cap,
         final(store).slot_view()[child].cap == old(store).slot_view()[child].cap,
         final(store).slot_view()[parent].first_child == Some(child),
         // the prior child list is spliced in after `child`, in order: `child`
@@ -9391,7 +10326,6 @@ pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
         fs.prev_sib = Some(child);
         store.set_slot(f, fs);
     }
-
     let mut p = store.slot(parent);
     p.first_child = Some(child);
     store.set_slot(parent, p);
@@ -9403,19 +10337,21 @@ pub fn cdt_insert_child<S: Store>(store: &mut S, parent: SlotId, child: SlotId)
     proof {
         let m1 = store.slot_view();
         assert(m1.dom() =~= m0.dom());
-        assert forall|k: SlotId| m0.dom().contains(k) && k != child
-            implies #[trigger] m1[k].parent == m0[k].parent by {}
+        assert forall|k: SlotId| m0.dom().contains(k) && k != child implies #[trigger] m1[k].parent
+            == m0[k].parent by {}
         lemma_reparent_preserves_acyclic(m0, m1, child, parent);
 
-        assert forall|k: SlotId| m0.dom().contains(k) && k != child
-            implies #[trigger] m1[k].next_sib == m0[k].next_sib by {}
+        assert forall|k: SlotId|
+            m0.dom().contains(k) && k != child implies #[trigger] m1[k].next_sib
+            == m0[k].next_sib by {}
         // child's new next_sib (== parent's old first child) is live and not child
         // itself (else child would name parent as parent — but child is detached).
         assert(m1[child].next_sib matches Some(n) ==> m0.dom().contains(n) && n != child);
         // No slot points next_sib at child: in m0 child had prev None, so doubly-
         // consistency forbids any k.next == child; the insert added none.
-        assert forall|k: SlotId| m0.dom().contains(k)
-            implies #[trigger] m1[k].next_sib != Some(child) by {
+        assert forall|k: SlotId| m0.dom().contains(k) implies #[trigger] m1[k].next_sib != Some(
+            child,
+        ) by {
             if k != child {
                 assert(m1[k].next_sib == m0[k].next_sib);
             }
@@ -9473,7 +10409,7 @@ pub fn ancestor_or_self_revoking<S: Store>(store: &S, start: SlotId) -> (res: bo
                     visited = visited.insert(cur);
                 }
                 cur = p;
-            }
+            },
         }
     }
 }
@@ -9497,28 +10433,39 @@ pub fn ancestor_or_self_revoking<S: Store>(store: &S, start: SlotId) -> (res: bo
 /// `u32::MAX`) the store is unchanged. Refusing at the ceiling makes the
 /// refcount bump overflow-free for **all** inputs — no unchecked `+ 1`
 /// wrap-to-zero (a UAF class); the production `CapCopy` path inherits this.
-pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_ceiling: u8) -> (res: Result<(), ()>)
+pub fn derive<S: Store>(
+    store: &mut S,
+    src: SlotId,
+    dst: SlotId,
+    mask: u8,
+    prio_ceiling: u8,
+) -> (res: Result<(), ()>)
     requires
         cspace_wf(old(store).slot_view()),
         old(store).slot_view().dom().finite(),
         old(store).slot_view().dom().contains(src),
         old(store).slot_view().dom().contains(dst),
-        cap_obj(old(store).slot_view()[src].cap) matches Some(o) ==>
-            old(store).refs_view().dom().contains(o),
+        cap_obj(old(store).slot_view()[src].cap) matches Some(o) ==> old(
+            store,
+        ).refs_view().dom().contains(o),
     ensures
         res is Ok ==> {
             // faithful copy: dst's kind is src's (same object / channel end),
             // a Frame copy unmapped — derivation cannot change the object or
             // amplify via the kind.
-            &&& final(store).slot_view()[dst].cap.kind
-                  == derived_kind(old(store).slot_view()[src].cap.kind, prio_ceiling)
+            &&& final(store).slot_view()[dst].cap.kind == derived_kind(
+                old(store).slot_view()[src].cap.kind,
+                prio_ceiling,
+            )
             // monotone derivation: dst's rights are src's rights masked, hence a
             // subset for ALL masks — authority only ever shrinks.
-            &&& final(store).slot_view()[dst].cap.rights.0
-                  == (old(store).slot_view()[src].cap.rights.0 & mask)
-            &&& (final(store).slot_view()[dst].cap.rights.0
-                  & old(store).slot_view()[src].cap.rights.0)
-                  == final(store).slot_view()[dst].cap.rights.0
+            &&& final(store).slot_view()[dst].cap.rights.0 == (old(
+                store,
+            ).slot_view()[src].cap.rights.0 & mask)
+            &&& (final(store).slot_view()[dst].cap.rights.0 & old(
+                store,
+            ).slot_view()[src].cap.rights.0)
+                == final(store).slot_view()[dst].cap.rights.0
             // rev2§5.4/rev2§2.3 monotone priority ceiling, now *reducing*: a derived thread
             // cap's maximum-controlled-priority ceiling is exactly `min(parent,
             // prio_ceiling)` — never above the parent's (the priority axis of the
@@ -9527,25 +10474,31 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_
             // `derived_kind` equality above (the ceiling rides the kind). With the
             // `cap_copy` sentinel `prio_ceiling = 0xFF` this collapses to exact
             // preservation.
-            &&& (cap_max_prio(old(store).slot_view()[src].cap) matches Some(p_mp) ==>
-                  cap_max_prio(final(store).slot_view()[dst].cap) matches Some(c_mp)
-                    && c_mp == (if p_mp <= prio_ceiling { p_mp } else { prio_ceiling })
-                    && c_mp <= p_mp
-                    && c_mp <= prio_ceiling)
+            &&& (cap_max_prio(old(store).slot_view()[src].cap) matches Some(p_mp) ==> cap_max_prio(
+                final(store).slot_view()[dst].cap,
+            ) matches Some(c_mp) && c_mp == (if p_mp <= prio_ceiling {
+                p_mp
+            } else {
+                prio_ceiling
+            }) && c_mp <= p_mp && c_mp <= prio_ceiling)
             &&& cspace_wf(final(store).slot_view())
             &&& final(store).slot_view()[src].first_child == Some(dst)
-            &&& (cap_obj(old(store).slot_view()[src].cap) matches Some(o) ==>
-                  final(store).refs_view()
-                      =~= old(store).refs_view().insert(o, (old(store).refs_view()[o] + 1) as nat))
+            &&& (cap_obj(old(store).slot_view()[src].cap) matches Some(o)
+                ==> final(store).refs_view() =~= old(store).refs_view().insert(
+                o,
+                (old(store).refs_view()[o] + 1) as nat,
+            ))
             // the stored refcount and the slot census rise by one in lockstep —
             // the per-op delta refcount soundness requires (the full
             // `refs == census` invariant, incl. non-slot refs, is deferred).
-            &&& (cap_obj(old(store).slot_view()[src].cap) matches Some(o) ==>
-                  slot_refs(final(store).slot_view(), o)
-                      == slot_refs(old(store).slot_view(), o) + 1)
+            &&& (cap_obj(old(store).slot_view()[src].cap) matches Some(o) ==> slot_refs(
+                final(store).slot_view(),
+                o,
+            ) == slot_refs(old(store).slot_view(), o)
+                + 1)
             // bare caps (no object): no refcount perturbed.
-            &&& (cap_obj(old(store).slot_view()[src].cap) is None ==>
-                  final(store).refs_view() == old(store).refs_view())
+            &&& (cap_obj(old(store).slot_view()[src].cap) is None ==> final(store).refs_view()
+                == old(store).refs_view())
         },
         res is Err ==> {
             &&& final(store).slot_view() == old(store).slot_view()
@@ -9572,17 +10525,25 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_
     }
     // On this path src is non-empty and dst is empty, so src != dst, and (by
     // empty_slots_detached) dst is fully detached.
+
     assert(src != dst);
     assert(is_empty_cap(m0[dst].cap));
     assert(cap_obj(m0[dst].cap) == Option::<ObjId>::None);
-    assert(m0[dst].parent is None && m0[dst].first_child is None
-        && m0[dst].next_sib is None && m0[dst].prev_sib is None);
+    assert(m0[dst].parent is None && m0[dst].first_child is None && m0[dst].next_sib is None
+        && m0[dst].prev_sib is None);
 
     // One mapping per cap copy (rev2§2.5): a fresh frame copy starts unmapped. A thread
     // copy's rev2§5.4 ceiling is attenuated to `min(parent, prio_ceiling)` (rev2§2.3).
     let kind = match s.cap.kind {
         CapKind::Frame { base, pages, mapping: _ } => CapKind::Frame { base, pages, mapping: None },
-        CapKind::Thread(o, mp) => CapKind::Thread(o, if mp <= prio_ceiling { mp } else { prio_ceiling }),
+        CapKind::Thread(o, mp) => CapKind::Thread(
+            o,
+            if mp <= prio_ceiling {
+                mp
+            } else {
+                prio_ceiling
+            },
+        ),
         k => k,
     };
     let cap = Cap { kind, rights: s.cap.rights.masked(mask) };
@@ -9610,7 +10571,6 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_
             return Err(());
         }
     }
-
     let mut d = store.slot(dst);
     d.cap = cap;
     store.set_slot(dst, d);
@@ -9627,8 +10587,9 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_
         assert(d.parent is None);
         assert(d.next_sib is None);
         assert(m1.dom() =~= m0.dom());
-        assert forall|k: SlotId| #[trigger] m1.dom().contains(k)
-            implies (m1[k].parent matches Some(p) ==> m1.dom().contains(p) && r0[k] < r0[p]) by {
+        assert forall|k: SlotId| #[trigger] m1.dom().contains(k) implies (m1[k].parent matches Some(
+            p,
+        ) ==> m1.dom().contains(p) && r0[k] < r0[p]) by {
             if k != dst {
                 assert(m1[k] == m0[k]);
             }
@@ -9638,8 +10599,8 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_
         // Sibling-acyclicity carries the same way: dst joins with no next_sib edge.
         let s0 = choose|s: Map<SlotId, nat>| valid_srank(m0, s);
         assert(valid_srank(m0, s0));
-        assert forall|k: SlotId| #[trigger] m1.dom().contains(k)
-            implies (m1[k].next_sib matches Some(n) ==> m1.dom().contains(n) && s0[n] < s0[k]) by {
+        assert forall|k: SlotId| #[trigger] m1.dom().contains(k) implies (
+        m1[k].next_sib matches Some(n) ==> m1.dom().contains(n) && s0[n] < s0[k]) by {
             if k != dst {
                 assert(m1[k] == m0[k]);
             }
@@ -9672,8 +10633,8 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_
             Some(o) => {
                 lemma_designation_bump(m0, dst, d, o);
                 lemma_same_caps_same_census(m1, store.slot_view(), o);
-            }
-            None => {}
+            },
+            None => {},
         }
         // refcount_sound (conditional): the full census rises by one exactly at the
         // newly-designated object (`lemma_set_slot_obj_census` composes the slot delta with the
@@ -9685,30 +10646,40 @@ pub fn derive<S: Store>(store: &mut S, src: SlotId, dst: SlotId, mask: u8, prio_
             assert(cap_frame_aspace(cap) is None);
             match cap_obj(cap) {
                 Some(o) => {
-                    assert forall|x: ObjId| #[trigger] obj_census(store, x)
-                        == obj_census(old(store), x) + (if x == o { 1nat } else { 0nat }) by {
+                    assert forall|x: ObjId| #[trigger]
+                        obj_census(store, x) == obj_census(old(store), x) + (if x == o {
+                            1nat
+                        } else {
+                            0nat
+                        }) by {
                         lemma_set_slot_obj_census(old(store), store, m1, dst, d, x);
                     }
                     // refs rose by one at `o` (`obj_ref`), matching the census; the domain is
                     // unchanged (`o` was already live), so `refs == census` carries everywhere.
-                    assert(store.refs_view()
-                        =~= old(store).refs_view().insert(o, (old(store).refs_view()[o] + 1) as nat));
+                    assert(store.refs_view() =~= old(store).refs_view().insert(
+                        o,
+                        (old(store).refs_view()[o] + 1) as nat,
+                    ));
                     assert(old(store).refs_view().dom().contains(o));
-                    assert forall|x: ObjId| store.refs_view().dom().contains(x) implies
-                        #[trigger] store.refs_view()[x] == obj_census(store, x) by {
-                        assert(obj_census(store, x)
-                            == obj_census(old(store), x) + (if x == o { 1nat } else { 0nat }));
+                    assert forall|x: ObjId|
+                        store.refs_view().dom().contains(x) implies #[trigger] store.refs_view()[x]
+                        == obj_census(store, x) by {
+                        assert(obj_census(store, x) == obj_census(old(store), x) + (if x == o {
+                            1nat
+                        } else {
+                            0nat
+                        }));
                         assert(old(store).refs_view()[x] == obj_census(old(store), x));
                     }
-                }
+                },
                 None => {
-                    assert forall|x: ObjId| #[trigger] obj_census(store, x)
-                        == obj_census(old(store), x) by {
+                    assert forall|x: ObjId| #[trigger]
+                        obj_census(store, x) == obj_census(old(store), x) by {
                         lemma_set_slot_obj_census(old(store), store, m1, dst, d, x);
                     }
                     assert(store.refs_view() == old(store).refs_view());
                     lemma_refcount_sound_from_census_eq(old(store), store);
-                }
+                },
             }
         }
     }
@@ -9757,8 +10728,9 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
         // Unlink moves links, never caps: every slot's cap rides through unchanged (the
         // closed form `unlinked` rebuilds each entry's `cap` from `m0`). This is the
         // cap-frame `delete`'s "teardown only empties slots" reasoning rests on.
-        forall|x: SlotId| old(store).slot_view().dom().contains(x)
-            ==> #[trigger] final(store).slot_view()[x].cap == old(store).slot_view()[x].cap,
+        forall|x: SlotId|
+            old(store).slot_view().dom().contains(x) ==> #[trigger] final(store).slot_view()[x].cap
+                == old(store).slot_view()[x].cap,
         // Unlink edits only CDT links in `slot_view`; every object view is framed (each
         // `set_slot` frames them). `delete`'s census/`end_caps`/`caps_consistent` proofs
         // (the teardown body) read these across the `cdt_unlink` that precedes the teardown.
@@ -9767,7 +10739,7 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
         final(store).tcb_view() == old(store).tcb_view(),
         final(store).timer_view() == old(store).timer_view(),
         final(store).timer_head_view() == old(store).timer_head_view(),
-            final(store).ready_view() == old(store).ready_view(),
+        final(store).ready_view() == old(store).ready_view(),
         final(store).cspace_view() == old(store).cspace_view(),
         final(store).irq_view() == old(store).irq_view(),
 {
@@ -9790,14 +10762,24 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
     // The all-children-re-parented arena: the children walk's postcondition.
     let ghost mw = Map::new(
         |k: SlotId| m0.dom().contains(k),
-        |k: SlotId| if m0[k].parent == Some(slot) { set_parent(m0[k], parent) } else { m0[k] },
+        |k: SlotId|
+            if m0[k].parent == Some(slot) {
+                set_parent(m0[k], parent)
+            } else {
+                m0[k]
+            },
     );
 
     // ── children walk: re-parent every child to `parent`; record the tail. ──
     proof {
         if let Some(h) = first {
-            assert forall|x: SlotId| m0.dom().contains(x) && m0[x].parent == Some(slot)
-                implies next_reach(m0, h, x, srk) by {
+            assert forall|x: SlotId|
+                m0.dom().contains(x) && m0[x].parent == Some(slot) implies next_reach(
+                m0,
+                h,
+                x,
+                srk,
+            ) by {
                 lemma_child_on_chain(m0, slot, x, srk);
             }
         }
@@ -9822,24 +10804,38 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
             parent == m0[slot].parent,
             first == m0[slot].first_child,
             m0.dom().contains(slot),
-            forall|k: SlotId| #[trigger] m0.dom().contains(k) && m0[k].parent != Some(slot)
-                ==> store.slot_view()[k] == m0[k],
+            forall|k: SlotId| #[trigger]
+                m0.dom().contains(k) && m0[k].parent != Some(slot) ==> store.slot_view()[k]
+                    == m0[k],
             c matches Some(cur) ==> {
                 &&& m0.dom().contains(cur)
                 &&& m0[cur].parent == Some(slot)
-                &&& forall|x: SlotId| #[trigger] m0.dom().contains(x) && m0[x].parent == Some(slot)
-                        && next_reach(m0, cur, x, srk) ==> store.slot_view()[x] == m0[x]
-                &&& forall|x: SlotId| #[trigger] m0.dom().contains(x) && m0[x].parent == Some(slot)
-                        && !next_reach(m0, cur, x, srk) ==> store.slot_view()[x] == set_parent(m0[x], parent)
+                &&& forall|x: SlotId| #[trigger]
+                    m0.dom().contains(x) && m0[x].parent == Some(slot) && next_reach(
+                        m0,
+                        cur,
+                        x,
+                        srk,
+                    ) ==> store.slot_view()[x] == m0[x]
+                &&& forall|x: SlotId| #[trigger]
+                    m0.dom().contains(x) && m0[x].parent == Some(slot) && !next_reach(
+                        m0,
+                        cur,
+                        x,
+                        srk,
+                    ) ==> store.slot_view()[x] == set_parent(m0[x], parent)
             },
-            c is None ==> forall|x: SlotId| #[trigger] m0.dom().contains(x)
-                && m0[x].parent == Some(slot) ==> store.slot_view()[x] == set_parent(m0[x], parent),
-            last matches Some(l) ==> m0.dom().contains(l) && m0[l].parent == Some(slot) && m0[l].next_sib == c,
+            c is None ==> forall|x: SlotId| #[trigger]
+                m0.dom().contains(x) && m0[x].parent == Some(slot) ==> store.slot_view()[x]
+                    == set_parent(m0[x], parent),
+            last matches Some(l) ==> m0.dom().contains(l) && m0[l].parent == Some(slot)
+                && m0[l].next_sib == c,
             last is None ==> c == first,
-        decreases match c {
-            Some(cur) => (srk[cur] + 1) as nat,
-            None => 0nat,
-        },
+        decreases
+                match c {
+                    Some(cur) => (srk[cur] + 1) as nat,
+                    None => 0nat,
+                },
     {
         let cur = c.unwrap();
         proof {
@@ -9860,17 +10856,17 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
             match nx {
                 Some(nn) => {
                     assert(m0[cur].next_sib == Some(nn));
-                    assert(m0[nn].parent == Some(slot));   // share_parent
-                    assert(m0.dom().contains(nn));          // links_in_domain
-                    assert(srk[nn] < srk[cur]);             // valid_srank
+                    assert(m0[nn].parent == Some(slot));  // share_parent
+                    assert(m0.dom().contains(nn));  // links_in_domain
+                    assert(srk[nn] < srk[cur]);  // valid_srank
                     if next_reach(m0, nn, cur, srk) {
                         lemma_next_reach_sr(m0, nn, cur, srk);
                     }
                     lemma_children_walk_peel(m0, cur, nn, srk);
-                }
+                },
                 None => {
                     assert(m0[cur].next_sib is None);
-                }
+                },
             }
         }
         last = Some(cur);
@@ -9881,10 +10877,11 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
     assert(store.slot_view() =~= mw);
     proof {
         assert(m0[slot].first_child is None <==> last is None);
-        assert forall|x: SlotId| m0.dom().contains(x) && m0[x].parent == Some(slot) && m0[x].next_sib is None
-            implies last == Some(x) by {
+        assert forall|x: SlotId|
+            m0.dom().contains(x) && m0[x].parent == Some(slot)
+                && m0[x].next_sib is None implies last == Some(x) by {
             assert(parent_has_first_child(m0));
-            assert(m0[slot].first_child is Some);   // x is a child
+            assert(m0[slot].first_child is Some);  // x is a child
             assert(last is Some);
             lemma_unique_tail(m0, slot, x, last->0, srk);
         }
@@ -9892,7 +10889,11 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
         lemma_unlink_roles(m0, slot);
     }
 
-    let head = if first.is_none() { next } else { first };
+    let head = if first.is_none() {
+        next
+    } else {
+        first
+    };
 
     // The straight-line splice maps (the spec mirror of the four fixups).
     let ghost ma = match prev {
@@ -9921,14 +10922,18 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
     if let Some(pv) = prev {
         proof {
             assert(m0[slot].prev_sib == Some(pv));
-            assert(m0.dom().contains(pv));        // links_in_domain
+            assert(m0.dom().contains(pv));  // links_in_domain
             assert(m0[pv].parent != Some(slot));  // roles: prev is a non-child
         }
         let mut ps = store.slot(pv);
         ps.next_sib = head;
-        proof { assert(ps == set_next_sib(mw[pv], head)); }
+        proof {
+            assert(ps == set_next_sib(mw[pv], head));
+        }
         store.set_slot(pv, ps);
-        proof { assert(store.slot_view() =~= ma); }
+        proof {
+            assert(store.slot_view() =~= ma);
+        }
     } else if let Some(pa) = parent {
         proof {
             assert(m0[slot].parent == Some(pa));
@@ -9937,52 +10942,80 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
         }
         let mut pas = store.slot(pa);
         pas.first_child = head;
-        proof { assert(pas == set_first_child(mw[pa], head)); }
+        proof {
+            assert(pas == set_first_child(mw[pa], head));
+        }
         store.set_slot(pa, pas);
-        proof { assert(store.slot_view() =~= ma); }
+        proof {
+            assert(store.slot_view() =~= ma);
+        }
     } else {
-        proof { assert(store.slot_view() =~= ma); }
+        proof {
+            assert(store.slot_view() =~= ma);
+        }
     }
 
     if let Some(h) = head {
-        proof { assert(m0.dom().contains(h)); }   // head is first/next, both in dom
+        proof {
+            assert(m0.dom().contains(h));
+        }  // head is first/next, both in dom
         let mut hs = store.slot(h);
         hs.prev_sib = prev;
-        proof { assert(hs == set_prev_sib(ma[h], prev)); }
+        proof {
+            assert(hs == set_prev_sib(ma[h], prev));
+        }
         store.set_slot(h, hs);
-        proof { assert(store.slot_view() =~= mb); }
+        proof {
+            assert(store.slot_view() =~= mb);
+        }
     } else {
-        proof { assert(store.slot_view() =~= mb); }
+        proof {
+            assert(store.slot_view() =~= mb);
+        }
     }
 
     if first.is_some() {
-        proof { assert(last is Some); }   // first Some <==> last Some (last_wf)
+        proof {
+            assert(last is Some);
+        }  // first Some <==> last Some (last_wf)
         let l = last.unwrap();
         proof {
-            assert(m0[l].parent == Some(slot));   // last_wf
+            assert(m0[l].parent == Some(slot));  // last_wf
             assert(m0.dom().contains(l));
         }
         let mut ls = store.slot(l);
         ls.next_sib = next;
-        proof { assert(ls == set_next_sib(mb[l], next)); }
+        proof {
+            assert(ls == set_next_sib(mb[l], next));
+        }
         store.set_slot(l, ls);
-        proof { assert(store.slot_view() =~= mc); }
+        proof {
+            assert(store.slot_view() =~= mc);
+        }
         if let Some(nx) = next {
             proof {
                 assert(m0[slot].next_sib == Some(nx));
                 assert(m0.dom().contains(nx));
-                assert(m0[nx].parent != Some(slot));   // roles: next is a non-child
+                assert(m0[nx].parent != Some(slot));  // roles: next is a non-child
             }
             let mut ns = store.slot(nx);
             ns.prev_sib = last;
-            proof { assert(ns == set_prev_sib(mc[nx], last)); }
+            proof {
+                assert(ns == set_prev_sib(mc[nx], last));
+            }
             store.set_slot(nx, ns);
-            proof { assert(store.slot_view() =~= md); }
+            proof {
+                assert(store.slot_view() =~= md);
+            }
         } else {
-            proof { assert(store.slot_view() =~= md); }
+            proof {
+                assert(store.slot_view() =~= md);
+            }
         }
     } else {
-        proof { assert(store.slot_view() =~= md); }
+        proof {
+            assert(store.slot_view() =~= md);
+        }
     }
 
     let mut s = store.slot(slot);
@@ -10000,7 +11033,22 @@ pub(crate) fn cdt_unlink<S: Store>(store: &mut S, slot: SlotId)
         assert(mfin =~= md.insert(slot, mfin[slot]));
         // The final arena is exactly the closed-form merge `unlinked` — the per-key
         // case split is keyed to the splice chain in `lemma_unlink_merge`.
-        lemma_unlink_merge(m0, mw, ma, mb, mc, md, mfin, slot, last, parent, prev, next, first, head);
+        lemma_unlink_merge(
+            m0,
+            mw,
+            ma,
+            mb,
+            mc,
+            md,
+            mfin,
+            slot,
+            last,
+            parent,
+            prev,
+            next,
+            first,
+            head,
+        );
         // Every slot's cap rode through: `mfin == unlinked`, and `unlinked` rebuilds
         // each entry's `.cap` from `m0` (the cap-frame `delete`'s "only empties" rests on).
         assert forall|x: SlotId| m0.dom().contains(x) implies #[trigger] mfin[x].cap
@@ -10053,14 +11101,15 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
         // `set_slot` frames `irq_view` too, so a queued-cap move preserves it (and
         // hence the `irq_binding_refs` census term — `thread::bind`'s relocation reads it off).
         final(store).irq_view() == old(store).irq_view(),
-            final(store).ready_view() == old(store).ready_view(),
+        final(store).ready_view() == old(store).ready_view(),
         final(store).slot_view()[dst].cap == old(store).slot_view()[src].cap,
         is_empty_cap(final(store).slot_view()[src].cap),
         // The cap-content frame: only `src`/`dst` change cap; the neighbour fixups
         // touch CDT *link* fields, never `.cap`. 3d's `send`/`recv` need this to
         // know a queued-cap move leaves every other ring slot's content alone.
-        forall|x: SlotId| old(store).slot_view().dom().contains(x) && x != src && x != dst
-            ==> #[trigger] final(store).slot_view()[x].cap == old(store).slot_view()[x].cap,
+        forall|x: SlotId|
+            old(store).slot_view().dom().contains(x) && x != src && x != dst
+                ==> #[trigger] final(store).slot_view()[x].cap == old(store).slot_view()[x].cap,
         count_nonempty(final(store).slot_view()) == count_nonempty(old(store).slot_view()),
 {
     let ghost m0 = old(store).slot_view();
@@ -10134,7 +11183,7 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
     if let Some(pa) = d.parent {
         proof {
             assert(m0[src].parent == Some(pa));
-            assert(m0.dom().contains(pa));   // links_in_domain
+            assert(m0.dom().contains(pa));  // links_in_domain
             assert(pa != dst);
         }
         let mut pas = store.slot(pa);
@@ -10150,21 +11199,29 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
                 Some(c) => {
                     assert(c == src <==> c.0 == src.0);
                     assert((m1[pa].first_child == Some(src)) == (c == src));
-                }
-                None => {}
+                },
+                None => {},
             }
             assert(fc_is_src == (m1[pa].first_child == Some(src)));
         }
         if fc_is_src {
             pas.first_child = Some(dst);
-            proof { assert(pas == set_first_child(m1[pa], Some(dst))); }
+            proof {
+                assert(pas == set_first_child(m1[pa], Some(dst)));
+            }
             store.set_slot(pa, pas);
-            proof { assert(store.slot_view() =~= m2); }
+            proof {
+                assert(store.slot_view() =~= m2);
+            }
         } else {
-            proof { assert(store.slot_view() =~= m2); }
+            proof {
+                assert(store.slot_view() =~= m2);
+            }
         }
     } else {
-        proof { assert(store.slot_view() =~= m2); }
+        proof {
+            assert(store.slot_view() =~= m2);
+        }
     }
 
     if let Some(pv) = d.prev_sib {
@@ -10175,11 +11232,17 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
         }
         let mut pvs = store.slot(pv);
         pvs.next_sib = Some(dst);
-        proof { assert(pvs == set_next_sib(m2[pv], Some(dst))); }
+        proof {
+            assert(pvs == set_next_sib(m2[pv], Some(dst)));
+        }
         store.set_slot(pv, pvs);
-        proof { assert(store.slot_view() =~= m3); }
+        proof {
+            assert(store.slot_view() =~= m3);
+        }
     } else {
-        proof { assert(store.slot_view() =~= m3); }
+        proof {
+            assert(store.slot_view() =~= m3);
+        }
     }
 
     if let Some(nx) = d.next_sib {
@@ -10190,11 +11253,17 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
         }
         let mut nxs = store.slot(nx);
         nxs.prev_sib = Some(dst);
-        proof { assert(nxs == set_prev_sib(m3[nx], Some(dst))); }
+        proof {
+            assert(nxs == set_prev_sib(m3[nx], Some(dst)));
+        }
         store.set_slot(nx, nxs);
-        proof { assert(store.slot_view() =~= m4); }
+        proof {
+            assert(store.slot_view() =~= m4);
+        }
     } else {
-        proof { assert(store.slot_view() =~= m4); }
+        proof {
+            assert(store.slot_view() =~= m4);
+        }
     }
 
     // ── C1/C2/C3: characterize the straight-line map m4 against m0 and tgt. ──
@@ -10209,12 +11278,17 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
         assert(m4[src] == m0[src]);
 
         // C2: each child of src is untouched (parent flip happens in the loop).
-        assert forall|x: SlotId| m0.dom().contains(x) && m0[x].parent == Some(src)
-            implies #[trigger] m4[x] == m0[x] by {
+        assert forall|x: SlotId|
+            m0.dom().contains(x) && m0[x].parent == Some(src) implies #[trigger] m4[x] == m0[x] by {
             // x != src/dst, and x is none of pa/pv/nx (else src.parent == src etc.).
-            if x == src { assert(r[src] < r[src]); }
+            if x == src {
+                assert(r[src] < r[src]);
+            }
             assert(x != dst);
-            if m0[src].parent == Some(x) { assert(r[src] < r[x]); assert(r[x] < r[src]); }
+            if m0[src].parent == Some(x) {
+                assert(r[src] < r[x]);
+                assert(r[x] < r[src]);
+            }
             if m0[src].prev_sib == Some(x) {
                 assert(m0[x].next_sib == Some(src));
                 assert(m0[src].parent == m0[x].parent);
@@ -10225,8 +11299,9 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
         }
 
         // C3: each non-child slot other than src lands on its renamed value rl[k].
-        assert forall|k: SlotId| m0.dom().contains(k) && k != src && m0[k].parent != Some(src)
-            implies #[trigger] m4[k] == rl[k] by {
+        assert forall|k: SlotId|
+            m0.dom().contains(k) && k != src && m0[k].parent != Some(src) implies #[trigger] m4[k]
+            == rl[k] by {
             if k == dst {
                 assert(m0[src].parent != Some(dst));
                 assert(m0[src].prev_sib != Some(dst));
@@ -10256,8 +11331,13 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
         // Completeness: every child is next_sib-reachable from the first child,
         // so the loop's entry "done" branch is vacuous.
         if let Some(h) = m0[src].first_child {
-            assert forall|x: SlotId| m0.dom().contains(x) && m0[x].parent == Some(src)
-                implies next_reach(m0, h, x, srk) by {
+            assert forall|x: SlotId|
+                m0.dom().contains(x) && m0[x].parent == Some(src) implies next_reach(
+                m0,
+                h,
+                x,
+                srk,
+            ) by {
                 lemma_child_on_chain(m0, src, x, srk);
             }
         }
@@ -10282,22 +11362,29 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
             is_empty_cap(m0[dst].cap),
             m0.dom().contains(src),
             m0.dom().contains(dst),
-            forall|k: SlotId| #[trigger] m0.dom().contains(k) && m0[k].parent != Some(src)
-                ==> store.slot_view()[k] == m4[k],
+            forall|k: SlotId| #[trigger]
+                m0.dom().contains(k) && m0[k].parent != Some(src) ==> store.slot_view()[k] == m4[k],
             c matches Some(cur) ==> {
                 &&& m0.dom().contains(cur)
                 &&& m0[cur].parent == Some(src)
-                &&& forall|x: SlotId| #[trigger] m0.dom().contains(x) && m0[x].parent == Some(src)
-                        && next_reach(m0, cur, x, srk) ==> store.slot_view()[x] == m0[x]
-                &&& forall|x: SlotId| #[trigger] m0.dom().contains(x) && m0[x].parent == Some(src)
-                        && !next_reach(m0, cur, x, srk) ==> store.slot_view()[x] == rl[x]
+                &&& forall|x: SlotId| #[trigger]
+                    m0.dom().contains(x) && m0[x].parent == Some(src) && next_reach(m0, cur, x, srk)
+                        ==> store.slot_view()[x] == m0[x]
+                &&& forall|x: SlotId| #[trigger]
+                    m0.dom().contains(x) && m0[x].parent == Some(src) && !next_reach(
+                        m0,
+                        cur,
+                        x,
+                        srk,
+                    ) ==> store.slot_view()[x] == rl[x]
             },
-            c is None ==> forall|x: SlotId| #[trigger] m0.dom().contains(x)
-                && m0[x].parent == Some(src) ==> store.slot_view()[x] == rl[x],
-        decreases match c {
-            Some(cur) => (srk[cur] + 1) as nat,
-            None => 0nat,
-        },
+            c is None ==> forall|x: SlotId| #[trigger]
+                m0.dom().contains(x) && m0[x].parent == Some(src) ==> store.slot_view()[x] == rl[x],
+        decreases
+                match c {
+                    Some(cur) => (srk[cur] + 1) as nat,
+                    None => 0nat,
+                },
     {
         let cur = c.unwrap();
         proof {
@@ -10325,20 +11412,21 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
             match nx {
                 Some(nn) => {
                     assert(m0[cur].next_sib == Some(nn));
-                    assert(m0[nn].parent == Some(src));   // share_parent
-                    assert(m0.dom().contains(nn));         // links_in_domain
-                    assert(srk[nn] < srk[cur]);            // valid_srank
+                    assert(m0[nn].parent == Some(src));  // share_parent
+                    assert(m0.dom().contains(nn));  // links_in_domain
+                    assert(srk[nn] < srk[cur]);  // valid_srank
                     // cur is not reachable from nn (rank strictly drops along reach).
                     if next_reach(m0, nn, cur, srk) {
                         lemma_next_reach_sr(m0, nn, cur, srk);
                     }
                     // Peel: for x != cur, reach(cur,x) ⟺ reach(nn,x).
+
                     lemma_children_walk_peel(m0, cur, nn, srk);
-                }
+                },
                 None => {
                     // reach(cur,x) for x != cur needs cur.next == Some(..); it is None.
                     assert(m0[cur].next_sib is None);
-                }
+                },
             }
         }
         c = nx;
@@ -10347,8 +11435,8 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
     proof {
         // Post-loop: children are all at rl, non-children still at m4 (== rl for
         // k != src by C3). So everything but src is already rl.
-        assert forall|k: SlotId| #[trigger] m0.dom().contains(k) && k != src
-            implies store.slot_view()[k] == rl[k] by {}
+        assert forall|k: SlotId| #[trigger]
+            m0.dom().contains(k) && k != src implies store.slot_view()[k] == rl[k] by {}
     }
     store.set_slot(src, CapSlot::empty());
     proof {
@@ -10360,8 +11448,8 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
         assert(mfin[src].first_child is None);
         assert(mfin[src].next_sib is None);
         assert(mfin[src].prev_sib is None);
-        assert forall|k: SlotId| #[trigger] m0.dom().contains(k) && k != src
-            implies mfin[k] == rl[k] by {}
+        assert forall|k: SlotId| #[trigger] m0.dom().contains(k) && k != src implies mfin[k]
+            == rl[k] by {}
         assert(mfin =~= rl.insert(src, mfin[src]));
         // cspace_wf: the transposition preserves it; replacing rl[src] (empty, all
         // links None) with the cleared `src` slot (same shape) keeps it.
@@ -10379,14 +11467,17 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
         assert(cspace_wf(rl.insert(src, mfin[src])));
         assert(cspace_wf(mfin));
         // count unchanged (the live set loses src, gains dst).
-        assert forall|k: SlotId| m0.dom().contains(k) && k != src && k != dst
-            implies #[trigger] is_empty_cap(mfin[k].cap) == is_empty_cap(m0[k].cap) by {
+        assert forall|k: SlotId|
+            m0.dom().contains(k) && k != src && k != dst implies #[trigger] is_empty_cap(
+            mfin[k].cap,
+        ) == is_empty_cap(m0[k].cap) by {
             lemma_generic_relabeled(m0, src, dst, k);
         }
         // The cap-content frame (above): mfin[k] == rl[k] (k != src) and
         // rl[k].cap == m0[k].cap (k != src, k != dst).
-        assert forall|x: SlotId| m0.dom().contains(x) && x != src && x != dst
-            implies #[trigger] mfin[x].cap == m0[x].cap by {
+        assert forall|x: SlotId|
+            m0.dom().contains(x) && x != src && x != dst implies #[trigger] mfin[x].cap
+            == m0[x].cap by {
             lemma_generic_relabeled(m0, src, dst, x);
         }
         lemma_move_count(m0, mfin, src, dst);
@@ -10410,7 +11501,6 @@ pub fn slot_move<S: Store>(store: &mut S, src: SlotId, dst: SlotId)
 // carry the recursion. The load-bearing invariant is `refcount_sound`: the underflow gate
 // for every `refs - 1` and, at the zero point, its census pins the *structural* emptiness
 // each destructor's `requires` needs (no waiters, no armed timers, …).
-
 /// Drop one reference to object `o` and restore the census. The shared
 /// decrement step `obj_unref`/`unref_cspace` factor out: the caller hands an **off-by-one**
 /// state — `refs[o] == census(o) + 1`, sound everywhere else (it already cleared the
@@ -10423,8 +11513,10 @@ pub(crate) fn dec_ref<S: Store>(store: &mut S, o: ObjId)
         old(store).refs_view().dom().contains(o),
         old(store).refs_view()[o] > 0,
         old(store).refs_view()[o] == obj_census(old(store), o) + 1,
-        forall|x: ObjId| x != o && old(store).refs_view().dom().contains(x)
-            ==> #[trigger] old(store).refs_view()[x] == obj_census(old(store), x),
+        forall|x: ObjId|
+            x != o && old(store).refs_view().dom().contains(x) ==> #[trigger] old(
+                store,
+            ).refs_view()[x] == obj_census(old(store), x),
         // The cap→object invariant rides through unchanged — it reads only object views, all
         // framed by `set_obj_refs`.
         caps_consistent(old(store)),
@@ -10437,7 +11529,9 @@ pub(crate) fn dec_ref<S: Store>(store: &mut S, o: ObjId)
     ensures
         refcount_sound(final(store)),
         final(store).refs_view() == old(store).refs_view().insert(
-            o, (old(store).refs_view()[o] - 1) as nat),
+            o,
+            (old(store).refs_view()[o] - 1) as nat,
+        ),
         final(store).refs_view().dom() == old(store).refs_view().dom(),
         final(store).refs_view()[o] == old(store).refs_view()[o] - 1,
         final(store).slot_view() == old(store).slot_view(),
@@ -10446,7 +11540,7 @@ pub(crate) fn dec_ref<S: Store>(store: &mut S, o: ObjId)
         final(store).tcb_view() == old(store).tcb_view(),
         final(store).timer_view() == old(store).timer_view(),
         final(store).timer_head_view() == old(store).timer_head_view(),
-            final(store).ready_view() == old(store).ready_view(),
+        final(store).ready_view() == old(store).ready_view(),
         final(store).cspace_view() == old(store).cspace_view(),
         final(store).irq_view() == old(store).irq_view(),
         caps_consistent(final(store)),
@@ -10457,23 +11551,28 @@ pub(crate) fn dec_ref<S: Store>(store: &mut S, o: ObjId)
     store.set_obj_refs(o, r - 1);
     proof {
         // Every census view is framed by `set_obj_refs`, so the recount is invariant.
-        assert forall|x: ObjId| #[trigger] obj_census(final(store), x)
-            == obj_census(old(store), x) by {}
+        assert forall|x: ObjId| #[trigger]
+            obj_census(final(store), x) == obj_census(old(store), x) by {}
         // `o`'s term moved with the `-1`; every other object's refs and census are both
         // untouched, so the off-by-one precondition carries to full soundness.
-        assert forall|x: ObjId| final(store).refs_view().dom().contains(x)
-            implies #[trigger] final(store).refs_view()[x] == obj_census(final(store), x) by {}
+        assert forall|x: ObjId|
+            final(store).refs_view().dom().contains(
+                x,
+            ) implies #[trigger] final(store).refs_view()[x] == obj_census(final(store), x) by {}
         // `caps_consistent` is refs-free: every per-cap clause reads only the object views
         // `set_obj_refs` left equal to `old`, so each live cap's consistency carries over.
-        assert forall|s: SlotId| #![trigger final(store).slot_view()[s]]
-            final(store).slot_view().dom().contains(s)
-                && !is_empty_cap(final(store).slot_view()[s].cap)
-            implies cap_consistent(final(store), final(store).slot_view()[s].cap) by {
+        assert forall|s: SlotId|
+            #![trigger final(store).slot_view()[s]]
+            final(store).slot_view().dom().contains(s) && !is_empty_cap(
+                final(store).slot_view()[s].cap,
+            ) implies cap_consistent(final(store), final(store).slot_view()[s].cap) by {
             assert(cap_consistent(old(store), old(store).slot_view()[s].cap));
         }
         // census + refs-domain unchanged ⇒ coverage carries.
-        assert forall|x: ObjId| #[trigger] obj_census(final(store), x) >= 1
-            implies final(store).refs_view().dom().contains(x) by {}
+        assert forall|x: ObjId| #[trigger]
+            obj_census(final(store), x) >= 1 implies final(store).refs_view().dom().contains(
+            x,
+        ) by {}
     }
 }
 
@@ -10538,10 +11637,14 @@ pub(crate) fn destroy_cspace<S: Store>(store: &mut S, cs: ObjId)
         // `delete` clears carries its own witness via the target-aware frame.
         emptied_via_dead_home_free(old(store), final(store)),
         // "Dead stays dead" across the resident loop (each `delete` only decrements/removes objects).
-        refs_death_persist(old(store), final(store)),
-    // SCC measure: `destroy_cspace` sits above `delete` (1 > 0); its
-    // resident-loop `delete` calls are count-flat on the first iteration, so the height drops.
-    decreases count_nonempty(old(store).slot_view()), 1int
+        refs_death_persist(
+            old(store),
+            final(store),
+        ),
+// SCC measure: `destroy_cspace` sits above `delete` (1 > 0); its
+// resident-loop `delete` calls are count-flat on the first iteration, so the height drops.
+
+    decreases count_nonempty(old(store).slot_view()), 1int,
 {
     let n = store.cspace_num_slots(cs);
     let mut i: u32 = 0;
@@ -10651,59 +11754,78 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             &&& old(store).refs_view().dom().contains(o)
             &&& old(store).refs_view()[o] > 0
             &&& old(store).refs_view()[o] == obj_census(old(store), o) + 1
-            &&& forall|x: ObjId| x != o && old(store).refs_view().dom().contains(x)
-                    ==> #[trigger] old(store).refs_view()[x] == obj_census(old(store), x)
+            &&& forall|x: ObjId|
+                x != o && old(store).refs_view().dom().contains(x) ==> #[trigger] old(
+                    store,
+                ).refs_view()[x] == obj_census(old(store), x)
         },
         // Per-kind well-formedness each at-zero destructor's `requires` needs.
         cap.kind matches CapKind::CSpace(o) ==> {
             &&& old(store).slot_view().dom().finite()
             &&& cspace_resident_wf(old(store), o)
         },
-        cap.kind matches CapKind::Channel(o, _) ==>
-            chan_wf(old(store).chan_view(), old(store).slot_view(), o),
+        cap.kind matches CapKind::Channel(o, _) ==> chan_wf(
+            old(store).chan_view(),
+            old(store).slot_view(),
+            o,
+        ),
         cap.kind matches CapKind::Thread(o, _) ==> {
             &&& old(store).slot_view().dom().finite()
             &&& old(store).tcb_view().dom().contains(o)
             &&& old(store).tcb_view()[o].bind_slots.len() == 2
             &&& old(store).slot_view().dom().contains(old(store).tcb_view()[o].bind_slots[0])
-            &&& old(store).slot_view().dom().contains(old(store).tcb_view()[o].bind_slots[1])
+            &&& old(store).slot_view().dom().contains(
+                old(store).tcb_view()[o].bind_slots[1],
+            )
             // The bound cspace is resident-wf — `destroy_tcb`'s `unref_cspace` needs it to drive
             // the at-zero `destroy_cspace`, and by then the TCB's own cap is gone. `delete`
             // supplies it from `caps_consistent`'s strengthened Thread clause.
-            &&& (old(store).tcb_view()[o].cspace matches Some(cs) ==>
-                    cspace_resident_wf(old(store), cs))
+            &&& (old(store).tcb_view()[o].cspace matches Some(cs) ==> cspace_resident_wf(
+                old(store),
+                cs,
+            ))
             // Waiter-coherence — `destroy_tcb`'s BlockedNotif branch `remove_waiter` needs
             // `notif_wf(wn)`; same provenance.
-            &&& (old(store).tcb_view()[o].state == ThreadState::BlockedNotif ==>
-                    (old(store).tcb_view()[o].wait_notif matches Some(wn) ==>
-                        notif_wf(old(store).notif_view(), old(store).tcb_view(), wn)))
+            &&& (old(store).tcb_view()[o].state == ThreadState::BlockedNotif ==> (old(
+                store,
+            ).tcb_view()[o].wait_notif matches Some(wn) ==> notif_wf(
+                old(store).notif_view(),
+                old(store).tcb_view(),
+                wn,
+            )))
         },
-        cap.kind matches CapKind::Notification(o) ==>
-            notif_wf(old(store).notif_view(), old(store).tcb_view(), o),
+        cap.kind matches CapKind::Notification(o) ==> notif_wf(
+            old(store).notif_view(),
+            old(store).tcb_view(),
+            o,
+        ),
         cap.kind matches CapKind::Timer(o) ==> {
             &&& old(store).timer_view().dom().contains(o)
             &&& old(store).timer_view().dom().finite()
-            &&& timer_wf(old(store).timer_view(), old(store).timer_head_view())
+            &&& timer_wf(
+                old(store).timer_view(),
+                old(store).timer_head_view(),
+            )
             // `o`'s own armed binding names a live notification (the kernel invariant
             // `disarm`/`destroy_timer` already require). The census rules out `o == n`
             // (an armed self-bound timer would make `census(o) >= 1`, but the zero branch
             // has `census(o) == 0`), so the `-1` on `refs[o]` never touches `refs[n]`.
-            &&& (old(store).timer_view()[o].armed ==>
-                    (old(store).timer_view()[o].notif matches Some(n) ==>
-                        old(store).refs_view().dom().contains(n)
-                        && old(store).refs_view()[n] > 0))
+            &&& (old(store).timer_view()[o].armed ==> (old(
+                store,
+            ).timer_view()[o].notif matches Some(n) ==> old(store).refs_view().dom().contains(n)
+                && old(store).refs_view()[n] > 0))
         },
         cap.kind matches CapKind::Irq(o) ==> {
             &&& old(store).irq_view().dom().contains(o)
             &&& old(store).irq_view().dom().finite()
-            &&& irq_wf(old(store).irq_view())
+            &&& irq_wf(
+                old(store).irq_view(),
+            )
             // `o`'s own binding names a live notification (the `destroy_irq` invariant). The
             // census rules out `o == n` (a self-bound IRQ would make `census(o) >= 1`, but the
             // zero branch has `census(o) == 0`), so the `-1` on `refs[o]` never touches `refs[n]`.
-            &&& (old(store).irq_view()[o].bound ==>
-                    (old(store).irq_view()[o].notif matches Some(n) ==>
-                        old(store).refs_view().dom().contains(n)
-                        && old(store).refs_view()[n] > 0))
+            &&& (old(store).irq_view()[o].bound ==> (old(store).irq_view()[o].notif matches Some(n)
+                ==> old(store).refs_view().dom().contains(n) && old(store).refs_view()[n] > 0))
         },
         // The system cap→object invariant: needed for the `destroy_channel`/
         // `destroy_tcb` arms (which delete arbitrary caps) and preserved through the `-1`.
@@ -10788,9 +11910,10 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             &&& final(store).timer_head_view() == old(store).timer_head_view()
             &&& final(store).irq_view() == old(store).irq_view()
         },
-    // SCC measure: `obj_unref` is the top of the height order — its
-    // `dec_ref`-then-destructor calls are count-flat, so the descent to the destructors is by height.
-    decreases count_nonempty(old(store).slot_view()), 4int
+// SCC measure: `obj_unref` is the top of the height order — its
+// `dec_ref`-then-destructor calls are count-flat, so the descent to the destructors is by height.
+
+    decreases count_nonempty(old(store).slot_view()), 4int,
 {
     let ghost st0 = *store;
     match cap.kind {
@@ -10822,7 +11945,7 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                     lemma_refs_death_persist_trans(&st0, &st1, store);
                 }
             }
-        }
+        },
         CapKind::Thread(o, _) => {
             dec_ref(store, o);
             let ghost st1 = *store;
@@ -10864,7 +11987,7 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                     lemma_refs_death_persist_trans(&st0, &st1, store);
                 }
             }
-        }
+        },
         CapKind::Channel(o, _) => {
             dec_ref(store, o);
             let ghost st1 = *store;
@@ -10883,7 +12006,9 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
             if store.obj_refs(o) == 0 {
                 // Death-provenance: `o` is in `refs.dom()` (dec_ref preserved it) at `refs == 0`, so it is
                 // dead — `destroy_channel`'s death-witness precondition.
-                proof { assert(dead_obj(store, o)); }
+                proof {
+                    assert(dead_obj(store, o));
+                }
                 crate::channel::destroy_channel(store, o);
                 proof {
                     lemma_dead_tcb_frozen_trans(&st0, &st1, store);
@@ -10895,7 +12020,7 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                     lemma_refs_death_persist_trans(&st0, &st1, store);
                 }
             }
-        }
+        },
         CapKind::Notification(o) => {
             dec_ref(store, o);
             let ghost st1 = *store;
@@ -10940,7 +12065,7 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                     lemma_refs_death_persist_trans(&st0, &st1, store);
                 }
             }
-        }
+        },
         CapKind::Timer(o) => {
             dec_ref(store, o);
             let ghost st1 = *store;
@@ -10964,13 +12089,17 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                     // is discharged from the off-by-one precondition's soundness at n ≠ o.
                     assert(store.refs_view()[o] == obj_census(store, o));
                     let armed = store.timer_view().dom().filter(
-                        |k: ObjId| store.timer_view()[k].armed && store.timer_view()[k].notif == Some(o));
+                        |k: ObjId|
+                            store.timer_view()[k].armed && store.timer_view()[k].notif == Some(o),
+                    );
                     assert(armed_timer_refs(store.timer_view(), o) == 0);
                     assert(armed.finite());
                     assert(armed.len() == 0);
                     assert(!armed.contains(o));
                     // `o` not self-bound (else `o` would be in `armed`).
-                    assert(!(store.timer_view()[o].armed && store.timer_view()[o].notif == Some(o)));
+                    assert(!(store.timer_view()[o].armed && store.timer_view()[o].notif == Some(
+                        o,
+                    )));
                     // dec_ref framed the timer view and dropped only refs[o] (to 0).
                     assert(store.timer_view() == old(store).timer_view());
                     assert(store.refs_view() == old(store).refs_view().insert(o, 0));
@@ -10992,7 +12121,7 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                     lemma_refs_death_persist_trans(&st0, &st1, store);
                 }
             }
-        }
+        },
         CapKind::Irq(o) => {
             // The `Timer(o)` arm, term-for-term (the IRQ object is the timer's census twin):
             // `dec_ref` then, at zero, `destroy_irq`. `irq_binding_refs` replaces
@@ -11015,7 +12144,9 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                     // precondition (`o.notif == Some(n)` ⟹ n live, n ≠ o) is discharged.
                     assert(store.refs_view()[o] == obj_census(store, o));
                     let bound = store.irq_view().dom().filter(
-                        |k: ObjId| store.irq_view()[k].bound && store.irq_view()[k].notif == Some(o));
+                        |k: ObjId|
+                            store.irq_view()[k].bound && store.irq_view()[k].notif == Some(o),
+                    );
                     assert(irq_binding_refs(store.irq_view(), o) == 0);
                     assert(bound.finite());
                     assert(bound.len() == 0);
@@ -11038,7 +12169,7 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                     lemma_refs_death_persist_trans(&st0, &st1, store);
                 }
             }
-        }
+        },
         CapKind::Aspace(o) => {
             // Decrement-then-maybe-`aspace_destroy` — exactly `unref_aspace`'s body, reused.
             unref_aspace(store, o);
@@ -11061,7 +12192,7 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                 // `refs_death_persist` (it only drops/removes `o`, never re-refs an object).
                 lemma_emptied_via_dead_home_free_from_slot_eq(&st0, store);
             }
-        }
+        },
         CapKind::Empty | CapKind::Untyped { .. } | CapKind::Frame { .. } => {
             proof {
                 lemma_dead_tcb_frozen_refl(&st0, store);
@@ -11074,7 +12205,7 @@ pub(crate) fn obj_unref<S: Store>(store: &mut S, cap: Cap)
                 lemma_emptied_via_dead_home_free_from_slot_eq(&st0, store);
                 lemma_refs_death_persist_from_refs_eq(&st0, store);
             }
-        }
+        },
     }
 }
 
@@ -11087,8 +12218,10 @@ pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId)
         old(store).refs_view().dom().contains(cs),
         old(store).refs_view()[cs] > 0,
         old(store).refs_view()[cs] == obj_census(old(store), cs) + 1,
-        forall|x: ObjId| x != cs && old(store).refs_view().dom().contains(x)
-            ==> #[trigger] old(store).refs_view()[x] == obj_census(old(store), x),
+        forall|x: ObjId|
+            x != cs && old(store).refs_view().dom().contains(x) ==> #[trigger] old(
+                store,
+            ).refs_view()[x] == obj_census(old(store), x),
         cspace_wf(old(store).slot_view()),
         old(store).slot_view().dom().finite(),
         caps_consistent(old(store)),
@@ -11131,13 +12264,17 @@ pub fn unref_cspace<S: Store>(store: &mut S, cs: ObjId)
         // Death-provenance: every emptied slot was a home handle of a dead object; "dead stays
         // dead" across the op. `destroy_tcb` reads these off (and composes onto its own subject).
         emptied_via_dead_home_free(old(store), final(store)),
-        refs_death_persist(old(store), final(store)),
-    // SCC measure: once `destroy_tcb` is a proven body the cycle
-    // `destroy_tcb → unref_cspace → destroy_cspace → delete → obj_unref → destroy_tcb` is visible,
-    // so `unref_cspace` joins the SCC and needs the shared lexicographic measure. Height 2 (above
-    // `destroy_cspace`=1/`delete`=0, below `destroy_tcb`=3): its `dec_ref`-then-`destroy_cspace`
-    // call is count-flat, so the descent is by height.
-    decreases count_nonempty(old(store).slot_view()), 2int
+        refs_death_persist(
+            old(store),
+            final(store),
+        ),
+// SCC measure: once `destroy_tcb` is a proven body the cycle
+// `destroy_tcb → unref_cspace → destroy_cspace → delete → obj_unref → destroy_tcb` is visible,
+// so `unref_cspace` joins the SCC and needs the shared lexicographic measure. Height 2 (above
+// `destroy_cspace`=1/`delete`=0, below `destroy_tcb`=3): its `dec_ref`-then-`destroy_cspace`
+// call is count-flat, so the descent is by height.
+
+    decreases count_nonempty(old(store).slot_view()), 2int,
 {
     let ghost st0 = *store;
     dec_ref(store, cs);
@@ -11192,27 +12329,29 @@ pub fn unref_aspace<S: Store>(store: &mut S, a: ObjId)
         old(store).refs_view().dom().contains(a),
         old(store).refs_view()[a] > 0,
         old(store).refs_view()[a] == obj_census(old(store), a) + 1,
-        forall|o: ObjId| o != a && old(store).refs_view().dom().contains(o)
-            ==> #[trigger] old(store).refs_view()[o] == obj_census(old(store), o),
+        forall|o: ObjId|
+            o != a && old(store).refs_view().dom().contains(o) ==> #[trigger] old(
+                store,
+            ).refs_view()[o] == obj_census(old(store), o),
         caps_consistent(old(store)),
         end_caps_sound(old(store)),
         census_dom_complete(old(store)),
     ensures
         refcount_sound(final(store)),
-        old(store).refs_view()[a] == 1 ==>
-            final(store).refs_view() == old(store).refs_view().remove(a),
-        old(store).refs_view()[a] > 1 ==>
-            final(store).refs_view() == old(store).refs_view().insert(
-                a,
-                (old(store).refs_view()[a] - 1) as nat,
-            ),
+        old(store).refs_view()[a] == 1 ==> final(store).refs_view() == old(
+            store,
+        ).refs_view().remove(a),
+        old(store).refs_view()[a] > 1 ==> final(store).refs_view() == old(store).refs_view().insert(
+            a,
+            (old(store).refs_view()[a] - 1) as nat,
+        ),
         final(store).slot_view() == old(store).slot_view(),
         final(store).chan_view() == old(store).chan_view(),
         final(store).notif_view() == old(store).notif_view(),
         final(store).tcb_view() == old(store).tcb_view(),
         final(store).timer_view() == old(store).timer_view(),
         final(store).timer_head_view() == old(store).timer_head_view(),
-            final(store).ready_view() == old(store).ready_view(),
+        final(store).ready_view() == old(store).ready_view(),
         final(store).cspace_view() == old(store).cspace_view(),
         final(store).irq_view() == old(store).irq_view(),
         // Aspaces appear in no `cap_consistent` arm and every object view is framed, so the
@@ -11242,24 +12381,27 @@ pub fn unref_aspace<S: Store>(store: &mut S, a: ObjId)
     }
     proof {
         // Every census view is framed unchanged, so the recount is invariant.
-        assert forall|o: ObjId| #[trigger] obj_census(final(store), o)
-            == obj_census(old(store), o) by {}
+        assert forall|o: ObjId| #[trigger]
+            obj_census(final(store), o) == obj_census(old(store), o) by {}
         // refcount_sound: a's term moved with the `-1`; every other object's refs
         // and census are both untouched, so the precond's soundness carries over.
-        assert forall|o: ObjId| final(store).refs_view().dom().contains(o)
-            implies #[trigger] final(store).refs_view()[o] == obj_census(final(store), o) by {}
+        assert forall|o: ObjId|
+            final(store).refs_view().dom().contains(
+                o,
+            ) implies #[trigger] final(store).refs_view()[o] == obj_census(final(store), o) by {}
         // caps_consistent: every object view is framed equal to `old`, so each live cap's
         // (refs-free) consistency carries over.
-        assert forall|s: SlotId| #![trigger final(store).slot_view()[s]]
-            final(store).slot_view().dom().contains(s)
-                && !is_empty_cap(final(store).slot_view()[s].cap)
-            implies cap_consistent(final(store), final(store).slot_view()[s].cap) by {
+        assert forall|s: SlotId|
+            #![trigger final(store).slot_view()[s]]
+            final(store).slot_view().dom().contains(s) && !is_empty_cap(
+                final(store).slot_view()[s].cap,
+            ) implies cap_consistent(final(store), final(store).slot_view()[s].cap) by {
             assert(cap_consistent(old(store), old(store).slot_view()[s].cap));
         }
         // census_dom_complete: census framed; `a` only left the domain when `refs[a]` hit 0,
         // which (off-by-one) means `census(a) == 0`, so the coverage carries.
-        assert forall|o: ObjId| #[trigger] obj_census(final(store), o) >= 1
-            implies final(store).refs_view().dom().contains(o) by {
+        assert forall|o: ObjId| #[trigger]
+            obj_census(final(store), o) >= 1 implies final(store).refs_view().dom().contains(o) by {
             assert(obj_census(old(store), o) >= 1);
         }
         // Death-provenance: `slot_view` is framed equal, so no slot is emptied (free frame trivial).
@@ -11291,8 +12433,10 @@ pub fn ref_aspace<S: Store>(store: &mut S, a: ObjId)
         old(store).refs_view().dom().contains(a),
         old(store).refs_view()[a] < u32::MAX as nat,
         old(store).refs_view()[a] + 1 == obj_census(old(store), a),
-        forall|o: ObjId| o != a && old(store).refs_view().dom().contains(o)
-            ==> #[trigger] old(store).refs_view()[o] == obj_census(old(store), o),
+        forall|o: ObjId|
+            o != a && old(store).refs_view().dom().contains(o) ==> #[trigger] old(
+                store,
+            ).refs_view()[o] == obj_census(old(store), o),
         caps_consistent(old(store)),
         end_caps_sound(old(store)),
         census_dom_complete(old(store)),
@@ -11308,7 +12452,7 @@ pub fn ref_aspace<S: Store>(store: &mut S, a: ObjId)
         final(store).tcb_view() == old(store).tcb_view(),
         final(store).timer_view() == old(store).timer_view(),
         final(store).timer_head_view() == old(store).timer_head_view(),
-            final(store).ready_view() == old(store).ready_view(),
+        final(store).ready_view() == old(store).ready_view(),
         final(store).cspace_view() == old(store).cspace_view(),
         final(store).irq_view() == old(store).irq_view(),
         // Aspaces appear in no `cap_consistent` arm and every object view is framed, so the
@@ -11323,27 +12467,30 @@ pub fn ref_aspace<S: Store>(store: &mut S, a: ObjId)
     store.set_obj_refs(a, r + 1);
     proof {
         // Every census view is framed unchanged by `set_obj_refs`, so the recount is invariant.
-        assert forall|o: ObjId| #[trigger] obj_census(final(store), o)
-            == obj_census(old(store), o) by {}
+        assert forall|o: ObjId| #[trigger]
+            obj_census(final(store), o) == obj_census(old(store), o) by {}
         // refcount_sound: `a`'s refs rose with the `+1` to meet its census (the under-by-one
         // closed); every other object's refs and census are both untouched.
-        assert forall|o: ObjId| final(store).refs_view().dom().contains(o)
-            implies #[trigger] final(store).refs_view()[o] == obj_census(final(store), o) by {
+        assert forall|o: ObjId|
+            final(store).refs_view().dom().contains(
+                o,
+            ) implies #[trigger] final(store).refs_view()[o] == obj_census(final(store), o) by {
             if o != a {
                 assert(old(store).refs_view()[o] == obj_census(old(store), o));
             }
         }
         // caps_consistent: every object view is framed equal to `old`, so each live cap's
         // (refs-free) consistency carries over.
-        assert forall|s: SlotId| #![trigger final(store).slot_view()[s]]
-            final(store).slot_view().dom().contains(s)
-                && !is_empty_cap(final(store).slot_view()[s].cap)
-            implies cap_consistent(final(store), final(store).slot_view()[s].cap) by {
+        assert forall|s: SlotId|
+            #![trigger final(store).slot_view()[s]]
+            final(store).slot_view().dom().contains(s) && !is_empty_cap(
+                final(store).slot_view()[s].cap,
+            ) implies cap_consistent(final(store), final(store).slot_view()[s].cap) by {
             assert(cap_consistent(old(store), old(store).slot_view()[s].cap));
         }
         // census_dom_complete: census framed; the domain only grew the count at `a` (present).
-        assert forall|o: ObjId| #[trigger] obj_census(final(store), o) >= 1
-            implies final(store).refs_view().dom().contains(o) by {
+        assert forall|o: ObjId| #[trigger]
+            obj_census(final(store), o) >= 1 implies final(store).refs_view().dom().contains(o) by {
             assert(obj_census(old(store), o) >= 1);
         }
     }
@@ -11361,8 +12508,13 @@ pub fn ref_aspace<S: Store>(store: &mut S, a: ObjId)
 /// On `Err` (the page-table map failed — pool exhausted / already mapped) nothing is recorded
 /// and the store is unchanged: `aspace_map` frames every view, and neither the cap-side record
 /// nor the ref bump has run.
-pub fn map_frame<S: Store>(store: &mut S, frame_slot: SlotId, asp: ObjId, va: u64, perms: u64)
-    -> (res: Result<(), crate::aspace::MapError>)
+pub fn map_frame<S: Store>(
+    store: &mut S,
+    frame_slot: SlotId,
+    asp: ObjId,
+    va: u64,
+    perms: u64,
+) -> (res: Result<(), crate::aspace::MapError>)
     requires
         cspace_wf(old(store).slot_view()),
         old(store).slot_view().dom().finite(),
@@ -11376,29 +12528,32 @@ pub fn map_frame<S: Store>(store: &mut S, frame_slot: SlotId, asp: ObjId, va: u6
         census_dom_complete(old(store)),
     ensures
         old(store).slot_view()[frame_slot].cap.kind matches CapKind::Frame { base, pages, .. } ==> (
-            res is Ok ==> {
-                &&& final(store).slot_view()[frame_slot].cap == (Cap {
-                        kind: CapKind::Frame { base, pages, mapping: Some((asp, va)) },
-                        rights: old(store).slot_view()[frame_slot].cap.rights,
-                    })
-                &&& final(store).slot_view().dom() == old(store).slot_view().dom()
-                &&& (forall|x: SlotId| final(store).slot_view().dom().contains(x) && x != frame_slot
-                        ==> #[trigger] final(store).slot_view()[x] == old(store).slot_view()[x])
-                &&& final(store).refs_view() == old(store).refs_view().insert(
-                        asp, (old(store).refs_view()[asp] + 1) as nat)
-                &&& cspace_wf(final(store).slot_view())
-                &&& refcount_sound(final(store))
-                &&& caps_consistent(final(store))
-                &&& end_caps_sound(final(store))
-                &&& census_dom_complete(final(store))
-                &&& final(store).chan_view() == old(store).chan_view()
-                &&& final(store).notif_view() == old(store).notif_view()
-                &&& final(store).tcb_view() == old(store).tcb_view()
-                &&& final(store).timer_view() == old(store).timer_view()
-                &&& final(store).timer_head_view() == old(store).timer_head_view()
-                &&& final(store).cspace_view() == old(store).cspace_view()
-                &&& final(store).irq_view() == old(store).irq_view()
-            }),
+        res is Ok ==> {
+            &&& final(store).slot_view()[frame_slot].cap == (Cap {
+                kind: CapKind::Frame { base, pages, mapping: Some((asp, va)) },
+                rights: old(store).slot_view()[frame_slot].cap.rights,
+            })
+            &&& final(store).slot_view().dom() == old(store).slot_view().dom()
+            &&& (forall|x: SlotId|
+                final(store).slot_view().dom().contains(x) && x != frame_slot
+                    ==> #[trigger] final(store).slot_view()[x] == old(store).slot_view()[x])
+            &&& final(store).refs_view() == old(store).refs_view().insert(
+                asp,
+                (old(store).refs_view()[asp] + 1) as nat,
+            )
+            &&& cspace_wf(final(store).slot_view())
+            &&& refcount_sound(final(store))
+            &&& caps_consistent(final(store))
+            &&& end_caps_sound(final(store))
+            &&& census_dom_complete(final(store))
+            &&& final(store).chan_view() == old(store).chan_view()
+            &&& final(store).notif_view() == old(store).notif_view()
+            &&& final(store).tcb_view() == old(store).tcb_view()
+            &&& final(store).timer_view() == old(store).timer_view()
+            &&& final(store).timer_head_view() == old(store).timer_head_view()
+            &&& final(store).cspace_view() == old(store).cspace_view()
+            &&& final(store).irq_view() == old(store).irq_view()
+        }),
         res is Err ==> {
             &&& final(store).slot_view() == old(store).slot_view()
             &&& final(store).refs_view() == old(store).refs_view()
@@ -11443,24 +12598,31 @@ pub fn map_frame<S: Store>(store: &mut S, frame_slot: SlotId, asp: ObjId, va: u6
                 // both frame it), so refs-domain facts carry straight from `old(store)`.
                 assert(store.refs_view() == old(store).refs_view());
                 assert(refcount_sound(&st_pre)) by {
-                    assert forall|o: ObjId| #[trigger] st_pre.refs_view().dom().contains(o)
-                        implies st_pre.refs_view()[o] == obj_census(&st_pre, o) by {
+                    assert forall|o: ObjId| #[trigger]
+                        st_pre.refs_view().dom().contains(o) implies st_pre.refs_view()[o]
+                        == obj_census(&st_pre, o) by {
                         // census reads only views, all equal to `old`'s ⇒ census equal there.
                         assert(obj_census(&st_pre, o) == obj_census(old(store), o));
                         assert(old(store).refs_view()[o] == obj_census(old(store), o));
                     }
                 }
                 // The recorded frame raises `obj_census(asp)` by one, nothing else.
-                assert forall|x: ObjId| #[trigger] obj_census(store, x)
-                    == obj_census(&st_pre, x) + (if x == asp { 1nat } else { 0nat }) by {
+                assert forall|x: ObjId| #[trigger]
+                    obj_census(store, x) == obj_census(&st_pre, x) + (if x == asp {
+                        1nat
+                    } else {
+                        0nat
+                    }) by {
                     lemma_map_frame_census(&st_pre, store, frame_slot, new, x);
                 }
                 // The under-by-one census window at `asp`; sound elsewhere (refs framed).
                 assert(st_pre.refs_view()[asp] == obj_census(&st_pre, asp));
                 assert(store.refs_view()[asp] + 1 == obj_census(store, asp));
                 assert(store.refs_view()[asp] < u32::MAX as nat);
-                assert forall|o: ObjId| o != asp && store.refs_view().dom().contains(o)
-                    implies #[trigger] store.refs_view()[o] == obj_census(store, o) by {
+                assert forall|o: ObjId|
+                    o != asp && store.refs_view().dom().contains(
+                        o,
+                    ) implies #[trigger] store.refs_view()[o] == obj_census(store, o) by {
                     assert(st_pre.refs_view()[o] == obj_census(&st_pre, o));
                 }
                 // cspace_wf: only the cap kind changed; the CDT links are identical.
@@ -11469,16 +12631,15 @@ pub fn map_frame<S: Store>(store: &mut S, frame_slot: SlotId, asp: ObjId, va: u6
                 lemma_map_frame_caps_consistent(&st_pre, store, frame_slot, new);
                 // end_caps_sound: no endpoint-cap filter moves (neither cap names an endpoint).
                 assert forall|ch: ObjId, e: int|
-                    store.chan_view().dom().contains(ch) && store.chan_view()[ch].end_caps.len() == 2
-                        && 0 <= e < 2
-                    implies #[trigger] store.chan_view()[ch].end_caps[e]
-                        == end_cap_count(store.slot_view(), ch, e) by {
+                    store.chan_view().dom().contains(ch) && store.chan_view()[ch].end_caps.len()
+                        == 2 && 0 <= e < 2 implies #[trigger] store.chan_view()[ch].end_caps[e]
+                    == end_cap_count(store.slot_view(), ch, e) by {
                     lemma_map_frame_end_cap(st_pre.slot_view(), frame_slot, new, ch, e);
                 }
                 // census_dom_complete: `asp` already in dom; every other census is framed, so
                 // `census_dom_complete(old)` covers it (refs domain unchanged here).
-                assert forall|o: ObjId| #[trigger] obj_census(store, o) >= 1
-                    implies store.refs_view().dom().contains(o) by {
+                assert forall|o: ObjId| #[trigger]
+                    obj_census(store, o) >= 1 implies store.refs_view().dom().contains(o) by {
                     if o != asp {
                         assert(obj_census(old(store), o) == obj_census(&st_pre, o));
                         assert(old(store).refs_view().dom().contains(o));
@@ -11487,7 +12648,7 @@ pub fn map_frame<S: Store>(store: &mut S, frame_slot: SlotId, asp: ObjId, va: u6
             }
             ref_aspace(store, asp);
             Ok(())
-        }
+        },
     }
 }
 
@@ -11523,16 +12684,19 @@ fn delete_prepare<S: Store>(store: &mut S, slot: SlotId) -> (cap: Cap)
         final(store).tcb_view() == old(store).tcb_view(),
         final(store).timer_view() == old(store).timer_view(),
         final(store).timer_head_view() == old(store).timer_head_view(),
-            final(store).ready_view() == old(store).ready_view(),
+        final(store).ready_view() == old(store).ready_view(),
         final(store).cspace_view() == old(store).cspace_view(),
         final(store).irq_view() == old(store).irq_view(),
-        forall|x: SlotId| final(store).slot_view().dom().contains(x) && x != slot
-            ==> #[trigger] final(store).slot_view()[x].cap == old(store).slot_view()[x].cap,
+        forall|x: SlotId|
+            final(store).slot_view().dom().contains(x) && x != slot
+                ==> #[trigger] final(store).slot_view()[x].cap == old(store).slot_view()[x].cap,
         caps_consistent(final(store)),
         census_dom_complete(final(store)),
         cap_obj(cap) matches Some(o) ==> census_off_by_one(final(store), o),
-        (cap_obj(cap) is None && cap_frame_aspace(cap) is Some)
-            ==> census_off_by_one(final(store), cap_frame_aspace(cap)->Some_0),
+        (cap_obj(cap) is None && cap_frame_aspace(cap) is Some) ==> census_off_by_one(
+            final(store),
+            cap_frame_aspace(cap)->Some_0,
+        ),
         (cap_obj(cap) is None && cap_frame_aspace(cap) is None) ==> refcount_sound(final(store)),
         cap_chan_end(cap) is Some ==> end_caps_off_by_one(
             final(store),
@@ -11557,16 +12721,21 @@ fn delete_prepare<S: Store>(store: &mut S, slot: SlotId) -> (cap: Cap)
             lemma_same_caps_same_frame_map(old(store).slot_view(), store.slot_view(), x);
         }
         assert(refcount_sound(store));
-        assert forall|s2: SlotId| #![trigger store.slot_view()[s2]]
-            store.slot_view().dom().contains(s2) && !is_empty_cap(store.slot_view()[s2].cap)
-            implies cap_consistent(store, store.slot_view()[s2].cap) by {
+        assert forall|s2: SlotId|
+            #![trigger store.slot_view()[s2]]
+            store.slot_view().dom().contains(s2) && !is_empty_cap(
+                store.slot_view()[s2].cap,
+            ) implies cap_consistent(store, store.slot_view()[s2].cap) by {
             assert(cap_consistent(old(store), old(store).slot_view()[s2].cap));
         }
         assert(caps_consistent(store));
         assert forall|ch2: ObjId, e2: int|
-            store.chan_view().dom().contains(ch2) && store.chan_view()[ch2].end_caps.len() == 2
-                && 0 <= e2 < 2 implies #[trigger] store.chan_view()[ch2].end_caps[e2]
-                == end_cap_count(store.slot_view(), ch2, e2) by {
+            store.chan_view().dom().contains(ch2) && store.chan_view()[ch2].end_caps.len() == 2 && 0
+                <= e2 < 2 implies #[trigger] store.chan_view()[ch2].end_caps[e2] == end_cap_count(
+            store.slot_view(),
+            ch2,
+            e2,
+        ) by {
             lemma_same_caps_same_end_cap(old(store).slot_view(), store.slot_view(), ch2, e2);
         }
         assert(end_caps_sound(store));
@@ -11607,8 +12776,9 @@ fn delete_prepare<S: Store>(store: &mut S, slot: SlotId) -> (cap: Cap)
         assert(store.notif_view() == old(store).notif_view());
         assert(store.tcb_view() == old(store).tcb_view());
         assert(store.timer_view() == old(store).timer_view());
-        assert forall|x: ObjId| #[trigger] obj_census(old(store), x)
-            == obj_census(store, x) + (if o_opt == Some(x) || asp_opt == Some(x) {
+        assert forall|x: ObjId| #[trigger]
+            obj_census(old(store), x) == obj_census(store, x) + (if o_opt == Some(x) || asp_opt
+                == Some(x) {
                 1nat
             } else {
                 0nat
@@ -11616,21 +12786,24 @@ fn delete_prepare<S: Store>(store: &mut S, slot: SlotId) -> (cap: Cap)
             lemma_clear_slot_obj_census(old(store), store, sv1, slot, es, cap, x);
         }
         assert forall|ch2: ObjId, e2: int|
-            store.chan_view().dom().contains(ch2) && store.chan_view()[ch2].end_caps.len() == 2
-                && 0 <= e2 < 2 implies #[trigger] store.chan_view()[ch2].end_caps[e2]
-                == end_cap_count(store.slot_view(), ch2, e2) + (if cap_chan_end(cap) == Some(
-                (ch2, e2),
-            ) {
-                1nat
-            } else {
-                0nat
-            }) by {
+            store.chan_view().dom().contains(ch2) && store.chan_view()[ch2].end_caps.len() == 2 && 0
+                <= e2 < 2 implies #[trigger] store.chan_view()[ch2].end_caps[e2] == end_cap_count(
+            store.slot_view(),
+            ch2,
+            e2,
+        ) + (if cap_chan_end(cap) == Some((ch2, e2)) {
+            1nat
+        } else {
+            0nat
+        }) by {
             lemma_clear_slot_end_cap(sv1, slot, es, ch2, e2);
             lemma_same_caps_same_end_cap(old(store).slot_view(), sv1, ch2, e2);
         }
-        assert forall|s2: SlotId| #![trigger store.slot_view()[s2]]
-            store.slot_view().dom().contains(s2) && !is_empty_cap(store.slot_view()[s2].cap)
-            implies cap_consistent(store, store.slot_view()[s2].cap) by {
+        assert forall|s2: SlotId|
+            #![trigger store.slot_view()[s2]]
+            store.slot_view().dom().contains(s2) && !is_empty_cap(
+                store.slot_view()[s2].cap,
+            ) implies cap_consistent(store, store.slot_view()[s2].cap) by {
             assert(s2 != slot);
             assert(store.slot_view()[s2] == sv1[s2]);
         }
@@ -11641,8 +12814,8 @@ fn delete_prepare<S: Store>(store: &mut S, slot: SlotId) -> (cap: Cap)
             assert(cap_consistent(old(store), cap));
         }
         // census_dom_complete: refs domain unchanged, census only dropped ⇒ coverage carries.
-        assert forall|x: ObjId| #[trigger] obj_census(store, x) >= 1
-            implies store.refs_view().dom().contains(x) by {
+        assert forall|x: ObjId| #[trigger]
+            obj_census(store, x) >= 1 implies store.refs_view().dom().contains(x) by {
             // census(old,x) == census(store,x) + δ ≥ census(store,x) ≥ 1, then dom_complete(old).
             assert(obj_census(old(store), x) >= 1);
         }
@@ -11654,23 +12827,26 @@ fn delete_prepare<S: Store>(store: &mut S, slot: SlotId) -> (cap: Cap)
             // makes `asp_opt` None, and `o_opt == Some(o) != Some(x)` for `x != o`).
             assert(obj_census(old(store), o) == obj_census(store, o) + 1);
             lemma_in_refs_from_census(old(store), o);
-            assert forall|x: ObjId| x != o && store.refs_view().dom().contains(x)
-                implies store.refs_view()[x] == obj_census(store, x) by {
+            assert forall|x: ObjId|
+                x != o && store.refs_view().dom().contains(x) implies store.refs_view()[x]
+                == obj_census(store, x) by {
                 assert(obj_census(old(store), x) == obj_census(store, x));
             }
             assert(census_off_by_one(store, o));
         } else if let Some(asp) = asp_opt {
             assert(obj_census(old(store), asp) == obj_census(store, asp) + 1);
             lemma_in_refs_from_census(old(store), asp);
-            assert forall|x: ObjId| x != asp && store.refs_view().dom().contains(x)
-                implies store.refs_view()[x] == obj_census(store, x) by {
+            assert forall|x: ObjId|
+                x != asp && store.refs_view().dom().contains(x) implies store.refs_view()[x]
+                == obj_census(store, x) by {
                 assert(obj_census(old(store), x) == obj_census(store, x));
             }
             assert(census_off_by_one(store, asp));
         } else {
             // Neither designation present ⇒ δ is 0 everywhere ⇒ full soundness carries.
-            assert forall|x: ObjId| store.refs_view().dom().contains(x)
-                implies #[trigger] store.refs_view()[x] == obj_census(store, x) by {
+            assert forall|x: ObjId|
+                store.refs_view().dom().contains(x) implies #[trigger] store.refs_view()[x]
+                == obj_census(store, x) by {
                 assert(obj_census(old(store), x) == obj_census(store, x));
             }
             assert(refcount_sound(store));
@@ -11802,12 +12978,14 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
             &&& final(store).timer_view() == old(store).timer_view()
             &&& final(store).timer_head_view() == old(store).timer_head_view()
             &&& final(store).irq_view() == old(store).irq_view()
-            &&& forall|x: SlotId| old(store).slot_view().dom().contains(x) && x != slot
+            &&& forall|x: SlotId|
+                old(store).slot_view().dom().contains(x) && x != slot
                     ==> #[trigger] final(store).slot_view()[x].cap == old(store).slot_view()[x].cap
         },
-    // SCC measure: `delete` is the bottom of the height order — the only
-    // edge that drops `count_nonempty` (it empties its slot before recursing into `obj_unref`).
-    decreases count_nonempty(old(store).slot_view()), 0int
+// SCC measure: `delete` is the bottom of the height order — the only
+// edge that drops `count_nonempty` (it empties its slot before recursing into `obj_unref`).
+
+    decreases count_nonempty(old(store).slot_view()), 0int,
 {
     let ghost cv0 = store.chan_view();
     let ghost st0 = *store;
@@ -11829,10 +13007,14 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         proof {
             assert(cap_consistent(old(store), cap));
             let peer = 1 - crate::channel::end_idx_spec(end);
-            if store.chan_view()[ch].bindings[(peer, crate::channel::EV_PEER_CLOSED as int)].notif
-                is Some {
-                let m = store.chan_view()[ch].bindings[(peer,
-                    crate::channel::EV_PEER_CLOSED as int)].notif->Some_0;
+            if store.chan_view()[ch].bindings[(
+                peer,
+                crate::channel::EV_PEER_CLOSED as int,
+            )].notif is Some {
+                let m = store.chan_view()[ch].bindings[(
+                    peer,
+                    crate::channel::EV_PEER_CLOSED as int,
+                )].notif->Some_0;
                 if store.notif_view()[m].wait_head is Some {
                     lemma_waiter_refs_pos_from_head(store.notif_view(), store.tcb_view(), m);
                     // A queued waiter makes `census(m) >= 1`, so refs-domain completeness
@@ -11937,6 +13119,7 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
             // and `tcb_view`, no Thread-cap teardown branch ran): if `o` is blocked, its
             // `wait_notif` names a `notif_wf` notification — `obj_unref`'s Thread arm needs it
             // to discharge `destroy_tcb`'s BlockedNotif-branch `remove_waiter`.
+
             if store.tcb_view()[o].state == ThreadState::BlockedNotif {
                 if let Some(wn) = store.tcb_view()[o].wait_notif {
                     assert(notif_wf(old(store).notif_view(), old(store).tcb_view(), wn));
@@ -11951,16 +13134,24 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         // `delete_prepare` only emptied the deleted cap's slot and `endpoint_cap_dropped` only
         // decremented `end_caps[end]` (a count, not `.len()`) — exactly `lemma_chan_wf_frame`'s
         // window. The other arms left `chan_view`/`slot_view` framed.
+
         if let CapKind::Channel(o, _) = cap.kind {
             assert(cap_consistent(old(store), cap));
             assert(chan_wf(cv0, old(store).slot_view(), o));
-            assert forall|s: SlotId| #[trigger] store.slot_view().dom().contains(s) implies
-                store.slot_view()[s].cap == old(store).slot_view()[s].cap
-                    || is_empty_cap(store.slot_view()[s].cap) by {}
-            lemma_chan_wf_frame(cv0, store.chan_view(), old(store).slot_view(),
-                store.slot_view(), o);
+            assert forall|s: SlotId| #[trigger]
+                store.slot_view().dom().contains(s) implies store.slot_view()[s].cap == old(
+                store,
+            ).slot_view()[s].cap || is_empty_cap(store.slot_view()[s].cap) by {}
+            lemma_chan_wf_frame(
+                cv0,
+                store.chan_view(),
+                old(store).slot_view(),
+                store.slot_view(),
+                o,
+            );
         }
         // Discharge `obj_unref`'s Timer armed-notif-live precondition from the census.
+
         if let CapKind::Timer(o) = cap.kind {
             if store.timer_view()[o].armed {
                 if let Some(nn) = store.timer_view()[o].notif {
@@ -11975,6 +13166,7 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         }
         // Discharge `obj_unref`'s Irq bound-notif-live precondition from the census (the
         // Timer block's twin: a bound IRQ makes `irq_binding_refs(nn) >= 1`, hence `census(nn) >= 1`).
+
         if let CapKind::Irq(o) = cap.kind {
             if store.irq_view()[o].bound {
                 if let Some(nn) = store.irq_view()[o].notif {
@@ -12001,13 +13193,15 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
             assert(st_frame.cspace_view() == st0.cspace_view());
             assert(chan_struct_frame(st0.chan_view(), st_frame.chan_view()));
             assert(st_frame.tcb_view().dom() == st0.tcb_view().dom());
-            assert forall|k: ObjId| #[trigger] st_frame.tcb_view()[k].bind_slots
-                == st0.tcb_view()[k].bind_slots by {}
+            assert forall|k: ObjId| #[trigger]
+                st_frame.tcb_view()[k].bind_slots == st0.tcb_view()[k].bind_slots by {}
         }
         assert(unhomed_frozen(&st0, &st_frame, slot)) by {
             assert forall|x: SlotId|
-                st_frame.slot_view().dom().contains(x) && x != slot && !is_homed(&st0, x)
-                implies #[trigger] st_frame.slot_view()[x].cap == st0.slot_view()[x].cap by {}
+                st_frame.slot_view().dom().contains(x) && x != slot && !is_homed(
+                    &st0,
+                    x,
+                ) implies #[trigger] st_frame.slot_view()[x].cap == st0.slot_view()[x].cap by {}
         }
         lemma_unhomed_frozen_compose(&st0, &st_frame, store, slot);
         lemma_home_views_frozen_trans(&st0, &st_frame, store);
@@ -12018,10 +13212,10 @@ pub fn delete<S: Store>(store: &mut S, slot: SlotId)
         // `st_frame → final`.
         assert(emptied_via_dead_home(&st0, &st_frame, slot)) by {
             assert forall|x: SlotId|
-                st_frame.slot_view().dom().contains(x) && x != slot
-                    && !is_empty_cap(st0.slot_view()[x].cap)
-                    && is_empty_cap(#[trigger] st_frame.slot_view()[x].cap)
-                implies exists|o: ObjId| homes(&st0, o, x) && dead_obj(&st_frame, o) by {
+                st_frame.slot_view().dom().contains(x) && x != slot && !is_empty_cap(
+                    st0.slot_view()[x].cap,
+                ) && is_empty_cap(#[trigger] st_frame.slot_view()[x].cap) implies exists|o: ObjId|
+                homes(&st0, o, x) && dead_obj(&st_frame, o) by {
                 assert(st_frame.slot_view()[x].cap == st0.slot_view()[x].cap);
             }
         }
@@ -12135,9 +13329,10 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
         ready_wf(old(store).ready_view(), old(store).tcb_view()),
         ready_complete(old(store).ready_view(), old(store).tcb_view()),
     ensures
-        // Descendant-deletion and well-formedness are **unconditional**: they
-        // hold for *any* target, including the `homed_in_cspace` slot every `Sys::CapRevoke`
-        // supplies — so the spec-mandated guarantee (rev2§2.2) is reachable from the real call path.
+// Descendant-deletion and well-formedness are **unconditional**: they
+// hold for *any* target, including the `homed_in_cspace` slot every `Sys::CapRevoke`
+// supplies — so the spec-mandated guarantee (rev2§2.2) is reachable from the real call path.
+
         cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom().contains(slot),
         final(store).slot_view()[slot].first_child is None,
@@ -12159,8 +13354,8 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
         // keep a live external reference (so none is `dead_obj`) concludes `slot` **survives** by
         // contraposition. We deliberately do no CDT-subtree reasoning inside `revoke` (there is no
         // subtree predicate, by design); the witness is the initial-state home + its destruction.
-        is_empty_cap(final(store).slot_view()[slot].cap)
-            ==> exists|o: ObjId| homes(old(store), o, slot) && dead_obj(final(store), o),
+        is_empty_cap(final(store).slot_view()[slot].cap) ==> exists|o: ObjId|
+            homes(old(store), o, slot) && dead_obj(final(store), o),
         // **Sees through queues — the rev2§3.4 / M1 subtree-deletion obligation, named.** After
         // `revoke`, no live slot anywhere — cspace resident *or* in-flight
         // channel ring cap — is a CDT descendant of `slot`. The transitive closure (not just the
@@ -12210,8 +13405,8 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
             // *initial* state was destroyed (dead at the current step). Each `delete` step covers a
             // freshly-emptied `slot` via its target-aware frame (`slot != leaf`), and a death once
             // witnessed persists (`refs_death_persist`); `homes` is stable (`home_views_frozen`).
-            is_empty_cap(store.slot_view()[slot].cap)
-                ==> exists|o: ObjId| homes(old(store), o, slot) && dead_obj(store, o),
+            is_empty_cap(store.slot_view()[slot].cap) ==> exists|o: ObjId|
+                homes(old(store), o, slot) && dead_obj(store, o),
         decreases count_nonempty(store.slot_view()),
     {
         // The first child is live (it names `slot` as parent), so we descend from a
@@ -12242,6 +13437,7 @@ pub fn revoke<S: Store>(store: &mut S, slot: SlotId)
             }
             // Compose the home + death frames across this `delete` step (`old → pre` from
             // the loop invariant, `pre → store` from `delete`'s ensures).
+
             lemma_home_views_frozen_trans(old(store), &pre, store);
             lemma_refs_death_persist_trans(old(store), &pre, store);
             // Compose `only_empties` across this `delete` step (`old → pre` from the loop
@@ -12323,8 +13519,9 @@ pub proof fn lemma_set_revoking_frames<S: Store>(s0: &S, s1: &S, slot: SlotId, v
         count_nonempty(s1.slot_view()) == count_nonempty(s0.slot_view()),
         only_empties(s0.slot_view(), s1.slot_view()),
         only_empties(s1.slot_view(), s0.slot_view()),
-        forall|x: SlotId| s0.slot_view().dom().contains(x)
-            ==> #[trigger] s1.slot_view()[x].cap == s0.slot_view()[x].cap,
+        forall|x: SlotId|
+            s0.slot_view().dom().contains(x) ==> #[trigger] s1.slot_view()[x].cap
+                == s0.slot_view()[x].cap,
         refcount_sound(s1),
         caps_consistent(s1),
         end_caps_sound(s1),
@@ -12350,27 +13547,30 @@ pub proof fn lemma_set_revoking_frames<S: Store>(s0: &S, s1: &S, slot: SlotId, v
     // Structural well-formedness: links identical, cap-emptiness identical.
     lemma_local_cap_edit_preserves_cspace_wf(m0, slot, v);
     // count_nonempty + only_empties: the live-cap filter is identical (caps equal).
-    assert(m1.dom().filter(|k: SlotId| !is_empty_cap(m1[k].cap))
-        =~= m0.dom().filter(|k: SlotId| !is_empty_cap(m0[k].cap)));
+    assert(m1.dom().filter(|k: SlotId| !is_empty_cap(m1[k].cap)) =~= m0.dom().filter(
+        |k: SlotId| !is_empty_cap(m0[k].cap),
+    ));
     // Census: `slot_refs`/`frame_map_refs` are cap-filters (identical); the binding /
     // waiter / timer / hold terms read framed views (equal) — so `obj_census` is fixed.
     assert forall|o: ObjId| #[trigger] obj_census(s1, o) == obj_census(s0, o) by {
-        assert(m1.dom().filter(|k: SlotId| cap_obj(m1[k].cap) == Some(o))
-            =~= m0.dom().filter(|k: SlotId| cap_obj(m0[k].cap) == Some(o)));
+        assert(m1.dom().filter(|k: SlotId| cap_obj(m1[k].cap) == Some(o)) =~= m0.dom().filter(
+            |k: SlotId| cap_obj(m0[k].cap) == Some(o),
+        ));
         assert(m1.dom().filter(|k: SlotId| cap_frame_aspace(m1[k].cap) == Some(o))
             =~= m0.dom().filter(|k: SlotId| cap_frame_aspace(m0[k].cap) == Some(o)));
     }
     lemma_refcount_sound_from_census_eq(s0, s1);
     // census_dom_complete: census fixed + refs domain fixed.
-    assert forall|o: ObjId| #[trigger] obj_census(s1, o) >= 1 implies
-        s1.refs_view().dom().contains(o) by {
+    assert forall|o: ObjId| #[trigger] obj_census(s1, o) >= 1 implies s1.refs_view().dom().contains(
+        o,
+    ) by {
         assert(obj_census(s0, o) >= 1);
     }
     // caps_consistent: `cap_consistent` reads `slot_view` only via `.dom()` plus the
     // framed object views; a Channel cap's `chan_wf` rides the emptiness frame.
-    assert forall|s: SlotId| #![trigger m1[s]]
-        m1.dom().contains(s) && !is_empty_cap(m1[s].cap)
-        implies cap_consistent(s1, m1[s].cap) by {
+    assert forall|s: SlotId|
+        #![trigger m1[s]]
+        m1.dom().contains(s) && !is_empty_cap(m1[s].cap) implies cap_consistent(s1, m1[s].cap) by {
         assert(m1[s].cap == m0[s].cap);
         assert(cap_consistent(s0, m0[s].cap));
         if let CapKind::Channel(o, _) = m0[s].cap.kind {
@@ -12379,8 +13579,8 @@ pub proof fn lemma_set_revoking_frames<S: Store>(s0: &S, s1: &S, slot: SlotId, v
     }
     // end_caps_sound: `end_cap_count` is a cap-filter (identical); `chan_view` framed.
     assert forall|ch: ObjId, e: int|
-        s1.chan_view().dom().contains(ch) && s1.chan_view()[ch].end_caps.len() == 2 && 0 <= e < 2
-        implies #[trigger] s1.chan_view()[ch].end_caps[e] == end_cap_count(m1, ch, e) by {
+        s1.chan_view().dom().contains(ch) && s1.chan_view()[ch].end_caps.len() == 2 && 0 <= e
+            < 2 implies #[trigger] s1.chan_view()[ch].end_caps[e] == end_cap_count(m1, ch, e) by {
         assert(m1.dom().filter(|k: SlotId| cap_chan_end(m1[k].cap) == Some((ch, e)))
             =~= m0.dom().filter(|k: SlotId| cap_chan_end(m0[k].cap) == Some((ch, e))));
         assert(s0.chan_view()[ch].end_caps[e] == end_cap_count(m0, ch, e));
@@ -12392,15 +13592,20 @@ pub proof fn lemma_set_revoking_frames<S: Store>(s0: &S, s1: &S, slot: SlotId, v
 /// object dead at `s_pre`) is still a homing object dead at `s_new` — `dead_obj` reads
 /// only `refs_view`. Lets `revoke_step`'s always-`ensures` carry the death-provenance
 /// implication across the marker write in both the `More` and `Done` arms.
-pub proof fn lemma_revoke_step_death_provenance<S: Store>(s_old: &S, s_pre: &S, s_new: &S, slot: SlotId)
+pub proof fn lemma_revoke_step_death_provenance<S: Store>(
+    s_old: &S,
+    s_pre: &S,
+    s_new: &S,
+    slot: SlotId,
+)
     requires
         s_new.slot_view()[slot].cap == s_pre.slot_view()[slot].cap,
         s_new.refs_view() == s_pre.refs_view(),
-        is_empty_cap(s_pre.slot_view()[slot].cap)
-            ==> exists|o: ObjId| homes(s_old, o, slot) && dead_obj(s_pre, o),
+        is_empty_cap(s_pre.slot_view()[slot].cap) ==> exists|o: ObjId|
+            homes(s_old, o, slot) && dead_obj(s_pre, o),
     ensures
-        is_empty_cap(s_new.slot_view()[slot].cap)
-            ==> exists|o: ObjId| homes(s_old, o, slot) && dead_obj(s_new, o),
+        is_empty_cap(s_new.slot_view()[slot].cap) ==> exists|o: ObjId|
+            homes(s_old, o, slot) && dead_obj(s_new, o),
 {
     if is_empty_cap(s_new.slot_view()[slot].cap) {
         let o = choose|o: ObjId| homes(s_old, o, slot) && dead_obj(s_pre, o);
@@ -12437,8 +13642,9 @@ pub fn revoke_step<S: Store>(store: &mut S, slot: SlotId, budget: usize) -> (res
         ready_complete(old(store).ready_view(), old(store).tcb_view()),
         budget >= 1,
     ensures
-        // ── Always (Done and More): the maintained invariant bundle, re-establishing
-        // the next call's `requires` — this is what makes `revoke_step` restartable. ──
+// ── Always (Done and More): the maintained invariant bundle, re-establishing
+// the next call's `requires` — this is what makes `revoke_step` restartable. ──
+
         cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom().finite(),
         final(store).slot_view().dom().contains(slot),
@@ -12451,8 +13657,8 @@ pub fn revoke_step<S: Store>(store: &mut S, slot: SlotId, budget: usize) -> (res
         only_empties(old(store).slot_view(), final(store).slot_view()),
         // Conditional root-survival + death-provenance (hold at every preemption point).
         !is_homed(old(store), slot) ==> !is_empty_cap(final(store).slot_view()[slot].cap),
-        is_empty_cap(final(store).slot_view()[slot].cap)
-            ==> exists|o: ObjId| homes(old(store), o, slot) && dead_obj(final(store), o),
+        is_empty_cap(final(store).slot_view()[slot].cap) ==> exists|o: ObjId|
+            homes(old(store), o, slot) && dead_obj(final(store), o),
         // ── Done: the subtree is empty (the `revoke` postcondition) and the marker is clear. ──
         res is Done ==> final(store).slot_view()[slot].first_child is None,
         res is Done ==> no_live_descendant(final(store).slot_view(), slot),
@@ -12461,8 +13667,9 @@ pub fn revoke_step<S: Store>(store: &mut S, slot: SlotId, budget: usize) -> (res
         res is More ==> final(store).slot_view()[slot].first_child is Some,
         res is More ==> !is_empty_cap(final(store).slot_view()[slot].cap),
         res is More ==> final(store).slot_view()[slot].revoking,
-        res is More ==>
-            count_nonempty(final(store).slot_view()) < count_nonempty(old(store).slot_view()),
+        res is More ==> count_nonempty(final(store).slot_view()) < count_nonempty(
+            old(store).slot_view(),
+        ),
 {
     let mut n: usize = 0;
     // The bounded form of `revoke`'s walk: the loop body is identical (descend to a
@@ -12485,8 +13692,8 @@ pub fn revoke_step<S: Store>(store: &mut S, slot: SlotId, budget: usize) -> (res
             !is_homed(old(store), slot) ==> !is_empty_cap(store.slot_view()[slot].cap),
             home_views_frozen(old(store), store),
             refs_death_persist(old(store), store),
-            is_empty_cap(store.slot_view()[slot].cap)
-                ==> exists|o: ObjId| homes(old(store), o, slot) && dead_obj(store, o),
+            is_empty_cap(store.slot_view()[slot].cap) ==> exists|o: ObjId|
+                homes(old(store), o, slot) && dead_obj(store, o),
             // The bounded-quantum bookkeeping.
             n <= budget,
             count_nonempty(store.slot_view()) + n <= count_nonempty(old(store).slot_view()),
@@ -12526,6 +13733,7 @@ pub fn revoke_step<S: Store>(store: &mut S, slot: SlotId, budget: usize) -> (res
             }
             // Progress: `delete` strictly dropped the live count, so the accumulator
             // carries with `n + 1`.
+
             assert(count_nonempty(store.slot_view()) < count_nonempty(pre.slot_view()));
         }
         n = n + 1;
@@ -12548,11 +13756,7 @@ pub fn revoke_step<S: Store>(store: &mut S, slot: SlotId, budget: usize) -> (res
         store.set_slot(slot, root);
         proof {
             lemma_set_revoking_frames(&s_pre, store, slot, root);
-            lemma_only_empties_trans(
-                old(store).slot_view(),
-                s_pre.slot_view(),
-                store.slot_view(),
-            );
+            lemma_only_empties_trans(old(store).slot_view(), s_pre.slot_view(), store.slot_view());
             lemma_revoke_step_death_provenance(old(store), &s_pre, store, slot);
         }
         RevokeStatus::More
@@ -12562,11 +13766,7 @@ pub fn revoke_step<S: Store>(store: &mut S, slot: SlotId, budget: usize) -> (res
         store.set_slot(slot, root);
         proof {
             lemma_set_revoking_frames(&s_pre, store, slot, root);
-            lemma_only_empties_trans(
-                old(store).slot_view(),
-                s_pre.slot_view(),
-                store.slot_view(),
-            );
+            lemma_only_empties_trans(old(store).slot_view(), s_pre.slot_view(), store.slot_view());
             lemma_revoke_step_death_provenance(old(store), &s_pre, store, slot);
             lemma_childless_no_descendant(store.slot_view(), slot);
         }

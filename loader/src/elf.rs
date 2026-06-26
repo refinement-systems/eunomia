@@ -1,7 +1,6 @@
 //! Minimal ELF64 little-endian parser for aarch64 executables.
 //! Strict (untrusted input — images come from the versioned store):
 //! bounds-checked, no panics.
-
 pub const PF_X: u32 = 1;
 pub const PF_W: u32 = 2;
 pub const PF_R: u32 = 4;
@@ -141,7 +140,7 @@ impl Segment {
                 &&& l.pages * PAGE == l.va_end - l.va_start
             },
     {
-        let va_start = self.vaddr & !PAGE_MASK; // round down: cannot overflow
+        let va_start = self.vaddr & !PAGE_MASK;  // round down: cannot overflow
         proof {
             lemma_align_down(self.vaddr, PAGE_MASK);
         }
@@ -152,7 +151,7 @@ impl Segment {
             Some(s) => match s.checked_add(PAGE_MASK) {
                 None => Err(ElfError::BadSegment),
                 Some(e) => {
-                    let va_end = e & !PAGE_MASK; // round up to page boundary
+                    let va_end = e & !PAGE_MASK;  // round up to page boundary
                     proof {
                         lemma_align_down(e, PAGE_MASK);
                         // Round-up never drops below the input: va_end == e - (e & m)
@@ -165,12 +164,15 @@ impl Segment {
                         // span is an exact number of pages (difference of two aligned bounds).
                         lemma_pages_exact(va_start, va_end);
                     }
-                    Ok(PageLayout {
-                        va_start,
-                        va_end,
-                        pages: span / PAGE,
-                        page_offset: self.vaddr - va_start, // in [0, PAGE): cannot underflow
-                    })
+                    Ok(
+                        PageLayout {
+                            va_start,
+                            va_end,
+                            pages: span / PAGE,
+                            page_offset: self.vaddr
+                                - va_start,  // in [0, PAGE): cannot underflow
+                        },
+                    )
                 },
             },
         }
@@ -221,14 +223,17 @@ pub fn parse(bytes: &[u8]) -> (r: Result<Image<'_>, ElfError>)
         r matches Ok(img) ==> well_formed_image(img),
 {
     broadcast use vstd::slice::group_slice_axioms;
+
     if bytes.len() < 64 {
         return Err(ElfError::Truncated);
     }
     // ELF magic `\x7FELF`, checked byte-wise (Verus does not spec slice equality).
+
     if bytes[0] != 0x7f || bytes[1] != 0x45 || bytes[2] != 0x4c || bytes[3] != 0x46 {
         return Err(ElfError::BadMagic);
     }
     // EI_CLASS = 2 (64-bit), EI_DATA = 1 (LE)
+
     if bytes[4] != 2 || bytes[5] != 1 {
         return Err(ElfError::NotElf64Le);
     }
@@ -248,8 +253,13 @@ pub fn parse(bytes: &[u8]) -> (r: Result<Image<'_>, ElfError>)
     if phentsize < 56 {
         return Err(ElfError::BadSegment);
     }
-
-    let mut segments = [Segment { vaddr: 0, offset: 0, filesz: 0, memsz: 0, flags: 0 }; MAX_SEGMENTS];
+    let mut segments = [Segment {
+        vaddr: 0,
+        offset: 0,
+        filesz: 0,
+        memsz: 0,
+        flags: 0,
+    };MAX_SEGMENTS];
     let mut n: usize = 0;
     let mut i: usize = 0;
     while i < phnum
@@ -344,7 +354,6 @@ pub fn parse(bytes: &[u8]) -> (r: Result<Image<'_>, ElfError>)
 }
 
 } // verus!
-
 #[cfg(test)]
 mod tests {
     use super::*;

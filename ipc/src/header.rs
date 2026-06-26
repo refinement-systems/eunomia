@@ -26,7 +26,6 @@
 //! `to_le_bytes`/`from_le_bytes` + `copy_from_slice`, which Verus does not spec)
 //! so the proof reasons natively over `|`/`<<`/`&` and `vstd` stays ghost-only —
 //! no `vstd` exec call survives erasure into the alloc-free user binaries.
-
 use vstd::prelude::*;
 
 verus! {
@@ -72,14 +71,16 @@ pub open spec fn spec_encode(h: Header) -> Seq<u8> {
 /// input and trailing bytes alike). Total over every byte string.
 pub open spec fn spec_decode(s: Seq<u8>) -> Result<Header, HeaderError> {
     if s.len() == HEADER_SIZE {
-        Ok(Header {
-            proto: s[0],
-            version: s[1],
-            opcode: (s[2] as u16) | ((s[3] as u16) << 8),
-            flags: (s[4] as u16) | ((s[5] as u16) << 8),
-            body_len: (s[6] as u32) | ((s[7] as u32) << 8) | ((s[8] as u32) << 16)
-                | ((s[9] as u32) << 24),
-        })
+        Ok(
+            Header {
+                proto: s[0],
+                version: s[1],
+                opcode: (s[2] as u16) | ((s[3] as u16) << 8),
+                flags: (s[4] as u16) | ((s[5] as u16) << 8),
+                body_len: (s[6] as u32) | ((s[7] as u32) << 8) | ((s[8] as u32) << 16) | ((
+                s[9] as u32) << 24),
+            },
+        )
     } else {
         Err(HeaderError::BadLength)
     }
@@ -91,6 +92,7 @@ impl Header {
             b@ == spec_encode(*self),
     {
         broadcast use vstd::array::group_array_axioms;
+
         let b: [u8; HEADER_SIZE] = [
             self.proto,
             self.version,
@@ -115,17 +117,20 @@ impl Header {
             r is Ok <==> buf@.len() == HEADER_SIZE,
     {
         broadcast use vstd::slice::group_slice_axioms;
+
         if buf.len() != HEADER_SIZE {
             return Err(HeaderError::BadLength);
         }
-        Ok(Header {
-            proto: buf[0],
-            version: buf[1],
-            opcode: (buf[2] as u16) | ((buf[3] as u16) << 8),
-            flags: (buf[4] as u16) | ((buf[5] as u16) << 8),
-            body_len: (buf[6] as u32) | ((buf[7] as u32) << 8) | ((buf[8] as u32) << 16)
-                | ((buf[9] as u32) << 24),
-        })
+        Ok(
+            Header {
+                proto: buf[0],
+                version: buf[1],
+                opcode: (buf[2] as u16) | ((buf[3] as u16) << 8),
+                flags: (buf[4] as u16) | ((buf[5] as u16) << 8),
+                body_len: (buf[6] as u32) | ((buf[7] as u32) << 8) | ((buf[8] as u32) << 16) | ((
+                buf[9] as u32) << 24),
+            },
+        )
     }
 }
 
@@ -138,7 +143,9 @@ pub proof fn lemma_decode_encode(h: Header)
     let s = spec_encode(h);
     assert(s.len() == HEADER_SIZE);
     // bit_vector reasons over plain fixed-width vars, not struct field projections.
-    let op = h.opcode; let fl = h.flags; let bl = h.body_len;
+    let op = h.opcode;
+    let fl = h.flags;
+    let bl = h.body_len;
     // Each multi-byte field reassembles from its split bytes (low | high<<k).
     crate::le_bytes::lemma_u16_le_reassemble(op);
     crate::le_bytes::lemma_u16_le_reassemble(fl);
@@ -155,9 +162,14 @@ pub proof fn lemma_encode_decode(s: Seq<u8>)
     ensures
         spec_encode(spec_decode(s)->Ok_0) == s,
 {
-    let s2 = s[2]; let s3 = s[3];
-    let s4 = s[4]; let s5 = s[5];
-    let s6 = s[6]; let s7 = s[7]; let s8 = s[8]; let s9 = s[9];
+    let s2 = s[2];
+    let s3 = s[3];
+    let s4 = s[4];
+    let s5 = s[5];
+    let s6 = s[6];
+    let s7 = s[7];
+    let s8 = s[8];
+    let s9 = s[9];
     // The split of a reassembled field recovers the original bytes.
     crate::le_bytes::lemma_u16_le_split_bytes(s2, s3);
     crate::le_bytes::lemma_u16_le_split_bytes(s4, s5);
@@ -166,7 +178,6 @@ pub proof fn lemma_encode_decode(s: Seq<u8>)
 }
 
 } // verus!
-
 #[cfg(test)]
 mod tests {
     use super::*;

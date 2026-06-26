@@ -15,7 +15,6 @@
 //! created this way: the kernel has no global pool (rev2§3.2). The one exception
 //! is the statically allocated root cspace, which is morally init's memory
 //! baked into the image.
-
 use crate::cspace::{self, CSpaceObj, Cap, CapKind, ChanEnd, Rights};
 // `StoreSpec` carries the `Store` ghost-view extension (`slot_view`/`refs_view`/
 // `chan_view`) the retype contracts quantify over. Only referenced from
@@ -78,19 +77,22 @@ impl ObjType {
 
     #[verifier::when_used_as_spec(spec_from_u64)]
     pub fn from_u64(v: u64) -> (r: Option<ObjType>)
-        ensures r == Self::spec_from_u64(v),
+        ensures
+            r == Self::spec_from_u64(v),
     {
-        Some(match v {
-            0 => ObjType::CSpace,
-            1 => ObjType::Thread,
-            2 => ObjType::Channel,
-            3 => ObjType::Notification,
-            4 => ObjType::Timer,
-            5 => ObjType::Frame,
-            6 => ObjType::Aspace,
-            7 => ObjType::Untyped,
-            _ => return None,
-        })
+        Some(
+            match v {
+                0 => ObjType::CSpace,
+                1 => ObjType::Thread,
+                2 => ObjType::Channel,
+                3 => ObjType::Notification,
+                4 => ObjType::Timer,
+                5 => ObjType::Frame,
+                6 => ObjType::Aspace,
+                7 => ObjType::Untyped,
+                _ => return None,
+            },
+        )
     }
 
     /// `from_u64` is a left inverse of the discriminant cast: every `ObjType`
@@ -100,17 +102,18 @@ impl ObjType {
     /// round-trip is needed (none yet — `decode` only needs the `None`-iff-`v>=8`
     /// direction — but it pins the encode/decode pairing as a theorem).
     pub proof fn lemma_from_u64_roundtrip(ty: ObjType)
-        ensures Self::spec_from_u64(ty as u64) == Some(ty),
+        ensures
+            Self::spec_from_u64(ty as u64) == Some(ty),
     {
         match ty {
-            ObjType::CSpace => {}
-            ObjType::Thread => {}
-            ObjType::Channel => {}
-            ObjType::Notification => {}
-            ObjType::Timer => {}
-            ObjType::Frame => {}
-            ObjType::Aspace => {}
-            ObjType::Untyped => {}
+            ObjType::CSpace => {},
+            ObjType::Thread => {},
+            ObjType::Channel => {},
+            ObjType::Notification => {},
+            ObjType::Timer => {},
+            ObjType::Frame => {},
+            ObjType::Aspace => {},
+            ObjType::Untyped => {},
         }
     }
 }
@@ -134,7 +137,6 @@ pub struct Carve {
 }
 
 } // verus!
-
 verus! {
 
 /// Slot-state half of retype's validation: `ut_slot` must hold an Untyped
@@ -161,23 +163,23 @@ pub fn retype_check<S: Store>(
     ensures
         final(store).slot_view() == old(store).slot_view(),
         final(store).refs_view() == old(store).refs_view(),
-        (result matches Ok((b, s, w)) ==> (
-            old(store).slot_view()[ut_slot].cap.kind matches CapKind::Untyped { base, size, watermark }
-                && b == base && s == size && w == watermark
-                && crate::cspace::is_empty_cap(old(store).slot_view()[dst].cap)
-                && (ty == ObjType::Channel ==> (
-                        dst2 matches Some(d2) && d2 != dst
-                            && crate::cspace::is_empty_cap(old(store).slot_view()[d2].cap)))
-        )),
-        (result matches Err(RetypeError::NotUntyped) ==>
-            !(old(store).slot_view()[ut_slot].cap.kind matches CapKind::Untyped { .. })),
-        (result matches Err(RetypeError::DestOccupied) ==> (
-            old(store).slot_view()[ut_slot].cap.kind matches CapKind::Untyped { .. }
-                && (!crate::cspace::is_empty_cap(old(store).slot_view()[dst].cap)
-                    || (ty == ObjType::Channel
-                        && !(dst2 matches Some(d2) && d2 != dst
-                                && crate::cspace::is_empty_cap(old(store).slot_view()[d2].cap))))
-        )),
+        (result matches Ok((b, s, w)) ==> (old(
+            store,
+        ).slot_view()[ut_slot].cap.kind matches CapKind::Untyped { base, size, watermark } && b
+            == base && s == size && w == watermark && crate::cspace::is_empty_cap(
+            old(store).slot_view()[dst].cap,
+        ) && (ty == ObjType::Channel ==> (dst2 matches Some(d2) && d2 != dst
+            && crate::cspace::is_empty_cap(old(store).slot_view()[d2].cap))))),
+        (result matches Err(RetypeError::NotUntyped) ==> !(old(
+            store,
+        ).slot_view()[ut_slot].cap.kind matches CapKind::Untyped { .. })),
+        (result matches Err(RetypeError::DestOccupied) ==> (old(
+            store,
+        ).slot_view()[ut_slot].cap.kind matches CapKind::Untyped { .. } && (
+        !crate::cspace::is_empty_cap(old(store).slot_view()[dst].cap) || (ty == ObjType::Channel
+            && !(dst2 matches Some(d2) && d2 != dst && crate::cspace::is_empty_cap(
+            old(store).slot_view()[d2].cap,
+        )))))),
 {
     let (base, size, watermark) = match store.slot(ut_slot).cap.kind {
         CapKind::Untyped { base, size, watermark } => (base, size, watermark),
@@ -192,7 +194,7 @@ pub fn retype_check<S: Store>(
                 if d2.0 == dst.0 || !matches!(store.slot(d2).cap.kind, CapKind::Empty) {
                     return Err(RetypeError::DestOccupied);
                 }
-            }
+            },
             None => return Err(RetypeError::DestOccupied),
         }
     }
@@ -213,7 +215,8 @@ impl ObjType {
 
     #[verifier::when_used_as_spec(spec_align)]
     pub(crate) fn align(self) -> (r: u64)
-        ensures r == self.spec_align(),
+        ensures
+            r == self.spec_align(),
     {
         match self {
             ObjType::Frame | ObjType::Aspace | ObjType::Untyped => 4096,
@@ -231,9 +234,20 @@ impl ObjType {
 // in-proof `assume`. The `size_of`
 // arms (Thread/Notification/Timer) and the page-rounded Untyped arm need no
 // contract — Verus discharges their positivity directly.
-pub assume_specification [ CSpaceObj::bytes_for ](n: u32) -> (r: usize) ensures r > 0;
-pub assume_specification [ crate::channel::Channel::bytes_for ](n: u32) -> (r: usize) ensures r > 0;
-pub assume_specification [ crate::aspace::AspaceObj::bytes_for ](n: u64) -> (r: usize) ensures r > 0;
+pub assume_specification[ CSpaceObj::bytes_for ](n: u32) -> (r: usize)
+    ensures
+        r > 0,
+;
+
+pub assume_specification[ crate::channel::Channel::bytes_for ](n: u32) -> (r: usize)
+    ensures
+        r > 0,
+;
+
+pub assume_specification[ crate::aspace::AspaceObj::bytes_for ](n: u64) -> (r: usize)
+    ensures
+        r > 0,
+;
 
 // The fixed-size object arms take `core::mem::size_of::<T>()` of these kcore
 // types, which live outside `verus!{}`; register them as opaque so `size_of`
@@ -244,10 +258,12 @@ pub assume_specification [ crate::aspace::AspaceObj::bytes_for ](n: u64) -> (r: 
 #[verifier::external_body]
 #[allow(dead_code)]
 pub struct ExTcb(crate::thread::Tcb);
+
 #[verifier::external_type_specification]
 #[verifier::external_body]
 #[allow(dead_code)]
 pub struct ExNotifObj(crate::notification::NotifObj);
+
 #[verifier::external_type_specification]
 #[verifier::external_body]
 #[allow(dead_code)]
@@ -255,10 +271,8 @@ pub struct ExTimerObj(crate::timer::TimerObj);
 
 // vstd has no spec for `checked_next_multiple_of` yet; trust its signature (the
 // Untyped arm only needs that it returns an `Option`, then re-checks positivity).
-pub assume_specification [ usize::checked_next_multiple_of ](
-    a: usize,
-    b: usize,
-) -> Option<usize>;
+pub assume_specification[ usize::checked_next_multiple_of ](a: usize, b: usize) -> Option<usize>
+;
 
 // Trusted boundary: the fixed-size kernel
 // object structs (`Tcb`/`NotifObj`/`TimerObj`) each carry at least an
@@ -293,13 +307,10 @@ fn fixed_object_bytes(ty: ObjType) -> (r: u64)
 /// The monotone-watermark/disjointness property is a free corollary of the
 /// containment `ensures`: a follow-on carve at `new_wm = end - base` has
 /// `start' >= base + new_wm = end`.
-pub fn carve_place(
-    base: u64,
-    size: u64,
-    watermark: u64,
-    align: u64,
-    bytes: u64,
-) -> (result: Result<Carve, RetypeError>)
+pub fn carve_place(base: u64, size: u64, watermark: u64, align: u64, bytes: u64) -> (result: Result<
+    Carve,
+    RetypeError,
+>)
     requires
         align == 16 || align == 4096,
         bytes > 0,
@@ -313,7 +324,7 @@ pub fn carve_place(
                 &&& base + watermark <= c.start
                 &&& c.end <= base + size
                 &&& watermark < c.end - base
-            }
+            },
             Err(_) => true,
         },
 {
@@ -338,7 +349,11 @@ pub fn carve_place(
         // multiple of align, with s - start == rem <= align - 1. Combined with
         // s == bpw + (align - 1) (the checked_add result) this yields bpw <= start.
         assert(start % align == 0) by (nonlinear_arith)
-            requires align > 0, rem == s % align, start == s - rem;
+            requires
+                align > 0,
+                rem == s % align,
+                start == s - rem,
+        ;
     }
     let end = match start.checked_add(bytes) {
         Some(e) => e,
@@ -365,13 +380,8 @@ pub fn carve_place(
 /// the verified surface). The abutment guard lives here, in verified host-testable
 /// code, rather than inlined in the shell — so its refusal is exercised by the
 /// `aspace_topup_accounting_roundtrip` host test, not only by argument.
-pub fn topup_carve(
-    base: u64,
-    size: u64,
-    watermark: u64,
-    pool_end: u64,
-    pages: u64,
-) -> (result: Result<Carve, RetypeError>)
+pub fn topup_carve(base: u64, size: u64, watermark: u64, pool_end: u64, pages: u64) -> (result:
+    Result<Carve, RetypeError>)
     ensures
         match result {
             Ok(c) => {
@@ -380,7 +390,7 @@ pub fn topup_carve(
                 &&& c.end - c.start == c.bytes
                 &&& base + watermark <= c.start
                 &&& c.end <= base + size
-            }
+            },
             Err(_) => true,
         },
 {
@@ -426,13 +436,10 @@ pub fn topup_carve(
 /// `param` arrives raw from user register `a[2]` (`syscall.rs`); every step that
 /// touches it is checked, so a pathological input yields `BadArg`/`NoMemory`,
 /// never a user-triggerable kernel panic.
-pub fn carve(
-    base: u64,
-    size: u64,
-    watermark: u64,
-    ty: ObjType,
-    param: u64,
-) -> (result: Result<Carve, RetypeError>)
+pub fn carve(base: u64, size: u64, watermark: u64, ty: ObjType, param: u64) -> (result: Result<
+    Carve,
+    RetypeError,
+>)
     ensures
         match result {
             Ok(c) => {
@@ -443,7 +450,7 @@ pub fn carve(
                 &&& base + watermark <= c.start
                 &&& c.end <= base + size
                 &&& watermark < c.end - base
-            }
+            },
             Err(_) => true,
         },
 {
@@ -453,14 +460,14 @@ pub fn carve(
                 return Err(RetypeError::BadArg);
             }
             CSpaceObj::bytes_for(param as u32) as u64
-        }
+        },
         ObjType::Thread => fixed_object_bytes(ty),
         ObjType::Channel => {
             if param == 0 || param > 256 {
                 return Err(RetypeError::BadArg);
             }
             crate::channel::Channel::bytes_for(param as u32) as u64
-        }
+        },
         ObjType::Notification => fixed_object_bytes(ty),
         ObjType::Timer => fixed_object_bytes(ty),
         ObjType::Frame => {
@@ -468,14 +475,15 @@ pub fn carve(
                 return Err(RetypeError::BadArg);
             }
             // param <= 65536, so param * 4096 <= 2^28 — Verus proves no overflow.
+
             param * 4096
-        }
+        },
         ObjType::Aspace => {
             if param == 0 || param > 256 {
                 return Err(RetypeError::BadArg);
             }
             crate::aspace::AspaceObj::bytes_for(param) as u64
-        }
+        },
         ObjType::Untyped => {
             // param is bytes; round up to a page so the carved range is
             // page-aligned at both ends (rev2§2.3). 0 is meaningless; a param
@@ -493,16 +501,15 @@ pub fn carve(
                         return Err(RetypeError::BadArg);
                     }
                     b as u64
-                }
+                },
                 None => return Err(RetypeError::BadArg),
             }
-        }
+        },
     };
     carve_place(base, size, watermark, ty.align(), bytes)
 }
 
 } // verus!
-
 verus! {
 
 /// Install half: advance the untyped's watermark, set the new cap's rights
@@ -545,61 +552,60 @@ pub fn retype_install<S: Store>(
             ==> base <= end),
         crate::cspace::is_empty_cap(old(store).slot_view()[dst].cap),
         !(kind matches CapKind::Empty),
-        (kind matches CapKind::Channel(ch, _) ==> (
-            dst2 matches Some(d2)
-                && d2 != dst
-                && old(store).slot_view().dom().contains(d2)
-                && crate::cspace::is_empty_cap(old(store).slot_view()[d2].cap)
-                && old(store).chan_view().dom().contains(ch)
-                && old(store).refs_view().dom().contains(ch)
-                && old(store).chan_view()[ch].end_caps.len() == 2
-                && old(store).chan_view()[ch].end_caps[0] == 0
-                && old(store).chan_view()[ch].end_caps[1] == 0
-                && old(store).refs_view()[ch] == 1
-        )),
+        (kind matches CapKind::Channel(ch, _) ==> (dst2 matches Some(d2) && d2 != dst && old(
+            store,
+        ).slot_view().dom().contains(d2) && crate::cspace::is_empty_cap(
+            old(store).slot_view()[d2].cap,
+        ) && old(store).chan_view().dom().contains(ch) && old(store).refs_view().dom().contains(ch)
+            && old(store).chan_view()[ch].end_caps.len() == 2 && old(
+            store,
+        ).chan_view()[ch].end_caps[0] == 0 && old(store).chan_view()[ch].end_caps[1] == 0 && old(
+            store,
+        ).refs_view()[ch] == 1)),
     ensures
         final(store).slot_view().dom() == old(store).slot_view().dom(),
         // watermark advanced to `end - base`.
         (old(store).slot_view()[ut_slot].cap.kind matches CapKind::Untyped { base, size, watermark }
-            ==> final(store).slot_view()[ut_slot].cap.kind
-                == CapKind::Untyped { base, size, watermark: (end - base) as u64 }),
+            ==> final(store).slot_view()[ut_slot].cap.kind == CapKind::Untyped {
+            base,
+            size,
+            watermark: (end - base) as u64,
+        }),
         // `dst` holds the new cap as a CDT child of `ut_slot`.
         final(store).slot_view()[dst].cap.kind == kind,
         final(store).slot_view()[dst].parent == Some(ut_slot),
         // rev2§2.5 rights-inheritance table, as theorems keyed on `ty`.
-        (ty == ObjType::Frame ==> final(store).slot_view()[dst].cap.rights.0
-            == old(store).slot_view()[ut_slot].cap.rights.0),
-        (ty == ObjType::Thread ==> final(store).slot_view()[dst].cap.rights.0 == Rights::THREAD_ALL.0),
-        (ty == ObjType::Untyped ==> (
-            final(store).slot_view()[dst].cap.rights.0
-                == (old(store).slot_view()[ut_slot].cap.rights.0 & (Rights::READ | Rights::WRITE))
-            && (final(store).slot_view()[dst].cap.rights.0 & Rights::PHYS) == 0
-        )),
+        (ty == ObjType::Frame ==> final(store).slot_view()[dst].cap.rights.0 == old(
+            store,
+        ).slot_view()[ut_slot].cap.rights.0),
+        (ty == ObjType::Thread ==> final(store).slot_view()[dst].cap.rights.0
+            == Rights::THREAD_ALL.0),
+        (ty == ObjType::Untyped ==> (final(store).slot_view()[dst].cap.rights.0 == (old(
+            store,
+        ).slot_view()[ut_slot].cap.rights.0 & (Rights::READ | Rights::WRITE)) && (
+        final(store).slot_view()[dst].cap.rights.0 & Rights::PHYS) == 0)),
         ((ty != ObjType::Frame && ty != ObjType::Thread && ty != ObjType::Untyped)
             ==> final(store).slot_view()[dst].cap.rights.0 == Rights::ALL.0),
         crate::cspace::cspace_wf(final(store).slot_view()),
         // refcount / chan_view deltas. Non-channel: untouched (the object's `init`
         // pre-counts `dst`, so there is no bump here).
-        (!(kind matches CapKind::Channel(_, _)) ==> (
-            final(store).refs_view() == old(store).refs_view()
-            && final(store).chan_view() == old(store).chan_view()
-        )),
+        (!(kind matches CapKind::Channel(_, _)) ==> (final(store).refs_view() == old(
+            store,
+        ).refs_view() && final(store).chan_view() == old(store).chan_view())),
         // Channel: refs → 2, both ends accounted (end_caps [1, 1]), other channels
         // untouched, `dst2` installed as endpoint B.
-        (kind matches CapKind::Channel(ch, _) ==> (
-            final(store).refs_view() == old(store).refs_view().insert(ch, 2 as nat)
-            && final(store).chan_view().dom() == old(store).chan_view().dom()
-            && final(store).chan_view()[ch].end_caps.len() == 2
+        (kind matches CapKind::Channel(ch, _) ==> (final(store).refs_view() == old(
+            store,
+        ).refs_view().insert(ch, 2 as nat) && final(store).chan_view().dom() == old(
+            store,
+        ).chan_view().dom() && final(store).chan_view()[ch].end_caps.len() == 2
             && final(store).chan_view()[ch].end_caps[0] == 1
-            && final(store).chan_view()[ch].end_caps[1] == 1
-            && (forall|o: ObjId| #[trigger] old(store).chan_view().dom().contains(o) && o != ch
-                    ==> final(store).chan_view()[o] == old(store).chan_view()[o])
-            && (dst2 matches Some(d2) ==> (
-                final(store).slot_view()[d2].cap.kind == CapKind::Channel(ch, ChanEnd::B)
-                && final(store).slot_view()[d2].cap.rights.0 == Rights::ALL.0
-                && final(store).slot_view()[d2].parent == Some(ut_slot)
-            ))
-        )),
+            && final(store).chan_view()[ch].end_caps[1] == 1 && (forall|o: ObjId| #[trigger]
+            old(store).chan_view().dom().contains(o) && o != ch ==> final(store).chan_view()[o]
+                == old(store).chan_view()[o]) && (dst2 matches Some(d2) ==> (
+        final(store).slot_view()[d2].cap.kind == CapKind::Channel(ch, ChanEnd::B)
+            && final(store).slot_view()[d2].cap.rights.0 == Rights::ALL.0
+            && final(store).slot_view()[d2].parent == Some(ut_slot))))),
 {
     let ghost m0 = store.slot_view();
     let ghost rv0 = store.refs_view();
@@ -613,7 +619,7 @@ pub fn retype_install<S: Store>(
             // Unreachable: the precondition pins `ut_slot` to an Untyped cap.
             assert(false);
             return;
-        }
+        },
     };
     assert(base <= end);
     ut.cap.kind = CapKind::Untyped { base, size, watermark: end - base };
@@ -707,15 +713,14 @@ pub fn retype_install<S: Store>(
                 assert(store.chan_view()[ch].end_caps[1] == 1);
                 assert(store.refs_view() =~= rv0.insert(ch, 2 as nat));
                 assert(store.chan_view().dom() == cv0.dom());
-                assert forall|o: ObjId| #[trigger] cv0.dom().contains(o) && o != ch
-                    implies store.chan_view()[o] == cv0[o] by {}
+                assert forall|o: ObjId| #[trigger]
+                    cv0.dom().contains(o) && o != ch implies store.chan_view()[o] == cv0[o] by {}
             }
         }
     }
 }
 
 } // verus!
-
 verus! {
 
 /// The slot `reset` produces: an Untyped slot's watermark zeroed, every other
@@ -725,8 +730,11 @@ pub open spec fn reset_slot(s: crate::cspace::CapSlot) -> crate::cspace::CapSlot
     crate::cspace::CapSlot {
         cap: Cap {
             kind: match s.cap.kind {
-                CapKind::Untyped { base, size, watermark } =>
-                    CapKind::Untyped { base, size, watermark: 0 },
+                CapKind::Untyped { base, size, watermark } => CapKind::Untyped {
+                    base,
+                    size,
+                    watermark: 0,
+                },
                 _ => s.cap.kind,
             },
             rights: s.cap.rights,
@@ -757,21 +765,23 @@ pub fn reset<S: Store>(store: &mut S, ut_slot: SlotId) -> (result: Result<(), Re
         old(store).slot_view().dom().contains(ut_slot),
     ensures
         final(store).refs_view() == old(store).refs_view(),
-        (result is Ok ==> (
-            old(store).slot_view()[ut_slot].cap.kind matches CapKind::Untyped { .. }
-                && old(store).slot_view()[ut_slot].first_child is None
-                && final(store).slot_view()
-                    == old(store).slot_view().insert(ut_slot, reset_slot(old(store).slot_view()[ut_slot]))
-        )),
-        (result matches Err(RetypeError::NotUntyped) ==> (
-            !(old(store).slot_view()[ut_slot].cap.kind matches CapKind::Untyped { .. })
-                && final(store).slot_view() == old(store).slot_view()
-        )),
-        (result matches Err(RetypeError::BadArg) ==> (
-            old(store).slot_view()[ut_slot].cap.kind matches CapKind::Untyped { .. }
-                && old(store).slot_view()[ut_slot].first_child is Some
-                && final(store).slot_view() == old(store).slot_view()
-        )),
+        (result is Ok ==> (old(store).slot_view()[ut_slot].cap.kind matches CapKind::Untyped { .. }
+            && old(store).slot_view()[ut_slot].first_child is None && final(store).slot_view()
+            == old(store).slot_view().insert(
+            ut_slot,
+            reset_slot(old(store).slot_view()[ut_slot]),
+        ))),
+        (result matches Err(RetypeError::NotUntyped) ==> (!(old(
+            store,
+        ).slot_view()[ut_slot].cap.kind matches CapKind::Untyped { .. }) && final(store).slot_view()
+            == old(store).slot_view())),
+        (result matches Err(RetypeError::BadArg) ==> (old(
+            store,
+        ).slot_view()[ut_slot].cap.kind matches CapKind::Untyped { .. } && old(
+            store,
+        ).slot_view()[ut_slot].first_child is Some && final(store).slot_view() == old(
+            store,
+        ).slot_view())),
 {
     let mut ut = store.slot(ut_slot);
     let (base, size) = match ut.cap.kind {
@@ -790,7 +800,6 @@ pub fn reset<S: Store>(store: &mut S, ut_slot: SlotId) -> (result: Result<(), Re
 }
 
 } // verus!
-
 #[cfg(test)]
 mod tests {
     use super::*;

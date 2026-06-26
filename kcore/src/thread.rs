@@ -9,7 +9,6 @@
 //!
 //! Single-core; the kernel is non-preemptible (IRQs masked at EL1), so the
 //! scheduler is only ever invoked at exception boundaries.
-
 use crate::cspace::{self, CapKind, CapSlot, ObjHeader};
 use crate::id::{ObjId, SlotId};
 use crate::store::Store;
@@ -123,6 +122,7 @@ impl Tcb {
 verus! {
 
 pub const BIND_EXIT: usize = 0;
+
 pub const BIND_FAULT: usize = 1;
 
 /// Record the terminal report and fire the matching binding (rev2§5.1).
@@ -151,16 +151,21 @@ pub fn report_terminal<S: Store>(store: &mut S, t: ObjId, r: Report)
         !(r matches Report::Running),
         old(store).tcb_view()[t].bind_slots.len() == 2,
         ({
-            let which: int = if r matches Report::Exited(_) { BIND_EXIT as int } else { BIND_FAULT as int };
+            let which: int = if r matches Report::Exited(_) {
+                BIND_EXIT as int
+            } else {
+                BIND_FAULT as int
+            };
             let slot = old(store).tcb_view()[t].bind_slots[which];
             &&& old(store).slot_view().dom().contains(slot)
             &&& (cspace::cap_notif(old(store).slot_view()[slot].cap) matches Some(nn) ==> {
-                    &&& old(store).notif_view().dom().contains(nn)
-                    &&& cspace::notif_wf(old(store).notif_view(), old(store).tcb_view(), nn)
-                    &&& (old(store).notif_view()[nn].wait_head is Some
-                            ==> old(store).refs_view().dom().contains(nn) && old(store).refs_view()[nn] > 0)
-                    &&& old(store).tcb_view()[t].wait_notif != Some(nn)
-                })
+                &&& old(store).notif_view().dom().contains(nn)
+                &&& cspace::notif_wf(old(store).notif_view(), old(store).tcb_view(), nn)
+                &&& (old(store).notif_view()[nn].wait_head is Some ==> old(
+                    store,
+                ).refs_view().dom().contains(nn) && old(store).refs_view()[nn] > 0)
+                &&& old(store).tcb_view()[t].wait_notif != Some(nn)
+            })
         }),
         // Carries the ready invariants across the bound `signal` (the kernel supplies them).
         cspace::ready_wf(old(store).ready_view(), old(store).tcb_view()),
@@ -180,8 +185,8 @@ pub fn report_terminal<S: Store>(store: &mut S, t: ObjId, r: Report)
         },
         // ReportMonotone — the one transition: a Running report becomes `r` (and any
         // later call hits the absorbing path above — "at most one transition").
-        old(store).tcb_view()[t].report matches Report::Running ==>
-            final(store).tcb_view()[t].report == r,
+        old(store).tcb_view()[t].report matches Report::Running
+            ==> final(store).tcb_view()[t].report == r,
         // CapRevocation `FireSafe` (rev2§5.1) preserved across the death fire: a consistent
         // cap store in ⇒ every resident TCB binding slot still names a live notification
         // out, so the fire signalled a live object, never freed memory
@@ -192,7 +197,7 @@ pub fn report_terminal<S: Store>(store: &mut S, t: ObjId, r: Report)
         cspace::caps_consistent(old(store)) ==> cspace::fire_safe(final(store)),
 {
     match store.tcb_report(t) {
-        Report::Running => {}
+        Report::Running => {},
         _ => {
             proof {
                 // Absorbing path: the store is untouched, so `fire_safe` carries straight
@@ -202,7 +207,7 @@ pub fn report_terminal<S: Store>(store: &mut S, t: ObjId, r: Report)
                 }
             }
             return;
-        }
+        },
     }
     store.set_tcb_report(t, r);
     proof {
@@ -216,7 +221,9 @@ pub fn report_terminal<S: Store>(store: &mut S, t: ObjId, r: Report)
     let which = match r {
         Report::Exited(_) => BIND_EXIT,
         Report::Faulted { .. } => BIND_FAULT,
-        Report::Running => { return; }
+        Report::Running => {
+            return;
+        },
     };
     let slot = store.tcb_bind_slot(t, which);
     let cap = store.slot(slot).cap;
@@ -232,8 +239,12 @@ pub fn report_terminal<S: Store>(store: &mut S, t: ObjId, r: Report)
             // waiter on `n` (`requires`), so `n`'s queue well-formedness survives —
             // discharging `signal`'s `notif_wf` precondition.
             cspace::lemma_notif_wf_frame(
-                old(store).notif_view(), old(store).tcb_view(),
-                store.notif_view(), store.tcb_view(), n);
+                old(store).notif_view(),
+                old(store).tcb_view(),
+                store.notif_view(),
+                store.tcb_view(),
+                n,
+            );
         }
         crate::notification::signal(store, n, bits);
         proof {
@@ -271,16 +282,22 @@ pub fn report_terminal<S: Store>(store: &mut S, t: ObjId, r: Report)
 /// Frames every other view unchanged in both branches (the mutual-frame
 /// discipline), so a spawn that calls this leaves cspace/refs/channels/notifs/
 /// timers untouched whether it accepts or refuses.
-pub fn set_priority<S: Store>(store: &mut S, t: ObjId, prio: u8, ceiling: u8) -> (res: Result<(), ()>)
+pub fn set_priority<S: Store>(store: &mut S, t: ObjId, prio: u8, ceiling: u8) -> (res: Result<
+    (),
+    (),
+>)
     requires
         old(store).tcb_view().dom().contains(t),
     ensures
-        // Accepted: the written priority is exactly `prio`, hence within the cap
-        // ceiling — a reachable `ensures`, not a shell promise.
+// Accepted: the written priority is exactly `prio`, hence within the cap
+// ceiling — a reachable `ensures`, not a shell promise.
+
         res is Ok ==> {
             &&& prio <= ceiling
             &&& final(store).tcb_view() == old(store).tcb_view().insert(
-                    t, TcbView { priority: prio, ..old(store).tcb_view()[t] })
+                t,
+                TcbView { priority: prio, ..old(store).tcb_view()[t] },
+            )
             &&& final(store).tcb_view()[t].priority == prio
             &&& final(store).tcb_view()[t].priority <= ceiling
         },
@@ -345,8 +362,11 @@ pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<S
         old(store).slot_view().dom().contains(old(store).tcb_view()[t].bind_slots[which as int]),
         // The displaced cap is empty or a notification, so the `delete` takes the
         // clean notification-cap frame (a bind slot only ever holds a notification cap).
-        cspace::is_empty_cap(old(store).slot_view()[old(store).tcb_view()[t].bind_slots[which as int]].cap)
-            || cspace::cap_notif(old(store).slot_view()[old(store).tcb_view()[t].bind_slots[which as int]].cap) is Some,
+        cspace::is_empty_cap(
+            old(store).slot_view()[old(store).tcb_view()[t].bind_slots[which as int]].cap,
+        ) || cspace::cap_notif(
+            old(store).slot_view()[old(store).tcb_view()[t].bind_slots[which as int]].cap,
+        ) is Some,
         notif_src matches Some(src) ==> {
             &&& old(store).slot_view().dom().contains(src)
             &&& src != old(store).tcb_view()[t].bind_slots[which as int]
@@ -367,7 +387,8 @@ pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<S
             TcbView {
                 bind_bits: old(store).tcb_view()[t].bind_bits.update(which as int, bits),
                 ..old(store).tcb_view()[t]
-            }),
+            },
+        ),
         final(store).chan_view() == old(store).chan_view(),
         final(store).notif_view() == old(store).notif_view(),
         final(store).timer_view() == old(store).timer_view(),
@@ -379,16 +400,22 @@ pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<S
         // The slot effect, split on `notif_src` (read off `delete` + `slot_move`).
         notif_src matches Some(src) ==> {
             &&& final(store).slot_view()[old(store).tcb_view()[t].bind_slots[which as int]].cap
-                    == old(store).slot_view()[src].cap
+                == old(store).slot_view()[src].cap
             &&& cspace::is_empty_cap(final(store).slot_view()[src].cap)
-            &&& forall|x: SlotId| old(store).slot_view().dom().contains(x)
-                    && x != old(store).tcb_view()[t].bind_slots[which as int] && x != src
+            &&& forall|x: SlotId|
+                old(store).slot_view().dom().contains(x) && x != old(
+                    store,
+                ).tcb_view()[t].bind_slots[which as int] && x != src
                     ==> #[trigger] final(store).slot_view()[x].cap == old(store).slot_view()[x].cap
         },
         notif_src is None ==> {
-            &&& cspace::is_empty_cap(final(store).slot_view()[old(store).tcb_view()[t].bind_slots[which as int]].cap)
-            &&& forall|x: SlotId| old(store).slot_view().dom().contains(x)
-                    && x != old(store).tcb_view()[t].bind_slots[which as int]
+            &&& cspace::is_empty_cap(
+                final(store).slot_view()[old(store).tcb_view()[t].bind_slots[which as int]].cap,
+            )
+            &&& forall|x: SlotId|
+                old(store).slot_view().dom().contains(x) && x != old(
+                    store,
+                ).tcb_view()[t].bind_slots[which as int]
                     ==> #[trigger] final(store).slot_view()[x].cap == old(store).slot_view()[x].cap
         },
 {
@@ -413,10 +440,14 @@ pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<S
         // (`thread_hold`, via `lemma_thread_hold_frame`), and frames slot/chan/notif/timer.
         assert(st1.tcb_view().dom().contains(t));
         assert(store.tcb_view().dom() == st1.tcb_view().dom());
-        assert forall|x: ObjId| #[trigger] cspace::obj_census(store, x)
-            == cspace::obj_census(&st1, x) by {
-            cspace::lemma_waiter_refs_frame_fields(st1.notif_view(), st1.tcb_view(),
-                store.tcb_view(), x);
+        assert forall|x: ObjId| #[trigger]
+            cspace::obj_census(store, x) == cspace::obj_census(&st1, x) by {
+            cspace::lemma_waiter_refs_frame_fields(
+                st1.notif_view(),
+                st1.tcb_view(),
+                store.tcb_view(),
+                x,
+            );
             cspace::lemma_thread_hold_frame(st1.tcb_view(), store.tcb_view(), x);
         }
         cspace::lemma_refcount_sound_from_census_eq(&st1, store);
@@ -438,8 +469,8 @@ pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<S
             // `slot_move` frames `irq_view`, so `irq_binding_refs` (the 7th census term)
             // is unchanged too.
             assert(store.irq_view() == st2.irq_view());
-            assert forall|x: ObjId| #[trigger] cspace::obj_census(store, x)
-                == cspace::obj_census(&st2, x) by {
+            assert forall|x: ObjId| #[trigger]
+                cspace::obj_census(store, x) == cspace::obj_census(&st2, x) by {
                 cspace::lemma_cap_move_census(st2.slot_view(), store.slot_view(), src, slot, x);
             }
             cspace::lemma_refcount_sound_from_census_eq(&st2, store);
@@ -451,7 +482,6 @@ pub fn bind<S: Store>(store: &mut S, t: ObjId, which: usize, notif_src: Option<S
 }
 
 } // verus!
-
 verus! {
 
 // ── `destroy_tcb` per-phase frame lemmas (rev2§6, doc/guidelines/verus.md §10). ──
@@ -465,7 +495,6 @@ verus! {
 // phase derivation nor the six quantified `pub open spec` frames flood the one isolated query.
 // The lemmas defer to the same `cspace::lemma_*` composition machinery the inline blocks used;
 // the in-tree precedent is `cspace::destroy_cspace`'s per-iteration `lemma_*_trans` frame calls.
-
 // Compose the four running cross-object frames over two adjacent edges `(a, b)` + `(b, c)`
 // into `(a, c)` in one call. Every teardown phase re-establishes the same four frames against
 // the running `st0`, so each phase's four `cspace::lemma_*_trans` calls fold into a single
@@ -500,7 +529,8 @@ proof fn lemma_running_frame_trans<S: Store>(a: &S, b: &S, c: &S)
 // + ready pair at `store` and compose the running frames `st0 → store`.
 proof fn lemma_destroy_tcb_halt_frame<S: Store>(st0: &S, st_detach: &S, store: &S, t: ObjId)
     requires
-        // ── `st_detach` invariant bundle (the detach phase left these in hand) ──
+// ── `st_detach` invariant bundle (the detach phase left these in hand) ──
+
         cspace::cspace_wf(st_detach.slot_view()),
         st_detach.slot_view().dom().finite(),
         cspace::refcount_sound(st_detach),
@@ -572,8 +602,8 @@ proof fn lemma_destroy_tcb_halt_frame<S: Store>(st0: &S, st_detach: &S, store: &
     cspace::lemma_refcount_sound_from_census_eq(st_detach, store);
     cspace::lemma_no_live_thread_cap_from_dead(st_detach, t);
     cspace::lemma_caps_consistent_frame_thread_halt_clear(st_detach, store, t);
-    assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o) >= 1 implies
-        store.refs_view().dom().contains(o) by {
+    assert forall|o: ObjId| #[trigger]
+        cspace::obj_census(store, o) >= 1 implies store.refs_view().dom().contains(o) by {
         assert(cspace::obj_census(st_detach, o) == cspace::obj_census(store, o));
         cspace::lemma_in_refs_from_census(st_detach, o);
     }
@@ -605,7 +635,8 @@ proof fn lemma_destroy_tcb_cspace_clear_frame<S: Store>(
     cs: ObjId,
 )
     requires
-        // ── `st_pre_cs` running-invariant bundle (the post-bind-delete state) ──
+// ── `st_pre_cs` running-invariant bundle (the post-bind-delete state) ──
+
         cspace::cspace_wf(st_pre_cs.slot_view()),
         st_pre_cs.tcb_view().dom().finite(),
         cspace::refcount_sound(st_pre_cs),
@@ -671,7 +702,7 @@ proof fn lemma_destroy_tcb_cspace_clear_frame<S: Store>(
     cspace::lemma_no_live_thread_cap_from_dead(st_pre_cs, t);
     cspace::lemma_caps_consistent_frame_thread_halt_clear(st_pre_cs, store, t);
     assert(cspace::cspace_resident_wf(store, cs));  // clear frames cspace_view + slot
-    assert(cspace::end_caps_sound(store));          // clear frames chan + slot
+    assert(cspace::end_caps_sound(store));  // clear frames chan + slot
     cspace::lemma_dead_tcb_frozen_except_single_t(st_pre_cs, store, t);
     cspace::lemma_dead_tcb_frozen_except_trans(st0, st_pre_cs, store, t);
     // The clear frames `slot_view` (free + emptied refl) and the home + refs maps; export the
@@ -694,7 +725,8 @@ proof fn lemma_destroy_tcb_aspace_clear_frame<S: Store>(
     a: ObjId,
 )
     requires
-        // ── `st_pre_as` running-invariant bundle (the post-cspace-release state) ──
+// ── `st_pre_as` running-invariant bundle (the post-cspace-release state) ──
+
         cspace::cspace_wf(st_pre_as.slot_view()),
         st_pre_as.tcb_view().dom().finite(),
         cspace::refcount_sound(st_pre_as),
@@ -833,15 +865,21 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         // drive the at-zero `destroy_cspace`. The TCB's own Thread cap is already gone by the
         // time this destructor runs, so `obj_unref` supplies it (sourced, in turn, from
         // `delete`'s `caps_consistent` over the live Thread cap).
-        old(store).tcb_view()[t].cspace matches Some(cs) ==>
-            cspace::cspace_resident_wf(old(store), cs),
+        old(store).tcb_view()[t].cspace matches Some(cs) ==> cspace::cspace_resident_wf(
+            old(store),
+            cs,
+        ),
         // Waiter-coherence: if `t` is blocked, its `wait_notif` names a
         // `notif_wf` notification — the precondition the BlockedNotif branch's `remove_waiter`
         // needs. Same provenance as the cspace fact: `obj_unref` ← `delete`'s `caps_consistent`
         // over the (now-deleted) live Thread cap's `cap_consistent` clause.
-        old(store).tcb_view()[t].state == ThreadState::BlockedNotif ==>
-            (old(store).tcb_view()[t].wait_notif matches Some(wn) ==>
-                cspace::notif_wf(old(store).notif_view(), old(store).tcb_view(), wn)),
+        old(store).tcb_view()[t].state == ThreadState::BlockedNotif ==> (old(
+            store,
+        ).tcb_view()[t].wait_notif matches Some(wn) ==> cspace::notif_wf(
+            old(store).notif_view(),
+            old(store).tcb_view(),
+            wn,
+        )),
         // The faithful `unqueue_ready` detach requires the ready-queue
         // invariants (a Runnable `t` is found + spliced); `obj_unref`'s Thread arm supplies them.
         cspace::ready_wf(old(store).ready_view(), old(store).tcb_view()),
@@ -849,8 +887,9 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
     ensures
         cspace::cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom() == old(store).slot_view().dom(),
-        cspace::count_nonempty(final(store).slot_view())
-            <= cspace::count_nonempty(old(store).slot_view()),
+        cspace::count_nonempty(final(store).slot_view()) <= cspace::count_nonempty(
+            old(store).slot_view(),
+        ),
         cspace::refcount_sound(final(store)),
         cspace::caps_consistent(final(store)),
         cspace::end_caps_sound(final(store)),
@@ -876,10 +915,8 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         // dying, so the record never transitions here (rev2§5.1).
         final(store).tcb_view()[t].report == old(store).tcb_view()[t].report,
         // Both binding slots emptied (their caps die with the TCB by CDT cleanup).
-        cspace::is_empty_cap(
-            final(store).slot_view()[old(store).tcb_view()[t].bind_slots[0]].cap),
-        cspace::is_empty_cap(
-            final(store).slot_view()[old(store).tcb_view()[t].bind_slots[1]].cap),
+        cspace::is_empty_cap(final(store).slot_view()[old(store).tcb_view()[t].bind_slots[0]].cap),
+        cspace::is_empty_cap(final(store).slot_view()[old(store).tcb_view()[t].bind_slots[1]].cap),
         // Dead, queue-detached TCBs *other than `t`* are frozen. `t` itself is excepted — the
         // body rewrites `tcb[t]` (halts it). `obj_unref`'s Thread arm composes this with
         // `dec_ref` to carry the base `dead_tcb_frozen` up the recursion.
@@ -899,7 +936,7 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         cspace::emptied_via_dead_home_free(old(store), final(store)),
         // "Dead stays dead" across the whole teardown (every step decrements/removes objects).
         cspace::refs_death_persist(old(store), final(store)),
-    decreases cspace::count_nonempty(old(store).slot_view()), 3int
+    decreases cspace::count_nonempty(old(store).slot_view()), 3int,
 {
     let ghost st0 = *store;
     let ghost report0 = store.tcb_view()[t].report;
@@ -923,20 +960,24 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
             // predecessor (both Runnable, hence `wait_notif None` by `ready_complete`, hence off
             // every waiter chain), and frames every object view + `refs`. So the four system
             // invariants ride it via the *off-chain* frame lemmas.
-            cspace::lemma_thread_off_all_chains(store, t);   // Runnable ⇒ not BlockedNotif
+            cspace::lemma_thread_off_all_chains(store, t);  // Runnable ⇒ not BlockedNotif
             // census frozen: waiter census (changed threads `wait_notif None`), thread-hold census
             // (`cspace`/`aspace` preserved), the rest read framed views.
-            assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o)
-                == cspace::obj_census(&st0, o) by {
+            assert forall|o: ObjId| #[trigger]
+                cspace::obj_census(store, o) == cspace::obj_census(&st0, o) by {
                 cspace::lemma_waiter_refs_frame_offchain(
-                    store.notif_view(), st0.tcb_view(), store.tcb_view(), o);
+                    store.notif_view(),
+                    st0.tcb_view(),
+                    store.tcb_view(),
+                    o,
+                );
                 cspace::lemma_thread_hold_frame(st0.tcb_view(), store.tcb_view(), o);
             }
             cspace::lemma_refcount_sound_from_census_eq(&st0, store);
             cspace::lemma_caps_consistent_frame_thread_offchain(&st0, store);
             // `census_dom_complete`: census frozen + refs domain unchanged.
-            assert forall|o: ObjId| #[trigger] cspace::obj_census(store, o) >= 1
-                implies store.refs_view().dom().contains(o) by {
+            assert forall|o: ObjId| #[trigger]
+                cspace::obj_census(store, o) >= 1 implies store.refs_view().dom().contains(o) by {
                 cspace::lemma_in_refs_from_census(&st0, o);
             }
             assert(cspace::end_caps_sound(store));
@@ -957,10 +998,12 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
             assert(0 <= i < rs0.len() && rs0[i] == t);
             cspace::lemma_seq_remove_drops(rs0, i);
             assert(store.tcb_view()[t].priority as int == level);
-            assert(cspace::ready_seq(store.ready_view(), store.tcb_view(), level)
-                == rs0.remove(i));
-            assert(!cspace::ready_seq(store.ready_view(), store.tcb_view(),
-                store.tcb_view()[t].priority as int).contains(t));
+            assert(cspace::ready_seq(store.ready_view(), store.tcb_view(), level) == rs0.remove(i));
+            assert(!cspace::ready_seq(
+                store.ready_view(),
+                store.tcb_view(),
+                store.tcb_view()[t].priority as int,
+            ).contains(t));
             cspace::lemma_thread_off_all_ready_chains(store, t);
         }
     } else if matches!(store.tcb_state(t), ThreadState::BlockedNotif) {
@@ -969,7 +1012,11 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
                 // `remove_waiter`'s refs side-condition: a non-empty queue forces `refs[wn] > 0`
                 // (a waiter ⇒ `census(wn) >= 1`, pinned by `refcount_sound` + `census_dom_complete`).
                 if store.notif_view()[wn].wait_head is Some {
-                    cspace::lemma_waiter_refs_pos_from_head(store.notif_view(), store.tcb_view(), wn);
+                    cspace::lemma_waiter_refs_pos_from_head(
+                        store.notif_view(),
+                        store.tcb_view(),
+                        wn,
+                    );
                     cspace::lemma_in_refs_from_census(store, wn);
                 }
             }
@@ -1010,7 +1057,7 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         } else {
             proof {
                 cspace::lemma_dead_tcb_frozen_refl(&st0, store);
-                cspace::lemma_thread_off_all_chains(store, t);   // wait_notif None
+                cspace::lemma_thread_off_all_chains(store, t);  // wait_notif None
                 cspace::lemma_sysinv_frame_equal_views(&st0, store);
                 cspace::lemma_refs_death_persist_from_refs_eq(&st0, store);
                 // A no-op detach — the ready pair rides the equal views, and `t`
@@ -1023,7 +1070,7 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
     } else {
         proof {
             cspace::lemma_dead_tcb_frozen_refl(&st0, store);
-            cspace::lemma_thread_off_all_chains(store, t);   // not BlockedNotif
+            cspace::lemma_thread_off_all_chains(store, t);  // not BlockedNotif
             cspace::lemma_sysinv_frame_equal_views(&st0, store);
             cspace::lemma_refs_death_persist_from_refs_eq(&st0, store);
             // A no-op detach — the ready pair rides the equal views, and `t`
@@ -1047,13 +1094,20 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
         // `t`, leaving it off-chain; the other branches preserve *full* completeness, which
         // weakens to except-`t`). The halt below promotes this back to full `ready_complete`.
         assert(cspace::ready_wf(store.ready_view(), store.tcb_view()));
-        assert(forall|level: int| 0 <= level < crate::sysabi::NUM_PRIOS as int
-            ==> !(#[trigger] cspace::ready_seq(store.ready_view(), store.tcb_view(), level))
-                    .contains(t));
+        assert(forall|level: int|
+            0 <= level < crate::sysabi::NUM_PRIOS as int ==> !(#[trigger] cspace::ready_seq(
+                store.ready_view(),
+                store.tcb_view(),
+                level,
+            )).contains(t));
         assert(cspace::ready_complete_except(store.ready_view(), store.tcb_view(), t));
         assert forall|o: ObjId, ws: Seq<ObjId>|
-            cspace::waiter_chain(st_detach.notif_view(), st_detach.tcb_view(), o, ws)
-            implies !ws.contains(t) by {}
+            cspace::waiter_chain(
+                st_detach.notif_view(),
+                st_detach.tcb_view(),
+                o,
+                ws,
+            ) implies !ws.contains(t) by {}
         // Home-frame base: the detach frames `slot_view` (free) and the home maps (home) —
         // `unqueue_ready` frames every view; `remove_waiter` keeps `slot_view`/`cspace_view`/the
         // channel skeleton and the TCB domain + `bind_slots`.
@@ -1104,8 +1158,8 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
                 assert(st_halt.tcb_view()[t].bind_slots[0] == s0);
             }
             assert(cspace::homes(&st_halt, t, s0));
-            assert(cspace::dead_obj(&st_halt, t));   // `refs[t] == 0` at `st_halt`
-            assert(cspace::dead_obj(store, t));       // `delete`'s `refs_death_persist`
+            assert(cspace::dead_obj(&st_halt, t));  // `refs[t] == 0` at `st_halt`
+            assert(cspace::dead_obj(store, t));  // `delete`'s `refs_death_persist`
             cspace::lemma_emptied_via_dead_home_free_from_homed(&st_halt, store, s0, t);
         }
     } else {
@@ -1146,8 +1200,8 @@ pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
                 assert(st_d0.tcb_view()[t].bind_slots[1] == s1);
             }
             assert(cspace::homes(&st_d0, t, s1));
-            assert(cspace::dead_obj(&st_d0, t));   // `refs[t] == 0` at `st_d0`
-            assert(cspace::dead_obj(store, t));      // `delete`'s `refs_death_persist`
+            assert(cspace::dead_obj(&st_d0, t));  // `refs[t] == 0` at `st_d0`
+            assert(cspace::dead_obj(store, t));  // `delete`'s `refs_death_persist`
             cspace::lemma_emptied_via_dead_home_free_from_homed(&st_d0, store, s1, t);
         }
     } else {

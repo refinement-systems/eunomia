@@ -40,7 +40,6 @@
 //! Usage in a process binary:
 //!   #[global_allocator]
 //!   static HEAP: urt::Heap<{ 2 * 1024 * 1024 }> = urt::Heap::new();
-
 // `no_std` for every real build; under `cargo test` the crate links `std` so the
 // wrapper proptests can use `std::panic::catch_unwind` + the panic hook (the
 // fragmentation-cap leak path's `debug_assert!` witness). Verus verification is

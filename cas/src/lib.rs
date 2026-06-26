@@ -16,7 +16,6 @@
 //!   - `overlay`  — per-ref in-memory overlay (interval maps, rev2§4.3–4.4)
 //!   - `store`    — the engine: WAL + flush + A/B commit + recovery + GC
 //!   - `gc`       — the mark walk (reachability over the tree, rev2§4.6)
-
 #![cfg_attr(not(feature = "std"), no_std)]
 // Clippy is not a CI gate: `assign_op_pattern` fires in `verus!{}`
 // verified exec code (`x = x + y` is the form Verus reasons about), `BlockDev` is

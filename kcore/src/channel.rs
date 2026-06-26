@@ -18,7 +18,6 @@
 //! bindings are [`crate::store::Binding`]s. The construction/layout helpers
 //! (`bytes_for`/`init`/`slot`) remain pointer-based: the kernel shell uses them
 //! to *place* an object before any handle exists.
-
 use crate::cspace::{self, CapSlot, ChanEnd, ObjHeader};
 use crate::id::{ObjId, SlotId};
 use crate::notification;
@@ -34,14 +33,16 @@ use crate::cspace::{ChanView, StoreSpec};
 verus! {
 
 pub const MSG_PAYLOAD: usize = 256;
+
 pub const MSG_CAPS: usize = 4;
 
 pub const EV_READABLE: usize = 0;
+
 pub const EV_WRITABLE: usize = 1;
+
 pub const EV_PEER_CLOSED: usize = 2;
 
 } // verus!
-
 #[repr(C)]
 pub struct MsgSlot {
     pub len: u16,
@@ -73,7 +74,6 @@ pub enum ChanError {
 }
 
 } // verus!
-
 verus! {
 
 /// Ghost mirror of [`end_idx`]: A → 0, B → 1. Lets the contracts name the
@@ -155,7 +155,10 @@ proof fn lemma_mask_zero(cc: u64)
     ensures
         !mask_bit(0u8, cc as int),
 {
-    assert((0u8 >> cc) & 1u8 == 0u8) by (bit_vector) requires cc < 8;
+    assert((0u8 >> cc) & 1u8 == 0u8) by (bit_vector)
+        requires
+            cc < 8,
+    ;
 }
 
 /// OR-ing in bit `c2` sets exactly that bit of an install mask and leaves the others — the
@@ -166,17 +169,27 @@ proof fn lemma_mask_set_bit(m: u8, c2: u64)
         c2 < 8,
     ensures
         mask_bit(m | (1u8 << c2), c2 as int),
-        forall|cc: int| #![trigger mask_bit(m | (1u8 << c2), cc)]
-            0 <= cc < 8 && cc != c2 as int
-            ==> (mask_bit(m | (1u8 << c2), cc) <==> mask_bit(m, cc)),
+        forall|cc: int|
+            #![trigger mask_bit(m | (1u8 << c2), cc)]
+            0 <= cc < 8 && cc != c2 as int ==> (mask_bit(m | (1u8 << c2), cc) <==> mask_bit(m, cc)),
 {
-    assert(((m | (1u8 << c2)) >> c2) & 1u8 == 1u8) by (bit_vector) requires c2 < 8;
-    assert forall|cc: int| #![trigger mask_bit(m | (1u8 << c2), cc)]
-        0 <= cc < 8 && cc != c2 as int implies
-        (mask_bit(m | (1u8 << c2), cc) <==> mask_bit(m, cc)) by {
+    assert(((m | (1u8 << c2)) >> c2) & 1u8 == 1u8) by (bit_vector)
+        requires
+            c2 < 8,
+    ;
+    assert forall|cc: int|
+        #![trigger mask_bit(m | (1u8 << c2), cc)]
+        0 <= cc < 8 && cc != c2 as int implies (mask_bit(m | (1u8 << c2), cc) <==> mask_bit(
+        m,
+        cc,
+    )) by {
         let ccu = cc as u64;
         assert(((m | (1u8 << c2)) >> ccu) & 1u8 == (m >> ccu) & 1u8) by (bit_vector)
-            requires ccu < 8, c2 < 8, ccu != c2;
+            requires
+                ccu < 8,
+                c2 < 8,
+                ccu != c2,
+        ;
     }
 }
 
@@ -192,7 +205,6 @@ fn end_idx(e: ChanEnd) -> (r: usize)
 }
 
 } // verus!
-
 impl Channel {
     pub const fn bytes_for(depth: u32) -> usize {
         core::mem::size_of::<Channel>() + 2 * depth as usize * core::mem::size_of::<MsgSlot>()
@@ -249,9 +261,11 @@ pub fn endpoint_cap_added<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
             ChanView {
                 end_caps: old(store).chan_view()[ch].end_caps.update(
                     end_idx_spec(end),
-                    (old(store).chan_view()[ch].end_caps[end_idx_spec(end)] + 1) as nat),
+                    (old(store).chan_view()[ch].end_caps[end_idx_spec(end)] + 1) as nat,
+                ),
                 ..old(store).chan_view()[ch]
-            }),
+            },
+        ),
         // `refcount_sound` as a system invariant: `end_caps` is no census term and the
         // bindings are untouched, so refs and census are both unchanged ⇒ a sound census carries.
         cspace::refcount_sound(old(store)) ==> cspace::refcount_sound(final(store)),
@@ -262,14 +276,15 @@ pub fn endpoint_cap_added<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
         // census-neutral: only `end_caps[ch]` moved (not a census term), the bindings frame.
         if cspace::refcount_sound(old(store)) {
             assert(store.chan_view().dom() == old(store).chan_view().dom());
-            assert forall|c: ObjId| #[trigger] old(store).chan_view().dom().contains(c)
-                implies store.chan_view()[c].bindings == old(store).chan_view()[c].bindings by {
+            assert forall|c: ObjId| #[trigger]
+                old(store).chan_view().dom().contains(c) implies store.chan_view()[c].bindings
+                == old(store).chan_view()[c].bindings by {
                 if c != ch {
                     assert(store.chan_view()[c] == old(store).chan_view()[c]);
                 }
             }
-            assert forall|x: ObjId| #[trigger] cspace::obj_census(store, x)
-                == cspace::obj_census(old(store), x) by {
+            assert forall|x: ObjId| #[trigger]
+                cspace::obj_census(store, x) == cspace::obj_census(old(store), x) by {
                 cspace::lemma_binding_refs_frame(old(store).chan_view(), store.chan_view(), x);
             }
             cspace::lemma_refcount_sound_from_census_eq(old(store), store);
@@ -293,10 +308,20 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
         old(store).chan_view().dom().contains(ch),
         old(store).chan_view()[ch].end_caps.len() == 2,
         old(store).chan_view()[ch].end_caps[end_idx_spec(end)] > 0,
-        cspace::binding_notif_wf(old(store).chan_view(), old(store).notif_view(),
-            old(store).tcb_view(), ch),
-        cspace::binding_refs_ok(old(store).chan_view(), old(store).notif_view(),
-            old(store).refs_view(), ch, 1 - end_idx_spec(end), EV_PEER_CLOSED as int),
+        cspace::binding_notif_wf(
+            old(store).chan_view(),
+            old(store).notif_view(),
+            old(store).tcb_view(),
+            ch,
+        ),
+        cspace::binding_refs_ok(
+            old(store).chan_view(),
+            old(store).notif_view(),
+            old(store).refs_view(),
+            ch,
+            1 - end_idx_spec(end),
+            EV_PEER_CLOSED as int,
+        ),
         // The cap→object invariant + the rev2§3.3 endpoint census, both off by one at `(ch, end)`:
         // `delete` cleared the deleted cap's slot before this call, so
         // `end_caps[ch][end]` over-counts the arena by one. The decrement here restores
@@ -323,13 +348,19 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
             ChanView {
                 end_caps: old(store).chan_view()[ch].end_caps.update(
                     end_idx_spec(end),
-                    (old(store).chan_view()[ch].end_caps[end_idx_spec(end)] - 1) as nat),
+                    (old(store).chan_view()[ch].end_caps[end_idx_spec(end)] - 1) as nat,
+                ),
                 ..old(store).chan_view()[ch]
-            }),
-        old(store).chan_view()[ch].end_caps[end_idx_spec(end)] != 1
-            ==> final(store).refs_view() == old(store).refs_view(),
-        cspace::binding_notif_wf(final(store).chan_view(), final(store).notif_view(),
-            final(store).tcb_view(), ch),
+            },
+        ),
+        old(store).chan_view()[ch].end_caps[end_idx_spec(end)] != 1 ==> final(store).refs_view()
+            == old(store).refs_view(),
+        cspace::binding_notif_wf(
+            final(store).chan_view(),
+            final(store).notif_view(),
+            final(store).tcb_view(),
+            ch,
+        ),
         // The refcount census moves in lockstep: the only state
         // change before a possible fire is `set_chan_end_caps`, and `end_caps` is **not** a
         // census term — `binding_refs` reads only the (unchanged) bindings, the other five
@@ -344,8 +375,11 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
         cspace::refcount_sound(old(store)) ==> cspace::refcount_sound(final(store)),
         // …and a census off by one at any `z` survives — exactly the shape `delete` carries
         // across the peer-closed fire (its deleted channel cap's slot was just cleared).
-        forall|z: ObjId| cspace::census_off_by_one(old(store), z)
-            ==> #[trigger] cspace::census_off_by_one(final(store), z),
+        forall|z: ObjId|
+            cspace::census_off_by_one(old(store), z) ==> #[trigger] cspace::census_off_by_one(
+                final(store),
+                z,
+            ),
         // …and refs-domain completeness survives (`set_chan_end_caps` is census/dom-neutral,
         // the fire only drops a census term and keeps the domain). `delete` carries it to `obj_unref`.
         cspace::census_dom_complete(old(store)) ==> cspace::census_dom_complete(final(store)),
@@ -364,8 +398,8 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
         // frames `tcb`, `fire` keeps both — the `home_views_frozen` stability `delete`'s Channel
         // branch threads for the provenance frame.
         final(store).tcb_view().dom() == old(store).tcb_view().dom(),
-        forall|k: ObjId| #[trigger] final(store).tcb_view()[k].bind_slots
-            == old(store).tcb_view()[k].bind_slots,
+        forall|k: ObjId| #[trigger]
+            final(store).tcb_view()[k].bind_slots == old(store).tcb_view()[k].bind_slots,
 {
     let e = end_idx(end);
     store.set_chan_end_caps(ch, e, store.chan_end_caps(ch, e) - 1);
@@ -378,14 +412,18 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
     // `set_chan_end_caps` also frames `refs`. So both refs and census equal `old` here.
     proof {
         assert(store.chan_view().dom() == old(store).chan_view().dom());
-        assert forall|c: ObjId| old(store).chan_view().dom().contains(c) implies
-            #[trigger] store.chan_view()[c].bindings == old(store).chan_view()[c].bindings by {
+        assert forall|c: ObjId|
+            old(store).chan_view().dom().contains(
+                c,
+            ) implies #[trigger] store.chan_view()[c].bindings == old(
+            store,
+        ).chan_view()[c].bindings by {
             if c != ch {
                 assert(store.chan_view()[c] == old(store).chan_view()[c]);
             }
         }
-        assert forall|x: ObjId| #[trigger] cspace::obj_census(store, x)
-            == cspace::obj_census(old(store), x) by {
+        assert forall|x: ObjId| #[trigger]
+            cspace::obj_census(store, x) == cspace::obj_census(old(store), x) by {
             cspace::lemma_binding_refs_frame(old(store).chan_view(), store.chan_view(), x);
         }
         // end_caps_sound after the decrement: the off-by-one at `(ch, e)` is landed (the
@@ -393,18 +431,23 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
         // `set_chan_end_caps` frames `slot_view` so `end_cap_count` is unchanged.
         assert(store.slot_view() == old(store).slot_view());
         assert forall|ch2: ObjId, e2: int|
-            store.chan_view().dom().contains(ch2) && store.chan_view()[ch2].end_caps.len() == 2
-                && 0 <= e2 < 2 implies #[trigger] store.chan_view()[ch2].end_caps[e2]
-                == cspace::end_cap_count(store.slot_view(), ch2, e2) by {
-            assert(cspace::end_cap_count(store.slot_view(), ch2, e2)
-                == cspace::end_cap_count(old(store).slot_view(), ch2, e2));
+            store.chan_view().dom().contains(ch2) && store.chan_view()[ch2].end_caps.len() == 2 && 0
+                <= e2 < 2 implies #[trigger] store.chan_view()[ch2].end_caps[e2]
+            == cspace::end_cap_count(store.slot_view(), ch2, e2) by {
+            assert(cspace::end_cap_count(store.slot_view(), ch2, e2) == cspace::end_cap_count(
+                old(store).slot_view(),
+                ch2,
+                e2,
+            ));
         }
         // caps_consistent after the decrement: the only changed term is `end_caps[ch][e]`,
         // which `end_caps_sound` keeps `> 0` for any live `Channel(ch, e)` sibling; every
         // other cap reads framed views (chan `bindings`/depth, notif/tcb/timer/cspace/slot).
-        assert forall|s: SlotId| #![trigger store.slot_view()[s]]
-            store.slot_view().dom().contains(s) && !cspace::is_empty_cap(store.slot_view()[s].cap)
-            implies cspace::cap_consistent(store, store.slot_view()[s].cap) by {
+        assert forall|s: SlotId|
+            #![trigger store.slot_view()[s]]
+            store.slot_view().dom().contains(s) && !cspace::is_empty_cap(
+                store.slot_view()[s].cap,
+            ) implies cspace::cap_consistent(store, store.slot_view()[s].cap) by {
             let c = store.slot_view()[s].cap;
             assert(c == old(store).slot_view()[s].cap);
             assert(cspace::cap_consistent(old(store), c));
@@ -447,8 +490,11 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
         if cspace::refcount_sound(old(store)) {
             cspace::lemma_refcount_sound_from_frozen(old(store), store);
         }
-        assert forall|z: ObjId| cspace::census_off_by_one(old(store), z) implies
-            #[trigger] cspace::census_off_by_one(store, z) by {
+        assert forall|z: ObjId|
+            cspace::census_off_by_one(old(store), z) implies #[trigger] cspace::census_off_by_one(
+            store,
+            z,
+        ) by {
             cspace::lemma_off_by_one_frozen(old(store), store, z);
         }
         // census_dom_complete: `set_chan_end_caps` is census/dom-neutral and `fire` carries it.
@@ -463,15 +509,17 @@ pub fn endpoint_cap_dropped<S: Store>(store: &mut S, ch: ObjId, end: ChanEnd)
         assert(st_mid.tcb_view() == old(store).tcb_view());
         assert(st_mid.refs_view() == old(store).refs_view());
         assert(cspace::dead_tcb_frozen(old(store), &st_mid)) by {
-            assert forall|k: ObjId| #[trigger] st_mid.tcb_view()[k] == old(store).tcb_view()[k]
-                || old(store).tcb_view()[k].wait_notif == Some(ch) by {}
+            assert forall|k: ObjId| #[trigger]
+                st_mid.tcb_view()[k] == old(store).tcb_view()[k] || old(
+                    store,
+                ).tcb_view()[k].wait_notif == Some(ch) by {}
             cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), &st_mid, ch);
         }
         cspace::lemma_dead_tcb_frozen_trans(old(store), &st_mid, store);
         // TCB domain + `bind_slots` ride through (`set_chan_end_caps` froze `tcb`; `fire`
         // keeps both, or the unfired branch leaves the store at `st_mid`).
-        assert forall|k: ObjId| #[trigger] store.tcb_view()[k].bind_slots
-            == old(store).tcb_view()[k].bind_slots by {}
+        assert forall|k: ObjId| #[trigger]
+            store.tcb_view()[k].bind_slots == old(store).tcb_view()[k].bind_slots by {}
         // "Dead stays dead": `set_chan_end_caps` froze `refs` (`old → st_mid` death-persist refl);
         // the fire (or no-op) carries `st_mid → final` death-persist; compose.
         cspace::lemma_refs_death_persist_from_refs_eq(old(store), &st_mid);
@@ -494,10 +542,20 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
         old(store).chan_view().dom().contains(ch),
         end < 2,
         event < 3,
-        cspace::binding_notif_wf(old(store).chan_view(), old(store).notif_view(),
-            old(store).tcb_view(), ch),
-        cspace::binding_refs_ok(old(store).chan_view(), old(store).notif_view(),
-            old(store).refs_view(), ch, end as int, event as int),
+        cspace::binding_notif_wf(
+            old(store).chan_view(),
+            old(store).notif_view(),
+            old(store).tcb_view(),
+            ch,
+        ),
+        cspace::binding_refs_ok(
+            old(store).chan_view(),
+            old(store).notif_view(),
+            old(store).refs_view(),
+            ch,
+            end as int,
+            event as int,
+        ),
         // The fire carries the ready-queue invariants across the bound `signal`
         // (the teardown/IPC callers supply them; `signal` re-establishes them on the wake).
         cspace::ready_wf(old(store).ready_view(), old(store).tcb_view()),
@@ -511,8 +569,12 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
         // branch is a no-op; the teardown chain reads it off to `obj_unref`.
         final(store).cspace_view() == old(store).cspace_view(),
         final(store).irq_view() == old(store).irq_view(),
-        cspace::binding_notif_wf(final(store).chan_view(), final(store).notif_view(),
-            final(store).tcb_view(), ch),
+        cspace::binding_notif_wf(
+            final(store).chan_view(),
+            final(store).notif_view(),
+            final(store).tcb_view(),
+            ch,
+        ),
         // The cap→object invariant survives the fire: `signal` keeps every
         // notification well-formed (the fired one by its own `ensures`, the rest by
         // `lemma_notif_wf_frame`) and every TCB's `bind_slots`, so `lemma_caps_consistent_frame`
@@ -527,8 +589,11 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
         cspace::census_delta_frozen(old(store), final(store)),
         // …and a census off by one at any `z` survives (the frozen delta applied to that
         // shape) — `endpoint_cap_dropped`/`delete` read this off the chain.
-        forall|z: ObjId| cspace::census_off_by_one(old(store), z)
-            ==> #[trigger] cspace::census_off_by_one(final(store), z),
+        forall|z: ObjId|
+            cspace::census_off_by_one(old(store), z) ==> #[trigger] cspace::census_off_by_one(
+                final(store),
+                z,
+            ),
         // …and refs-domain completeness survives (`signal`'s own conditional, or the unbound
         // no-op) — the teardown chain carries it to `obj_unref`.
         cspace::census_dom_complete(old(store)) ==> cspace::census_dom_complete(final(store)),
@@ -545,8 +610,8 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
         // both (the bound branch) and the unbound branch is a no-op — the `home_views_frozen`
         // stability `endpoint_cap_dropped`/`delete` thread for the provenance frame.
         final(store).tcb_view().dom() == old(store).tcb_view().dom(),
-        forall|k: ObjId| #[trigger] final(store).tcb_view()[k].bind_slots
-            == old(store).tcb_view()[k].bind_slots,
+        forall|k: ObjId| #[trigger]
+            final(store).tcb_view()[k].bind_slots == old(store).tcb_view()[k].bind_slots,
 {
     let b = store.chan_binding(ch, end, event);
     if let Some(n) = b.notif {
@@ -560,11 +625,13 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
             let tvf = store.tcb_view();
             assert(nvf.dom() == old(store).notif_view().dom());
             assert forall|e: int, v: int|
-                (0 <= e < 2 && 0 <= v < 3
-                    && #[trigger] cvf[ch].bindings[(e, v)].notif is Some) implies {
-                    let m = cvf[ch].bindings[(e, v)].notif->Some_0;
-                    nvf.dom().contains(m) && cspace::notif_wf(nvf, tvf, m)
-                } by {
+                (0 <= e < 2 && 0 <= v < 3 && #[trigger] cvf[ch].bindings[(
+                    e,
+                    v,
+                )].notif is Some) implies {
+                let m = cvf[ch].bindings[(e, v)].notif->Some_0;
+                nvf.dom().contains(m) && cspace::notif_wf(nvf, tvf, m)
+            } by {
                 let m = cvf[ch].bindings[(e, v)].notif->Some_0;
                 // `cvf == old.cv` (signal frames chan_view), so the old invariant covers
                 // this binding; the fired notification `n` is reproven by signal, every
@@ -576,41 +643,52 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
                     // frame says it was an `n`-waiter (`Some(n) != Some(m)`) or Runnable (⇒
                     // `wait_notif None` by `ready_complete`, contradicting `Some(m)`) — neither
                     // holds, so `k` is fixed. (Phantom out-of-domain keys are dom-guarded out.)
-                    assert forall|k: ObjId| #[trigger] old(store).tcb_view()[k].wait_notif == Some(m)
-                        && old(store).tcb_view().dom().contains(k)
-                        implies tvf[k] == old(store).tcb_view()[k] by {
+                    assert forall|k: ObjId| #[trigger]
+                        old(store).tcb_view()[k].wait_notif == Some(m) && old(
+                            store,
+                        ).tcb_view().dom().contains(k) implies tvf[k] == old(
+                        store,
+                    ).tcb_view()[k] by {
                         if tvf[k] != old(store).tcb_view()[k] {
                             assert(old(store).tcb_view()[k].state
                                 != crate::thread::ThreadState::Runnable);
                         }
                     }
-                    cspace::lemma_notif_wf_frame(old(store).notif_view(),
-                        old(store).tcb_view(), nvf, tvf, m);
+                    cspace::lemma_notif_wf_frame(
+                        old(store).notif_view(),
+                        old(store).tcb_view(),
+                        nvf,
+                        tvf,
+                        m,
+                    );
                 }
             }
             // caps_consistent preservation across the signal (the bound branch): every
             // notification stays wf and every TCB's bind_slots are fixed, so the frame applies.
             if cspace::caps_consistent(old(store)) {
-                assert forall|k: ObjId| #[trigger] tvf[k].bind_slots
-                    == old(store).tcb_view()[k].bind_slots by {}
+                assert forall|k: ObjId| #[trigger]
+                    tvf[k].bind_slots == old(store).tcb_view()[k].bind_slots by {}
                 // The bound cspace of every TCB is framed across the wake — `signal` moves only
                 // the woken head's queue/wait/retval fields, never any cspace (the strengthened
                 // `cap_consistent(Thread)` clause).
-                assert forall|k: ObjId| #[trigger] tvf[k].cspace
-                    == old(store).tcb_view()[k].cspace by {}
+                assert forall|k: ObjId| #[trigger]
+                    tvf[k].cspace == old(store).tcb_view()[k].cspace by {}
                 // The only changed TCB is the woken head — `signal` sets it `Runnable`, so it is
                 // not blocked in the post-state (waiter-coherence frame;
                 // a changed-and-still-blocked thread would have to be blocked on `n`).
-                assert forall|k: ObjId| #[trigger] tvf[k] != old(store).tcb_view()[k]
-                    && tvf[k].state == crate::thread::ThreadState::BlockedNotif
-                    implies (tvf[k].wait_notif matches Some(wn) ==> wn == n) by {}
+                assert forall|k: ObjId| #[trigger]
+                    tvf[k] != old(store).tcb_view()[k] && tvf[k].state
+                        == crate::thread::ThreadState::BlockedNotif implies (
+                tvf[k].wait_notif matches Some(wn) ==> wn == n) by {}
                 // Other notifications' waiters (`wait_notif` Some, `!= n`) are frozen — each is
                 // `BlockedNotif` (non-Runnable by `ready_complete`), so signal's contrapositive
                 // frame (changed ⇒ `n`-waiter or Runnable) leaves it unchanged.
-                assert forall|k: ObjId| #[trigger] old(store).tcb_view()[k].wait_notif is Some
-                    && old(store).tcb_view()[k].wait_notif != Some(n)
-                    && old(store).tcb_view().dom().contains(k)
-                    implies tvf[k] == old(store).tcb_view()[k] by {
+                assert forall|k: ObjId| #[trigger]
+                    old(store).tcb_view()[k].wait_notif is Some && old(
+                        store,
+                    ).tcb_view()[k].wait_notif != Some(n) && old(store).tcb_view().dom().contains(
+                        k,
+                    ) implies tvf[k] == old(store).tcb_view()[k] by {
                     if tvf[k] != old(store).tcb_view()[k] {
                         assert(old(store).tcb_view()[k].state
                             != crate::thread::ThreadState::Runnable);
@@ -624,10 +702,14 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
     // `census_delta_frozen` applies (nothing mutated before it, so its `old` is this `old`);
     // in the unbound branch the store is untouched (a trivially frozen delta). A census
     // off-by-one then survives by `lemma_off_by_one_frozen` applied to that frozen delta.
+
     proof {
         assert(cspace::census_delta_frozen(old(store), store));
-        assert forall|z: ObjId| cspace::census_off_by_one(old(store), z) implies
-            #[trigger] cspace::census_off_by_one(store, z) by {
+        assert forall|z: ObjId|
+            cspace::census_off_by_one(old(store), z) implies #[trigger] cspace::census_off_by_one(
+            store,
+            z,
+        ) by {
             cspace::lemma_off_by_one_frozen(old(store), store, z);
         }
         // census_dom_complete: the bound branch rides `signal`'s own conditional (its `old` is
@@ -635,8 +717,8 @@ fn fire<S: Store>(store: &mut S, ch: ObjId, end: usize, event: usize)
         assert(cspace::census_dom_complete(old(store)) ==> cspace::census_dom_complete(store));
         // TCB domain + `bind_slots` ride the fire (signal's own ensures in the bound branch;
         // store untouched in the unbound one).
-        assert forall|k: ObjId| #[trigger] store.tcb_view()[k].bind_slots
-            == old(store).tcb_view()[k].bind_slots by {}
+        assert forall|k: ObjId| #[trigger]
+            store.tcb_view()[k].bind_slots == old(store).tcb_view()[k].bind_slots by {}
         // Death persists — the bound branch rides `signal`'s `refs_death_persist` (its
         // `old` is this `old`, nothing preceded it); the unbound branch frames `refs` whole.
         if b.notif is None {
@@ -686,7 +768,11 @@ proof fn lemma_bind_refs_post_at(
             1nat
         } else {
             0nat
-        }) == r0[x] + (if new_notif == Some(x) { 1nat } else { 0nat }),
+        }) == r0[x] + (if new_notif == Some(x) {
+            1nat
+        } else {
+            0nat
+        }),
 {
     let r1 = match old_notif {
         Some(no) => r0.insert(no, (r0[no] - 1) as nat),
@@ -694,7 +780,11 @@ proof fn lemma_bind_refs_post_at(
     };
     if let Some(no) = old_notif {
         assert(r0[no] > 0);
-        assert(r1[x] == if x == no { (r0[no] - 1) as nat } else { r0[x] });
+        assert(r1[x] == if x == no {
+            (r0[no] - 1) as nat
+        } else {
+            r0[x]
+        });
     } else {
         assert(r1[x] == r0[x]);
     }
@@ -730,11 +820,14 @@ pub fn bind<S: Store>(
         event < 3,
         old(store).chan_view()[ch].bindings[(end_idx_spec(end), event as int)].notif is Some
             ==> old(store).refs_view().dom().contains(
-                    old(store).chan_view()[ch].bindings[(end_idx_spec(end), event as int)].notif->Some_0)
-                && old(store).refs_view()[
-                    old(store).chan_view()[ch].bindings[(end_idx_spec(end), event as int)].notif->Some_0] > 0,
-        notif is Some ==> old(store).refs_view().dom().contains(notif->Some_0)
-            && old(store).refs_view()[notif->Some_0] < u32::MAX as nat,
+            old(store).chan_view()[ch].bindings[(end_idx_spec(end), event as int)].notif->Some_0,
+        ) && old(store).refs_view()[old(store).chan_view()[ch].bindings[(
+            end_idx_spec(end),
+            event as int,
+        )].notif->Some_0] > 0,
+        notif is Some ==> old(store).refs_view().dom().contains(notif->Some_0) && old(
+            store,
+        ).refs_view()[notif->Some_0] < u32::MAX as nat,
     ensures
         final(store).slot_view() == old(store).slot_view(),
         final(store).chan_view() == old(store).chan_view().insert(
@@ -742,13 +835,16 @@ pub fn bind<S: Store>(
             ChanView {
                 bindings: old(store).chan_view()[ch].bindings.insert(
                     (end_idx_spec(end), event as int),
-                    Binding { notif, bits }),
+                    Binding { notif, bits },
+                ),
                 ..old(store).chan_view()[ch]
-            }),
+            },
+        ),
         final(store).refs_view() == bind_refs_post(
             old(store).refs_view(),
             old(store).chan_view()[ch].bindings[(end_idx_spec(end), event as int)].notif,
-            notif),
+            notif,
+        ),
         // `refcount_sound` as a system invariant: the binding-census delta
         // (`lemma_binding_replace`) matches the `bind_refs_post` refs delta
         // (`lemma_bind_refs_post_at`) term-for-term — `refs` and the census move in lockstep at
@@ -759,8 +855,10 @@ pub fn bind<S: Store>(
             ==> cspace::refcount_sound(final(store)),
 {
     let e = end_idx(end);
-    let ghost old_notif =
-        old(store).chan_view()[ch].bindings[(end_idx_spec(end), event as int)].notif;
+    let ghost old_notif = old(store).chan_view()[ch].bindings[(
+        end_idx_spec(end),
+        event as int,
+    )].notif;
     let old_b = store.chan_binding(ch, e, event);
     if let Some(n) = old_b.notif {
         store.set_obj_refs(n, store.obj_refs(n) - 1);
@@ -783,13 +881,22 @@ pub fn bind<S: Store>(
                 ChanView {
                     bindings: cv0[ch].bindings.insert(
                         (end_idx_spec(end), event as int),
-                        Binding { notif, bits }),
+                        Binding { notif, bits },
+                    ),
                     ..cv0[ch]
-                }));
-            assert forall|x: ObjId| store.refs_view().dom().contains(x) implies
-                #[trigger] store.refs_view()[x] == cspace::obj_census(store, x) by {
-                cspace::lemma_binding_replace(cv0, ch, end_idx_spec(end), event as int,
-                    Binding { notif, bits }, x);
+                },
+            ));
+            assert forall|x: ObjId|
+                store.refs_view().dom().contains(x) implies #[trigger] store.refs_view()[x]
+                == cspace::obj_census(store, x) by {
+                cspace::lemma_binding_replace(
+                    cv0,
+                    ch,
+                    end_idx_spec(end),
+                    event as int,
+                    Binding { notif, bits },
+                    x,
+                );
                 lemma_bind_refs_post_at(old(store).refs_view(), old_notif, notif, x);
                 // refcount_sound(old) at x; the binding delta == the refs delta closes refs == census.
                 assert(old(store).refs_view()[x] == cspace::obj_census(old(store), x));
@@ -838,7 +945,8 @@ proof fn lemma_send_chan_wf(
         // the new tail ii is in the grown window.
         cspace::in_live_window(cvf[ch], rr, ii),
         // every ring slot other than the new tail (rr, ii) is untouched.
-        forall|r: int, i: int, c: int| #![trigger cv0[ch].ring_cap[(r, i, c)]]
+        forall|r: int, i: int, c: int|
+            #![trigger cv0[ch].ring_cap[(r, i, c)]]
             (0 <= r < 2 && 0 <= i < dd && 0 <= c < 4 && (r != rr || i != ii))
                 ==> svf[cv0[ch].ring_cap[(r, i, c)]].cap == sv0[cv0[ch].ring_cap[(r, i, c)]].cap,
     ensures
@@ -846,13 +954,13 @@ proof fn lemma_send_chan_wf(
 {
     // FIFO cursors stay in range: head unchanged; ring rr's count grew by one (still
     // <= depth since nn < depth), the other ring unchanged.
-    assert forall|r: int| #![trigger cvf[ch].head[r]] 0 <= r < 2
-        implies cvf[ch].head[r] < cvf[ch].depth by {
+    assert forall|r: int| #![trigger cvf[ch].head[r]] 0 <= r < 2 implies cvf[ch].head[r]
+        < cvf[ch].depth by {
         assert(cvf[ch].head[r] == cv0[ch].head[r]);
         assert(cv0[ch].head[r] < cv0[ch].depth);
     }
-    assert forall|r: int| #![trigger cvf[ch].count[r]] 0 <= r < 2
-        implies cvf[ch].count[r] <= cvf[ch].depth by {
+    assert forall|r: int| #![trigger cvf[ch].count[r]] 0 <= r < 2 implies cvf[ch].count[r]
+        <= cvf[ch].depth by {
         if r != rr {
             assert(r == 1 - rr);
             assert(cv0[ch].count[1 - rr] <= cv0[ch].depth);
@@ -860,17 +968,21 @@ proof fn lemma_send_chan_wf(
     }
     // The coupling: out-of-(new-)window ring slots are empty.
     assert forall|r2: int, idx2: int, c2: int|
-        (0 <= r2 < 2 && 0 <= idx2 < cvf[ch].depth && 0 <= c2 < 4
-            && !cspace::in_live_window(cvf[ch], r2, idx2))
-        implies cspace::is_empty_cap(svf[#[trigger] cvf[ch].ring_cap[(r2, idx2, c2)]].cap) by {
+        (0 <= r2 < 2 && 0 <= idx2 < cvf[ch].depth && 0 <= c2 < 4 && !cspace::in_live_window(
+            cvf[ch],
+            r2,
+            idx2,
+        )) implies cspace::is_empty_cap(svf[#[trigger] cvf[ch].ring_cap[(r2, idx2, c2)]].cap) by {
         assert(cvf[ch].ring_cap[(r2, idx2, c2)] == cv0[ch].ring_cap[(r2, idx2, c2)]);
         // (r2,idx2) != (rr,ii): ii is in-window, idx2 is not.
         assert(r2 != rr || idx2 != ii);
         // out-of-new ⟹ out-of-old: the old window's witness j (< nn) also witnesses
         // the new window (< nn+1), so old-window ⊆ new-window.
         if cspace::in_live_window(cv0[ch], r2, idx2) {
-            let j = choose|j: int| #![trigger (cv0[ch].head[r2] + j) % (cv0[ch].depth as int)]
-                0 <= j < cv0[ch].count[r2] && idx2 == (cv0[ch].head[r2] + j) % (cv0[ch].depth as int);
+            let j = choose|j: int|
+                #![trigger (cv0[ch].head[r2] + j) % (cv0[ch].depth as int)]
+                0 <= j < cv0[ch].count[r2] && idx2 == (cv0[ch].head[r2] + j) % (
+                cv0[ch].depth as int);
             assert(0 <= j < cvf[ch].count[r2]) by {
                 if r2 != rr {
                     assert(r2 == 1 - rr);
@@ -900,18 +1012,20 @@ proof fn lemma_ring_fifo_frame(
         cvf.head[ring] == cv0.head[ring],
         cvf.count[ring] == cv0.count[ring],
         // congruent over the ring's valid positions — the only indices `ring_fifo` reads.
-        forall|idx: int| 0 <= idx < cv0.depth ==> #[trigger] cspace::ring_msg(cvf, svf, ring, idx)
-            == cspace::ring_msg(cv0, sv0, ring, idx),
+        forall|idx: int|
+            0 <= idx < cv0.depth ==> #[trigger] cspace::ring_msg(cvf, svf, ring, idx)
+                == cspace::ring_msg(cv0, sv0, ring, idx),
     ensures
         cspace::ring_fifo(cvf, svf, ring) == cspace::ring_fifo(cv0, sv0, ring),
 {
     assert(cspace::ring_fifo(cvf, svf, ring) =~= cspace::ring_fifo(cv0, sv0, ring)) by {
         assert(cspace::ring_fifo(cvf, svf, ring).len() == cspace::ring_fifo(cv0, sv0, ring).len());
-        assert forall|j: int| #![trigger cspace::ring_fifo(cvf, svf, ring)[j]]
-            0 <= j < cv0.count[ring]
-            implies cspace::ring_fifo(cvf, svf, ring)[j] == cspace::ring_fifo(cv0, sv0, ring)[j] by {
-            assert((cvf.head[ring] + j) % (cvf.depth as int)
-                == (cv0.head[ring] + j) % (cv0.depth as int));
+        assert forall|j: int|
+            #![trigger cspace::ring_fifo(cvf, svf, ring)[j]]
+            0 <= j < cv0.count[ring] implies cspace::ring_fifo(cvf, svf, ring)[j]
+            == cspace::ring_fifo(cv0, sv0, ring)[j] by {
+            assert((cvf.head[ring] + j) % (cvf.depth as int) == (cv0.head[ring] + j) % (
+            cv0.depth as int));
         }
     }
 }
@@ -943,38 +1057,50 @@ proof fn lemma_send_fifo_push(
         cvf[ch].count[rr] == nn + 1,
         cvf[ch].ring_cap == cv0[ch].ring_cap,
         // the enqueue wrote only the new tail slot's msg_len.
-        forall|idx: int| #![trigger cvf[ch].msg_len[(rr, idx)]]
+        forall|idx: int|
+            #![trigger cvf[ch].msg_len[(rr, idx)]]
             idx != ii ==> cvf[ch].msg_len[(rr, idx)] == cv0[ch].msg_len[(rr, idx)],
         // every ring slot other than the new tail (rr, ii) is untouched.
-        forall|r: int, i: int, c: int| #![trigger cv0[ch].ring_cap[(r, i, c)]]
+        forall|r: int, i: int, c: int|
+            #![trigger cv0[ch].ring_cap[(r, i, c)]]
             (0 <= r < 2 && 0 <= i < dd && 0 <= c < 4 && (r != rr || i != ii))
                 ==> svf[cv0[ch].ring_cap[(r, i, c)]].cap == sv0[cv0[ch].ring_cap[(r, i, c)]].cap,
     ensures
-        cspace::ring_fifo(cvf[ch], svf, rr)
-            == cspace::ring_fifo(cv0[ch], sv0, rr).push(cspace::ring_msg(cvf[ch], svf, rr, ii)),
+        cspace::ring_fifo(cvf[ch], svf, rr) == cspace::ring_fifo(cv0[ch], sv0, rr).push(
+            cspace::ring_msg(cvf[ch], svf, rr, ii),
+        ),
 {
     assert(cv0[ch].head[rr] < cv0[ch].depth);
-    assert(cspace::ring_fifo(cvf[ch], svf, rr)
-        =~= cspace::ring_fifo(cv0[ch], sv0, rr).push(cspace::ring_msg(cvf[ch], svf, rr, ii))) by {
+    assert(cspace::ring_fifo(cvf[ch], svf, rr) =~= cspace::ring_fifo(cv0[ch], sv0, rr).push(
+        cspace::ring_msg(cvf[ch], svf, rr, ii),
+    )) by {
         assert(cspace::ring_fifo(cvf[ch], svf, rr).len() == nn + 1);
-        assert(cspace::ring_fifo(cv0[ch], sv0, rr).push(cspace::ring_msg(cvf[ch], svf, rr, ii)).len()
-            == nn + 1);
-        assert forall|j: int| 0 <= j < nn + 1
-            implies cspace::ring_fifo(cvf[ch], svf, rr)[j]
-                == cspace::ring_fifo(cv0[ch], sv0, rr).push(cspace::ring_msg(cvf[ch], svf, rr, ii))[j] by {
+        assert(cspace::ring_fifo(cv0[ch], sv0, rr).push(
+            cspace::ring_msg(cvf[ch], svf, rr, ii),
+        ).len() == nn + 1);
+        assert forall|j: int| 0 <= j < nn + 1 implies cspace::ring_fifo(cvf[ch], svf, rr)[j]
+            == cspace::ring_fifo(cv0[ch], sv0, rr).push(
+            cspace::ring_msg(cvf[ch], svf, rr, ii),
+        )[j] by {
             if j < nn {
                 // in-window message j unchanged: its index (hh+j)%dd != ii, so its
                 // msg_len and ring caps are framed to sv0.
                 cspace::lemma_window_index_distinct(hh, dd, j, nn);
                 assert((hh + j) % dd != ii);
                 assert((cvf[ch].head[rr] + j) % (cvf[ch].depth as int) == (hh + j) % dd);
-                assert(cvf[ch].msg_len[(rr, (hh + j) % dd)] == cv0[ch].msg_len[(rr, (hh + j) % dd)]);
-                assert forall|c: int| #![trigger cv0[ch].ring_cap[(rr, (hh + j) % dd, c)]]
-                    0 <= c < 4 implies
-                    svf[cvf[ch].ring_cap[(rr, (hh + j) % dd, c)]].cap
-                        == sv0[cv0[ch].ring_cap[(rr, (hh + j) % dd, c)]].cap by {
-                    assert(cvf[ch].ring_cap[(rr, (hh + j) % dd, c)]
-                        == cv0[ch].ring_cap[(rr, (hh + j) % dd, c)]);
+                assert(cvf[ch].msg_len[(rr, (hh + j) % dd)] == cv0[ch].msg_len[(
+                    rr,
+                    (hh + j) % dd,
+                )]);
+                assert forall|c: int|
+                    #![trigger cv0[ch].ring_cap[(rr, (hh + j) % dd, c)]]
+                    0 <= c < 4 implies svf[cvf[ch].ring_cap[(rr, (hh + j) % dd, c)]].cap
+                    == sv0[cv0[ch].ring_cap[(rr, (hh + j) % dd, c)]].cap by {
+                    assert(cvf[ch].ring_cap[(rr, (hh + j) % dd, c)] == cv0[ch].ring_cap[(
+                        rr,
+                        (hh + j) % dd,
+                        c,
+                    )]);
                 }
                 cspace::lemma_ring_msg_eq(cvf[ch], svf, cv0[ch], sv0, rr, (hh + j) % dd);
             } else {
@@ -1007,27 +1133,42 @@ pub fn send<S: Store>(
         cspace::cspace_wf(old(store).slot_view()),
         old(store).slot_view().dom().finite(),
         data.len() <= MSG_PAYLOAD,
-        forall|c: int| #![trigger caps@[c]]
-            0 <= c < 4 && caps@[c] is Some ==> (
-                old(store).slot_view().dom().contains(caps@[c]->Some_0)
-                && !cspace::is_empty_cap(old(store).slot_view()[caps@[c]->Some_0].cap)
+        forall|c: int|
+            #![trigger caps@[c]]
+            0 <= c < 4 && caps@[c] is Some ==> (old(store).slot_view().dom().contains(
+                caps@[c]->Some_0,
+            ) && !cspace::is_empty_cap(old(store).slot_view()[caps@[c]->Some_0].cap)
                 && !cspace::is_ring_cap_of(old(store).chan_view()[ch], caps@[c]->Some_0)),
-        forall|c1: int, c2: int| #![trigger caps@[c1], caps@[c2]]
-            0 <= c1 < 4 && 0 <= c2 < 4 && c1 != c2
-                && caps@[c1] is Some && caps@[c2] is Some
+        forall|c1: int, c2: int|
+            #![trigger caps@[c1], caps@[c2]]
+            0 <= c1 < 4 && 0 <= c2 < 4 && c1 != c2 && caps@[c1] is Some && caps@[c2] is Some
                 ==> caps@[c1]->Some_0 != caps@[c2]->Some_0,
-        cspace::binding_notif_wf(old(store).chan_view(), old(store).notif_view(),
-            old(store).tcb_view(), ch),
-        cspace::binding_refs_ok(old(store).chan_view(), old(store).notif_view(),
-            old(store).refs_view(), ch, 1 - end_idx_spec(end), EV_READABLE as int),
+        cspace::binding_notif_wf(
+            old(store).chan_view(),
+            old(store).notif_view(),
+            old(store).tcb_view(),
+            ch,
+        ),
+        cspace::binding_refs_ok(
+            old(store).chan_view(),
+            old(store).notif_view(),
+            old(store).refs_view(),
+            ch,
+            1 - end_idx_spec(end),
+            EV_READABLE as int,
+        ),
         // The readable `fire` faithfully enqueues a woken receiver, so `send` carries the
         // ready-queue invariants in. (The trusted syscall shell supplies them; `send` consumes
         // them only to discharge `fire`'s requires — no kcore caller needs them in `ensures`.)
         cspace::ready_wf(old(store).ready_view(), old(store).tcb_view()),
         cspace::ready_complete(old(store).ready_view(), old(store).tcb_view()),
     ensures
-        cspace::binding_notif_wf(final(store).chan_view(), final(store).notif_view(),
-            final(store).tcb_view(), ch),
+        cspace::binding_notif_wf(
+            final(store).chan_view(),
+            final(store).notif_view(),
+            final(store).tcb_view(),
+            ch,
+        ),
         res is Err ==> no_drop_on_refusal(
             old(store).slot_view(),
             old(store).chan_view(),
@@ -1036,29 +1177,37 @@ pub fn send<S: Store>(
             final(store).chan_view(),
             final(store).refs_view(),
         ),
-        res is Ok ==> (
-            cspace::chan_wf(final(store).chan_view(), final(store).slot_view(), ch)
-            && cspace::cspace_wf(final(store).slot_view())
-            && final(store).slot_view().dom() == old(store).slot_view().dom()
-            && final(store).slot_view().dom().finite()
+        res is Ok ==> (cspace::chan_wf(final(store).chan_view(), final(store).slot_view(), ch)
+            && cspace::cspace_wf(final(store).slot_view()) && final(store).slot_view().dom() == old(
+            store,
+        ).slot_view().dom() && final(store).slot_view().dom().finite()
             && final(store).chan_view()[ch].depth == old(store).chan_view()[ch].depth
             && final(store).chan_view()[ch].head == old(store).chan_view()[ch].head
-            && final(store).chan_view()[ch].count[end_idx_spec(end)]
-                   == old(store).chan_view()[ch].count[end_idx_spec(end)] + 1
-            && fifo_send_appends(
-                old(store).chan_view()[ch],
-                old(store).slot_view(),
-                final(store).chan_view()[ch],
-                final(store).slot_view(),
-                end_idx_spec(end),
-                (old(store).chan_view()[ch].head[end_idx_spec(end)] as int
-                    + old(store).chan_view()[ch].count[end_idx_spec(end)] as int)
-                    % (old(store).chan_view()[ch].depth as int),
-            )
-            && cspace::ring_fifo(final(store).chan_view()[ch], final(store).slot_view(), 1 - end_idx_spec(end))
-                   == cspace::ring_fifo(old(store).chan_view()[ch], old(store).slot_view(), 1 - end_idx_spec(end))
-            && forall|c: int| 0 <= c < 4 && caps@[c] is Some
-                   ==> cspace::is_empty_cap(final(store).slot_view()[caps@[c]->Some_0].cap)),
+            && final(store).chan_view()[ch].count[end_idx_spec(end)] == old(
+            store,
+        ).chan_view()[ch].count[end_idx_spec(end)] + 1 && fifo_send_appends(
+            old(store).chan_view()[ch],
+            old(store).slot_view(),
+            final(store).chan_view()[ch],
+            final(store).slot_view(),
+            end_idx_spec(end),
+            (old(store).chan_view()[ch].head[end_idx_spec(end)] as int + old(
+                store,
+            ).chan_view()[ch].count[end_idx_spec(end)] as int) % (old(
+                store,
+            ).chan_view()[ch].depth as int),
+        ) && cspace::ring_fifo(
+            final(store).chan_view()[ch],
+            final(store).slot_view(),
+            1 - end_idx_spec(end),
+        ) == cspace::ring_fifo(
+            old(store).chan_view()[ch],
+            old(store).slot_view(),
+            1 - end_idx_spec(end),
+        ) && forall|c: int|
+            0 <= c < 4 && caps@[c] is Some ==> cspace::is_empty_cap(
+                final(store).slot_view()[caps@[c]->Some_0].cap,
+            )),
 {
     let ghost sv0 = old(store).slot_view();
     let ghost cv0 = old(store).chan_view();
@@ -1071,12 +1220,13 @@ pub fn send<S: Store>(
     if store.chan_end_caps(ch, 1 - e) == 0 {
         return Err(ChanError::PeerClosed);
     }
-    let ring = e; // end A sends on ring 0, B on ring 1
+    let ring = e;  // end A sends on ring 0, B on ring 1
     let depth = store.chan_depth(ch);
     if store.chan_count(ch, ring) == depth {
         return Err(ChanError::Full);
     }
     // N < D after the Full guard (chan_wf: count <= depth, and != here).
+
     let ghost rr = ring as int;
     let ghost hh = cv0[ch].head[rr] as int;
     let ghost nn = cv0[ch].count[rr] as int;
@@ -1099,9 +1249,9 @@ pub fn send<S: Store>(
         // j < nn lands on a different index (lemma_window_index_distinct).
         assert(0 <= ii < dd);
         assert(!cspace::in_live_window(cv0[ch], rr, ii)) by {
-            assert forall|j: int| #![trigger (cv0[ch].head[rr] + j) % (cv0[ch].depth as int)]
-                0 <= j < nn
-                implies (cv0[ch].head[rr] + j) % (cv0[ch].depth as int) != ii by {
+            assert forall|j: int|
+                #![trigger (cv0[ch].head[rr] + j) % (cv0[ch].depth as int)]
+                0 <= j < nn implies (cv0[ch].head[rr] + j) % (cv0[ch].depth as int) != ii by {
                 cspace::lemma_window_index_distinct(hh, dd, j, nn);
             }
         }
@@ -1140,37 +1290,52 @@ pub fn send<S: Store>(
             // precondition A (each source slot is live, non-empty, ring-disjoint)
             // and C (sources pairwise distinct), carried in sv0/cv0 terms so the
             // loop body can instantiate them (they are immutable, so preserved).
-            forall|cc: int| #![trigger caps@[cc]]
-                (0 <= cc < 4 && caps@[cc] is Some) ==> (
-                    sv0.dom().contains(caps@[cc]->Some_0)
-                    && !cspace::is_empty_cap(sv0[caps@[cc]->Some_0].cap)
-                    && !cspace::is_ring_cap_of(cv0[ch], caps@[cc]->Some_0)),
-            forall|c1: int, c2: int| #![trigger caps@[c1], caps@[c2]]
-                (0 <= c1 < 4 && 0 <= c2 < 4 && c1 != c2
-                    && caps@[c1] is Some && caps@[c2] is Some)
+            forall|cc: int|
+                #![trigger caps@[cc]]
+                (0 <= cc < 4 && caps@[cc] is Some) ==> (sv0.dom().contains(caps@[cc]->Some_0)
+                    && !cspace::is_empty_cap(sv0[caps@[cc]->Some_0].cap) && !cspace::is_ring_cap_of(
+                    cv0[ch],
+                    caps@[cc]->Some_0,
+                )),
+            forall|c1: int, c2: int|
+                #![trigger caps@[c1], caps@[c2]]
+                (0 <= c1 < 4 && 0 <= c2 < 4 && c1 != c2 && caps@[c1] is Some && caps@[c2] is Some)
                     ==> caps@[c1]->Some_0 != caps@[c2]->Some_0,
             // dsts not yet processed (cc >= c) still empty:
-            forall|cc: int| #![trigger cv0[ch].ring_cap[(rr, ii, cc)]]
-                (c <= cc < 4) ==> cspace::is_empty_cap(store.slot_view()[cv0[ch].ring_cap[(rr, ii, cc)]].cap),
+            forall|cc: int|
+                #![trigger cv0[ch].ring_cap[(rr, ii, cc)]]
+                (c <= cc < 4) ==> cspace::is_empty_cap(
+                    store.slot_view()[cv0[ch].ring_cap[(rr, ii, cc)]].cap,
+                ),
             // dsts processed (cc < c) filled (Some) or empty (None):
-            forall|cc: int| #![trigger caps@[cc], cv0[ch].ring_cap[(rr, ii, cc)]]
-                (0 <= cc < c && caps@[cc] is Some)
-                ==> store.slot_view()[cv0[ch].ring_cap[(rr, ii, cc)]].cap == sv0[caps@[cc]->Some_0].cap,
-            forall|cc: int| #![trigger caps@[cc], cv0[ch].ring_cap[(rr, ii, cc)]]
-                (0 <= cc < c && caps@[cc] is None)
-                ==> cspace::is_empty_cap(store.slot_view()[cv0[ch].ring_cap[(rr, ii, cc)]].cap),
+            forall|cc: int|
+                #![trigger caps@[cc], cv0[ch].ring_cap[(rr, ii, cc)]]
+                (0 <= cc < c && caps@[cc] is Some) ==> store.slot_view()[cv0[ch].ring_cap[(
+                    rr,
+                    ii,
+                    cc,
+                )]].cap == sv0[caps@[cc]->Some_0].cap,
+            forall|cc: int|
+                #![trigger caps@[cc], cv0[ch].ring_cap[(rr, ii, cc)]]
+                (0 <= cc < c && caps@[cc] is None) ==> cspace::is_empty_cap(
+                    store.slot_view()[cv0[ch].ring_cap[(rr, ii, cc)]].cap,
+                ),
             // unprocessed srcs (cc >= c) unchanged; processed srcs emptied:
-            forall|cc: int| #![trigger caps@[cc]]
-                (c <= cc < 4 && caps@[cc] is Some)
-                ==> store.slot_view()[caps@[cc]->Some_0].cap == sv0[caps@[cc]->Some_0].cap,
-            forall|cc: int| #![trigger caps@[cc]]
-                (0 <= cc < c && caps@[cc] is Some)
-                ==> cspace::is_empty_cap(store.slot_view()[caps@[cc]->Some_0].cap),
+            forall|cc: int|
+                #![trigger caps@[cc]]
+                (c <= cc < 4 && caps@[cc] is Some) ==> store.slot_view()[caps@[cc]->Some_0].cap
+                    == sv0[caps@[cc]->Some_0].cap,
+            forall|cc: int|
+                #![trigger caps@[cc]]
+                (0 <= cc < c && caps@[cc] is Some) ==> cspace::is_empty_cap(
+                    store.slot_view()[caps@[cc]->Some_0].cap,
+                ),
             // every ring slot NOT at (ring, ii) unchanged:
-            forall|r2: int, idx2: int, c2: int| #![trigger cv0[ch].ring_cap[(r2, idx2, c2)]]
-                (0 <= r2 < 2 && 0 <= idx2 < cv0[ch].depth && 0 <= c2 < 4 && (r2 != rr || idx2 != ii))
-                ==> store.slot_view()[cv0[ch].ring_cap[(r2, idx2, c2)]].cap
-                        == sv0[cv0[ch].ring_cap[(r2, idx2, c2)]].cap,
+            forall|r2: int, idx2: int, c2: int|
+                #![trigger cv0[ch].ring_cap[(r2, idx2, c2)]]
+                (0 <= r2 < 2 && 0 <= idx2 < cv0[ch].depth && 0 <= c2 < 4 && (r2 != rr || idx2
+                    != ii)) ==> store.slot_view()[cv0[ch].ring_cap[(r2, idx2, c2)]].cap
+                    == sv0[cv0[ch].ring_cap[(r2, idx2, c2)]].cap,
         decreases 4 - c,
     {
         let src_opt = caps[c];
@@ -1183,8 +1348,7 @@ pub fn send<S: Store>(
                 // src is a live, non-empty, ring-disjoint slot (precondition A @ c);
                 // dst empty (cc>=c clause @ cc=c); src != dst (B, on the ring_cap term).
                 assert(0 <= c < 4 && caps@[c as int] is Some);
-                assert(sv0.dom().contains(src)
-                    && !cspace::is_empty_cap(sv0[src].cap)
+                assert(sv0.dom().contains(src) && !cspace::is_empty_cap(sv0[src].cap)
                     && !cspace::is_ring_cap_of(cv0[ch], src));
                 assert(sv0.dom().contains(cv0[ch].ring_cap[(rr, ii, c as int)]));
                 assert(store.slot_view()[src].cap == sv0[src].cap);
@@ -1205,9 +1369,10 @@ pub fn send<S: Store>(
                 assert(sv2[dst].cap == sv0[src].cap);
                 assert(cspace::is_empty_cap(sv2[src].cap));
                 // (D1) every ring cap of ch differs from src (precondition B).
-                assert forall|r3: int, i3: int, c3: int| #![trigger cv0[ch].ring_cap[(r3, i3, c3)]]
-                    (0 <= r3 < 2 && 0 <= i3 < cv0[ch].depth && 0 <= c3 < 4)
-                    implies cv0[ch].ring_cap[(r3, i3, c3)] != src by {
+                assert forall|r3: int, i3: int, c3: int|
+                    #![trigger cv0[ch].ring_cap[(r3, i3, c3)]]
+                    (0 <= r3 < 2 && 0 <= i3 < cv0[ch].depth && 0 <= c3
+                        < 4) implies cv0[ch].ring_cap[(r3, i3, c3)] != src by {
                     if cv0[ch].ring_cap[(r3, i3, c3)] == src {
                         assert(cspace::is_ring_cap_of(cv0[ch], src));
                     }
@@ -1215,34 +1380,46 @@ pub fn send<S: Store>(
                 // Re-establish each frame clause for c+1 (injectivity gives x != dst at
                 // a different ring index; D1 gives ring caps != src; C/A give the
                 // sender-cap disequalities; slot_move's cap-frame does the rest).
-                assert forall|cc: int| #![trigger cv0[ch].ring_cap[(rr, ii, cc)]]
-                    (c + 1 <= cc < 4) implies cspace::is_empty_cap(sv2[cv0[ch].ring_cap[(rr, ii, cc)]].cap) by {
+                assert forall|cc: int|
+                    #![trigger cv0[ch].ring_cap[(rr, ii, cc)]]
+                    (c + 1 <= cc < 4) implies cspace::is_empty_cap(
+                    sv2[cv0[ch].ring_cap[(rr, ii, cc)]].cap,
+                ) by {
                     assert(cv0[ch].ring_cap[(rr, ii, cc)] != dst);
                 }
-                assert forall|cc: int| #![trigger caps@[cc], cv0[ch].ring_cap[(rr, ii, cc)]]
-                    (0 <= cc < c + 1 && caps@[cc] is Some)
-                    implies sv2[cv0[ch].ring_cap[(rr, ii, cc)]].cap == sv0[caps@[cc]->Some_0].cap by {
+                assert forall|cc: int|
+                    #![trigger caps@[cc], cv0[ch].ring_cap[(rr, ii, cc)]]
+                    (0 <= cc < c + 1 && caps@[cc] is Some) implies sv2[cv0[ch].ring_cap[(
+                    rr,
+                    ii,
+                    cc,
+                )]].cap == sv0[caps@[cc]->Some_0].cap by {
                     if cc < c {
                         assert(cv0[ch].ring_cap[(rr, ii, cc)] != dst);
                     } else {
                         assert(cv0[ch].ring_cap[(rr, ii, cc)] == dst);
                     }
                 }
-                assert forall|cc: int| #![trigger caps@[cc], cv0[ch].ring_cap[(rr, ii, cc)]]
-                    (0 <= cc < c + 1 && caps@[cc] is None)
-                    implies cspace::is_empty_cap(sv2[cv0[ch].ring_cap[(rr, ii, cc)]].cap) by {
+                assert forall|cc: int|
+                    #![trigger caps@[cc], cv0[ch].ring_cap[(rr, ii, cc)]]
+                    (0 <= cc < c + 1 && caps@[cc] is None) implies cspace::is_empty_cap(
+                    sv2[cv0[ch].ring_cap[(rr, ii, cc)]].cap,
+                ) by {
                     assert(cv0[ch].ring_cap[(rr, ii, cc)] != dst);
                 }
-                assert forall|cc: int| #![trigger caps@[cc]]
-                    (c + 1 <= cc < 4 && caps@[cc] is Some)
-                    implies sv2[caps@[cc]->Some_0].cap == sv0[caps@[cc]->Some_0].cap by {
+                assert forall|cc: int|
+                    #![trigger caps@[cc]]
+                    (c + 1 <= cc < 4 && caps@[cc] is Some) implies sv2[caps@[cc]->Some_0].cap
+                    == sv0[caps@[cc]->Some_0].cap by {
                     if caps@[cc]->Some_0 == dst {
                         assert(cspace::is_ring_cap_of(cv0[ch], caps@[cc]->Some_0));
                     }
                 }
-                assert forall|cc: int| #![trigger caps@[cc]]
-                    (0 <= cc < c + 1 && caps@[cc] is Some)
-                    implies cspace::is_empty_cap(sv2[caps@[cc]->Some_0].cap) by {
+                assert forall|cc: int|
+                    #![trigger caps@[cc]]
+                    (0 <= cc < c + 1 && caps@[cc] is Some) implies cspace::is_empty_cap(
+                    sv2[caps@[cc]->Some_0].cap,
+                ) by {
                     if cc < c {
                         if caps@[cc]->Some_0 == dst {
                             assert(cspace::is_ring_cap_of(cv0[ch], caps@[cc]->Some_0));
@@ -1251,10 +1428,11 @@ pub fn send<S: Store>(
                         assert(caps@[cc]->Some_0 == src);
                     }
                 }
-                assert forall|r2: int, idx2: int, c2: int| #![trigger cv0[ch].ring_cap[(r2, idx2, c2)]]
-                    (0 <= r2 < 2 && 0 <= idx2 < cv0[ch].depth && 0 <= c2 < 4 && (r2 != rr || idx2 != ii))
-                    implies sv2[cv0[ch].ring_cap[(r2, idx2, c2)]].cap
-                        == sv0[cv0[ch].ring_cap[(r2, idx2, c2)]].cap by {
+                assert forall|r2: int, idx2: int, c2: int|
+                    #![trigger cv0[ch].ring_cap[(r2, idx2, c2)]]
+                    (0 <= r2 < 2 && 0 <= idx2 < cv0[ch].depth && 0 <= c2 < 4 && (r2 != rr || idx2
+                        != ii)) implies sv2[cv0[ch].ring_cap[(r2, idx2, c2)]].cap
+                    == sv0[cv0[ch].ring_cap[(r2, idx2, c2)]].cap by {
                     assert(cv0[ch].ring_cap[(r2, idx2, c2)] != dst);
                     assert(cv0[ch].ring_cap[(r2, idx2, c2)] != src);
                 }
@@ -1262,7 +1440,9 @@ pub fn send<S: Store>(
         } else {
             // None: store unchanged; the cc==c dst (empty, old cc>=c clause @ cc=c)
             // joins the cc<c+1 None-empty class; every other clause shifts trivially.
-            assert(cspace::is_empty_cap(store.slot_view()[cv0[ch].ring_cap[(rr, ii, c as int)]].cap));
+            assert(cspace::is_empty_cap(
+                store.slot_view()[cv0[ch].ring_cap[(rr, ii, c as int)]].cap,
+            ));
         }
         c += 1;
     }
@@ -1301,7 +1481,8 @@ pub fn send<S: Store>(
         assert(cvf[ch].bindings.dom() == cv0[ch].bindings.dom());
         assert(svf.dom() == sv0.dom());
         assert(nn < dd);
-        assert forall|idx: int| #![trigger cvf[ch].msg_len[(rr, idx)]]
+        assert forall|idx: int|
+            #![trigger cvf[ch].msg_len[(rr, idx)]]
             idx != ii implies cvf[ch].msg_len[(rr, idx)] == cv0[ch].msg_len[(rr, idx)] by {}
 
         // ii is the nn-th window position of the *new* window, hence in it.
@@ -1313,10 +1494,14 @@ pub fn send<S: Store>(
         // The cap-move loop emptied no other ring slot (loop invariant @ c == 4),
         // carried through the enqueue + fire — the per-slot facts the two post-loop
         // lemmas consume.
-        assert forall|r2: int, idx2: int, c2: int| #![trigger cv0[ch].ring_cap[(r2, idx2, c2)]]
-            (0 <= r2 < 2 && 0 <= idx2 < dd && 0 <= c2 < 4 && (r2 != rr || idx2 != ii))
-            implies svf[cv0[ch].ring_cap[(r2, idx2, c2)]].cap
-                == sv0[cv0[ch].ring_cap[(r2, idx2, c2)]].cap by {}
+        assert forall|r2: int, idx2: int, c2: int|
+            #![trigger cv0[ch].ring_cap[(r2, idx2, c2)]]
+            (0 <= r2 < 2 && 0 <= idx2 < dd && 0 <= c2 < 4 && (r2 != rr || idx2
+                != ii)) implies svf[cv0[ch].ring_cap[(r2, idx2, c2)]].cap == sv0[cv0[ch].ring_cap[(
+            r2,
+            idx2,
+            c2,
+        )]].cap by {}
 
         // chan_wf and the sending-ring FIFO append (push), each proved against the
         // tight facts above in its own solver context rather than send's full pass-2
@@ -1326,9 +1511,12 @@ pub fn send<S: Store>(
 
         // The other ring is untouched: its cursors and slots are unchanged, so every
         // message is congruent and its whole FIFO view rides through (lemma_ring_fifo_frame).
-        assert forall|idx: int| 0 <= idx < cv0[ch].depth
-            implies #[trigger] cspace::ring_msg(cvf[ch], svf, 1 - rr, idx)
-                == cspace::ring_msg(cv0[ch], sv0, 1 - rr, idx) by {
+        assert forall|idx: int| 0 <= idx < cv0[ch].depth implies #[trigger] cspace::ring_msg(
+            cvf[ch],
+            svf,
+            1 - rr,
+            idx,
+        ) == cspace::ring_msg(cv0[ch], sv0, 1 - rr, idx) by {
             cspace::lemma_ring_msg_eq(cvf[ch], svf, cv0[ch], sv0, 1 - rr, idx);
         }
         lemma_ring_fifo_frame(cv0[ch], sv0, cvf[ch], svf, 1 - rr);
@@ -1337,7 +1525,6 @@ pub fn send<S: Store>(
 }
 
 } // verus!
-
 verus! {
 
 // `recv` post-loop frame — channel `ch` stays well-formed after the head dequeue.
@@ -1379,10 +1566,12 @@ proof fn lemma_recv_chan_wf(
         cvf[ch].bindings.dom() == cv0[ch].bindings.dom(),
         svf.dom() == sv0.dom(),
         // pass 2 emptied the dequeued head's caps.
-        forall|c: int| #![trigger cv0[ch].ring_cap[(rr, hh, c)]]
+        forall|c: int|
+            #![trigger cv0[ch].ring_cap[(rr, hh, c)]]
             0 <= c < 4 ==> cspace::is_empty_cap(svf[cv0[ch].ring_cap[(rr, hh, c)]].cap),
         // every ring slot other than the dequeued head is untouched.
-        forall|r: int, i: int, c: int| #![trigger cv0[ch].ring_cap[(r, i, c)]]
+        forall|r: int, i: int, c: int|
+            #![trigger cv0[ch].ring_cap[(r, i, c)]]
             (0 <= r < 2 && 0 <= i < dd && 0 <= c < 4 && (r != rr || i != hh))
                 ==> svf[cv0[ch].ring_cap[(r, i, c)]].cap == sv0[cv0[ch].ring_cap[(r, i, c)]].cap,
     ensures
@@ -1393,15 +1582,15 @@ proof fn lemma_recv_chan_wf(
     }
     // FIFO cursors stay in range: ring rr's head shifted one slot (mod depth) and
     // its count dropped by one; the other ring is unchanged.
-    assert forall|r: int| #![trigger cvf[ch].head[r]] 0 <= r < 2
-        implies cvf[ch].head[r] < cvf[ch].depth by {
+    assert forall|r: int| #![trigger cvf[ch].head[r]] 0 <= r < 2 implies cvf[ch].head[r]
+        < cvf[ch].depth by {
         if r != rr {
             assert(r == 1 - rr);
             assert(cv0[ch].head[1 - rr] < cv0[ch].depth);
         }
     }
-    assert forall|r: int| #![trigger cvf[ch].count[r]] 0 <= r < 2
-        implies cvf[ch].count[r] <= cvf[ch].depth by {
+    assert forall|r: int| #![trigger cvf[ch].count[r]] 0 <= r < 2 implies cvf[ch].count[r]
+        <= cvf[ch].depth by {
         if r == rr {
             assert(cv0[ch].count[rr] <= cv0[ch].depth);
         } else {
@@ -1413,9 +1602,11 @@ proof fn lemma_recv_chan_wf(
     // old minus the dequeued head index hh; the head slot is now empty (pass 2), and
     // every other out-of-window slot was out-of-old-window and is unchanged.
     assert forall|r2: int, idx2: int, c3: int|
-        (0 <= r2 < 2 && 0 <= idx2 < cvf[ch].depth && 0 <= c3 < 4
-            && !cspace::in_live_window(cvf[ch], r2, idx2))
-        implies cspace::is_empty_cap(svf[#[trigger] cvf[ch].ring_cap[(r2, idx2, c3)]].cap) by {
+        (0 <= r2 < 2 && 0 <= idx2 < cvf[ch].depth && 0 <= c3 < 4 && !cspace::in_live_window(
+            cvf[ch],
+            r2,
+            idx2,
+        )) implies cspace::is_empty_cap(svf[#[trigger] cvf[ch].ring_cap[(r2, idx2, c3)]].cap) by {
         assert(cvf[ch].ring_cap[(r2, idx2, c3)] == cv0[ch].ring_cap[(r2, idx2, c3)]);
         if r2 == rr && idx2 == hh {
             // head slot: every cap emptied in pass 2 (c3 < 4).
@@ -1423,8 +1614,10 @@ proof fn lemma_recv_chan_wf(
         } else {
             // out-of-new ⟹ out-of-old (new window = old minus head hh).
             if cspace::in_live_window(cv0[ch], r2, idx2) {
-                let j = choose|j: int| #![trigger (cv0[ch].head[r2] + j) % (cv0[ch].depth as int)]
-                    0 <= j < cv0[ch].count[r2] && idx2 == (cv0[ch].head[r2] + j) % (cv0[ch].depth as int);
+                let j = choose|j: int|
+                    #![trigger (cv0[ch].head[r2] + j) % (cv0[ch].depth as int)]
+                    0 <= j < cv0[ch].count[r2] && idx2 == (cv0[ch].head[r2] + j) % (
+                    cv0[ch].depth as int);
                 if r2 == rr {
                     // idx2 != hh == head, so the witness j is not 0; shift to j-1.
                     assert(cv0[ch].head[r2] == hh);
@@ -1473,7 +1666,8 @@ proof fn lemma_recv_fifo_drop_first(
         cvf[ch].count[rr] == nn - 1,
         cvf[ch].ring_cap == cv0[ch].ring_cap,
         cvf[ch].msg_len == cv0[ch].msg_len.insert((rr, hh), 0),
-        forall|r: int, i: int, c: int| #![trigger cv0[ch].ring_cap[(r, i, c)]]
+        forall|r: int, i: int, c: int|
+            #![trigger cv0[ch].ring_cap[(r, i, c)]]
             (0 <= r < 2 && 0 <= i < dd && 0 <= c < 4 && (r != rr || i != hh))
                 ==> svf[cv0[ch].ring_cap[(r, i, c)]].cap == sv0[cv0[ch].ring_cap[(r, i, c)]].cap,
     ensures
@@ -1481,12 +1675,12 @@ proof fn lemma_recv_fifo_drop_first(
 {
     assert(cv0[ch].head[rr] < cv0[ch].depth);
     assert(cv0[ch].count[rr] <= cv0[ch].depth);
-    assert(cspace::ring_fifo(cvf[ch], svf, rr) =~= cspace::ring_fifo(cv0[ch], sv0, rr).drop_first()) by {
+    assert(cspace::ring_fifo(cvf[ch], svf, rr) =~= cspace::ring_fifo(cv0[ch], sv0, rr).drop_first())
+        by {
         assert(cspace::ring_fifo(cvf[ch], svf, rr).len() == nn - 1);
         assert(cspace::ring_fifo(cv0[ch], sv0, rr).drop_first().len() == nn - 1);
-        assert forall|j: int| 0 <= j < nn - 1
-            implies cspace::ring_fifo(cvf[ch], svf, rr)[j]
-                == cspace::ring_fifo(cv0[ch], sv0, rr).drop_first()[j] by {
+        assert forall|j: int| 0 <= j < nn - 1 implies cspace::ring_fifo(cvf[ch], svf, rr)[j]
+            == cspace::ring_fifo(cv0[ch], sv0, rr).drop_first()[j] by {
             // after-index ((hh+1)%dd + j)%dd == (hh + (j+1))%dd (old position j+1),
             // which is not the head hh (lemma_window_index_distinct(hh,dd,0,j+1)).
             cspace::lemma_mod_shift_head(hh, dd, j);
@@ -1496,14 +1690,19 @@ proof fn lemma_recv_fifo_drop_first(
             assert((hh + (j + 1)) % dd != hh);
             // idx = (hh+(j+1))%dd is a non-head window position, so its msg_len and
             // ring caps survived the dequeue.
-            assert(cvf[ch].msg_len[(rr, (hh + (j + 1)) % dd)]
-                == cv0[ch].msg_len[(rr, (hh + (j + 1)) % dd)]);
-            assert forall|c: int| #![trigger cv0[ch].ring_cap[(rr, (hh + (j + 1)) % dd, c)]]
-                0 <= c < 4 implies
-                svf[cvf[ch].ring_cap[(rr, (hh + (j + 1)) % dd, c)]].cap
-                    == sv0[cv0[ch].ring_cap[(rr, (hh + (j + 1)) % dd, c)]].cap by {
-                assert(cvf[ch].ring_cap[(rr, (hh + (j + 1)) % dd, c)]
-                    == cv0[ch].ring_cap[(rr, (hh + (j + 1)) % dd, c)]);
+            assert(cvf[ch].msg_len[(rr, (hh + (j + 1)) % dd)] == cv0[ch].msg_len[(
+                rr,
+                (hh + (j + 1)) % dd,
+            )]);
+            assert forall|c: int|
+                #![trigger cv0[ch].ring_cap[(rr, (hh + (j + 1)) % dd, c)]]
+                0 <= c < 4 implies svf[cvf[ch].ring_cap[(rr, (hh + (j + 1)) % dd, c)]].cap
+                == sv0[cv0[ch].ring_cap[(rr, (hh + (j + 1)) % dd, c)]].cap by {
+                assert(cvf[ch].ring_cap[(rr, (hh + (j + 1)) % dd, c)] == cv0[ch].ring_cap[(
+                    rr,
+                    (hh + (j + 1)) % dd,
+                    c,
+                )]);
             }
             cspace::lemma_ring_msg_eq(cvf[ch], svf, cv0[ch], sv0, rr, (hh + (j + 1)) % dd);
         }
@@ -1535,26 +1734,41 @@ pub fn recv<S: Store>(
         cspace::chan_wf(old(store).chan_view(), old(store).slot_view(), ch),
         cspace::cspace_wf(old(store).slot_view()),
         old(store).slot_view().dom().finite(),
-        forall|c: int| #![trigger dests@[c]]
-            0 <= c < 4 && dests@[c] is Some ==> (
-                old(store).slot_view().dom().contains(dests@[c]->Some_0)
-                && cspace::is_empty_cap(old(store).slot_view()[dests@[c]->Some_0].cap)
+        forall|c: int|
+            #![trigger dests@[c]]
+            0 <= c < 4 && dests@[c] is Some ==> (old(store).slot_view().dom().contains(
+                dests@[c]->Some_0,
+            ) && cspace::is_empty_cap(old(store).slot_view()[dests@[c]->Some_0].cap)
                 && !cspace::is_ring_cap_of(old(store).chan_view()[ch], dests@[c]->Some_0)),
-        forall|c1: int, c2: int| #![trigger dests@[c1], dests@[c2]]
-            0 <= c1 < 4 && 0 <= c2 < 4 && c1 != c2
-                && dests@[c1] is Some && dests@[c2] is Some
+        forall|c1: int, c2: int|
+            #![trigger dests@[c1], dests@[c2]]
+            0 <= c1 < 4 && 0 <= c2 < 4 && c1 != c2 && dests@[c1] is Some && dests@[c2] is Some
                 ==> dests@[c1]->Some_0 != dests@[c2]->Some_0,
-        cspace::binding_notif_wf(old(store).chan_view(), old(store).notif_view(),
-            old(store).tcb_view(), ch),
-        cspace::binding_refs_ok(old(store).chan_view(), old(store).notif_view(),
-            old(store).refs_view(), ch, 1 - end_idx_spec(end), EV_WRITABLE as int),
+        cspace::binding_notif_wf(
+            old(store).chan_view(),
+            old(store).notif_view(),
+            old(store).tcb_view(),
+            ch,
+        ),
+        cspace::binding_refs_ok(
+            old(store).chan_view(),
+            old(store).notif_view(),
+            old(store).refs_view(),
+            ch,
+            1 - end_idx_spec(end),
+            EV_WRITABLE as int,
+        ),
         // The writable `fire` faithfully enqueues a woken sender, so `recv` carries the
         // ready-queue invariants in (trusted shell supplies them; consumed only for `fire`).
         cspace::ready_wf(old(store).ready_view(), old(store).tcb_view()),
         cspace::ready_complete(old(store).ready_view(), old(store).tcb_view()),
     ensures
-        cspace::binding_notif_wf(final(store).chan_view(), final(store).notif_view(),
-            final(store).tcb_view(), ch),
+        cspace::binding_notif_wf(
+            final(store).chan_view(),
+            final(store).notif_view(),
+            final(store).tcb_view(),
+            ch,
+        ),
         res is Err ==> no_drop_on_refusal(
             old(store).slot_view(),
             old(store).chan_view(),
@@ -1563,61 +1777,75 @@ pub fn recv<S: Store>(
             final(store).chan_view(),
             final(store).refs_view(),
         ),
-        res is Ok ==> (
-            cspace::chan_wf(final(store).chan_view(), final(store).slot_view(), ch)
-            && cspace::cspace_wf(final(store).slot_view())
-            && final(store).slot_view().dom() == old(store).slot_view().dom()
-            && final(store).slot_view().dom().finite()
+        res is Ok ==> (cspace::chan_wf(final(store).chan_view(), final(store).slot_view(), ch)
+            && cspace::cspace_wf(final(store).slot_view()) && final(store).slot_view().dom() == old(
+            store,
+        ).slot_view().dom() && final(store).slot_view().dom().finite()
             && final(store).chan_view()[ch].depth == old(store).chan_view()[ch].depth
-            && final(store).chan_view()[ch].count[1 - end_idx_spec(end)]
-                   == old(store).chan_view()[ch].count[1 - end_idx_spec(end)] - 1
-            && fifo_recv_pops_head(
-                old(store).chan_view()[ch],
-                old(store).slot_view(),
-                final(store).chan_view()[ch],
-                final(store).slot_view(),
+            && final(store).chan_view()[ch].count[1 - end_idx_spec(end)] == old(
+            store,
+        ).chan_view()[ch].count[1 - end_idx_spec(end)] - 1 && fifo_recv_pops_head(
+            old(store).chan_view()[ch],
+            old(store).slot_view(),
+            final(store).chan_view()[ch],
+            final(store).slot_view(),
+            1 - end_idx_spec(end),
+        ) && cspace::ring_fifo(
+            final(store).chan_view()[ch],
+            final(store).slot_view(),
+            end_idx_spec(end),
+        ) == cspace::ring_fifo(
+            old(store).chan_view()[ch],
+            old(store).slot_view(),
+            end_idx_spec(end),
+        ) && res->Ok_0.0 as nat == old(store).chan_view()[ch].msg_len[(
+            1 - end_idx_spec(end),
+            old(store).chan_view()[ch].head[1 - end_idx_spec(end)] as int,
+        )]
+        // The receive-half of move semantics, mirroring `send`'s source export.
+        // (B) Every non-empty arriving cap landed in the dest the caller named — so a
+        // verified caller can conclude where the cap went, not merely that it left the
+        // queue. (`dests@[c] is Some` here is forced by the pass-1 free-slot check.)
+         && (forall|c: int|
+            #![trigger dests@[c]]
+            0 <= c < 4 && !cspace::is_empty_cap(
+                old(store).slot_view()[old(store).chan_view()[ch].ring_cap[(
+                    1 - end_idx_spec(end),
+                    old(store).chan_view()[ch].head[1 - end_idx_spec(end)] as int,
+                    c,
+                )]].cap,
+            ) ==> (dests@[c] is Some && final(store).slot_view()[dests@[c]->Some_0].cap == old(
+                store,
+            ).slot_view()[old(store).chan_view()[ch].ring_cap[(
                 1 - end_idx_spec(end),
-            )
-            && cspace::ring_fifo(final(store).chan_view()[ch], final(store).slot_view(), end_idx_spec(end))
-                   == cspace::ring_fifo(old(store).chan_view()[ch], old(store).slot_view(), end_idx_spec(end))
-            && res->Ok_0.0 as nat == old(store).chan_view()[ch].msg_len[
-                   (1 - end_idx_spec(end), old(store).chan_view()[ch].head[1 - end_idx_spec(end)] as int)]
-            // The receive-half of move semantics, mirroring `send`'s source export.
-            // (B) Every non-empty arriving cap landed in the dest the caller named — so a
-            // verified caller can conclude where the cap went, not merely that it left the
-            // queue. (`dests@[c] is Some` here is forced by the pass-1 free-slot check.)
-            && (forall|c: int| #![trigger dests@[c]]
-                   0 <= c < 4 && !cspace::is_empty_cap(
-                       old(store).slot_view()[old(store).chan_view()[ch].ring_cap[(
-                           1 - end_idx_spec(end),
-                           old(store).chan_view()[ch].head[1 - end_idx_spec(end)] as int,
-                           c)]].cap)
-                   ==> (dests@[c] is Some
-                        && final(store).slot_view()[dests@[c]->Some_0].cap
-                           == old(store).slot_view()[old(store).chan_view()[ch].ring_cap[(
-                               1 - end_idx_spec(end),
-                               old(store).chan_view()[ch].head[1 - end_idx_spec(end)] as int,
-                               c)]].cap))
-            // (C) The dequeued head's ring slots are all empty afterward — the queue-slot
-            // owner relinquished the cap (moved-out caps cleared, null caps already empty).
-            && (forall|c: int| #![trigger old(store).chan_view()[ch].ring_cap[(
+                old(store).chan_view()[ch].head[1 - end_idx_spec(end)] as int,
+                c,
+            )]].cap))
+        // (C) The dequeued head's ring slots are all empty afterward — the queue-slot
+        // owner relinquished the cap (moved-out caps cleared, null caps already empty).
+         && (forall|c: int|
+            #![trigger old(store).chan_view()[ch].ring_cap[(
                        1 - end_idx_spec(end),
                        old(store).chan_view()[ch].head[1 - end_idx_spec(end)] as int, c)]]
-                   0 <= c < 4 ==> cspace::is_empty_cap(
-                       final(store).slot_view()[old(store).chan_view()[ch].ring_cap[(
-                           1 - end_idx_spec(end),
-                           old(store).chan_view()[ch].head[1 - end_idx_spec(end)] as int,
-                           c)]].cap))
-            // (A) The returned install mask names exactly the filled dests: bit c set iff
-            // arriving cap c was non-empty (hence moved into dests@[c] by (B)). A caller
-            // can decode which slots it now owns directly from the mask.
-            && (forall|c: int| #![trigger mask_bit(res->Ok_0.1, c)]
-                   0 <= c < 4 ==> (mask_bit(res->Ok_0.1, c)
-                       <==> !cspace::is_empty_cap(
-                           old(store).slot_view()[old(store).chan_view()[ch].ring_cap[(
-                               1 - end_idx_spec(end),
-                               old(store).chan_view()[ch].head[1 - end_idx_spec(end)] as int,
-                               c)]].cap)))),
+            0 <= c < 4 ==> cspace::is_empty_cap(
+                final(store).slot_view()[old(store).chan_view()[ch].ring_cap[(
+                    1 - end_idx_spec(end),
+                    old(store).chan_view()[ch].head[1 - end_idx_spec(end)] as int,
+                    c,
+                )]].cap,
+            ))
+        // (A) The returned install mask names exactly the filled dests: bit c set iff
+        // arriving cap c was non-empty (hence moved into dests@[c] by (B)). A caller
+        // can decode which slots it now owns directly from the mask.
+         && (forall|c: int|
+            #![trigger mask_bit(res->Ok_0.1, c)]
+            0 <= c < 4 ==> (mask_bit(res->Ok_0.1, c) <==> !cspace::is_empty_cap(
+                old(store).slot_view()[old(store).chan_view()[ch].ring_cap[(
+                    1 - end_idx_spec(end),
+                    old(store).chan_view()[ch].head[1 - end_idx_spec(end)] as int,
+                    c,
+                )]].cap,
+            )))),
 {
     let ghost sv0 = old(store).slot_view();
     let ghost cv0 = old(store).chan_view();
@@ -1661,13 +1889,13 @@ pub fn recv<S: Store>(
             cspace::binding_notif_wf(store.chan_view(), store.notif_view(), store.tcb_view(), ch),
             cspace::chan_wf(cv0, sv0, ch),
             0 <= hh < cv0[ch].depth,
-            forall|cc: int| #![trigger dests@[cc]]
-                (0 <= cc < 4 && dests@[cc] is Some)
-                ==> sv0.dom().contains(dests@[cc]->Some_0),
-            forall|cc: int| #![trigger cv0[ch].ring_cap[(rr, hh, cc)]]
+            forall|cc: int|
+                #![trigger dests@[cc]]
+                (0 <= cc < 4 && dests@[cc] is Some) ==> sv0.dom().contains(dests@[cc]->Some_0),
+            forall|cc: int|
+                #![trigger cv0[ch].ring_cap[(rr, hh, cc)]]
                 (0 <= cc < c && !cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap))
-                ==> (dests@[cc] is Some
-                    && cspace::is_empty_cap(sv0[dests@[cc]->Some_0].cap)),
+                    ==> (dests@[cc] is Some && cspace::is_empty_cap(sv0[dests@[cc]->Some_0].cap)),
         decreases 4 - c,
     {
         let src = store.chan_ring_cap(ch, ring, head, c);
@@ -1680,7 +1908,7 @@ pub fn recv<S: Store>(
                     if !cspace::cap_is_empty(store.slot(d).cap) {
                         return Err(ChanError::NoCapSlot);
                     }
-                }
+                },
             }
         }
         c += 1;
@@ -1716,57 +1944,66 @@ pub fn recv<S: Store>(
             0 <= hh < cv0[ch].depth,
             cspace::chan_wf(cv0, sv0, ch),
             // pass-1 result, carried in:
-            forall|cc: int| #![trigger cv0[ch].ring_cap[(rr, hh, cc)]]
+            forall|cc: int|
+                #![trigger cv0[ch].ring_cap[(rr, hh, cc)]]
                 (0 <= cc < 4 && !cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap))
-                ==> (dests@[cc] is Some
-                    && cspace::is_empty_cap(sv0[dests@[cc]->Some_0].cap)),
+                    ==> (dests@[cc] is Some && cspace::is_empty_cap(sv0[dests@[cc]->Some_0].cap)),
             // dests precondition (live, empty, ring-disjoint, distinct), in sv0/cv0:
-            forall|cc: int| #![trigger dests@[cc]]
-                (0 <= cc < 4 && dests@[cc] is Some) ==> (
-                    sv0.dom().contains(dests@[cc]->Some_0)
-                    && cspace::is_empty_cap(sv0[dests@[cc]->Some_0].cap)
-                    && !cspace::is_ring_cap_of(cv0[ch], dests@[cc]->Some_0)),
-            forall|d1: int, d2: int| #![trigger dests@[d1], dests@[d2]]
-                (0 <= d1 < 4 && 0 <= d2 < 4 && d1 != d2
-                    && dests@[d1] is Some && dests@[d2] is Some)
+            forall|cc: int|
+                #![trigger dests@[cc]]
+                (0 <= cc < 4 && dests@[cc] is Some) ==> (sv0.dom().contains(dests@[cc]->Some_0)
+                    && cspace::is_empty_cap(sv0[dests@[cc]->Some_0].cap) && !cspace::is_ring_cap_of(
+                    cv0[ch],
+                    dests@[cc]->Some_0,
+                )),
+            forall|d1: int, d2: int|
+                #![trigger dests@[d1], dests@[d2]]
+                (0 <= d1 < 4 && 0 <= d2 < 4 && d1 != d2 && dests@[d1] is Some && dests@[d2] is Some)
                     ==> dests@[d1]->Some_0 != dests@[d2]->Some_0,
             // processed head caps (cc < c2) emptied; unprocessed unchanged:
-            forall|cc: int| #![trigger cv0[ch].ring_cap[(rr, hh, cc)]]
-                (0 <= cc < c2) ==> cspace::is_empty_cap(store.slot_view()[cv0[ch].ring_cap[(rr, hh, cc)]].cap),
-            forall|cc: int| #![trigger cv0[ch].ring_cap[(rr, hh, cc)]]
+            forall|cc: int|
+                #![trigger cv0[ch].ring_cap[(rr, hh, cc)]]
+                (0 <= cc < c2) ==> cspace::is_empty_cap(
+                    store.slot_view()[cv0[ch].ring_cap[(rr, hh, cc)]].cap,
+                ),
+            forall|cc: int|
+                #![trigger cv0[ch].ring_cap[(rr, hh, cc)]]
                 (c2 <= cc < 4) ==> store.slot_view()[cv0[ch].ring_cap[(rr, hh, cc)]].cap
-                        == sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap,
+                    == sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap,
             // unprocessed dests (cc >= c2) unchanged (still empty):
-            forall|cc: int| #![trigger dests@[cc]]
-                (c2 <= cc < 4 && dests@[cc] is Some)
-                ==> store.slot_view()[dests@[cc]->Some_0].cap == sv0[dests@[cc]->Some_0].cap,
+            forall|cc: int|
+                #![trigger dests@[cc]]
+                (c2 <= cc < 4 && dests@[cc] is Some) ==> store.slot_view()[dests@[cc]->Some_0].cap
+                    == sv0[dests@[cc]->Some_0].cap,
             // (2a) processed dests (cc < c2) with a non-empty arriving cap now HOLD
             // it — the receive-half installation we will export from the `ensures`:
-            forall|cc: int| #![trigger cv0[ch].ring_cap[(rr, hh, cc)]]
-                (0 <= cc < c2
-                    && !cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap))
-                ==> (dests@[cc] is Some
-                    && store.slot_view()[dests@[cc]->Some_0].cap
-                        == sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap),
+            forall|cc: int|
+                #![trigger cv0[ch].ring_cap[(rr, hh, cc)]]
+                (0 <= cc < c2 && !cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap))
+                    ==> (dests@[cc] is Some && store.slot_view()[dests@[cc]->Some_0].cap
+                    == sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap),
             // (2b) the install mask names exactly the processed-and-filled indices:
             // bit cc set iff (cc already processed AND arriving cap cc was non-empty):
-            forall|cc: int| #![trigger mask_bit(mask, cc)]
-                0 <= cc < 4 ==> (mask_bit(mask, cc)
-                    <==> (cc < c2
-                        && !cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap))),
+            forall|cc: int|
+                #![trigger mask_bit(mask, cc)]
+                0 <= cc < 4 ==> (mask_bit(mask, cc) <==> (cc < c2 && !cspace::is_empty_cap(
+                    sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap,
+                ))),
             // every ring slot NOT at (rr, hh) unchanged:
-            forall|r2: int, idx2: int, c3: int| #![trigger cv0[ch].ring_cap[(r2, idx2, c3)]]
-                (0 <= r2 < 2 && 0 <= idx2 < cv0[ch].depth && 0 <= c3 < 4 && (r2 != rr || idx2 != hh))
-                ==> store.slot_view()[cv0[ch].ring_cap[(r2, idx2, c3)]].cap
-                        == sv0[cv0[ch].ring_cap[(r2, idx2, c3)]].cap,
+            forall|r2: int, idx2: int, c3: int|
+                #![trigger cv0[ch].ring_cap[(r2, idx2, c3)]]
+                (0 <= r2 < 2 && 0 <= idx2 < cv0[ch].depth && 0 <= c3 < 4 && (r2 != rr || idx2
+                    != hh)) ==> store.slot_view()[cv0[ch].ring_cap[(r2, idx2, c3)]].cap
+                    == sv0[cv0[ch].ring_cap[(r2, idx2, c3)]].cap,
         decreases 4 - c2,
     {
         let src = store.chan_ring_cap(ch, ring, head, c2);
         assert(src == cv0[ch].ring_cap[(rr, hh, c2 as int)]);
         if !cspace::cap_is_empty(store.slot(src).cap) {
             assert(!cspace::is_empty_cap(sv0[src].cap));
-            assert(dests@[c2 as int] is Some
-                && cspace::is_empty_cap(sv0[dests@[c2 as int]->Some_0].cap));
+            assert(dests@[c2 as int] is Some && cspace::is_empty_cap(
+                sv0[dests@[c2 as int]->Some_0].cap,
+            ));
             let d = dests[c2].unwrap();
             assert(d == dests@[c2 as int]->Some_0);
             proof {
@@ -1786,16 +2023,20 @@ pub fn recv<S: Store>(
             proof {
                 let ghost sv2 = store.slot_view();
                 // (D1) every ring cap of ch differs from d (precondition B on d).
-                assert forall|r3: int, i3: int, c4: int| #![trigger cv0[ch].ring_cap[(r3, i3, c4)]]
-                    (0 <= r3 < 2 && 0 <= i3 < cv0[ch].depth && 0 <= c4 < 4)
-                    implies cv0[ch].ring_cap[(r3, i3, c4)] != d by {
+                assert forall|r3: int, i3: int, c4: int|
+                    #![trigger cv0[ch].ring_cap[(r3, i3, c4)]]
+                    (0 <= r3 < 2 && 0 <= i3 < cv0[ch].depth && 0 <= c4
+                        < 4) implies cv0[ch].ring_cap[(r3, i3, c4)] != d by {
                     if cv0[ch].ring_cap[(r3, i3, c4)] == d {
                         assert(cspace::is_ring_cap_of(cv0[ch], d));
                     }
                 }
                 // Re-establish the frame for c2+1.
-                assert forall|cc: int| #![trigger cv0[ch].ring_cap[(rr, hh, cc)]]
-                    (0 <= cc < c2 + 1) implies cspace::is_empty_cap(sv2[cv0[ch].ring_cap[(rr, hh, cc)]].cap) by {
+                assert forall|cc: int|
+                    #![trigger cv0[ch].ring_cap[(rr, hh, cc)]]
+                    (0 <= cc < c2 + 1) implies cspace::is_empty_cap(
+                    sv2[cv0[ch].ring_cap[(rr, hh, cc)]].cap,
+                ) by {
                     if cc < c2 {
                         assert(cv0[ch].ring_cap[(rr, hh, cc)] != src);
                         assert(cv0[ch].ring_cap[(rr, hh, cc)] != d);
@@ -1803,36 +2044,39 @@ pub fn recv<S: Store>(
                         assert(cv0[ch].ring_cap[(rr, hh, cc)] == src);
                     }
                 }
-                assert forall|cc: int| #![trigger cv0[ch].ring_cap[(rr, hh, cc)]]
+                assert forall|cc: int|
+                    #![trigger cv0[ch].ring_cap[(rr, hh, cc)]]
                     (c2 + 1 <= cc < 4) implies sv2[cv0[ch].ring_cap[(rr, hh, cc)]].cap
-                        == sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap by {
+                    == sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap by {
                     assert(cv0[ch].ring_cap[(rr, hh, cc)] != src);
                     assert(cv0[ch].ring_cap[(rr, hh, cc)] != d);
                 }
-                assert forall|cc: int| #![trigger dests@[cc]]
-                    (c2 + 1 <= cc < 4 && dests@[cc] is Some)
-                    implies sv2[dests@[cc]->Some_0].cap == sv0[dests@[cc]->Some_0].cap by {
+                assert forall|cc: int|
+                    #![trigger dests@[cc]]
+                    (c2 + 1 <= cc < 4 && dests@[cc] is Some) implies sv2[dests@[cc]->Some_0].cap
+                    == sv0[dests@[cc]->Some_0].cap by {
                     assert(dests@[cc]->Some_0 != d);
                     if dests@[cc]->Some_0 == src {
                         assert(cspace::is_ring_cap_of(cv0[ch], dests@[cc]->Some_0));
                     }
                 }
-                assert forall|r2: int, idx2: int, c3: int| #![trigger cv0[ch].ring_cap[(r2, idx2, c3)]]
-                    (0 <= r2 < 2 && 0 <= idx2 < cv0[ch].depth && 0 <= c3 < 4 && (r2 != rr || idx2 != hh))
-                    implies sv2[cv0[ch].ring_cap[(r2, idx2, c3)]].cap
-                        == sv0[cv0[ch].ring_cap[(r2, idx2, c3)]].cap by {
+                assert forall|r2: int, idx2: int, c3: int|
+                    #![trigger cv0[ch].ring_cap[(r2, idx2, c3)]]
+                    (0 <= r2 < 2 && 0 <= idx2 < cv0[ch].depth && 0 <= c3 < 4 && (r2 != rr || idx2
+                        != hh)) implies sv2[cv0[ch].ring_cap[(r2, idx2, c3)]].cap
+                    == sv0[cv0[ch].ring_cap[(r2, idx2, c3)]].cap by {
                     assert(cv0[ch].ring_cap[(r2, idx2, c3)] != src);
                     assert(cv0[ch].ring_cap[(r2, idx2, c3)] != d);
                 }
                 // (2a) processed dests through c2 hold their arriving cap. The cc==c2
                 // case is this very `slot_move` (dst d holds src's cap); cc < c2 survive
                 // because d (dests distinct) and src (a dest is not a ring cap) are not them.
-                assert forall|cc: int| #![trigger cv0[ch].ring_cap[(rr, hh, cc)]]
-                    (0 <= cc < c2 + 1
-                        && !cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap))
-                    implies (dests@[cc] is Some
-                        && sv2[dests@[cc]->Some_0].cap
-                            == sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap) by {
+                assert forall|cc: int|
+                    #![trigger cv0[ch].ring_cap[(rr, hh, cc)]]
+                    (0 <= cc < c2 + 1 && !cspace::is_empty_cap(
+                        sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap,
+                    )) implies (dests@[cc] is Some && sv2[dests@[cc]->Some_0].cap
+                    == sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap) by {
                     if cc < c2 {
                         assert(dests@[cc]->Some_0 != d);
                         if dests@[cc]->Some_0 == src {
@@ -1851,9 +2095,8 @@ pub fn recv<S: Store>(
                 // (2b) re-establish the mask invariant for c2+1: the lemma sets bit
                 // c2 and frames the rest; the arriving cap at c2 is non-empty in this branch.
                 lemma_mask_set_bit(m_pre, c2u);
-                assert forall|cc: int| 0 <= cc < 4 implies (mask_bit(mask, cc)
-                    <==> (cc < c2 + 1
-                        && !cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap))) by {
+                assert forall|cc: int| 0 <= cc < 4 implies (mask_bit(mask, cc) <==> (cc < c2 + 1
+                    && !cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap))) by {
                     if cc == c2 as int {
                         assert(!cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap));
                     }
@@ -1861,23 +2104,24 @@ pub fn recv<S: Store>(
             }
         } else {
             // null cap (revoked in flight): skip; head cap cc=c2 already empty.
-            assert(cspace::is_empty_cap(store.slot_view()[cv0[ch].ring_cap[(rr, hh, c2 as int)]].cap));
+            assert(cspace::is_empty_cap(
+                store.slot_view()[cv0[ch].ring_cap[(rr, hh, c2 as int)]].cap,
+            ));
             proof {
                 // arriving cap c2 is empty (this branch), so the cc==c2 obligation is vacuous;
                 // nothing moved this iteration, so cc < c2 ride through unchanged.
                 assert(cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, c2 as int)]].cap));
-                assert forall|cc: int| #![trigger cv0[ch].ring_cap[(rr, hh, cc)]]
-                    (0 <= cc < c2 + 1
-                        && !cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap))
-                    implies (dests@[cc] is Some
-                        && store.slot_view()[dests@[cc]->Some_0].cap
-                            == sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap) by {
+                assert forall|cc: int|
+                    #![trigger cv0[ch].ring_cap[(rr, hh, cc)]]
+                    (0 <= cc < c2 + 1 && !cspace::is_empty_cap(
+                        sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap,
+                    )) implies (dests@[cc] is Some && store.slot_view()[dests@[cc]->Some_0].cap
+                    == sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap) by {
                     assert(cc < c2);
                 }
                 // (2b) mask unchanged; arriving c2 empty ⟹ bit c2 stays 0.
-                assert forall|cc: int| 0 <= cc < 4 implies (mask_bit(mask, cc)
-                    <==> (cc < c2 + 1
-                        && !cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap))) by {}
+                assert forall|cc: int| 0 <= cc < 4 implies (mask_bit(mask, cc) <==> (cc < c2 + 1
+                    && !cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, cc)]].cap))) by {}
             }
         }
         c2 += 1;
@@ -1932,12 +2176,17 @@ pub fn recv<S: Store>(
         // Pass 2 emptied the dequeued head's caps and left every other ring slot
         // untouched (loop invariants @ c2 == 4, carried through the dequeue + fire by
         // svf == sv_loop) — the per-slot facts the two post-loop lemmas consume.
-        assert forall|c: int| #![trigger cv0[ch].ring_cap[(rr, hh, c)]]
+        assert forall|c: int|
+            #![trigger cv0[ch].ring_cap[(rr, hh, c)]]
             0 <= c < 4 implies cspace::is_empty_cap(svf[cv0[ch].ring_cap[(rr, hh, c)]].cap) by {}
-        assert forall|r2: int, idx2: int, c3: int| #![trigger cv0[ch].ring_cap[(r2, idx2, c3)]]
-            (0 <= r2 < 2 && 0 <= idx2 < dd && 0 <= c3 < 4 && (r2 != rr || idx2 != hh))
-            implies svf[cv0[ch].ring_cap[(r2, idx2, c3)]].cap
-                == sv0[cv0[ch].ring_cap[(r2, idx2, c3)]].cap by {}
+        assert forall|r2: int, idx2: int, c3: int|
+            #![trigger cv0[ch].ring_cap[(r2, idx2, c3)]]
+            (0 <= r2 < 2 && 0 <= idx2 < dd && 0 <= c3 < 4 && (r2 != rr || idx2
+                != hh)) implies svf[cv0[ch].ring_cap[(r2, idx2, c3)]].cap == sv0[cv0[ch].ring_cap[(
+            r2,
+            idx2,
+            c3,
+        )]].cap by {}
 
         // chan_wf and the receiving-ring FIFO pop (drop_first), each proved against
         // the tight facts above in its own solver context rather than recv's full
@@ -1947,9 +2196,12 @@ pub fn recv<S: Store>(
 
         // The other ring is untouched: every message is congruent, so its whole FIFO
         // view rides through (lemma_ring_fifo_frame).
-        assert forall|idx: int| 0 <= idx < cv0[ch].depth
-            implies #[trigger] cspace::ring_msg(cvf[ch], svf, 1 - rr, idx)
-                == cspace::ring_msg(cv0[ch], sv0, 1 - rr, idx) by {
+        assert forall|idx: int| 0 <= idx < cv0[ch].depth implies #[trigger] cspace::ring_msg(
+            cvf[ch],
+            svf,
+            1 - rr,
+            idx,
+        ) == cspace::ring_msg(cv0[ch], sv0, 1 - rr, idx) by {
             cspace::lemma_ring_msg_eq(cvf[ch], svf, cv0[ch], sv0, 1 - rr, idx);
         }
         lemma_ring_fifo_frame(cv0[ch], sv0, cvf[ch], svf, 1 - rr);
@@ -1959,23 +2211,26 @@ pub fn recv<S: Store>(
         // installation rides to `final`; the c2==4 loop invariants then yield ensures
         // (B) and (C) directly.
         // (C) every dequeued-head ring slot is empty (loop invariant "processed emptied").
-        assert forall|c: int| #![trigger cv0[ch].ring_cap[(rr, hh, c)]]
+        assert forall|c: int|
+            #![trigger cv0[ch].ring_cap[(rr, hh, c)]]
             0 <= c < 4 implies cspace::is_empty_cap(svf[cv0[ch].ring_cap[(rr, hh, c)]].cap) by {}
         // (B) each non-empty arriving cap landed in the named dest ((2a) at c2==4).
-        assert forall|c: int| #![trigger dests@[c]]
-            (0 <= c < 4 && !cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, c)]].cap))
-            implies (dests@[c] is Some
-                && svf[dests@[c]->Some_0].cap == sv0[cv0[ch].ring_cap[(rr, hh, c)]].cap) by {}
+        assert forall|c: int|
+            #![trigger dests@[c]]
+            (0 <= c < 4 && !cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, c)]].cap)) implies (
+        dests@[c] is Some && svf[dests@[c]->Some_0].cap == sv0[cv0[ch].ring_cap[(
+            rr,
+            hh,
+            c,
+        )]].cap) by {}
         // (A) mask exactness ((2b) at c2==4: cc < 4 always holds, so RHS == non-emptiness).
-        assert forall|c: int| #![trigger mask_bit(mask, c)]
-            0 <= c < 4 implies (mask_bit(mask, c)
-                <==> !cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, c)]].cap)) by {}
+        assert forall|c: int| #![trigger mask_bit(mask, c)] 0 <= c < 4 implies (mask_bit(mask, c)
+            <==> !cspace::is_empty_cap(sv0[cv0[ch].ring_cap[(rr, hh, c)]].cap)) by {}
     }
     Ok((len as usize, mask))
 }
 
 } // verus!
-
 verus! {
 
 /// Release one event binding's notification reference: drop `refs[n]` and **clear the
@@ -2046,30 +2301,42 @@ fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
             assert(store.cspace_view() == s_b.cspace_view());
             assert(store.refs_view() =~= s_b.refs_view().insert(n, (r - 1) as nat));
             assert(cvf =~= cv_b.insert(
-                ch, ChanView { bindings: cv_b[ch].bindings.insert((end as int, ev as int), nb), ..cv_b[ch] }));
+                ch,
+                ChanView {
+                    bindings: cv_b[ch].bindings.insert((end as int, ev as int), nb),
+                    ..cv_b[ch]
+                },
+            ));
             // The cleared binding lowers `binding_refs(n)` by one and frames every other object.
             cspace::lemma_binding_drop(cv_b, ch, end as int, ev as int, nb, n);
             // Census drops by one at `n` only (additive — no `nat` underflow); the other five
             // terms read the framed views.
-            assert forall|x: ObjId| #[trigger] cspace::obj_census(&s_b, x)
-                == cspace::obj_census(store, x) + (if x == n { 1nat } else { 0nat }) by {}
+            assert forall|x: ObjId| #[trigger]
+                cspace::obj_census(&s_b, x) == cspace::obj_census(store, x) + (if x == n {
+                    1nat
+                } else {
+                    0nat
+                }) by {}
             // refcount_sound: `n`'s term moved with the `-1`; every other object's refs and
             // census are both untouched.
-            assert forall|x: ObjId| store.refs_view().dom().contains(x)
-                implies #[trigger] store.refs_view()[x] == cspace::obj_census(store, x) by {
+            assert forall|x: ObjId|
+                store.refs_view().dom().contains(x) implies #[trigger] store.refs_view()[x]
+                == cspace::obj_census(store, x) by {
                 assert(s_b.refs_view()[x] == cspace::obj_census(&s_b, x));
             }
             // census_dom_complete: every census only dropped; domain unchanged.
-            assert forall|x: ObjId| #[trigger] cspace::obj_census(store, x) >= 1
-                implies store.refs_view().dom().contains(x) by {
+            assert forall|x: ObjId| #[trigger]
+                cspace::obj_census(store, x) >= 1 implies store.refs_view().dom().contains(x) by {
                 assert(cspace::obj_census(&s_b, x) >= 1);
             }
             // caps_consistent: slot view unchanged; the only chan edit cleared `ch`'s binding
             // to `None`, which keeps `binding_notif_wf(ch)` (vacuous antecedent) and leaves
             // `chan_wf`/`end_caps` (the other `cap_consistent` clauses) framed.
-            assert forall|s: SlotId| #![trigger store.slot_view()[s]]
-                store.slot_view().dom().contains(s) && !cspace::is_empty_cap(store.slot_view()[s].cap)
-                implies cspace::cap_consistent(store, store.slot_view()[s].cap) by {
+            assert forall|s: SlotId|
+                #![trigger store.slot_view()[s]]
+                store.slot_view().dom().contains(s) && !cspace::is_empty_cap(
+                    store.slot_view()[s].cap,
+                ) implies cspace::cap_consistent(store, store.slot_view()[s].cap) by {
                 let c = store.slot_view()[s].cap;
                 assert(c == s_b.slot_view()[s].cap);
                 assert(cspace::cap_consistent(&s_b, c));
@@ -2089,19 +2356,39 @@ fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
                         // the trigger context after the `cap_consistent` strengthening widened it;
                         // the lemma isolates a clean context.
                         // `release_binding` touches no slot, so `sv0 == sv1`.
-                        cspace::lemma_chan_wf_frame(cv_b, store.chan_view(), store.slot_view(),
-                            store.slot_view(), ch);
+                        cspace::lemma_chan_wf_frame(
+                            cv_b,
+                            store.chan_view(),
+                            store.slot_view(),
+                            store.slot_view(),
+                            ch,
+                        );
                         assert(cspace::binding_notif_wf(
-                            store.chan_view(), store.notif_view(), store.tcb_view(), ch)) by {
-                            assert forall|e2: int, v2: int| #![trigger cvf[ch].bindings[(e2, v2)]]
-                                (0 <= e2 < 2 && 0 <= v2 < 3 && cvf[ch].bindings[(e2, v2)].notif is Some)
-                                implies {
-                                    &&& store.notif_view().dom().contains(cvf[ch].bindings[(e2, v2)].notif->Some_0)
-                                    &&& cspace::notif_wf(store.notif_view(), store.tcb_view(),
-                                            cvf[ch].bindings[(e2, v2)].notif->Some_0)
-                                } by {
+                            store.chan_view(),
+                            store.notif_view(),
+                            store.tcb_view(),
+                            ch,
+                        )) by {
+                            assert forall|e2: int, v2: int|
+                                #![trigger cvf[ch].bindings[(e2, v2)]]
+                                (0 <= e2 < 2 && 0 <= v2 < 3 && cvf[ch].bindings[(
+                                    e2,
+                                    v2,
+                                )].notif is Some) implies {
+                                &&& store.notif_view().dom().contains(
+                                    cvf[ch].bindings[(e2, v2)].notif->Some_0,
+                                )
+                                &&& cspace::notif_wf(
+                                    store.notif_view(),
+                                    store.tcb_view(),
+                                    cvf[ch].bindings[(e2, v2)].notif->Some_0,
+                                )
+                            } by {
                                 if (e2, v2) != (end as int, ev as int) {
-                                    assert(cvf[ch].bindings[(e2, v2)] == cv_b[ch].bindings[(e2, v2)]);
+                                    assert(cvf[ch].bindings[(e2, v2)] == cv_b[ch].bindings[(
+                                        e2,
+                                        v2,
+                                    )]);
                                 }
                             }
                         }
@@ -2112,7 +2399,7 @@ fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
             assert forall|ch2: ObjId, e2: int|
                 store.chan_view().dom().contains(ch2) && store.chan_view()[ch2].end_caps.len() == 2
                     && 0 <= e2 < 2 implies #[trigger] store.chan_view()[ch2].end_caps[e2]
-                    == cspace::end_cap_count(store.slot_view(), ch2, e2) by {
+                == cspace::end_cap_count(store.slot_view(), ch2, e2) by {
                 assert(store.chan_view()[ch2].end_caps == s_b.chan_view()[ch2].end_caps);
             }
             // The skeleton rides through the bindings-only update.
@@ -2125,23 +2412,31 @@ fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
             assert(old(store).refs_view()[n] > 0);
             assert(store.tcb_view() == old(store).tcb_view());
             assert forall|x: ObjId|
-                old(store).refs_view().dom().contains(x) && old(store).refs_view()[x] == 0
-                implies #[trigger] store.refs_view()[x] == 0 by { assert(x != n); }
-            assert forall|k: ObjId| #[trigger] store.tcb_view()[k] == old(store).tcb_view()[k]
-                || old(store).tcb_view()[k].wait_notif == Some(n) by {}
+                old(store).refs_view().dom().contains(x) && old(store).refs_view()[x]
+                    == 0 implies #[trigger] store.refs_view()[x] == 0 by {
+                assert(x != n);
+            }
+            assert forall|k: ObjId| #[trigger]
+                store.tcb_view()[k] == old(store).tcb_view()[k] || old(
+                    store,
+                ).tcb_view()[k].wait_notif == Some(n) by {}
             assert(store.refs_view().dom() =~= old(store).refs_view().dom());
             assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
             cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, n);
             // "Dead stays dead": the bound case drops only `refs[n]` (positive), keeping the domain.
-            assert(store.refs_view()
-                == old(store).refs_view().insert(n, (old(store).refs_view()[n] - 1) as nat));
+            assert(store.refs_view() == old(store).refs_view().insert(
+                n,
+                (old(store).refs_view()[n] - 1) as nat,
+            ));
             cspace::lemma_refs_death_persist_dec_ref(old(store), store, n);
         }
     } else {
         // No bound notification ⇒ the store is unchanged, so it is trivially dead-tcb-frozen.
         proof {
-            assert forall|k: ObjId| #[trigger] store.tcb_view()[k] == old(store).tcb_view()[k]
-                || old(store).tcb_view()[k].wait_notif == Some(ch) by {}
+            assert forall|k: ObjId| #[trigger]
+                store.tcb_view()[k] == old(store).tcb_view()[k] || old(
+                    store,
+                ).tcb_view()[k].wait_notif == Some(ch) by {}
             assert(store.refs_view().dom() =~= old(store).refs_view().dom());
             assert(store.tcb_view().dom() =~= old(store).tcb_view().dom());
             cspace::lemma_dead_tcb_frozen_signal_shaped(old(store), store, ch);
@@ -2153,8 +2448,8 @@ fn release_binding<S: Store>(store: &mut S, ch: ObjId, end: usize, ev: usize)
     // and the chan edit (if any) is the skeleton-preserving binding clear.
     proof {
         assert(store.tcb_view() == old(store).tcb_view());
-        assert forall|k: ObjId| #[trigger] store.tcb_view()[k].bind_slots
-            == old(store).tcb_view()[k].bind_slots by {}
+        assert forall|k: ObjId| #[trigger]
+            store.tcb_view()[k].bind_slots == old(store).tcb_view()[k].bind_slots by {}
     }
 }
 
@@ -2193,8 +2488,9 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
     ensures
         cspace::cspace_wf(final(store).slot_view()),
         final(store).slot_view().dom() == old(store).slot_view().dom(),
-        cspace::count_nonempty(final(store).slot_view())
-            <= cspace::count_nonempty(old(store).slot_view()),
+        cspace::count_nonempty(final(store).slot_view()) <= cspace::count_nonempty(
+            old(store).slot_view(),
+        ),
         cspace::refcount_sound(final(store)),
         cspace::caps_consistent(final(store)),
         cspace::end_caps_sound(final(store)),
@@ -2214,8 +2510,12 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
         forall|r: int, i: int, c: int|
             (0 <= r < 2 && 0 <= i < old(store).chan_view()[ch].depth && 0 <= c < 4)
                 ==> cspace::is_empty_cap(
-                    final(store).slot_view()[
-                        #[trigger] old(store).chan_view()[ch].ring_cap[(r, i, c)]].cap),
+                final(store).slot_view()[#[trigger] old(store).chan_view()[ch].ring_cap[(
+                    r,
+                    i,
+                    c,
+                )]].cap,
+            ),
         // Dead, queue-detached TCBs are frozen across the teardown:
         // each ring-cap `delete` and binding `release_binding` carries `dead_tcb_frozen`, threaded
         // through the loops by `lemma_dead_tcb_frozen_trans`. `obj_unref`'s Channel arm reads it.
@@ -2231,26 +2531,32 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
         // the recursive closure each `delete` clears carries its own witness. `obj_unref` reads it.
         cspace::emptied_via_dead_home_free(old(store), final(store)),
         // "Dead stays dead" across the ring-cap deletes + binding releases (each decrements only).
-        cspace::refs_death_persist(old(store), final(store)),
-    // SCC measure: height 3 — above `delete` (0), below `obj_unref` (4); its
-    // ring-cap `delete`s are count-flat on the first iteration, so the height drops.
-    decreases cspace::count_nonempty(old(store).slot_view()), 3int
+        cspace::refs_death_persist(
+            old(store),
+            final(store),
+        ),
+// SCC measure: height 3 — above `delete` (0), below `obj_unref` (4); its
+// ring-cap `delete`s are count-flat on the first iteration, so the height drops.
+
+    decreases cspace::count_nonempty(old(store).slot_view()), 3int,
 {
     let ghost rc = old(store).chan_view()[ch].ring_cap;
     let ghost depth0 = old(store).chan_view()[ch].depth;
     let depth = store.chan_depth(ch);
     // The ring-cap slots are live (chan_wf, about the immutable old state).
     assert forall|r: int, i: int, c: int|
-        (0 <= r < 2 && 0 <= i < depth0 && 0 <= c < 4)
-            implies #[trigger] old(store).slot_view().dom().contains(rc[(r, i, c)]) by {}
+        (0 <= r < 2 && 0 <= i < depth0 && 0 <= c < 4) implies #[trigger] old(
+        store,
+    ).slot_view().dom().contains(rc[(r, i, c)]) by {}
     for ring in 0..2usize
         invariant
             depth as nat == depth0,
             cspace::cspace_wf(store.slot_view()),
             store.slot_view().dom() == old(store).slot_view().dom(),
             store.slot_view().dom().finite(),
-            cspace::count_nonempty(store.slot_view())
-                <= cspace::count_nonempty(old(store).slot_view()),
+            cspace::count_nonempty(store.slot_view()) <= cspace::count_nonempty(
+                old(store).slot_view(),
+            ),
             cspace::refcount_sound(store),
             cspace::caps_consistent(store),
             cspace::end_caps_sound(store),
@@ -2275,12 +2581,14 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
             store.chan_view().dom().contains(ch),
             store.chan_view()[ch].ring_cap == rc,
             forall|r: int, i: int, c: int|
-                (0 <= r < 2 && 0 <= i < depth0 && 0 <= c < 4)
-                    ==> #[trigger] old(store).slot_view().dom().contains(rc[(r, i, c)]),
+                (0 <= r < 2 && 0 <= i < depth0 && 0 <= c < 4) ==> #[trigger] old(
+                    store,
+                ).slot_view().dom().contains(rc[(r, i, c)]),
             // Completed rings are fully empty.
             forall|r: int, i: int, c: int|
-                (0 <= r < ring && 0 <= i < depth0 && 0 <= c < 4)
-                    ==> cspace::is_empty_cap(#[trigger] store.slot_view()[rc[(r, i, c)]].cap),
+                (0 <= r < ring && 0 <= i < depth0 && 0 <= c < 4) ==> cspace::is_empty_cap(
+                    #[trigger] store.slot_view()[rc[(r, i, c)]].cap,
+                ),
     {
         for i in 0..depth
             invariant
@@ -2289,8 +2597,9 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                 cspace::cspace_wf(store.slot_view()),
                 store.slot_view().dom() == old(store).slot_view().dom(),
                 store.slot_view().dom().finite(),
-                cspace::count_nonempty(store.slot_view())
-                    <= cspace::count_nonempty(old(store).slot_view()),
+                cspace::count_nonempty(store.slot_view()) <= cspace::count_nonempty(
+                    old(store).slot_view(),
+                ),
                 cspace::refcount_sound(store),
                 cspace::caps_consistent(store),
                 cspace::end_caps_sound(store),
@@ -2312,16 +2621,18 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                 store.chan_view().dom().contains(ch),
                 store.chan_view()[ch].ring_cap == rc,
                 forall|r: int, ii: int, c: int|
-                    (0 <= r < 2 && 0 <= ii < depth0 && 0 <= c < 4)
-                        ==> #[trigger] old(store).slot_view().dom().contains(rc[(r, ii, c)]),
+                    (0 <= r < 2 && 0 <= ii < depth0 && 0 <= c < 4) ==> #[trigger] old(
+                        store,
+                    ).slot_view().dom().contains(rc[(r, ii, c)]),
                 forall|r: int, ii: int, c: int|
-                    (0 <= r < ring && 0 <= ii < depth0 && 0 <= c < 4)
-                        ==> cspace::is_empty_cap(#[trigger] store.slot_view()[rc[(r, ii, c)]].cap),
+                    (0 <= r < ring && 0 <= ii < depth0 && 0 <= c < 4) ==> cspace::is_empty_cap(
+                        #[trigger] store.slot_view()[rc[(r, ii, c)]].cap,
+                    ),
                 // Completed rows in the current ring are empty.
                 forall|ii: int, c: int|
-                    (0 <= ii < i && 0 <= c < 4)
-                        ==> cspace::is_empty_cap(
-                            #[trigger] store.slot_view()[rc[(ring as int, ii, c)]].cap),
+                    (0 <= ii < i && 0 <= c < 4) ==> cspace::is_empty_cap(
+                        #[trigger] store.slot_view()[rc[(ring as int, ii, c)]].cap,
+                    ),
         {
             for c in 0..MSG_CAPS
                 invariant
@@ -2331,8 +2642,9 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                     cspace::cspace_wf(store.slot_view()),
                     store.slot_view().dom() == old(store).slot_view().dom(),
                     store.slot_view().dom().finite(),
-                    cspace::count_nonempty(store.slot_view())
-                        <= cspace::count_nonempty(old(store).slot_view()),
+                    cspace::count_nonempty(store.slot_view()) <= cspace::count_nonempty(
+                        old(store).slot_view(),
+                    ),
                     cspace::refcount_sound(store),
                     cspace::caps_consistent(store),
                     cspace::end_caps_sound(store),
@@ -2354,20 +2666,22 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                     store.chan_view().dom().contains(ch),
                     store.chan_view()[ch].ring_cap == rc,
                     forall|r: int, ii: int, cc: int|
-                        (0 <= r < 2 && 0 <= ii < depth0 && 0 <= cc < 4)
-                            ==> #[trigger] old(store).slot_view().dom().contains(rc[(r, ii, cc)]),
+                        (0 <= r < 2 && 0 <= ii < depth0 && 0 <= cc < 4) ==> #[trigger] old(
+                            store,
+                        ).slot_view().dom().contains(rc[(r, ii, cc)]),
                     forall|r: int, ii: int, cc: int|
-                        (0 <= r < ring && 0 <= ii < depth0 && 0 <= cc < 4)
-                            ==> cspace::is_empty_cap(#[trigger] store.slot_view()[rc[(r, ii, cc)]].cap),
+                        (0 <= r < ring && 0 <= ii < depth0 && 0 <= cc < 4) ==> cspace::is_empty_cap(
+                            #[trigger] store.slot_view()[rc[(r, ii, cc)]].cap,
+                        ),
                     forall|ii: int, cc: int|
-                        (0 <= ii < i && 0 <= cc < 4)
-                            ==> cspace::is_empty_cap(
-                                #[trigger] store.slot_view()[rc[(ring as int, ii, cc)]].cap),
+                        (0 <= ii < i && 0 <= cc < 4) ==> cspace::is_empty_cap(
+                            #[trigger] store.slot_view()[rc[(ring as int, ii, cc)]].cap,
+                        ),
                     // Completed positions in the current row are empty.
                     forall|cc: int|
-                        (0 <= cc < c)
-                            ==> cspace::is_empty_cap(
-                                #[trigger] store.slot_view()[rc[(ring as int, i as int, cc)]].cap),
+                        (0 <= cc < c) ==> cspace::is_empty_cap(
+                            #[trigger] store.slot_view()[rc[(ring as int, i as int, cc)]].cap,
+                        ),
             {
                 let cs = store.chan_ring_cap(ch, ring, i, c);
                 assert(cs == rc[(ring as int, i as int, c as int)]);
@@ -2379,9 +2693,15 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                     cspace::delete(store, cs);
                     proof {
                         cspace::lemma_only_empties_trans(
-                            old(store).slot_view(), sv_before, store.slot_view());
+                            old(store).slot_view(),
+                            sv_before,
+                            store.slot_view(),
+                        );
                         cspace::lemma_chan_struct_frame_trans(
-                            old(store).chan_view(), cv_before, store.chan_view());
+                            old(store).chan_view(),
+                            cv_before,
+                            store.chan_view(),
+                        );
                         cspace::lemma_dead_tcb_frozen_trans(old(store), &st_before, store);
                         // `cs` is a ring cap of `ch` (homed), so `delete`'s target-aware frame
                         // is already target-free — composing the provenance frame across the loop.
@@ -2390,8 +2710,11 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                             // value, and the loop pins `ch`'s ring_cap map to `rc`.
                             assert(st_before.chan_view().dom().contains(ch));
                             assert(st_before.chan_view()[ch].ring_cap == rc);
-                            assert(st_before.chan_view()[ch].ring_cap[(ring as int, i as int,
-                                c as int)] == cs);
+                            assert(st_before.chan_view()[ch].ring_cap[(
+                                ring as int,
+                                i as int,
+                                c as int,
+                            )] == cs);
                         }
                         cspace::lemma_unhomed_frozen_free_from_homed(&st_before, store, cs);
                         cspace::lemma_unhomed_frozen_free_trans(old(store), &st_before, store);
@@ -2402,38 +2725,47 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                         // witness `ch`. Lift `delete`'s target-aware frame to the free frame, compose.
                         assert(cspace::homes_in_chan(&st_before, ch, cs)) by {
                             assert(st_before.chan_view().dom().contains(ch));
-                            assert(st_before.chan_view()[ch].ring_cap[(ring as int, i as int,
-                                c as int)] == cs);
+                            assert(st_before.chan_view()[ch].ring_cap[(
+                                ring as int,
+                                i as int,
+                                c as int,
+                            )] == cs);
                         }
                         assert(cspace::homes(&st_before, ch, cs));
                         assert(cspace::dead_obj(&st_before, ch));  // loop invariant
-                        assert(cspace::dead_obj(store, ch));        // `delete`'s `refs_death_persist`
+                        assert(cspace::dead_obj(store, ch));  // `delete`'s `refs_death_persist`
                         cspace::lemma_emptied_via_dead_home_free_from_homed(
-                            &st_before, store, cs, ch);
-                        cspace::lemma_emptied_via_dead_home_free_trans(old(store), &st_before, store);
+                            &st_before,
+                            store,
+                            cs,
+                            ch,
+                        );
+                        cspace::lemma_emptied_via_dead_home_free_trans(
+                            old(store),
+                            &st_before,
+                            store,
+                        );
                         cspace::lemma_refs_death_persist_trans(old(store), &st_before, store);
                     }
                 }
                 // Re-establish the empty prefix: prior empties stay empty (`only_empties` from
                 // this step), the just-handled position `cs` is now empty (guard or `delete`).
+
                 assert forall|r: int, ii: int, cc: int|
-                    (0 <= r < ring && 0 <= ii < depth0 && 0 <= cc < 4)
-                        implies cspace::is_empty_cap(#[trigger] store.slot_view()[rc[(r, ii, cc)]].cap)
-                    by {}
+                    (0 <= r < ring && 0 <= ii < depth0 && 0 <= cc < 4) implies cspace::is_empty_cap(
+                    #[trigger] store.slot_view()[rc[(r, ii, cc)]].cap,
+                ) by {}
                 assert forall|ii: int, cc: int|
-                    (0 <= ii < i && 0 <= cc < 4)
-                        implies cspace::is_empty_cap(
-                            #[trigger] store.slot_view()[rc[(ring as int, ii, cc)]].cap)
-                    by {}
-                assert forall|cc: int|
-                    (0 <= cc < c + 1)
-                        implies cspace::is_empty_cap(
-                            #[trigger] store.slot_view()[rc[(ring as int, i as int, cc)]].cap)
-                    by {
-                        if cc == c as int {
-                            assert(rc[(ring as int, i as int, cc)] == cs);
-                        }
+                    (0 <= ii < i && 0 <= cc < 4) implies cspace::is_empty_cap(
+                    #[trigger] store.slot_view()[rc[(ring as int, ii, cc)]].cap,
+                ) by {}
+                assert forall|cc: int| (0 <= cc < c + 1) implies cspace::is_empty_cap(
+                    #[trigger] store.slot_view()[rc[(ring as int, i as int, cc)]].cap,
+                ) by {
+                    if cc == c as int {
+                        assert(rc[(ring as int, i as int, cc)] == cs);
                     }
+                }
             }
         }
     }
@@ -2445,8 +2777,9 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
             cspace::cspace_wf(store.slot_view()),
             store.slot_view().dom() == old(store).slot_view().dom(),
             store.slot_view().dom().finite(),
-            cspace::count_nonempty(store.slot_view())
-                <= cspace::count_nonempty(old(store).slot_view()),
+            cspace::count_nonempty(store.slot_view()) <= cspace::count_nonempty(
+                old(store).slot_view(),
+            ),
             cspace::refcount_sound(store),
             cspace::caps_consistent(store),
             cspace::end_caps_sound(store),
@@ -2467,8 +2800,9 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
             cspace::ready_complete(store.ready_view(), store.tcb_view()),
             store.chan_view().dom().contains(ch),
             forall|r: int, i: int, c: int|
-                (0 <= r < 2 && 0 <= i < depth0 && 0 <= c < 4)
-                    ==> cspace::is_empty_cap(#[trigger] store.slot_view()[rc[(r, i, c)]].cap),
+                (0 <= r < 2 && 0 <= i < depth0 && 0 <= c < 4) ==> cspace::is_empty_cap(
+                    #[trigger] store.slot_view()[rc[(r, i, c)]].cap,
+                ),
     {
         for ev in 0..3usize
             invariant
@@ -2477,8 +2811,9 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                 cspace::cspace_wf(store.slot_view()),
                 store.slot_view().dom() == old(store).slot_view().dom(),
                 store.slot_view().dom().finite(),
-                cspace::count_nonempty(store.slot_view())
-                    <= cspace::count_nonempty(old(store).slot_view()),
+                cspace::count_nonempty(store.slot_view()) <= cspace::count_nonempty(
+                    old(store).slot_view(),
+                ),
                 cspace::refcount_sound(store),
                 cspace::caps_consistent(store),
                 cspace::end_caps_sound(store),
@@ -2497,8 +2832,9 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                 cspace::ready_complete(store.ready_view(), store.tcb_view()),
                 store.chan_view().dom().contains(ch),
                 forall|r: int, i: int, c: int|
-                    (0 <= r < 2 && 0 <= i < depth0 && 0 <= c < 4)
-                        ==> cspace::is_empty_cap(#[trigger] store.slot_view()[rc[(r, i, c)]].cap),
+                    (0 <= r < 2 && 0 <= i < depth0 && 0 <= c < 4) ==> cspace::is_empty_cap(
+                        #[trigger] store.slot_view()[rc[(r, i, c)]].cap,
+                    ),
         {
             let ghost cv_before = store.chan_view();
             let ghost st_before = *store;
@@ -2507,7 +2843,10 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
                 // `release_binding` frames `ready_view` + `tcb_view`; carry the pair.
                 cspace::lemma_ready_inv_frame(&st_before, store);
                 cspace::lemma_chan_struct_frame_trans(
-                    old(store).chan_view(), cv_before, store.chan_view());
+                    old(store).chan_view(),
+                    cv_before,
+                    store.chan_view(),
+                );
                 cspace::lemma_dead_tcb_frozen_trans(old(store), &st_before, store);
                 // `release_binding` frames `slot_view` (only bindings/refs move), so no slot
                 // is emptied — the free + home frames compose across the binding-release loop.
@@ -2524,10 +2863,10 @@ pub fn destroy_channel<S: Store>(store: &mut S, ch: ObjId)
     }
     // The ring-cap-empty ensures (over `old.ring_cap`) is exactly the carried invariant.
     assert forall|r: int, i: int, c: int|
-        (0 <= r < 2 && 0 <= i < old(store).chan_view()[ch].depth && 0 <= c < 4)
-            implies cspace::is_empty_cap(
-                store.slot_view()[#[trigger] old(store).chan_view()[ch].ring_cap[(r, i, c)]].cap)
-        by {}
+        (0 <= r < 2 && 0 <= i < old(store).chan_view()[ch].depth && 0 <= c
+            < 4) implies cspace::is_empty_cap(
+        store.slot_view()[#[trigger] old(store).chan_view()[ch].ring_cap[(r, i, c)]].cap,
+    ) by {}
 }
 
 } // verus!
