@@ -1,0 +1,13 @@
+# Pins the nightly used to build the kernel and the user/* binaries (build-std)
+# for the eunomia target. It matches the `vendor/rust` submodule commit exactly:
+# nightly-2026-06-26 == rustc commit bd08c9e71874a81670fe3938dbf85148e42c2b96,
+# which is the source build-std compiles (redirected there via
+# __CARGO_TESTS_ONLY_SRC_ROOT in kernel/build.rs + kernel/.cargo/config.toml).
+#
+# Scoped to kernel/ on purpose: a root-level pin would drag the verus gate (Rust
+# 1.95.0) and the host test suite off their own toolchains. The user/* sub-builds
+# are spawned from kernel/build.rs with a cwd outside kernel/, so they inherit the
+# pin via RUSTUP_TOOLCHAIN rather than by discovering this file.
+[toolchain]
+channel = "nightly-2026-06-26"
+components = ["rust-src"]
