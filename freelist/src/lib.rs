@@ -675,7 +675,7 @@ impl<const N: usize> FreeList<N> {
     {
         // Sortedness, junction by junction: i-1→i and i+1→i+2 close over old's
         // adjacent gaps; i→i+1 is the n>0 gap between the two new pieces.
-        assert forall|k: int| #![trigger new.free@[k]] 0 <= k < new.nfree - 1 implies
+        assert forall|k: int| #![trigger new.free@[k].0, new.free@[k].1] 0 <= k < new.nfree - 1 implies
             (new.free@[k].0 as int + new.free@[k].1 as int) < new.free@[k + 1].0 as int by {
             if k + 1 < i {
                 assert((old.free@[k].0 as int + old.free@[k].1 as int) < old.free@[k + 1].0 as int);
@@ -816,7 +816,7 @@ impl<const N: usize> FreeList<N> {
             forall|p: int| off <= p < off + n ==> new.covers(p),
             forall|p: int| !(off <= p < off + n) ==> new.covers(p) == old.covers(p),
     {
-        assert forall|k: int| #![trigger new.free@[k]] 0 <= k < new.nfree - 1 implies
+        assert forall|k: int| #![trigger new.free@[k].0, new.free@[k].1] 0 <= k < new.nfree - 1 implies
             (new.free@[k].0 as int + new.free@[k].1 as int) < new.free@[k + 1].0 as int by {
             if k + 1 < i {
                 assert((old.free@[k].0 as int + old.free@[k].1 as int) < old.free@[k + 1].0 as int);
@@ -926,7 +926,7 @@ impl<const N: usize> FreeList<N> {
             forall|p: int| !(off <= p < off + n) ==> new.covers(p) == old.covers(p),
     {
         assert(off <= eoff + elen && eoff <= off);
-        assert forall|k: int| #![trigger new.free@[k]] 0 <= k < new.nfree - 1 implies
+        assert forall|k: int| #![trigger new.free@[k].0, new.free@[k].1] 0 <= k < new.nfree - 1 implies
             (new.free@[k].0 as int + new.free@[k].1 as int) < new.free@[k + 1].0 as int by {
             if k + 1 < g || k > g {
                 assert((old.free@[k].0 as int + old.free@[k].1 as int) < old.free@[k + 1].0 as int);
@@ -1030,7 +1030,7 @@ impl<const N: usize> FreeList<N> {
             forall|p: int| off <= p < off + n ==> new.covers(p),
             forall|p: int| !(off <= p < off + n) ==> new.covers(p) == old.covers(p),
     {
-        assert forall|k: int| #![trigger new.free@[k]] 0 <= k < new.nfree - 1 implies
+        assert forall|k: int| #![trigger new.free@[k].0, new.free@[k].1] 0 <= k < new.nfree - 1 implies
             (new.free@[k].0 as int + new.free@[k].1 as int) < new.free@[k + 1].0 as int by {
             if k + 1 < i - 1 {
                 assert((old.free@[k].0 as int + old.free@[k].1 as int) < old.free@[k + 1].0 as int);
