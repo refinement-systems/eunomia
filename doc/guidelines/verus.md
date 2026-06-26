@@ -33,21 +33,7 @@ Verus has no crates.io binary: CI fetches the release zip (it bundles
 — bump binary + `vstd` + toolchain together, re-run the whole suite, never fold
 into a feature change.
 
-## The vendored prover and authoring state machines
-
-`vendor/verus` is the Verus project (fork `refinement-systems/verus`) vendored as
-a git submodule, checked out at the exact pin above — HEAD is the upstream release
-tag `release/0.2026.06.07.cd03505` and `source/vstd` is `0.0.0-2026-05-31-0205`.
-It is the in-tree, version-matched **source-of-truth and reading copy**: read the
-ghost library under `vendor/verus/source/vstd` and the macro idioms under
-`vendor/verus/examples/state_machines/`. It is **not** a workspace member and is
-**not** built by `cargo build`: the prover (`rust_verify`/`cargo-verus`/`z3`)
-builds only through Verus's own `vargo` system, and the CI verify gate uses the
-downloaded prebuilt binary — byte-identical to building the submodule while the
-fork tracks upstream. The submodule is the staging ground for the day the fork
-must diverge to patch a prover gap (e.g. atomics weaker than SeqCst, or minting a
-`PointsToRaw` for a pre-existing `static [u8; N]`); only then does building from
-source via `vargo`, and moving the ghost crates to path deps, become mandatory.
+## Authoring state machines
 
 The ghost libraries are all on crates.io at the pin, so the submodule is **not**
 required to author proofs. A crate that writes a `state_machine!{}` or
@@ -2464,7 +2450,6 @@ These are not "hard" proofs to schedule; they are *currently inexpressible* fait
 | **A speculative seqlock writer critical section with no production writer** | Same SeqCst gap, *plus* no production writer exists to certify (every writer is test/harness-only). It proposes verifying code that does not ship; even built, it would not subsume the interleaving harness it claims to retire. | Keep the interleaving harnesses; revisit only if a real production writer is added — and even then the SeqCst gap blocks harness removal. |
 | **Minting a tracked points-to-raw permission for a pre-existing `static [u8; N]` arena** | No ghost-library constructor mints a root raw permission for a pre-existing static (the constructors are empty / heap-allocate / cell-to-raw; exposing provenance yields only a provenance token). Fabricating one needs a hand-written trusted axiom — a *new* seam invisible to the UB checker, net-worse than the existing checker+proptest guard — and a global-allocator signature cannot carry a tracked permission, so it could never reach the client. | Keep the arena in the UB-checker + proptest tier; the disjointness / no-double-free facts are already proven by the verified free-list dependency. Add a `_has_teeth` negative control to the disjointness proptest if hardening is wanted. |
 | **Verus-side thread spawning in a bare-metal `no_std` runtime** | The ghost-library thread API is std-only and unusable in `no_std`. | No thread-spawning proofs there; concurrency interleaving stays in the interleaving checker. |
-| **(Build-graph prerequisite, not a memory-model gap)** — the state-machine macro crate is not published to a registry; it ships only inside the prover install. | A crate authoring a state machine must add a CI-resolvable path/vendored dependency into the install dir. | Solve this build-graph problem *before* writing any proof, and treat it as the highest-risk part of any state-machine task. |
 
 ### 15.6 How this tier divides labor with the design-model tier
 
