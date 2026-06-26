@@ -1,0 +1,44 @@
+[package]
+name = "eunomia-sys"
+version.workspace = true
+edition.workspace = true
+
+# eunomia-sys is the PAL↔kernel seam crate for the Rust std port (rev2§3.7,
+# rev2§6.1(d)): the raw `svc #0` syscall wrappers (trusted inline-asm shell) over a
+# Verus-verified syscall-argument *encoder* (the inverse of `kcore::sysabi::decode`),
+# plus a thin named-grant resolver over `loader::startup`. no_std for the userspace
+# cross-build; the `verus!{}` macro erases to plain Rust in an ordinary build.
+[dependencies]
+# The startup-block decoder + the named-grant table types the grant resolver wraps
+# (rev2§5.1). `default-features = false` ⇒ loader's no_std/no-alloc shipping config
+# (the one its own `cargo verus verify -p loader --no-default-features` gate uses), so
+# this edge adds no std to the cross-build. Re-verified transitively on a cold run.
+loader = { path = "../loader", default-features = false }
+
+# vstd is the *Verus* dependency (see doc/guidelines/verus.md): the `verus!{}` macro +
+# ghost vocabulary for the syscall-encoder proof (`encode` total over every `Call`,
+# opcode/arg placement + the inverse-leak refusal of out-of-range fields, rev2§3.7).
+# no_std/no-alloc; in an ordinary build it erases to nothing load-bearing. Pinned
+# (=version) in lockstep with the other gated crates: an upgrade is a deliberate PR.
+vstd = { version = "=0.0.0-2026-05-31-0205", default-features = false }
+
+[dev-dependencies]
+# The host round-trip oracle pins the local ABI twin against the *real* kernel decoder
+# (`decode(encode(call)) == Ok(call)`). A dev-dep only — it compiles solely for the
+# test target, which `cargo verus verify` does not build, so kcore's obligations stay
+# out of this crate's verify session (the userspace/kernel decoupling `ipc::sys` keeps).
+kcore = { path = "../kcore" }
+proptest = "1"
+
+# `cargo verus verify -p eunomia-sys` targets this crate (the same flag kcore/loader
+# use). NOTE: this metadata flag alone does not enroll the crate in CI — the verus job
+# enumerates each crate by an explicit `-p` line (.github/workflows/ci.yml).
+[package.metadata.verus]
+verify = true
+
+# cfg(verus_keep_ghost)/cfg(verus_only) are injected by Verus during `cargo verus
+# verify`. target_os="eunomia" is the custom aarch64-unknown-eunomia target that gates
+# the `svc` asm (alongside bare-metal "none"); unknown to a host/none toolchain. Teach
+# plain cargo all three are expected (same handling as loader/ipc/urt).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(verus_keep_ghost)", "cfg(verus_only)", 'cfg(target_os, values("eunomia"))'] }
