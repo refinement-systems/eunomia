@@ -42,6 +42,13 @@ arbitrary = { version = "1", features = ["derive"], optional = true }
 # upgrade is a deliberate PR.
 vstd = { version = "=0.0.0-2026-05-31-0205", default-features = false, features = ["alloc"] }
 
+# The shared verified read-direction little-endian byte machinery (the `u*_le`
+# specs, their `lemma_u*_le_bytes` split identities, and the `read_u*_le` exec
+# readers) the prolly.rs node decoder cites by full path. no_std + no-alloc, so it
+# rides into the userspace cross-build with cas unchanged; its proof helpers erase
+# in a plain build. A `verify = true` dep is re-verified transitively on a cold run.
+le-bytes = { path = "../le-bytes" }
+
 # `cargo verus verify -p cas --no-default-features` targets this crate. cas is
 # std-on-host / Vec/BTreeMap-heavy, but the verified chokepoint fns (superblock
 # byte parsing in disk.rs, the TLV codec in prolly.rs) are feature-agnostic, so

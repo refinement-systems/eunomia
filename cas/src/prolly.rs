@@ -645,24 +645,9 @@ pub enum TlvErr {
 
 // ── Spec: the canonical byte image of an entry ───────────────────────────
 
-pub open spec fn u16_le(x: u16) -> Seq<u8> {
-    seq![x as u8, (x >> 8) as u8]
-}
-
-pub open spec fn u32_le(x: u32) -> Seq<u8> {
-    seq![x as u8, (x >> 8) as u8, (x >> 16) as u8, (x >> 24) as u8]
-}
-
-pub open spec fn u64_le(x: u64) -> Seq<u8> {
-    seq![
-        x as u8, (x >> 8) as u8, (x >> 16) as u8, (x >> 24) as u8,
-        (x >> 32) as u8, (x >> 40) as u8, (x >> 48) as u8, (x >> 56) as u8,
-    ]
-}
-
 pub open spec fn content_bytes(c: RawContent) -> Seq<u8> {
     match c {
-        RawContent::Inline(b) => seq![0u8] + u16_le(b@.len() as u16) + b@,
+        RawContent::Inline(b) => seq![0u8] + le_bytes::u16_le(b@.len() as u16) + b@,
         RawContent::ChunkList(h) => seq![1u8] + h@,
         RawContent::DirRoot(h) => seq![2u8] + h@,
     }
@@ -673,14 +658,14 @@ pub open spec fn content_bytes(c: RawContent) -> Seq<u8> {
 /// exactly the one 7-byte flags record.
 pub open spec fn opt_bytes(flags: u32) -> Seq<u8> {
     if flags == 0 {
-        u16_le(0)
+        le_bytes::u16_le(0)
     } else {
-        u16_le(7) + seq![1u8] + u16_le(4) + u32_le(flags)
+        le_bytes::u16_le(7) + seq![1u8] + le_bytes::u16_le(4) + le_bytes::u32_le(flags)
     }
 }
 
 pub open spec fn canonical_bytes(e: RawEntry) -> Seq<u8> {
-    seq![e.name@.len() as u8] + e.name@ + seq![e.kind] + u64_le(e.size) + u64_le(e.mtime)
+    seq![e.name@.len() as u8] + e.name@ + seq![e.kind] + le_bytes::u64_le(e.size) + le_bytes::u64_le(e.mtime)
         + content_bytes(e.content) + opt_bytes(e.flags)
 }
 
@@ -704,129 +689,7 @@ pub open spec fn entries_bytes(es: Seq<RawEntry>) -> Seq<u8>
 /// the node-grain of rev2§4.9 ("exactly one encoding per logical leaf node") and
 /// the rev2§6 decode-then-re-encode oracle.
 pub open spec fn canonical_leaf_bytes(es: Seq<RawEntry>) -> Seq<u8> {
-    seq![0u8] + u32_le(es.len() as u32) + entries_bytes(es)
-}
-
-// ── Little-endian byte-split identities (cited by the exec readers below) ────
-//
-// The readers build `v = b0 | (b1<<8) | …` (bit-construction form) but the
-// `u*_le` spec extracts `v as u8`, `(v >> 8) as u8`, … (shift form); the two
-// agree only by `bit_vector`. Each lemma takes the constructed `v` plus its
-// source bytes (the construction fed in via `requires`) and states the per-byte
-// `(v >> 8k) as u8 == bk` extraction. Following the `doc/guidelines/verus.md` §6
-// recipe — `by (bit_vector)` on the signature, the facts as `ensures`, empty
-// body — keeps the readers free of inline `bit_vector` queries.
-
-/// `v == b0 | b1<<8` splits back into its little-endian bytes `b0`, `b1`.
-proof fn lemma_u16_le_bytes(v: u16, b0: u8, b1: u8) by (bit_vector)
-    requires
-        v == (b0 as u16) | ((b1 as u16) << 8),
-    ensures
-        v as u8 == b0,
-        (v >> 8) as u8 == b1,
-{
-}
-
-/// `v == b0 | b1<<8 | b2<<16 | b3<<24` splits back into its bytes `b0..b3`.
-proof fn lemma_u32_le_bytes(v: u32, b0: u8, b1: u8, b2: u8, b3: u8) by (bit_vector)
-    requires
-        v == (b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16) | ((b3 as u32) << 24),
-    ensures
-        v as u8 == b0,
-        (v >> 8) as u8 == b1,
-        (v >> 16) as u8 == b2,
-        (v >> 24) as u8 == b3,
-{
-}
-
-/// `v == b0 | b1<<8 | … | b7<<56` splits back into its bytes `b0..b7`.
-proof fn lemma_u64_le_bytes(
-    v: u64,
-    b0: u8,
-    b1: u8,
-    b2: u8,
-    b3: u8,
-    b4: u8,
-    b5: u8,
-    b6: u8,
-    b7: u8,
-) by (bit_vector)
-    requires
-        v == (b0 as u64) | ((b1 as u64) << 8) | ((b2 as u64) << 16) | ((b3 as u64) << 24) | ((b4
-            as u64) << 32) | ((b5 as u64) << 40) | ((b6 as u64) << 48) | ((b7 as u64) << 56),
-    ensures
-        v as u8 == b0,
-        (v >> 8) as u8 == b1,
-        (v >> 16) as u8 == b2,
-        (v >> 24) as u8 == b3,
-        (v >> 32) as u8 == b4,
-        (v >> 40) as u8 == b5,
-        (v >> 48) as u8 == b6,
-        (v >> 56) as u8 == b7,
-{
-}
-
-// ── Exec byte readers (explicit index + shift, not `from_le_bytes`/`try_into`),
-//    each citing the matching byte-split identity above ────────────────────────
-
-fn read_u16_le(buf: &[u8], off: usize) -> (v: u16)
-    requires
-        off + 2 <= buf@.len(),
-    ensures
-        buf@.subrange(off as int, off as int + 2) == u16_le(v),
-{
-    broadcast use vstd::slice::group_slice_axioms;
-    let b0 = buf[off];
-    let b1 = buf[off + 1];
-    let v: u16 = (b0 as u16) | ((b1 as u16) << 8);
-    proof {
-        lemma_u16_le_bytes(v, b0, b1);
-    }
-    assert(buf@.subrange(off as int, off as int + 2) =~= u16_le(v));
-    v
-}
-
-fn read_u32_le(buf: &[u8], off: usize) -> (v: u32)
-    requires
-        off + 4 <= buf@.len(),
-    ensures
-        buf@.subrange(off as int, off as int + 4) == u32_le(v),
-{
-    broadcast use vstd::slice::group_slice_axioms;
-    let b0 = buf[off];
-    let b1 = buf[off + 1];
-    let b2 = buf[off + 2];
-    let b3 = buf[off + 3];
-    let v: u32 = (b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16) | ((b3 as u32) << 24);
-    proof {
-        lemma_u32_le_bytes(v, b0, b1, b2, b3);
-    }
-    assert(buf@.subrange(off as int, off as int + 4) =~= u32_le(v));
-    v
-}
-
-fn read_u64_le(buf: &[u8], off: usize) -> (v: u64)
-    requires
-        off + 8 <= buf@.len(),
-    ensures
-        buf@.subrange(off as int, off as int + 8) == u64_le(v),
-{
-    broadcast use vstd::slice::group_slice_axioms;
-    let b0 = buf[off];
-    let b1 = buf[off + 1];
-    let b2 = buf[off + 2];
-    let b3 = buf[off + 3];
-    let b4 = buf[off + 4];
-    let b5 = buf[off + 5];
-    let b6 = buf[off + 6];
-    let b7 = buf[off + 7];
-    let v: u64 = (b0 as u64) | ((b1 as u64) << 8) | ((b2 as u64) << 16) | ((b3 as u64) << 24)
-        | ((b4 as u64) << 32) | ((b5 as u64) << 40) | ((b6 as u64) << 48) | ((b7 as u64) << 56);
-    proof {
-        lemma_u64_le_bytes(v, b0, b1, b2, b3, b4, b5, b6, b7);
-    }
-    assert(buf@.subrange(off as int, off as int + 8) =~= u64_le(v));
-    v
+    seq![0u8] + le_bytes::u32_le(es.len() as u32) + entries_bytes(es)
 }
 
 fn read_arr32(buf: &[u8], off: usize) -> (a: [u8; 32])
@@ -922,27 +785,27 @@ fn push_arr32(out: &mut Vec<u8>, h: &[u8; 32])
 
 fn push_u16_le(out: &mut Vec<u8>, x: u16)
     ensures
-        final(out)@ == old(out)@ + u16_le(x),
+        final(out)@ == old(out)@ + le_bytes::u16_le(x),
 {
     out.push(x as u8);
     out.push((x >> 8) as u8);
-    assert(out@ =~= old(out)@ + u16_le(x));
+    assert(out@ =~= old(out)@ + le_bytes::u16_le(x));
 }
 
 fn push_u32_le(out: &mut Vec<u8>, x: u32)
     ensures
-        final(out)@ == old(out)@ + u32_le(x),
+        final(out)@ == old(out)@ + le_bytes::u32_le(x),
 {
     out.push(x as u8);
     out.push((x >> 8) as u8);
     out.push((x >> 16) as u8);
     out.push((x >> 24) as u8);
-    assert(out@ =~= old(out)@ + u32_le(x));
+    assert(out@ =~= old(out)@ + le_bytes::u32_le(x));
 }
 
 fn push_u64_le(out: &mut Vec<u8>, x: u64)
     ensures
-        final(out)@ == old(out)@ + u64_le(x),
+        final(out)@ == old(out)@ + le_bytes::u64_le(x),
 {
     out.push(x as u8);
     out.push((x >> 8) as u8);
@@ -952,7 +815,7 @@ fn push_u64_le(out: &mut Vec<u8>, x: u64)
     out.push((x >> 40) as u8);
     out.push((x >> 48) as u8);
     out.push((x >> 56) as u8);
-    assert(out@ =~= old(out)@ + u64_le(x));
+    assert(out@ =~= old(out)@ + le_bytes::u64_le(x));
 }
 
 // Encode the content section (tag byte + payload). Split out of `encode_raw` so
@@ -1042,7 +905,7 @@ fn decode_content(buf: &[u8], p_ctag: usize) -> (r: Result<(RawContent, usize), 
         if !fits(p_content, 2, len) {
             return Err(TlvErr::Truncated);
         }
-        let ilen_u16 = read_u16_le(buf, p_content);
+        let ilen_u16 = le_bytes::read_u16_le(buf, p_content);
         let ilen = ilen_u16 as usize;
         let p_inline = p_content + 2;
         if !fits(p_inline, ilen, len) {
@@ -1052,7 +915,7 @@ fn decode_content(buf: &[u8], p_ctag: usize) -> (r: Result<(RawContent, usize), 
         let end = p_inline + ilen;
         let content = RawContent::Inline(ib);
         proof {
-            // [0] + u16_le(ilen) + inline-bytes == buf[p_ctag, end]
+            // [0] + le_bytes::u16_le(ilen) + inline-bytes == buf[p_ctag, end]
             lemma_cat(buf@, gp_content, gp_content + 1, gp_content + 3);
             lemma_cat(buf@, gp_content, gp_content + 3, end as int);
         }
@@ -1130,12 +993,12 @@ pub fn decode_raw(buf: &[u8], start: usize) -> (r: Result<(RawEntry, usize), Tlv
     if !fits(p_size, 8, len) {
         return Err(TlvErr::Truncated);
     }
-    let size = read_u64_le(buf, p_size);
+    let size = le_bytes::read_u64_le(buf, p_size);
     let p_mtime = p_size + 8;
     if !fits(p_mtime, 8, len) {
         return Err(TlvErr::Truncated);
     }
-    let mtime = read_u64_le(buf, p_mtime);
+    let mtime = le_bytes::read_u64_le(buf, p_mtime);
     let p_ctag = p_mtime + 8;
 
     // content tag (u8) + content
@@ -1153,7 +1016,7 @@ pub fn decode_raw(buf: &[u8], start: usize) -> (r: Result<(RawEntry, usize), Tlv
     if !fits(p_optlen, 2, len) {
         return Err(TlvErr::Truncated);
     }
-    let opt_len_u16 = read_u16_le(buf, p_optlen);
+    let opt_len_u16 = le_bytes::read_u16_le(buf, p_optlen);
     let opt_len = opt_len_u16 as usize;
     let opt_start = p_optlen + 2;
     if opt_len > MAX_OPT_BYTES {
@@ -1165,7 +1028,7 @@ pub fn decode_raw(buf: &[u8], start: usize) -> (r: Result<(RawEntry, usize), Tlv
     let opt_end = opt_start + opt_len;
     let ghost g_opt_start = opt_start as int;
     // buf[p_optlen, opt_start] is the u16 length prefix of opt_bytes.
-    assert(buf@.subrange(gp_optlen, g_opt_start) == u16_le(opt_len_u16));
+    assert(buf@.subrange(gp_optlen, g_opt_start) == le_bytes::u16_le(opt_len_u16));
 
     let mut flags: u32 = 0;
     let mut last_tag: i16 = -1;
@@ -1180,7 +1043,7 @@ pub fn decode_raw(buf: &[u8], start: usize) -> (r: Result<(RawEntry, usize), Tlv
             last_tag == -1 || last_tag == 1,
             (last_tag == -1) ==> (flags == 0 && p as int == g_opt_start),
             (last_tag == 1) ==> (flags != 0 && p as int == g_opt_start + 7
-                && buf@.subrange(g_opt_start, p as int) == seq![1u8] + u16_le(4) + u32_le(flags)),
+                && buf@.subrange(g_opt_start, p as int) == seq![1u8] + le_bytes::u16_le(4) + le_bytes::u32_le(flags)),
         decreases opt_end - p,
     {
         let ghost gp = p as int;
@@ -1193,7 +1056,7 @@ pub fn decode_raw(buf: &[u8], start: usize) -> (r: Result<(RawEntry, usize), Tlv
         if !fits(pt, 2, opt_end) {
             return Err(TlvErr::Truncated);
         }
-        let vlen_u16 = read_u16_le(buf, pt);
+        let vlen_u16 = le_bytes::read_u16_le(buf, pt);
         let vlen = vlen_u16 as usize;
         let pv = pt + 2;
         if !fits(pv, vlen, opt_end) {
@@ -1205,7 +1068,7 @@ pub fn decode_raw(buf: &[u8], start: usize) -> (r: Result<(RawEntry, usize), Tlv
             if vlen != 4 {
                 return Err(TlvErr::BadEntry("bad flags length"));
             }
-            let f = read_u32_le(buf, val_pos);
+            let f = le_bytes::read_u32_le(buf, val_pos);
             if f == 0 {
                 return Err(TlvErr::BadEntry("zero flags must be absent"));
             }
@@ -1217,13 +1080,13 @@ pub fn decode_raw(buf: &[u8], start: usize) -> (r: Result<(RawEntry, usize), Tlv
             assert(pnext as int == g_opt_start + 7);
             assert(g_opt_start + 7 <= buf@.len());   // pnext <= opt_end <= len
             assert(buf@.subrange(g_opt_start, g_opt_start + 1) =~= seq![1u8]);
-            assert(buf@.subrange(g_opt_start + 1, g_opt_start + 3) == u16_le(4));
-            assert(buf@.subrange(g_opt_start + 3, g_opt_start + 7) == u32_le(f));
+            assert(buf@.subrange(g_opt_start + 1, g_opt_start + 3) == le_bytes::u16_le(4));
+            assert(buf@.subrange(g_opt_start + 3, g_opt_start + 7) == le_bytes::u32_le(f));
             proof {
                 lemma_cat(buf@, g_opt_start + 1, g_opt_start + 3, g_opt_start + 7);
                 lemma_cat(buf@, g_opt_start, g_opt_start + 1, g_opt_start + 7);
             }
-            assert(buf@.subrange(g_opt_start, pnext as int) == seq![1u8] + u16_le(4) + u32_le(f));
+            assert(buf@.subrange(g_opt_start, pnext as int) == seq![1u8] + le_bytes::u16_le(4) + le_bytes::u32_le(f));
             flags = f;
             last_tag = 1;
             p = pnext;
@@ -1240,7 +1103,7 @@ pub fn decode_raw(buf: &[u8], start: usize) -> (r: Result<(RawEntry, usize), Tlv
     }
     if last_tag == 1 {
         assert(opt_len_u16 == 7);
-        assert(buf@.subrange(g_opt_start, opt_end as int) == seq![1u8] + u16_le(4) + u32_le(flags));
+        assert(buf@.subrange(g_opt_start, opt_end as int) == seq![1u8] + le_bytes::u16_le(4) + le_bytes::u32_le(flags));
         assert(opt_bytes(flags) == buf@.subrange(gp_optlen, opt_end as int));
     } else {
         assert(flags == 0);
@@ -1255,8 +1118,8 @@ pub fn decode_raw(buf: &[u8], start: usize) -> (r: Result<(RawEntry, usize), Tlv
     assert(seq![e.name@.len() as u8] == buf@.subrange(start as int, start as int + 1));
     assert(e.name@ == buf@.subrange(start as int + 1, p_kind as int));
     assert(seq![e.kind] =~= buf@.subrange(p_kind as int, p_size as int));
-    assert(u64_le(e.size) == buf@.subrange(p_size as int, p_mtime as int));
-    assert(u64_le(e.mtime) == buf@.subrange(p_mtime as int, gp_content));
+    assert(le_bytes::u64_le(e.size) == buf@.subrange(p_size as int, p_mtime as int));
+    assert(le_bytes::u64_le(e.mtime) == buf@.subrange(p_mtime as int, gp_content));
     proof {
         lemma_cat(buf@, start as int, start as int + 1, p_kind as int);
         lemma_cat(buf@, start as int, p_kind as int, p_size as int);
@@ -1307,7 +1170,7 @@ pub fn decode_node(buf: &[u8]) -> (r: Result<(u8, RawNodeBody), TlvErr>)
     if !fits(1, 4, len) {
         return Err(TlvErr::Truncated);
     }
-    let count = read_u32_le(buf, 1);
+    let count = le_bytes::read_u32_le(buf, 1);
     if count as usize > MAX_NODE_ENTRIES {
         return Err(TlvErr::BadNode("node too wide"));
     }
@@ -1325,7 +1188,7 @@ pub fn decode_node(buf: &[u8]) -> (r: Result<(u8, RawNodeBody), TlvErr>)
                 i <= count,
                 entries@.len() == i,
                 buf@.subrange(0, 1) == seq![level],
-                buf@.subrange(1, 5) == u32_le(count),
+                buf@.subrange(1, 5) == le_bytes::u32_le(count),
                 buf@.subrange(5, pos as int) == entries_bytes(entries@),
             decreases count - i,
         {
@@ -1413,7 +1276,7 @@ pub fn encode_node_leaf(es: &Vec<RawEntry>, out: &mut Vec<u8>)
     while i < es.len()
         invariant
             i <= es@.len(),
-            out@ == old(out)@ + seq![0u8] + u32_le(es@.len() as u32) + entries_bytes(
+            out@ == old(out)@ + seq![0u8] + le_bytes::u32_le(es@.len() as u32) + entries_bytes(
                 es@.subrange(0, i as int),
             ),
         decreases es@.len() - i,

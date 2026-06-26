@@ -6,6 +6,13 @@ edition.workspace = true
 [dependencies]
 ipc = { path = "../ipc" }
 
+# The shared verified read-direction little-endian byte machinery (`u*_le` specs,
+# their `lemma_u*_le_bytes` split identities, and the `read_u*_le` exec readers)
+# the ELF `parse` decoder cites for every fixed-width little-endian field. no_std +
+# no-alloc like loader itself; its proof helpers erase in a plain build. A
+# `verify = true` dep is re-verified transitively on a cold run.
+le-bytes = { path = "../le-bytes" }
+
 # vstd is the *Verus* dependency (see doc/guidelines/verus.md): the `verus!{}`
 # macro + ghost vocabulary for the ELF page-geometry proof (`Segment::page_layout`
 # — total/overflow-safe page rounding, refuse-not-crash for all `u64` vaddr/memsz,
