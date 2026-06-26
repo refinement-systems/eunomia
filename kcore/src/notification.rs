@@ -63,11 +63,11 @@ pub open spec fn signal_wakes(nv: Map<ObjId, NotifView>, n: ObjId, bits: u64) ->
 /// queued ref is released (`refs -= 1`), and the thread is made Runnable; on the
 /// **accumulate** path the word grows and the queue/refs are untouched. `notif_wf`
 /// is preserved either way.
-// The wake (faithful enqueue + the ready pair + the three caller-frame ensures —
-// contrapositive, field, BlockedNotif-frozen) carries many proof obligations; the private
-// resource cap (own Z3 instance, no other proof affected) is raised to hold margin.
+// `spinoff_prover`: the wake path carries the `make_runnable` enqueue + ready-queue/`p_opt`
+// term families inline (extracting the census via `cspace::lemma_waiter_dequeue_census`
+// costs more than it saves here — §10 dead-end documented at :379-383), pushing this body
+// past the shared module batch budget. No `rlimit` cap: verifies at default (~21M rlimit).
 #[verifier::spinoff_prover]
-#[verifier::rlimit(50)]
 pub fn signal<S: Store>(store: &mut S, n: ObjId, bits: u64)
     requires
         old(store).notif_view().dom().contains(n),
@@ -711,13 +711,10 @@ pub fn destroy_notif<S: Store>(store: &mut S, n: ObjId)
 /// read-only — the only writes are on the found path, which returns. The `refs > 0`
 /// precondition (a non-empty queue ⇒ live) discharges the release `-1`, exactly as in
 /// `signal`.
-// Carrying the ready-queue pair through the splice-walk loop invariant adds proof load
-// to an already-heavy loop body; the private resource cap (own Z3 instance) holds margin.
-// The per-object census map lives in `cspace::lemma_waiter_dequeue_census`, so this body
-// proves only the cheap local facts (the `-1` waiter delta + the changed-TCB shape) and
-// needs only a modest cap.
-#[verifier::spinoff_prover]
-#[verifier::rlimit(25)]
+// With the per-object census map extracted to `cspace::lemma_waiter_dequeue_census`
+// (called at :964), this body proves only the cheap local facts (the `-1` waiter delta +
+// the changed-TCB shape). The residual splice-walk loop body verifies within the default
+// budget without a dedicated Z3 instance; no `spinoff_prover` or `rlimit` cap needed.
 pub fn remove_waiter<S: Store>(store: &mut S, n: ObjId, t: ObjId)
     requires
         old(store).notif_view().dom().contains(n),
