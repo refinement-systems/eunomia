@@ -40,7 +40,7 @@ LOG="${LOG:-/tmp/eunomia-spawn-test.log}"
 rm -rf "$DEMO_ROOT"
 mkdir -p "$DEMO_ROOT/bin"
 printf 'spawn test\n' > "$DEMO_ROOT/hello.txt"
-cp "$ROOT/target/user/aarch64-unknown-none-softfloat/release/selftest" "$DEMO_ROOT/bin/selftest"
+cp "$ROOT/target/user/aarch64-unknown-eunomia/release/selftest" "$DEMO_ROOT/bin/selftest"
 
 "$ROOT/target/debug/mkfs" "$IMG" "$DEMO_ROOT" 64
 
