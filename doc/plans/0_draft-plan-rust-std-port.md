@@ -1,6 +1,6 @@
 # Plan — Porting the Rust Standard Library to Eunomia
 
-> Renumber to the current era convention (e.g. `N_plan_rust_std.md`). Targets `spec rev2`.
+> Targets `spec rev2`.
 > Two-track note: almost all of this is **userspace-track** work and is host-testable on macOS
 > (Miri/Loom/Shuttle) decoupled from the kernel, per §1. Only three items touch the
 > **kernel track** — `TPIDR_EL0` save/restore, a `yield` syscall, and an entropy source — and
