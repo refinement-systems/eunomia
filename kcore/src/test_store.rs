@@ -124,6 +124,10 @@ struct ArrayStore {
     // can assert `unmap_in` issues one TLBI per cleared page, in order (the
     // ordering theorem checked against the real body).
     tlb_log: Vec<(u16, u64)>,
+    // Forces the `aspace_map` seam to return `NeedMemory` (the real kernel's
+    // table-pool-exhausted path), so `map_frame`'s verified Err arm — store
+    // unchanged — can be exercised by a host test.
+    fail_aspace_map: bool,
 }
 
 impl ArrayStore {
@@ -142,6 +146,7 @@ impl ArrayStore {
             ready_tails: vec![None; crate::sysabi::NUM_PRIOS],
             ready_bitmap: 0,
             tlb_log: Vec::new(),
+            fail_aspace_map: false,
         }
     }
     fn n(&self) -> usize {
@@ -193,8 +198,10 @@ impl Store for ArrayStore {
     }
     fn aspace_unmap(&mut self, _a: ObjId, _va: u64, _pages: u64) {}
     // The map-time twin of `aspace_unmap`: page-table machinery with no kcore object state, so
-    // the no-op faithfully "frames every view". Always succeeds here (the real kernel can fail
-    // with `NeedMemory`; `map_frame`'s `Err` arm — store unchanged — is verified, not exercised).
+    // the no-op faithfully "frames every view" whether it succeeds or fails. Normally succeeds;
+    // when `fail_aspace_map` is set it returns `NeedMemory` (the real kernel's table-pool-
+    // exhausted path) without touching any field, exercising `map_frame`'s verified `Err` arm —
+    // store unchanged.
     fn aspace_map(
         &mut self,
         _a: ObjId,
@@ -203,7 +210,11 @@ impl Store for ArrayStore {
         _pages: u64,
         _perms: u64,
     ) -> Result<(), crate::aspace::MapError> {
-        Ok(())
+        if self.fail_aspace_map {
+            Err(crate::aspace::MapError::NeedMemory)
+        } else {
+            Ok(())
+        }
     }
 
     // ── channel state: the `chan_*` accessors backed by `chans` ──
@@ -3679,6 +3690,38 @@ fn map_then_delete_roundtrip() {
     check_delete(&mut st, SlotId(1)); // delete the newly-mapped frame
     assert_eq!(st.refs[&2], 1, "after delete: aspace ref restored to 1");
     assert!(refcount_sound_exec(&st), "after delete: refcount_sound");
+}
+
+// `map_frame`'s `Err` arm — store unchanged on a `NeedMemory` from the trusted page-table
+// map — is verified but, because the test store's `aspace_map` otherwise always succeeds,
+// never otherwise reached at runtime. Flip `fail_aspace_map` to drive that arm and assert
+// the frame: the two views the Ok path would have moved (the frame cap's mapping, the
+// aspace refcount) are untouched. The aspace-side twin is `map_in_need_memory`.
+#[test]
+fn map_frame_need_memory() {
+    let mut st = ArrayStore::new(1);
+    st.slots[0] = detached(frame_cap(0x1000)); // an unmapped frame cap
+    st.refs.insert(2, 0); // a live, as-yet-unreferenced aspace
+    st.fail_aspace_map = true; // aspace_map → Err(NeedMemory)
+    assert!(refcount_sound_exec(&st), "fixture is refcount_sound");
+    let res = map_frame(&mut st, SlotId(0), ObjId(2), 0x4000, 0);
+    assert_eq!(
+        res,
+        Err(MapError::NeedMemory),
+        "map_frame propagates the page-table NeedMemory"
+    );
+    assert!(
+        matches!(st.slots[0].cap.kind, CapKind::Frame { mapping: None, .. }),
+        "map_frame Err: the frame cap is still unmapped"
+    );
+    assert_eq!(
+        st.refs[&2], 0,
+        "map_frame Err: the aspace ref is not bumped"
+    );
+    assert!(
+        refcount_sound_exec(&st),
+        "map_frame Err: refcount_sound preserved"
+    );
 }
 
 // Deleting the *last* mapped frame drives `unref_aspace` to zero, firing
