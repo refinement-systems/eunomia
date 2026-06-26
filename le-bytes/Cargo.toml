@@ -1,0 +1,33 @@
+[package]
+name = "le-bytes"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+# Host-test escape hatch: the crate is no_std for the aarch64 userspace
+# cross-build (it rides into every decoder that reads little-endian fields off
+# a byte buffer — cas's node decoder, loader's ELF `parse`), but
+# `cargo test`/`--features std` build against std so the test harness links.
+# Same recipe as freelist/Cargo.toml.
+std = []
+
+[dependencies]
+# vstd is the *Verus* dependency (see doc/guidelines/verus.md): the `verus!{}`
+# macro + ghost vocabulary for the read-direction little-endian byte machinery
+# (rev2§6, §8) — the `u*_le` byte image, the `lemma_u*_le_bytes` `by (bit_vector)`
+# split identities (§6), and the `read_u*_le` byte readers. `default-features =
+# false` ⇒ no_std, no alloc, so it rides into the userspace cross-build
+# unchanged. In an ordinary build the `verus!{}` macro erases to plain Rust and
+# vstd compiles to nothing load-bearing. Pinned (=version) in lockstep with
+# kcore/ipc/urt/dma-pool/freelist: an upgrade is a deliberate PR.
+vstd = { version = "=0.0.0-2026-05-31-0205", default-features = false }
+
+# `cargo verus verify -p le-bytes` targets this crate (the flag kcore/ipc/urt/dma-pool/freelist use).
+[package.metadata.verus]
+verify = true
+
+# cfg(verus_keep_ghost)/cfg(verus_only) are set by Verus during `cargo verus
+# verify`; teach plain cargo they're expected (same handling as freelist/dma-pool/ipc/urt/kcore).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(verus_keep_ghost)", "cfg(verus_only)"] }

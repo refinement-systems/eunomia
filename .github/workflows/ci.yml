@@ -318,6 +318,12 @@ jobs:
           # urt heap. The dma-pool gate below re-checks that its wrapper delegates
           # cleanly (it carries 0 obligations of its own — the proof lives here).
           cargo verus verify -p freelist
+          # le-bytes — the shared read-direction little-endian byte core (rev2§6,
+          # §8): the `u*_le` byte image, the `lemma_u*_le_bytes` `by (bit_vector)`
+          # split identities, and the `read_u*_le` byte readers, cited by cas's
+          # node decoder and loader's ELF `parse`. no_std/no-alloc sibling, so no
+          # --no-default-features needed.
+          cargo verus verify -p le-bytes
           cargo verus verify -p dma-pool
           # cas::disk superblock chokepoint — validate_geometry
           # (totality + region-within-device ∀) and decode_checked (totality ∀,
