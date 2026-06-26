@@ -1237,6 +1237,38 @@ spec fn laid_out(wal: Seq<u8>, records: Seq<RecMeta>, k: int) -> bool
     }
 }
 
+/// The WAL-byte/queue **projection** of the `CommitProtocol` TLA invariant
+/// `RecoverReconstructs` (`tla/commit_protocol/CommitProtocol.tla:281`): the run
+/// `recover_records` rebuilds from the committed head *is exactly* the maximal
+/// seq-continuous, content-valid post-head record skeleton. "Exactly" is the
+/// conjunction of **soundness** — every rebuilt record is a real laid-out record
+/// (`laid_out`) anchored at the committed head `(head, next_seq)` — and
+/// **maximality** — the run accounts for the whole `run_len` from that head
+/// (`forged_max` is the lone seq-ceiling record `run_len` counts past the laid-out
+/// skeleton, rev2§4.4). This is the *local per-call* reading of `RecoverReconstructs`.
+/// The **global** arm — that this set equals the past-head, above-root acked writes
+/// quantified over `writeCtr`/`walLog` (`AckedWritesRecoverable`/`RecoverReconstructs`,
+/// `CommitProtocol.tla:261`/`:281`) — ranges over global acked-write state the verified
+/// core does not model and rests on the trusted Store-lifetime join (rev2§6.1(e)); it
+/// stays TLA-owned + by-construction. The predicate carries a teeth control
+/// ([`lemma_recover_reconstructs_pins_head`]): it pins the head it is stated against,
+/// so a wrong (off-by-one) bound fails it — it is not vacuous over its sole producer.
+spec fn recover_reconstructs(
+    wal: Seq<u8>,
+    records: Seq<RecMeta>,
+    head: u64,
+    next_seq: u64,
+    forged_max: bool,
+) -> bool {
+    &&& laid_out(wal, records, 0)
+    &&& run_len(wal, head as int, next_seq) == records.len() + (if forged_max {
+        1nat
+    } else {
+        0nat
+    })
+    &&& (records.len() > 0 ==> records[0].off == head && records[0].seq == next_seq)
+}
+
 /// `laid_out` from `k` carries to any later index `m` (the suffix of a laid-out
 /// suffix is laid out — each unfold exposes `laid_out` at the next index).
 proof fn lemma_laid_out_mono(wal: Seq<u8>, records: Seq<RecMeta>, k: int, m: int)
@@ -1486,6 +1518,12 @@ fn recover_records(wal: &[u8], wal_head: u64, wal_next_seq: u64) -> (r: Recovere
         laid_out(wal@, r.records@, 0),
         forall|k: int| 0 <= k < r.records@.len() ==> !(#[trigger] r.records@[k]).flushed,
         r.records@.len() > 0 ==> r.records@[0].off == wal_head && r.records@[0].seq == wal_next_seq,
+        // The WAL-byte/queue projection of TLA `RecoverReconstructs`: the rebuilt run
+        // is exactly the maximal seq-continuous content-valid post-head skeleton
+        // (sound + maximal + head-anchored — the conjunction of the three ensures
+        // above). The global replay-equality over `writeCtr`/`walLog` stays TLA-owned
+        // + by-construction (rev2§6.1(e)).
+        recover_reconstructs(wal@, r.records@, wal_head, wal_next_seq, r.forged_max),
 {
     broadcast use vstd::slice::group_slice_axioms;
     let ghost total = run_len(wal@, wal_head as int, wal_next_seq);
@@ -1577,8 +1615,62 @@ fn recover_records(wal: &[u8], wal_head: u64, wal_next_seq: u64) -> (r: Recovere
             let count = run_len(wal@, wal_head as int, wal_next_seq) as int;
             lemma_gap_freedom(wal@, records@, 0, wal_head, wal_next_seq, count);
         }
+        // Surface the projection: its three conjuncts are exactly the run_len
+        // equality, `laid_out`, and head anchor the walk just established.
+        lemma_recover_reconstructs(wal@, records@, wal_head, wal_next_seq, forged_max);
     }
     Recovered { records, end_off: off as u64, next_seq: seq, forged_max }
+}
+
+/// The projection is entailed by `recover_records`'s existing `ensures` — the thin
+/// cross-link naming [`recover_reconstructs`] as their conjunction. Discharged by
+/// hypothesis (each conjunct is a `requires`); it is what `recover_records` calls to
+/// surface the projection as a live postcondition (the rev2§4.5 establish-side label,
+/// `verus.md` §10).
+proof fn lemma_recover_reconstructs(
+    wal: Seq<u8>,
+    records: Seq<RecMeta>,
+    head: u64,
+    next_seq: u64,
+    forged_max: bool,
+)
+    requires
+        laid_out(wal, records, 0),
+        run_len(wal, head as int, next_seq) == records.len() + (if forged_max {
+            1nat
+        } else {
+            0nat
+        }),
+        records.len() > 0 ==> records[0].off == head && records[0].seq == next_seq,
+    ensures
+        recover_reconstructs(wal, records, head, next_seq, forged_max),
+{
+}
+
+/// **Anti-theatre teeth** (Task 13): the projection *pins* its head/seq to the rebuilt
+/// run's anchor, so a deliberately-wrong (e.g. off-by-one) head bound `(h2, s2)` cannot
+/// also satisfy it. With `records` non-empty, [`recover_reconstructs`] forces
+/// `records[0].off == head && records[0].seq == next_seq`; any `(h2, s2)` differing from
+/// `(head, next_seq)` fails that anchor clause. So the green proof genuinely constrains
+/// the head it is stated against — it is not vacuous over its own producer (a predicate
+/// that merely asserted "some head exists" could not prove this).
+proof fn lemma_recover_reconstructs_pins_head(
+    wal: Seq<u8>,
+    records: Seq<RecMeta>,
+    head: u64,
+    next_seq: u64,
+    forged_max: bool,
+    h2: u64,
+    s2: u64,
+)
+    requires
+        recover_reconstructs(wal, records, head, next_seq, forged_max),
+        records.len() > 0,
+        h2 != head || s2 != next_seq,
+    ensures
+        !recover_reconstructs(wal, records, h2, s2, forged_max),
+{
+    assert(records[0].off == head && records[0].seq == next_seq);
 }
 
 } // verus!
