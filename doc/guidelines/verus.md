@@ -161,6 +161,17 @@ Three rules govern what a contract may name:
   for `closed` whenever a public operation's correctness is
   naturally stated in internal terms. (If the operation is single-crate, narrowing
   the consts to `pub(crate)` is the lighter escape.)
+- **Labeling an already-proven fact under an invariant name** — naming a per-step
+  `ensures` after the TLA invariant it mechanizes, so the contract *reads as* that
+  invariant — prefers `open`: a clarifying label should keep the named fact
+  transparent to external readers and future callers, not encapsulate it (`closed`
+  discharges just as well for a non-recursive in-module spec, but hides the fact — the
+  wrong direction for a label). The real pitfall is a **vacuous** label: a predicate
+  already entailed by another `ensures` clause proves nothing (e.g. naming
+  `ring_fifo().len() ± 1` when a `count ± 1` clause already fixes it, since
+  `ring_fifo().len() == count` by construction). Pick the predicate that carries genuine,
+  non-derived content (the channel `send`/`recv` FIFO labels name `Seq::push` /
+  `drop_first` and the Err-arm store-frame, not the length).
 
 ## The trusted base
 
