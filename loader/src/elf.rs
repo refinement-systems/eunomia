@@ -7,7 +7,8 @@ pub const PF_W: u32 = 2;
 pub const PF_R: u32 = 4;
 
 // Verus is the deductive-proof tier for the page geometry (`Segment::page_layout`)
-// and the ELF decoder (`parse` + the little-endian field readers), below.
+// and the ELF decoder (`parse`, reading fixed-width fields via the shared
+// `le-bytes` crate's verified little-endian readers), below.
 // `vstd::prelude` supplies the `verus!{}` macro + ghost vocabulary; Verus
 // requires it imported at the crate root. In an ordinary build the macro erases
 // ghost code, so this import is otherwise unused — hence the allow (same as
@@ -17,10 +18,12 @@ use vstd::prelude::*;
 
 // The page-geometry cluster and the ELF decoder are the Verus-verified deductive
 // core: `PAGE`, the `Segment`/`PageLayout`/`Image` types, `ElfError`,
-// `page_layout`'s total/overflow-safe contract, the little-endian field readers,
-// and `parse`'s total bounded-decoder contract all live in the `verus!{}` block
-// so the proofs can name them (doc/guidelines/verus.md §6). The startup-block
-// codec and the target-only `spawn` stay external plain Rust — after erasure
+// `page_layout`'s total/overflow-safe contract, and `parse`'s total
+// bounded-decoder contract all live in the `verus!{}` block so the proofs can
+// name them (doc/guidelines/verus.md §6); `parse` reads each fixed-width
+// little-endian field through the shared `le-bytes` crate's verified `read_u*_le`
+// readers (their `ensures` pin the consumed bytes to the value's `u*_le` split).
+// The startup-block codec and the target-only `spawn` stay external plain Rust — after erasure
 // these are ordinary items, so `spawn`, the `pub use crate::elf::PAGE`
 // re-export, and the callers of `parse` keep working unchanged.
 verus! {
@@ -188,133 +191,6 @@ pub struct Image<'a> {
     pub bytes: &'a [u8],
 }
 
-// Little-endian field readers (rev2§5). The header fields come from untrusted
-// images, so a read is admissible only when its window lies inside `buf`
-// (`off + N <= buf@.len()`, the caller's obligation); `parse` bounds the whole
-// program-header entry up front so each field read is in range. Each reader
-// reassembles the value with explicit mask/shift arithmetic (Verus does not
-// spec `from_le_bytes`) and proves the bytes it consumed are exactly the value's
-// little-endian split (`u*_le`), discharged by the matching `lemma_u*_le_bytes`
-// bit-vector identity (doc/guidelines/verus.md §6; cas's node-decoder readers
-// are the precedent).
-pub open spec fn u16_le(x: u16) -> Seq<u8> {
-    seq![x as u8, (x >> 8) as u8]
-}
-
-pub open spec fn u32_le(x: u32) -> Seq<u8> {
-    seq![x as u8, (x >> 8) as u8, (x >> 16) as u8, (x >> 24) as u8]
-}
-
-pub open spec fn u64_le(x: u64) -> Seq<u8> {
-    seq![
-        x as u8,
-        (x >> 8) as u8,
-        (x >> 16) as u8,
-        (x >> 24) as u8,
-        (x >> 32) as u8,
-        (x >> 40) as u8,
-        (x >> 48) as u8,
-        (x >> 56) as u8,
-    ]
-}
-
-proof fn lemma_u16_le_bytes(v: u16, b0: u8, b1: u8) by (bit_vector)
-    requires
-        v == (b0 as u16) | ((b1 as u16) << 8),
-    ensures
-        v as u8 == b0,
-        (v >> 8) as u8 == b1,
-{
-}
-
-proof fn lemma_u32_le_bytes(v: u32, b0: u8, b1: u8, b2: u8, b3: u8) by (bit_vector)
-    requires
-        v == (b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16) | ((b3 as u32) << 24),
-    ensures
-        v as u8 == b0,
-        (v >> 8) as u8 == b1,
-        (v >> 16) as u8 == b2,
-        (v >> 24) as u8 == b3,
-{
-}
-
-proof fn lemma_u64_le_bytes(v: u64, b0: u8, b1: u8, b2: u8, b3: u8, b4: u8, b5: u8, b6: u8, b7: u8)
-    by (bit_vector)
-    requires
-        v == (b0 as u64) | ((b1 as u64) << 8) | ((b2 as u64) << 16) | ((b3 as u64) << 24) | ((b4
-            as u64) << 32) | ((b5 as u64) << 40) | ((b6 as u64) << 48) | ((b7 as u64) << 56),
-    ensures
-        v as u8 == b0,
-        (v >> 8) as u8 == b1,
-        (v >> 16) as u8 == b2,
-        (v >> 24) as u8 == b3,
-        (v >> 32) as u8 == b4,
-        (v >> 40) as u8 == b5,
-        (v >> 48) as u8 == b6,
-        (v >> 56) as u8 == b7,
-{
-}
-
-fn read_u16_le(buf: &[u8], off: usize) -> (v: u16)
-    requires
-        off + 2 <= buf@.len(),
-    ensures
-        buf@.subrange(off as int, off as int + 2) == u16_le(v),
-{
-    broadcast use vstd::slice::group_slice_axioms;
-    let b0 = buf[off];
-    let b1 = buf[off + 1];
-    let v: u16 = (b0 as u16) | ((b1 as u16) << 8);
-    proof {
-        lemma_u16_le_bytes(v, b0, b1);
-    }
-    assert(buf@.subrange(off as int, off as int + 2) =~= u16_le(v));
-    v
-}
-
-fn read_u32_le(buf: &[u8], off: usize) -> (v: u32)
-    requires
-        off + 4 <= buf@.len(),
-    ensures
-        buf@.subrange(off as int, off as int + 4) == u32_le(v),
-{
-    broadcast use vstd::slice::group_slice_axioms;
-    let b0 = buf[off];
-    let b1 = buf[off + 1];
-    let b2 = buf[off + 2];
-    let b3 = buf[off + 3];
-    let v: u32 = (b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16) | ((b3 as u32) << 24);
-    proof {
-        lemma_u32_le_bytes(v, b0, b1, b2, b3);
-    }
-    assert(buf@.subrange(off as int, off as int + 4) =~= u32_le(v));
-    v
-}
-
-fn read_u64_le(buf: &[u8], off: usize) -> (v: u64)
-    requires
-        off + 8 <= buf@.len(),
-    ensures
-        buf@.subrange(off as int, off as int + 8) == u64_le(v),
-{
-    broadcast use vstd::slice::group_slice_axioms;
-    let b0 = buf[off];
-    let b1 = buf[off + 1];
-    let b2 = buf[off + 2];
-    let b3 = buf[off + 3];
-    let b4 = buf[off + 4];
-    let b5 = buf[off + 5];
-    let b6 = buf[off + 6];
-    let b7 = buf[off + 7];
-    let v: u64 = (b0 as u64) | ((b1 as u64) << 8) | ((b2 as u64) << 16) | ((b3 as u64) << 24) | ((b4
-        as u64) << 32) | ((b5 as u64) << 40) | ((b6 as u64) << 48) | ((b7 as u64) << 56);
-    proof {
-        lemma_u64_le_bytes(v, b0, b1, b2, b3, b4, b5, b6, b7);
-    }
-    assert(buf@.subrange(off as int, off as int + 8) =~= u64_le(v));
-    v
-}
-
 /// A PT_LOAD segment `parse` will accept: its file extent lies inside the
 /// image (`offset + filesz <= len`) and its page geometry does not overflow
 /// (equivalently `page_layout()` returns `Ok` — the rev2§5.3 refuse-not-crash
@@ -356,19 +232,19 @@ pub fn parse(bytes: &[u8]) -> (r: Result<Image<'_>, ElfError>)
     if bytes[4] != 2 || bytes[5] != 1 {
         return Err(ElfError::NotElf64Le);
     }
-    let e_type = read_u16_le(bytes, 16);
+    let e_type = le_bytes::read_u16_le(bytes, 16);
     if e_type != 2 {
         // ET_EXEC: userspace is statically linked at fixed VAs (rev2§5).
         return Err(ElfError::NotExecutable);
     }
-    if read_u16_le(bytes, 18) != 183 {
+    if le_bytes::read_u16_le(bytes, 18) != 183 {
         // EM_AARCH64
         return Err(ElfError::NotAarch64);
     }
-    let entry = read_u64_le(bytes, 24);
-    let phoff = read_u64_le(bytes, 32) as usize;
-    let phentsize = read_u16_le(bytes, 54) as usize;
-    let phnum = read_u16_le(bytes, 56) as usize;
+    let entry = le_bytes::read_u64_le(bytes, 24);
+    let phoff = le_bytes::read_u64_le(bytes, 32) as usize;
+    let phentsize = le_bytes::read_u16_le(bytes, 54) as usize;
+    let phnum = le_bytes::read_u16_le(bytes, 56) as usize;
     if phentsize < 56 {
         return Err(ElfError::BadSegment);
     }
@@ -406,18 +282,18 @@ pub fn parse(bytes: &[u8]) -> (r: Result<Image<'_>, ElfError>)
             // read below (the widest window is ph+40 .. ph+48) is in bounds.
             assert(ph + 56 <= bytes@.len());
         }
-        let p_type = read_u32_le(bytes, ph);
+        let p_type = le_bytes::read_u32_le(bytes, ph);
         if p_type == 1 {
             // PT_LOAD only.
             if n == MAX_SEGMENTS {
                 return Err(ElfError::TooManySegments);
             }
             let seg = Segment {
-                flags: read_u32_le(bytes, ph + 4),
-                offset: read_u64_le(bytes, ph + 8),
-                vaddr: read_u64_le(bytes, ph + 16),
-                filesz: read_u64_le(bytes, ph + 32),
-                memsz: read_u64_le(bytes, ph + 40),
+                flags: le_bytes::read_u32_le(bytes, ph + 4),
+                offset: le_bytes::read_u64_le(bytes, ph + 8),
+                vaddr: le_bytes::read_u64_le(bytes, ph + 16),
+                filesz: le_bytes::read_u64_le(bytes, ph + 32),
+                memsz: le_bytes::read_u64_le(bytes, ph + 40),
             };
             let pl = seg.page_layout();
             // Producer/consumer agreement: refuse exactly the segments `prepare`

@@ -103,6 +103,7 @@ version = "0.1.0"
 dependencies = [
  "arbitrary",
  "blake3",
+ "le-bytes",
  "proptest",
  "serde",
  "vstd",
@@ -415,6 +416,7 @@ name = "loader"
 version = "0.1.0"
 dependencies = [
  "ipc",
+ "le-bytes",
  "proptest",
  "vstd",
 ]
