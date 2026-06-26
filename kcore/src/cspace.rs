@@ -5228,8 +5228,6 @@ pub proof fn lemma_ready_inv_frame<S: Store>(s0: &S, s1: &S)
 // hence `ready_complete` — are untouched. Used by `signal`'s pre-enqueue fixups (which retarget
 // only the still-`BlockedNotif` woken head), `remove_waiter` (a waiter-chain splice over
 // `BlockedNotif` nodes), and `destroy_tcb`'s blocked/halt branches.
-#[verifier::spinoff_prover]
-#[verifier::rlimit(60)]
 pub proof fn lemma_ready_inv_frame_offchain<S: Store>(s0: &S, s1: &S)
     requires
         ready_wf(s0.ready_view(), s0.tcb_view()),
@@ -5277,8 +5275,6 @@ pub proof fn lemma_ready_inv_frame_offchain<S: Store>(s0: &S, s1: &S)
 // preserves the four ready-relevant fields (`state`/`priority`/`qnext`/`wait_notif`) of EVERY
 // thread, even if it rewrites other fields. Used by `report_terminal` (sets `report`) and `bind`
 // (sets `cspace`/`aspace`/`bind_*`) — neither touches a field `ready_wf`/`ready_complete` reads.
-#[verifier::spinoff_prover]
-#[verifier::rlimit(60)]
 pub proof fn lemma_ready_inv_frame_fields<S: Store>(s0: &S, s1: &S)
     requires
         ready_wf(s0.ready_view(), s0.tcb_view()),
