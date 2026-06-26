@@ -381,7 +381,10 @@ pub fn page() -> Option<&'static TimePage> {
 /// The virtual counter — EL0-readable (CNTKCTL_EL1.EL0VCTEN, kernel timer
 /// init). Init pairs this with the one-shot RTC read to form the page's
 /// `cntvct_base`.
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "none", target_os = "eunomia")
+))]
 pub fn cntvct() -> u64 {
     let v: u64;
     // Safety: the register read has no side effects.
@@ -390,7 +393,10 @@ pub fn cntvct() -> u64 {
 }
 
 /// The counter frequency, EL0-readable under the same CNTKCTL enable.
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "none", target_os = "eunomia")
+))]
 pub fn cntfrq() -> u64 {
     let v: u64;
     // Safety: the register read has no side effects.
@@ -403,7 +409,10 @@ pub fn cntfrq() -> u64 {
 ///
 /// Panics if no time page was attached: a process that asks for wall time
 /// without holding the `"time"` grant is mis-wired, not degraded.
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "none", target_os = "eunomia")
+))]
 pub fn now_utc_ns() -> i64 {
     let page = page().expect("time page not attached");
     page.sample().utc_ns_at(cntvct())

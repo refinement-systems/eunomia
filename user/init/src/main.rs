@@ -20,9 +20,9 @@ use ipc::sys::{self, OBJ_CHANNEL, OBJ_FRAME, PERM_DEVICE, PERM_W, RIGHT_READ};
 // The shared startup-block codec (rev2§5.1) — host-buildable, used by both
 // `_start` (the producer) and the builder tests.
 use loader::startup::{self, Grant, GrantKind};
-// `loader::spawn` exists only on the bare-metal target (it is gated
-// `target_os = "none"`), so the import is boot-only — gated out of the host
-// test build alongside the `_start` that is its sole user.
+// `loader::spawn` exists only on the bare-metal target (it is gated to
+// `target_os = "none"`/`"eunomia"`), so the import is boot-only — gated out of
+// the host test build alongside the `_start` that is its sole user.
 #[cfg(not(test))]
 use loader::spawn;
 

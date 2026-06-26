@@ -9,5 +9,8 @@
 pub mod elf;
 pub mod startup;
 
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "none", target_os = "eunomia")
+))]
 pub mod spawn;

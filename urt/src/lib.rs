@@ -64,7 +64,10 @@ pub mod time;
 
 // The spawn-lifecycle helper issues syscalls, so it only exists on the
 // bare-metal target; `slots` is pure bookkeeping and host-tested.
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "none", target_os = "eunomia")
+))]
 pub mod spawn;
 
 use core::alloc::{GlobalAlloc, Layout};
