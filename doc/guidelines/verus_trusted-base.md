@@ -329,6 +329,16 @@ interpreted-hash seam, proven *around* by the verified partition core.
 > `CapSlot::empty` (`cspace.rs:1595`). Ground truth is **6** `assume_specification`
 > statements, recorded above.
 
+> **The 10 transparent cspace `external_type_specification` registrations are not seams
+> and add 0 to the tally.** `kcore/src/cspace.rs:268-324` defines 10
+> `#[verifier::external_type_specification]` + `#[verifier::ext_equal]` wrappers
+> (`ExSlotId`, `ExObjId`, `ExRights`, `ExChanEnd`, `ExCapKind`, `ExCap`, `ExCapSlot`,
+> `ExBinding`, `ExThreadState`, `ExReport`) that give plain-Rust types structural `==`
+> in spec code. Unlike the 3 opaque untyped registrations (`ExTcb`/`ExNotifObj`/`ExTimerObj`
+> in `kcore/src/untyped.rs:246-254`), none carry `external_body` and none introduce a
+> trusted axiom or opaque size fact — they are transparent Verus scaffolding, erased in a
+> normal build. The tally remains **14**.
+
 ## Verified surfaces governed by rev2§6.1's `[verifying]` tags
 
 These constructs are in the verified surface (and the TLA models), each mirroring a
