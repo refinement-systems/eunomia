@@ -467,6 +467,11 @@ pub fn pick_survivor(gen_a: u64, valid_a: bool, gen_b: u64, valid_b: bool) -> (r
         (!valid_a && !valid_b) ==> r is Neither,
         (valid_a && !valid_b) ==> r is SlotA,
         (!valid_a && valid_b) ==> r is SlotB,
+        // The local per-call witness of the TLA+ `GenerationsDistinct`: the
+        // winner under two valid slots is fixed by generation, so `LiveSlot` is
+        // deterministic (with distinct generations the `>=` is a strict `>`).
+        // The *global* `GenerationsDistinct` invariant — two valid slots never
+        // share a generation across the whole commit history — stays TLA-owned.
         (valid_a && valid_b) ==> ((r is SlotA) <==> gen_a >= gen_b),
         // A chosen slot is always a valid one — what justifies mount's `unwrap`.
         (r is SlotA) ==> valid_a,
@@ -509,6 +514,11 @@ pub open spec fn live_slot(sb_in_b: bool) -> Slot {
 pub fn commit_target(sb_in_b: bool) -> (r: Slot)
     ensures
         (r is A) <==> sb_in_b,
+        // The by-construction per-call witness of the TLA+ `AtLeastOneValidSlot`:
+        // a commit never targets the live slot, so a torn write damages only the
+        // slot being written and the last good slot survives. The *global*
+        // `AtLeastOneValidSlot` crash-step invariant over `slotA`/`slotB` stays
+        // TLA-owned.
         r != live_slot(sb_in_b),
 {
     if sb_in_b {
