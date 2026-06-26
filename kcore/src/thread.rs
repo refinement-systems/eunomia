@@ -801,18 +801,11 @@ proof fn lemma_destroy_tcb_aspace_clear_frame<S: Store>(
 // `dead_tcb_frozen` frame fixes its TCB; the census rides the **clear-before-unref** discipline
 // (`lemma_census_after_hold_clear` opens the off-by-one window `unref_cspace`/`unref_aspace`
 // consume).
-// `spinoff_prover`: giving `CapKind::Thread` its rev2§5.4 `max_prio` ceiling adds a datatype
-// field + the `is_thread_cap_for`/`cap_max_prio` axioms to this module's shared SMT batch,
-// shifting Z3's resource accounting for this borderline body. Isolating `destroy_tcb` into its
-// own Z3 instance is the standard Verus headroom fix.
-//
-// `rlimit`: surfacing `priority` in `TcbView` adds yet another field to every `tcb_view()` term
-// this teardown carries, so the isolated body needs a raised private resource cap (it is on its
-// own Z3 instance, so no other proof is affected). The per-phase frame re-establishment lives in
-// the keyed `lemma_destroy_tcb_*_frame` proof fns above, so this isolated body needs only a
-// modestly raised cap rather than carrying every phase's derivation in this one query.
+// `spinoff_prover`: the `is_thread_cap_for`/`cap_max_prio` axioms and the `priority` field in
+// `TcbView` extend the module's shared SMT batch enough that the inline detach-phase proof
+// pushes this body past budget in the shared query. Isolated in its own Z3 instance as the
+// standard Verus headroom fix.
 #[verifier::spinoff_prover]
-#[verifier::rlimit(24)]
 pub fn destroy_tcb<S: Store>(store: &mut S, t: ObjId)
     requires
         cspace::cspace_wf(old(store).slot_view()),
