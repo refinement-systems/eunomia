@@ -305,7 +305,7 @@ impl<const N: usize> FreeList<N> {
                 off as int + n as int <= self.spec_len(),
                 0 <= k <= self.nfree,
                 // every scanned extent is disjoint from [off, off+n).
-                forall|j: int| #![trigger self.free@[j]]
+                forall|j: int| #![trigger self.free@[j].0, self.free@[j].1]
                     0 <= j < k
                     ==> (self.free@[j].0 as int + self.free@[j].1 as int <= off as int
                             || off as int + n as int <= self.free@[j].0 as int),
@@ -700,7 +700,7 @@ impl<const N: usize> FreeList<N> {
                 assert(old.free@[k - 1].1 > 0);
             }
         }
-        assert forall|k: int| #![trigger new.free@[k]] 0 <= k < new.nfree implies
+        assert forall|k: int| #![trigger new.free@[k].0, new.free@[k].1] 0 <= k < new.nfree implies
             new.free@[k].0 as int + new.free@[k].1 as int <= new.len as int by {
             assert(old.free@[i].0 as int + old.free@[i].1 as int <= old.len as int);
             if k < i {
@@ -837,7 +837,7 @@ impl<const N: usize> FreeList<N> {
                 assert(old.free@[k - 1].1 > 0);
             }
         }
-        assert forall|k: int| #![trigger new.free@[k]] 0 <= k < new.nfree implies
+        assert forall|k: int| #![trigger new.free@[k].0, new.free@[k].1] 0 <= k < new.nfree implies
             new.free@[k].0 as int + new.free@[k].1 as int <= new.len as int by {
             if k < i {
                 assert(old.free@[k].0 as int + old.free@[k].1 as int <= old.len as int);
@@ -939,7 +939,7 @@ impl<const N: usize> FreeList<N> {
                 assert(old.free@[k].1 > 0);
             }
         }
-        assert forall|k: int| #![trigger new.free@[k]] 0 <= k < new.nfree implies
+        assert forall|k: int| #![trigger new.free@[k].0, new.free@[k].1] 0 <= k < new.nfree implies
             new.free@[k].0 as int + new.free@[k].1 as int <= new.len as int by {
             if k != g {
                 assert(old.free@[k].0 as int + old.free@[k].1 as int <= old.len as int);
@@ -1053,7 +1053,7 @@ impl<const N: usize> FreeList<N> {
                 assert(old.free@[k + 1].1 > 0);
             }
         }
-        assert forall|k: int| #![trigger new.free@[k]] 0 <= k < new.nfree implies
+        assert forall|k: int| #![trigger new.free@[k].0, new.free@[k].1] 0 <= k < new.nfree implies
             new.free@[k].0 as int + new.free@[k].1 as int <= new.len as int by {
             assert(old.free@[i].0 as int + old.free@[i].1 as int <= old.len as int);
             if k < i - 1 {
