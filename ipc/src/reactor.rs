@@ -320,31 +320,50 @@ fn register_into(slots: [Option<Reg>; WORD_BITS], used: u64, signals: Signals, k
                 1u64 << (b as u64)) != 0u64) by {
                     let bb = b as u64;
                     if b == g as int {
-                        // Newly filled slot; its `used` bit is the one just set.
-                        assert(u & (1u64 << bb) != 0u64) by (bit_vector)
-                            requires
-                                u == used | (1u64 << g),
-                                bb == g,
-                                g < 64,
-                        ;
+                        // Newly filled slot; its `used` bit is the one just set. The
+                        // self identity gives `(used | (1<<g)) & (1<<g) != 0`; bridge
+                        // through `u == used | (1<<g)` and `bb == g`.
+                        lemma_set_bit_self(used, g);
+                        assert(u & (1u64 << bb) != 0u64);
                     } else {
                         // Untouched slot: membership carries over from the entry coherence,
                         // and bit `bb` of `u` equals bit `bb` of `used` (OR didn't touch it).
+                        // The other identity gives `(used | (1<<g)) & (1<<bb) == used &
+                        // (1<<bb)`; bridge through `u == used | (1<<g)`.
                         assert(out@[b] == slots@[b]);
-                        assert((u & (1u64 << bb) != 0u64) == (used & (1u64 << bb) != 0u64))
-                            by (bit_vector)
-                            requires
-                                u == used | (1u64 << g),
-                                bb != g,
-                                bb < 64,
-                                g < 64,
-                        ;
+                        lemma_bit_other(used, g, bb);
+                        assert((u & (1u64 << bb) != 0u64) == (used & (1u64 << bb) != 0u64));
                     }
                 }
             }
             (out, u, Ok(bit))
         },
     }
+}
+
+// ORing bit `k` into `x` reads back set when masked with `1<<k` (the single-bit
+// OR-set self identity behind `register`'s `used |= 1<<bit`). Pure `bit_vector`.
+proof fn lemma_set_bit_self(x: u64, k: u64)
+    by (bit_vector)
+    requires
+        k < 64,
+    ensures
+        (x | (1u64 << k)) & (1u64 << k) != 0u64,
+{
+}
+
+// ORing bit `k` into `x` leaves every other bit `m != k` of the word unchanged, so
+// an untouched slot's membership carries over the OR. The mask-equal form (the masked
+// words are equal, not merely both (non)zero). Pure `bit_vector`.
+proof fn lemma_bit_other(x: u64, k: u64, m: u64)
+    by (bit_vector)
+    requires
+        k < 64,
+        m < 64,
+        k != m,
+    ensures
+        (x | (1u64 << k)) & (1u64 << m) == x & (1u64 << m),
+{
 }
 
 // Popping the lowest set bit (`bits & (bits - 1)`) of a word whose lowest set bit
