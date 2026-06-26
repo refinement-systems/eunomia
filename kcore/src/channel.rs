@@ -85,6 +85,60 @@ pub open spec fn end_idx_spec(e: ChanEnd) -> int {
     }
 }
 
+/// IpcReactor `FifoPerChannel` (rev2§3.3, the per-step *local* half), mechanized on
+/// `send`: the operated ring's FIFO `Seq` grows by `Seq::push` of the offered message
+/// at the tail (`idx` = the tail slot `(head + count) % depth`), so a channel's
+/// messages queue in strict send order — none reordered. `ring` is the sending ring
+/// (`end_idx_spec(end)`). This names ONLY the local step: the *global* FIFO-index arms
+/// (`recvd[i] = i`, `queue[i] = |recvd| + i`, tla/ipc_reactor/IpcReactor.tla:280-281)
+/// range over the send/recv history the live-window ring does not retain, so they stay
+/// the TLA design oracle (IpcReactor `FifoPerChannel`, IpcReactor.tla:279).
+pub open spec fn fifo_send_appends(
+    cv0: ChanView,
+    sv0: Map<SlotId, CapSlot>,
+    cvf: ChanView,
+    svf: Map<SlotId, CapSlot>,
+    ring: int,
+    idx: int,
+) -> bool {
+    cspace::ring_fifo(cvf, svf, ring) == cspace::ring_fifo(cv0, sv0, ring).push(
+        cspace::ring_msg(cvf, svf, ring, idx),
+    )
+}
+
+/// IpcReactor `FifoPerChannel` (rev2§3.3, the per-step *local* half) for the receive
+/// side: `recv` pops the operated ring's FIFO `Seq` head (`Seq::drop_first`), so
+/// messages are delivered in send order. `ring` is the ring `recv` drains
+/// (`1 - end_idx_spec(end)`). As above this names ONLY the local step — the global
+/// FIFO-index arms stay the TLA design oracle (IpcReactor.tla:279).
+pub open spec fn fifo_recv_pops_head(
+    cv0: ChanView,
+    sv0: Map<SlotId, CapSlot>,
+    cvf: ChanView,
+    svf: Map<SlotId, CapSlot>,
+    ring: int,
+) -> bool {
+    cspace::ring_fifo(cvf, svf, ring) == cspace::ring_fifo(cv0, sv0, ring).drop_first()
+}
+
+/// IpcReactor `NoDrop` (rev2§3.3, the per-step *local* half): a refused `send`/`recv`
+/// (`Full`/`PeerClosed` on send, `Empty` on recv) drops nothing — the channel store's
+/// slot, chan, and refs views are all unchanged, so the offered message returns to the
+/// caller and no queued message is lost (refusal is the only non-delivery). This names
+/// ONLY the local step: the *global* counting identity (`nextSend = |recvd| + |queue|`,
+/// IpcReactor.tla:275) ranges over the send/recv history the live-window ring does not
+/// retain, so it stays the TLA design oracle (IpcReactor `NoDrop`, IpcReactor.tla:274).
+pub open spec fn no_drop_on_refusal(
+    sv0: Map<SlotId, CapSlot>,
+    cv0: Map<ObjId, ChanView>,
+    rv0: Map<ObjId, nat>,
+    svf: Map<SlotId, CapSlot>,
+    cvf: Map<ObjId, ChanView>,
+    rvf: Map<ObjId, nat>,
+) -> bool {
+    svf == sv0 && cvf == cv0 && rvf == rv0
+}
+
 /// Bit `c` of a `recv` install mask: set iff `recv` moved a non-empty arriving cap
 /// into `dests[c]`. Named (not inline `(m >> c) & 1`) so the `recv` ensures and the
 /// pass-2 invariant share one canonical trigger (`mask_bit(mask, c)`) and the bit-vector
@@ -974,10 +1028,14 @@ pub fn send<S: Store>(
     ensures
         cspace::binding_notif_wf(final(store).chan_view(), final(store).notif_view(),
             final(store).tcb_view(), ch),
-        res is Err ==> (
-            final(store).slot_view() == old(store).slot_view()
-            && final(store).chan_view() == old(store).chan_view()
-            && final(store).refs_view() == old(store).refs_view()),
+        res is Err ==> no_drop_on_refusal(
+            old(store).slot_view(),
+            old(store).chan_view(),
+            old(store).refs_view(),
+            final(store).slot_view(),
+            final(store).chan_view(),
+            final(store).refs_view(),
+        ),
         res is Ok ==> (
             cspace::chan_wf(final(store).chan_view(), final(store).slot_view(), ch)
             && cspace::cspace_wf(final(store).slot_view())
@@ -987,12 +1045,16 @@ pub fn send<S: Store>(
             && final(store).chan_view()[ch].head == old(store).chan_view()[ch].head
             && final(store).chan_view()[ch].count[end_idx_spec(end)]
                    == old(store).chan_view()[ch].count[end_idx_spec(end)] + 1
-            && cspace::ring_fifo(final(store).chan_view()[ch], final(store).slot_view(), end_idx_spec(end))
-                   == cspace::ring_fifo(old(store).chan_view()[ch], old(store).slot_view(), end_idx_spec(end)).push(
-                       cspace::ring_msg(final(store).chan_view()[ch], final(store).slot_view(), end_idx_spec(end),
-                           (old(store).chan_view()[ch].head[end_idx_spec(end)] as int
-                               + old(store).chan_view()[ch].count[end_idx_spec(end)] as int)
-                               % (old(store).chan_view()[ch].depth as int)))
+            && fifo_send_appends(
+                old(store).chan_view()[ch],
+                old(store).slot_view(),
+                final(store).chan_view()[ch],
+                final(store).slot_view(),
+                end_idx_spec(end),
+                (old(store).chan_view()[ch].head[end_idx_spec(end)] as int
+                    + old(store).chan_view()[ch].count[end_idx_spec(end)] as int)
+                    % (old(store).chan_view()[ch].depth as int),
+            )
             && cspace::ring_fifo(final(store).chan_view()[ch], final(store).slot_view(), 1 - end_idx_spec(end))
                    == cspace::ring_fifo(old(store).chan_view()[ch], old(store).slot_view(), 1 - end_idx_spec(end))
             && forall|c: int| 0 <= c < 4 && caps@[c] is Some
@@ -1493,10 +1555,14 @@ pub fn recv<S: Store>(
     ensures
         cspace::binding_notif_wf(final(store).chan_view(), final(store).notif_view(),
             final(store).tcb_view(), ch),
-        res is Err ==> (
-            final(store).slot_view() == old(store).slot_view()
-            && final(store).chan_view() == old(store).chan_view()
-            && final(store).refs_view() == old(store).refs_view()),
+        res is Err ==> no_drop_on_refusal(
+            old(store).slot_view(),
+            old(store).chan_view(),
+            old(store).refs_view(),
+            final(store).slot_view(),
+            final(store).chan_view(),
+            final(store).refs_view(),
+        ),
         res is Ok ==> (
             cspace::chan_wf(final(store).chan_view(), final(store).slot_view(), ch)
             && cspace::cspace_wf(final(store).slot_view())
@@ -1505,8 +1571,13 @@ pub fn recv<S: Store>(
             && final(store).chan_view()[ch].depth == old(store).chan_view()[ch].depth
             && final(store).chan_view()[ch].count[1 - end_idx_spec(end)]
                    == old(store).chan_view()[ch].count[1 - end_idx_spec(end)] - 1
-            && cspace::ring_fifo(final(store).chan_view()[ch], final(store).slot_view(), 1 - end_idx_spec(end))
-                   == cspace::ring_fifo(old(store).chan_view()[ch], old(store).slot_view(), 1 - end_idx_spec(end)).drop_first()
+            && fifo_recv_pops_head(
+                old(store).chan_view()[ch],
+                old(store).slot_view(),
+                final(store).chan_view()[ch],
+                final(store).slot_view(),
+                1 - end_idx_spec(end),
+            )
             && cspace::ring_fifo(final(store).chan_view()[ch], final(store).slot_view(), end_idx_spec(end))
                    == cspace::ring_fifo(old(store).chan_view()[ch], old(store).slot_view(), end_idx_spec(end))
             && res->Ok_0.0 as nat == old(store).chan_view()[ch].msg_len[
