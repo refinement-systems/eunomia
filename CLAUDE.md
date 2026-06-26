@@ -195,9 +195,14 @@ cargo verus verify -p virtio-blk                  # avail_ring_slot index/wrap +
                                                   # vstd[alloc])
 cargo verus verify -p storage-server --no-default-features --lib
                                                   # rights lattice (attenuate
-                                                  # monotone / deny-by-default);
-                                                  # no_std+alloc variant like cas,
-                                                  # --lib skips the placeholder bin
+                                                  # monotone / deny-by-default) +
+                                                  # wire header/version decode
+                                                  # prefix (check_header, total ∀
+                                                  # bytes; postcard body stays the
+                                                  # trusted seam by feature-
+                                                  # exclusion); no_std+alloc variant
+                                                  # like cas, --lib skips the
+                                                  # placeholder bin
 cargo verus verify -p loader --no-default-features # ELF page_layout: total,
                                                   # overflow-safe page geometry
                                                   # ∀ (vaddr, memsz); verified as

@@ -25,8 +25,10 @@ arbitrary = { version = "1", features = ["derive"], optional = true }
 
 # vstd is the *Verus* dependency (doc/guidelines/verus.md): the `verus!{}` macro
 # + ghost vocabulary for the rights-lattice proof (`attenuate` is monotone and
-# strips `R_STAT_STORE` by default, ∀ u8 parent/mask, rev2§2.3). The
-# session/handle dispatch and the serde/postcard wire codec stay external.
+# strips `R_STAT_STORE` by default, ∀ u8 parent/mask, rev2§2.3) and the
+# wire-decode header/version prefix (`check_header`, total ∀ bytes, rev2§3.7).
+# The session/handle dispatch stays external; the postcard body decode stays the
+# trusted seam by feature-exclusion (serde-gated, dropped under --no-default-features).
 # `default-features = false, features = ["alloc"]` mirrors cas (the no_std+alloc
 # verify variant); in an ordinary build the macro erases to plain Rust and vstd
 # compiles to nothing load-bearing. Pinned (=version) in lockstep with the other
@@ -37,9 +39,11 @@ vstd = { version = "=0.0.0-2026-05-31-0205", default-features = false, features 
 proptest = "1"
 
 # `cargo verus verify -p storage-server --no-default-features` targets this crate
-# (⇒ no_std + alloc; serde/postcard/std dropped). Only the rights lattice
-# (`attenuate`, `has_right`, the `by (bit_vector)` lemmas) is in `verus!{}`; the
-# session/handle dispatch, the wire codec, and the cas/ipc adapters are external.
+# (⇒ no_std + alloc; serde/postcard/std dropped). The rights lattice (`attenuate`,
+# `has_right`, the `by (bit_vector)` lemmas) and the wire header/version decode
+# prefix (`wire::check_header`, slice-prefix reasoning) are in `verus!{}`; the
+# session/handle dispatch, the postcard body decode (serde-gated, dropped here),
+# and the cas/ipc adapters are external.
 # cas/ipc stay in the build (storaged links them) and pull vstd's `alloc` feature,
 # so this run re-verifies the gated deps under the alloc prelude (verus.md §10).
 [package.metadata.verus]
