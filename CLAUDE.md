@@ -203,10 +203,12 @@ cargo verus verify -p storage-server --no-default-features --lib
                                                   # exclusion); no_std+alloc variant
                                                   # like cas, --lib skips the
                                                   # placeholder bin
-cargo verus verify -p loader --no-default-features # ELF page_layout: total,
-                                                  # overflow-safe page geometry
-                                                  # ∀ (vaddr, memsz); verified as
-                                                  # the no_std core, re-verifies ipc
+cargo verus verify -p loader --no-default-features # ELF page_layout (total,
+                                                  # overflow-safe ∀ vaddr,memsz)
+                                                  # + parse total bounded decoder
+                                                  # ∀ &[u8] (le readers + every
+                                                  # accepted Image well-formed);
+                                                  # no_std core, re-verifies ipc
 ```
 
 A real run ends each crate with a `verification results:: N verified, 0 errors`

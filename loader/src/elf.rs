@@ -6,21 +6,23 @@ pub const PF_X: u32 = 1;
 pub const PF_W: u32 = 2;
 pub const PF_R: u32 = 4;
 
-// Verus is the deductive-proof tier for the page geometry (`Segment::page_layout`,
-// below). `vstd::prelude` supplies the `verus!{}` macro + ghost vocabulary; Verus
+// Verus is the deductive-proof tier for the page geometry (`Segment::page_layout`)
+// and the ELF decoder (`parse` + the little-endian field readers), below.
+// `vstd::prelude` supplies the `verus!{}` macro + ghost vocabulary; Verus
 // requires it imported at the crate root. In an ordinary build the macro erases
 // ghost code, so this import is otherwise unused — hence the allow (same as
 // freelist/virtio-blk/storage-server).
 #[allow(unused_imports)]
 use vstd::prelude::*;
 
-// The page-geometry cluster is the Verus-verified deductive core: `PAGE`, the
-// `Segment`/`PageLayout` types, `ElfError`, and `page_layout`'s total/overflow-
-// safe contract all live in the `verus!{}` block so the proof can name them
-// (doc/guidelines/verus.md §6). The ELF/startup byte decoders and the
-// target-only `spawn` stay external plain Rust — after erasure these are
-// ordinary items, so `parse`, `spawn`, and the `pub use crate::elf::PAGE`
-// re-export keep working unchanged.
+// The page-geometry cluster and the ELF decoder are the Verus-verified deductive
+// core: `PAGE`, the `Segment`/`PageLayout`/`Image` types, `ElfError`,
+// `page_layout`'s total/overflow-safe contract, the little-endian field readers,
+// and `parse`'s total bounded-decoder contract all live in the `verus!{}` block
+// so the proofs can name them (doc/guidelines/verus.md §6). The startup-block
+// codec and the target-only `spawn` stay external plain Rust — after erasure
+// these are ordinary items, so `spawn`, the `pub use crate::elf::PAGE`
+// re-export, and the callers of `parse` keep working unchanged.
 verus! {
 
 /// Page size the loader maps segments at (rev2§5). Canonical home: `spawn`
@@ -172,10 +174,12 @@ impl Segment {
     }
 }
 
-} // verus!
-
 pub const MAX_SEGMENTS: usize = 8;
 
+/// A parsed, validated ELF image: the entry point, the accepted PT_LOAD
+/// segments (`segments[..nsegments]`), and the backing bytes. `parse` is the
+/// only constructor and its `ensures` make every returned `Image` satisfy
+/// [`well_formed_image`].
 #[derive(Debug)]
 pub struct Image<'a> {
     pub entry: u64,
@@ -184,119 +188,286 @@ pub struct Image<'a> {
     pub bytes: &'a [u8],
 }
 
-// `off` comes from untrusted header fields: the end offset needs checked
-// math, not just the slice bounds check.
-fn u16le(b: &[u8], off: usize) -> Result<u16, ElfError> {
-    off.checked_add(2)
-        .and_then(|end| b.get(off..end))
-        .map(|s| u16::from_le_bytes([s[0], s[1]]))
-        .ok_or(ElfError::Truncated)
+// Little-endian field readers (rev2§5). The header fields come from untrusted
+// images, so a read is admissible only when its window lies inside `buf`
+// (`off + N <= buf@.len()`, the caller's obligation); `parse` bounds the whole
+// program-header entry up front so each field read is in range. Each reader
+// reassembles the value with explicit mask/shift arithmetic (Verus does not
+// spec `from_le_bytes`) and proves the bytes it consumed are exactly the value's
+// little-endian split (`u*_le`), discharged by the matching `lemma_u*_le_bytes`
+// bit-vector identity (doc/guidelines/verus.md §6; cas's node-decoder readers
+// are the precedent).
+pub open spec fn u16_le(x: u16) -> Seq<u8> {
+    seq![x as u8, (x >> 8) as u8]
 }
 
-fn u32le(b: &[u8], off: usize) -> Result<u32, ElfError> {
-    off.checked_add(4)
-        .and_then(|end| b.get(off..end))
-        .map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
-        .ok_or(ElfError::Truncated)
+pub open spec fn u32_le(x: u32) -> Seq<u8> {
+    seq![x as u8, (x >> 8) as u8, (x >> 16) as u8, (x >> 24) as u8]
 }
 
-fn u64le(b: &[u8], off: usize) -> Result<u64, ElfError> {
-    off.checked_add(8)
-        .and_then(|end| b.get(off..end))
-        .map(|s| u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]))
-        .ok_or(ElfError::Truncated)
+pub open spec fn u64_le(x: u64) -> Seq<u8> {
+    seq![
+        x as u8,
+        (x >> 8) as u8,
+        (x >> 16) as u8,
+        (x >> 24) as u8,
+        (x >> 32) as u8,
+        (x >> 40) as u8,
+        (x >> 48) as u8,
+        (x >> 56) as u8,
+    ]
 }
 
-pub fn parse(bytes: &[u8]) -> Result<Image<'_>, ElfError> {
+proof fn lemma_u16_le_bytes(v: u16, b0: u8, b1: u8) by (bit_vector)
+    requires
+        v == (b0 as u16) | ((b1 as u16) << 8),
+    ensures
+        v as u8 == b0,
+        (v >> 8) as u8 == b1,
+{
+}
+
+proof fn lemma_u32_le_bytes(v: u32, b0: u8, b1: u8, b2: u8, b3: u8) by (bit_vector)
+    requires
+        v == (b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16) | ((b3 as u32) << 24),
+    ensures
+        v as u8 == b0,
+        (v >> 8) as u8 == b1,
+        (v >> 16) as u8 == b2,
+        (v >> 24) as u8 == b3,
+{
+}
+
+proof fn lemma_u64_le_bytes(v: u64, b0: u8, b1: u8, b2: u8, b3: u8, b4: u8, b5: u8, b6: u8, b7: u8)
+    by (bit_vector)
+    requires
+        v == (b0 as u64) | ((b1 as u64) << 8) | ((b2 as u64) << 16) | ((b3 as u64) << 24) | ((b4
+            as u64) << 32) | ((b5 as u64) << 40) | ((b6 as u64) << 48) | ((b7 as u64) << 56),
+    ensures
+        v as u8 == b0,
+        (v >> 8) as u8 == b1,
+        (v >> 16) as u8 == b2,
+        (v >> 24) as u8 == b3,
+        (v >> 32) as u8 == b4,
+        (v >> 40) as u8 == b5,
+        (v >> 48) as u8 == b6,
+        (v >> 56) as u8 == b7,
+{
+}
+
+fn read_u16_le(buf: &[u8], off: usize) -> (v: u16)
+    requires
+        off + 2 <= buf@.len(),
+    ensures
+        buf@.subrange(off as int, off as int + 2) == u16_le(v),
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    let b0 = buf[off];
+    let b1 = buf[off + 1];
+    let v: u16 = (b0 as u16) | ((b1 as u16) << 8);
+    proof {
+        lemma_u16_le_bytes(v, b0, b1);
+    }
+    assert(buf@.subrange(off as int, off as int + 2) =~= u16_le(v));
+    v
+}
+
+fn read_u32_le(buf: &[u8], off: usize) -> (v: u32)
+    requires
+        off + 4 <= buf@.len(),
+    ensures
+        buf@.subrange(off as int, off as int + 4) == u32_le(v),
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    let b0 = buf[off];
+    let b1 = buf[off + 1];
+    let b2 = buf[off + 2];
+    let b3 = buf[off + 3];
+    let v: u32 = (b0 as u32) | ((b1 as u32) << 8) | ((b2 as u32) << 16) | ((b3 as u32) << 24);
+    proof {
+        lemma_u32_le_bytes(v, b0, b1, b2, b3);
+    }
+    assert(buf@.subrange(off as int, off as int + 4) =~= u32_le(v));
+    v
+}
+
+fn read_u64_le(buf: &[u8], off: usize) -> (v: u64)
+    requires
+        off + 8 <= buf@.len(),
+    ensures
+        buf@.subrange(off as int, off as int + 8) == u64_le(v),
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    let b0 = buf[off];
+    let b1 = buf[off + 1];
+    let b2 = buf[off + 2];
+    let b3 = buf[off + 3];
+    let b4 = buf[off + 4];
+    let b5 = buf[off + 5];
+    let b6 = buf[off + 6];
+    let b7 = buf[off + 7];
+    let v: u64 = (b0 as u64) | ((b1 as u64) << 8) | ((b2 as u64) << 16) | ((b3 as u64) << 24) | ((b4
+        as u64) << 32) | ((b5 as u64) << 40) | ((b6 as u64) << 48) | ((b7 as u64) << 56);
+    proof {
+        lemma_u64_le_bytes(v, b0, b1, b2, b3, b4, b5, b6, b7);
+    }
+    assert(buf@.subrange(off as int, off as int + 8) =~= u64_le(v));
+    v
+}
+
+/// A PT_LOAD segment `parse` will accept: its file extent lies inside the
+/// image (`offset + filesz <= len`) and its page geometry does not overflow
+/// (equivalently `page_layout()` returns `Ok` — the rev2§5.3 refuse-not-crash
+/// boundary mechanized on `page_layout`).
+pub open spec fn seg_ok(s: Segment, len: nat) -> bool {
+    &&& s.offset + s.filesz <= len
+    &&& s.vaddr + s.memsz + PAGE_MASK <= u64::MAX
+}
+
+/// What `parse` guarantees of a returned `Image`: between one and
+/// `MAX_SEGMENTS` accepted segments, each satisfying [`seg_ok`] against the
+/// backing bytes (rev2§5).
+pub open spec fn well_formed_image(img: Image) -> bool {
+    &&& 1 <= img.nsegments <= MAX_SEGMENTS
+    &&& forall|j: int|
+        0 <= j < img.nsegments ==> seg_ok(#[trigger] img.segments@[j], img.bytes@.len())
+}
+
+/// Parse an ELF64 little-endian aarch64 executable (rev2§5). Strict, untrusted
+/// input: images are data in the versioned store, so any writer feeds bytes
+/// here. Mechanized **total** — for every `&[u8]`, `parse` returns without
+/// panicking or reading out of bounds (rev2§5.3) — and every accepted `Image`
+/// satisfies [`well_formed_image`]: a non-empty, bounded set of segments, each
+/// in range and layout-safe, so `spawn::prepare` is never handed a segment it
+/// cannot lay out.
+pub fn parse(bytes: &[u8]) -> (r: Result<Image<'_>, ElfError>)
+    ensures
+        r matches Ok(img) ==> well_formed_image(img),
+{
+    broadcast use vstd::slice::group_slice_axioms;
     if bytes.len() < 64 {
         return Err(ElfError::Truncated);
     }
-    if &bytes[0..4] != b"\x7FELF" {
+    // ELF magic `\x7FELF`, checked byte-wise (Verus does not spec slice equality).
+    if bytes[0] != 0x7f || bytes[1] != 0x45 || bytes[2] != 0x4c || bytes[3] != 0x46 {
         return Err(ElfError::BadMagic);
     }
     // EI_CLASS = 2 (64-bit), EI_DATA = 1 (LE)
     if bytes[4] != 2 || bytes[5] != 1 {
         return Err(ElfError::NotElf64Le);
     }
-    let e_type = u16le(bytes, 16)?;
+    let e_type = read_u16_le(bytes, 16);
     if e_type != 2 {
         // ET_EXEC: userspace is statically linked at fixed VAs (rev2§5).
         return Err(ElfError::NotExecutable);
     }
-    if u16le(bytes, 18)? != 183 {
+    if read_u16_le(bytes, 18) != 183 {
         // EM_AARCH64
         return Err(ElfError::NotAarch64);
     }
-    let entry = u64le(bytes, 24)?;
-    let phoff = u64le(bytes, 32)? as usize;
-    let phentsize = u16le(bytes, 54)? as usize;
-    let phnum = u16le(bytes, 56)? as usize;
+    let entry = read_u64_le(bytes, 24);
+    let phoff = read_u64_le(bytes, 32) as usize;
+    let phentsize = read_u16_le(bytes, 54) as usize;
+    let phnum = read_u16_le(bytes, 56) as usize;
     if phentsize < 56 {
         return Err(ElfError::BadSegment);
     }
 
-    let mut segments = [Segment {
-        vaddr: 0,
-        offset: 0,
-        filesz: 0,
-        memsz: 0,
-        flags: 0,
-    }; MAX_SEGMENTS];
-    let mut n = 0;
-    for i in 0..phnum {
-        // Checked: `e_phoff` is untrusted, so `ph` (and the `ph + k` field
-        // offsets below) must not wrap. Bounding the whole entry up front
-        // keeps the later `ph + k` additions overflow-free (k < phentsize).
-        let ph = i
-            .checked_mul(phentsize)
-            .and_then(|o| phoff.checked_add(o))
-            .ok_or(ElfError::Truncated)?;
-        let ph_end = ph.checked_add(phentsize).ok_or(ElfError::Truncated)?;
+    let mut segments = [Segment { vaddr: 0, offset: 0, filesz: 0, memsz: 0, flags: 0 }; MAX_SEGMENTS];
+    let mut n: usize = 0;
+    let mut i: usize = 0;
+    while i < phnum
+        invariant
+            bytes@.len() >= 64,
+            phentsize >= 56,
+            n <= MAX_SEGMENTS,
+            forall|j: int| 0 <= j < n ==> seg_ok(#[trigger] segments@[j], bytes@.len()),
+        decreases phnum - i,
+    {
+        // `phoff`/`phentsize` are untrusted, so `ph` (and the `ph + k` field
+        // offsets below) must not wrap. Bounding the whole entry up front keeps
+        // the later `ph + k` additions overflow-free (k < phentsize).
+        let ph = match i.checked_mul(phentsize) {
+            None => return Err(ElfError::Truncated),
+            Some(o) => match phoff.checked_add(o) {
+                None => return Err(ElfError::Truncated),
+                Some(p) => p,
+            },
+        };
+        let ph_end = match ph.checked_add(phentsize) {
+            None => return Err(ElfError::Truncated),
+            Some(e) => e,
+        };
         if ph_end > bytes.len() {
             return Err(ElfError::Truncated);
         }
-        let p_type = u32le(bytes, ph)?;
-        if p_type != 1 {
-            continue; // PT_LOAD only
+        proof {
+            // ph_end == ph + phentsize <= len and phentsize >= 56, so every field
+            // read below (the widest window is ph+40 .. ph+48) is in bounds.
+            assert(ph + 56 <= bytes@.len());
         }
-        if n == MAX_SEGMENTS {
-            return Err(ElfError::TooManySegments);
+        let p_type = read_u32_le(bytes, ph);
+        if p_type == 1 {
+            // PT_LOAD only.
+            if n == MAX_SEGMENTS {
+                return Err(ElfError::TooManySegments);
+            }
+            let seg = Segment {
+                flags: read_u32_le(bytes, ph + 4),
+                offset: read_u64_le(bytes, ph + 8),
+                vaddr: read_u64_le(bytes, ph + 16),
+                filesz: read_u64_le(bytes, ph + 32),
+                memsz: read_u64_le(bytes, ph + 40),
+            };
+            let pl = seg.page_layout();
+            // Producer/consumer agreement: refuse exactly the segments `prepare`
+            // cannot lay out — file extent past the image, `filesz > memsz`, or a
+            // page-rounding overflow (the `pl.is_err()` arm).
+            match seg.offset.checked_add(seg.filesz) {
+                None => return Err(ElfError::BadSegment),
+                Some(end) => {
+                    if seg.filesz > seg.memsz || end > bytes.len() as u64 || pl.is_err() {
+                        return Err(ElfError::BadSegment);
+                    }
+                    if seg.memsz != 0 {
+                        proof {
+                            // The accepted segment satisfies `seg_ok`: file extent
+                            // in bounds (`end == offset+filesz <= len`) and layout
+                            // overflow-free (`pl.is_ok()` ⇒ `page_layout`'s ensures).
+                            assert(seg.offset + seg.filesz <= bytes@.len());
+                            assert(seg.vaddr + seg.memsz + PAGE_MASK <= u64::MAX);
+                            assert(seg_ok(seg, bytes@.len()));
+                        }
+                        let ghost prev = segments@;
+                        let ghost prev_n = n;
+                        segments[n] = seg;
+                        proof {
+                            assert forall|j: int| 0 <= j < prev_n + 1 implies seg_ok(
+                                #[trigger] segments@[j],
+                                bytes@.len(),
+                            ) by {
+                                if j < prev_n {
+                                    assert(segments@[j] == prev[j]);
+                                    assert(seg_ok(prev[j], bytes@.len()));
+                                } else {
+                                    assert(segments@[j] == seg);
+                                }
+                            }
+                        }
+                        n = n + 1;
+                    }
+                },
+            }
         }
-        let seg = Segment {
-            flags: u32le(bytes, ph + 4)?,
-            offset: u64le(bytes, ph + 8)?,
-            vaddr: u64le(bytes, ph + 16)?,
-            filesz: u64le(bytes, ph + 32)?,
-            memsz: u64le(bytes, ph + 40)?,
-        };
-        if seg.filesz > seg.memsz
-            || seg
-                .offset
-                .checked_add(seg.filesz)
-                .is_none_or(|end| end > bytes.len() as u64)
-            // Producer/consumer agreement: refuse exactly the segments
-            // `prepare` cannot lay out (catches the vaddr+memsz wrap and
-            // rejects the page-rounding overflow).
-            || seg.page_layout().is_err()
-        {
-            return Err(ElfError::BadSegment);
-        }
-        if seg.memsz == 0 {
-            continue;
-        }
-        segments[n] = seg;
-        n += 1;
+        i = i + 1;
     }
     if n == 0 {
         return Err(ElfError::BadSegment);
     }
-    Ok(Image {
-        entry,
-        segments,
-        nsegments: n,
-        bytes,
-    })
+    Ok(Image { entry, segments, nsegments: n, bytes })
 }
+
+} // verus!
 
 #[cfg(test)]
 mod tests {
