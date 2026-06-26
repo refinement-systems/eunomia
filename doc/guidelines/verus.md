@@ -79,6 +79,19 @@ cargo verus verify -p dma-pool
 cargo verus verify -p cas --no-default-features   # cas is Vec-heavy; the feature-agnostic codecs verify in the no_std+alloc variant
 ```
 
+**Verifying a crate verifies every target it builds — binaries included, not just the
+library.** A binary with no `verus!{}` code of its own still must import the ghost prelude
+(`use vstd::prelude::*`), or the prover aborts it ("the builtin/ghost crate was not
+imported"). For a genuinely proof-free binary — a thin on-target entrypoint — scope the
+gate to the library with `--lib` rather than adding a prelude import the binary does not
+otherwise need: that import buys nothing, and every future proof-free binary in the crate
+would have to carry it. The verify wrapper partitions its flags into *prover-forwarded*
+(package selection `-p`, feature flags like `--no-default-features`) and
+*build-tool-forwarded* (target selection like `--lib`), and the prover-forwarded flags must
+come **first** on the command line — the reverse order is a hard error. Restricting to
+`--lib` still recompiles and re-verifies the full gated dependency closure; it only drops
+the crate's own non-library targets.
+
 **The gate counts verified items, not source.** The verifier's number is one per
 `exec`/`proof`/`spec fn`, not per line, branch, or match arm. Extending an
 already-verified function — a new match arm, a new enum variant, a moved or
@@ -171,18 +184,30 @@ Three rules govern what a contract may name:
   `ring_fifo().len() ± 1` when a `count ± 1` clause already fixes it, since
   `ring_fifo().len() == count` by construction). Pick the predicate that carries genuine,
   non-derived content (the channel `send`/`recv` FIFO labels name `Seq::push` /
-  `drop_first` and the Err-arm store-frame, not the length).
+  `drop_first` and the Err-arm store-frame, not the length). Pick the lightest faithful
+  *instrument*, too: when the clause is a self-contained boolean over the function's own
+  scalar arguments and the doc comment already names the invariant, an inline comment on
+  that specific `ensures` clause — not a wrapper `spec fn` — is the faithful label, and a
+  wrapper there is the vacuous over-engineering to avoid; reserve a named `spec fn` for
+  clauses that are complex expressions over aggregate views, where the name earns the
+  reader something the raw clause does not. A comment carries no obligation and is invisible
+  to the solver, so the verified count and per-function `rlimit` stay flat by construction —
+  it is not a proof change to measure. (Where the label names only the *local* half of a
+  model invariant whose global arm the in-memory state cannot witness, §15.6 governs:
+  state that the global arm stays the design oracle, so the per-step `ensures` is never read
+  as a full mechanization.)
 - **A *new* projection `spec fn` of an external (TLA) invariant must carry a
   pins/teeth control** — the case the comment-only labels above don't cover. When the
   named predicate is discharged *only* by feeding it its sole producer's `ensures`
   (e.g. `recover_reconstructs` from `recover_records`), a green proof risks being
   vacuous: it could hold for the wrong reconstruction too. Add a committed `proof fn`
   proving the predicate is *false* for a deliberately-wrong argument (an off-by-one
-  anchor — `lemma_recover_reconstructs_pins_head` proves a head ≠ the rebuilt run's
-  anchor fails it), so the green proof demonstrably constrains the input it is stated
-  against. The pins lemma stays in the tree; the symmetric "wrong `ensures` fails to
-  verify" experiment is recorded in the findings doc and reverted — it is red by
-  construction and cannot be committed.
+  anchor — a lemma proving that a head ≠ the rebuilt run's anchor fails the
+  predicate), so the green proof demonstrably constrains the input it is stated
+  against. The pins lemma stays in the tree; its mirror image — adding a *wrong*
+  `ensures` and watching it fail to verify — is red by construction and so cannot be
+  committed (a committed proof must be green), so run it locally once to confirm the
+  pins lemma has teeth, then discard it.
 
 ## The trusted base
 
@@ -197,11 +222,46 @@ reason and a test is a finding, not a boundary.
 
 ## When Verus is not the tool
 
-Verus is one tier of a wider verification scheme (rev2§6). When a problem is not
-a deductive-proof obligation on an extracted function — a design-level state
-machine, code-level concurrency interleavings, adversarial bytes, or a pure
-policy over already-verified ops — the method that fits it and the reason are in
-the dispatcher, `doc/guidelines/verification.md`.
+Verus is one tier of a wider verification scheme (rev2§6); a problem that is not a
+deductive-proof obligation on an extracted function routes to a different tier,
+decided by what the obligation is *about*, not by reaching for the
+strongest-sounding tool:
+
+- **A design-level state machine — liveness, fairness, refinement, or an unbounded
+  cross-restart / cross-process / crash interleaving** → a temporal model-checker
+  (the TLA+ tier). Verus has no temporal logic, no fairness, and no crash/environment
+  model, so these are irreducibly model-tier. Only the property's *per-step inductive
+  safety* arm over finite first-order state can move to Verus, as the unbounded
+  deductive twin (§15.6) — re-routed, not duplicated.
+- **Code-level concurrency interleavings — a torn read, a lost wakeup, a
+  weak-ordering protocol** → a concurrency interleaving checker (an exhaustive
+  enumerator for a certifying proof, a randomized scheduler for smoke). The hard
+  constraint that forces this: the ghost atomics under the pin are
+  **sequentially-consistent only, with no standalone fence**, so a structure that
+  ships Relaxed data behind an Acquire/Release fence cannot be proven faithfully in
+  Verus — a SeqCst proof would certify a *different* binary than ships (§15.5). When
+  the shared state genuinely *is* a SeqCst atomic, the tokenized-state-machine path
+  (§15) is the in-Verus option.
+- **Adversarial bytes — a wire/on-disk decoder over arbitrary input** → coverage
+  fuzzing, *paired* with a Verus decode-totality / accept-iff proof (§8): the proof
+  discharges totality and canonical form for all inputs while the fuzzer carries
+  differential and corpus coverage. Provenance, not concern-class, decides this —
+  trusted-provenance input (a value your own code just produced, typed interactive
+  input) earns neither proof nor fuzzer, only a documented non-guard.
+- **A pure policy or scheduler over already-verified ops — code deciding *when* an
+  effect fires, not *how* it persists** → property / undefined-behaviour testing; the
+  underlying ops already carry their `ensures`, so no new proof chokepoint exists, and
+  the UB checker is the oracle for any `unsafe`.
+
+Whatever the tier, a model or proof earns its keep only when a deliberately broken
+variant is *confirmed to fail* (§11's host-test-with-teeth; the model tier's runnable
+negative control) — a check that cannot express the defect proves nothing. Some
+surfaces have no method and are trusted by construction: the assembly shell (boot,
+MMU/TLB, interrupt controller, MMIO, the one physical-address→pointer site) and the
+crypto / perf inner loops; the small enumerated trusted base (Part A, "The trusted
+base") is what keeps that set honest. A separate problem-shape→method dispatcher
+covers the full cross-tier routing; this section inlines the part a Verus author needs
+at the moment of deciding whether to start a proof at all.
 
 ---
 
@@ -316,7 +376,32 @@ Bare `self` in a postcondition is a hard compile error on current toolchains —
 many stale web examples use it and will not compile (the restriction is on
 `ensures`; `requires` may use bare `self`). A read-only `&mut` frame is
 free: keep the ergonomic signature and prove `*x == *old(x)` by calling no
-mutator.
+mutator. For a *small owned aggregate of `Copy` elements* (a fixed-size array, a
+handful of scalars), an alternative that dodges the `final`/`old` syntax entirely is to
+take it **by value and return the updated value**: the body mutates an owned local and
+every postcondition and loop invariant names the returned value and entry parameters
+directly. This trades a setup-time copy at the call boundary for a simpler proof
+surface — worth it when the mutated state is small and the call is infrequent, since
+`&mut` is least documented precisely inside the loop invariants where such a proof lives.
+
+**Prefer a fixed-capacity array to a growable vector for a bounded decoder.** Writing one
+element of a `[T; N]` in place (`arr.set(i, v)`) is native under Verus: with `i < N` the
+prover applies update framing — the written slot takes the new value, every other slot is
+unchanged. So when a decoder fills a fixed maximum number of records, keep a fixed array
+rather than a `Vec`; this keeps any heap-allocation dependency out of a no-heap /
+minimal-feature verify configuration and needs no public API change. To carry a
+`forall`-prefix invariant across the write, snapshot the pre-write view into a ghost
+binding and re-establish the invariant over the new length by case-splitting on the
+written index:
+
+```rust
+let ghost prev = arr@;
+arr.set(i, v);
+assert forall|j: int| 0 <= j < i + 1 implies elem_ok(arr@[j], len) by {
+    if j < i { /* arr@[j] == prev[j]: the prefix invariant held */ }
+    else     { /* arr@[i] == v: the new element satisfies elem_ok */ }
+}
+```
 
 ## 3. Frames and invariants
 
@@ -725,6 +810,12 @@ let pad   = (align - off % align) % align;
 let start = off + pad;                 // start % align == 0, from vstd::arithmetic::div_mod
 ```
 
+Not every modular fact needs a lemma, though: a simple in-bounds modulo bound —
+`idx % size < size`, with the no-overflow of a small surrounding cast/multiply/add and an
+in-buffer offset bound — discharges automatically from a `size > 0` precondition, citing
+no arithmetic axiom. Reserve the quarantine-behind-a-named-lemma discipline for the goals
+the solver actually stalls on (symbolic products, division, round-up masks).
+
 **Discharge concrete-value and constant-nonlinear obligations by computation.** When
 a recursive `spec fn` won't reduce at a concrete argument under default fuel, or Z3
 refuses to simplify a product of static constants, run Verus's interpreter:
@@ -787,6 +878,20 @@ let r = self.refs(o);
 if r == u32::MAX { return Err(Overflow); }   // refuse pre-mutation
 self.set_refs(o, r + 1);                       // now provably no wrap
 ```
+
+**State a refuse-not-wrap range check as an overflow-iff.** A defensive bound check is
+cleanest as a small *total* exec fn with a single biconditional postcondition
+`r is Err <==> out_of_range(..)`, written over a `match` on a checked-arithmetic
+combinator. The library's checked-add option spec — `None` exactly when the true sum
+exceeds the maximum, else `Some` of the result — drives the iff with no hints: the
+overflowing-sum and exceeds-bound cases collapse (an overflowing sum already exceeds any
+in-range bound) and the success arm follows by exhaustiveness. Verifying the body *is* its
+totality theorem. The same idiom serves alignment-and-overflow geometry (with masks) and a
+plain length / range bound (without); the maskless form is strictly simpler. When the
+rewrite's proof shows a defensive runtime guard can *never* fire, **drop** it rather than
+keep it — a retained dead error branch is strictly weaker than the proof and breaks the
+clean error-iff by adding a second, never-taken error variant; behaviour is unchanged (the
+branch was dead) and the postcondition becomes exact.
 
 Smaller rules: narrowing casts (`as u8`) carry **no** obligation — they are total;
 for a widening cast needing a bound, order the guard *before* the cast so the bound
@@ -860,7 +965,14 @@ Two facts explain almost every confusing `bit_vector` failure:
 
 - **It knows only the literals in the goal** — not symbolic consts, not enclosing
   `let`s. Pin a named const first (`assert(MASK == 0xFF) by (compute)`), and inline
-  a `let`'s full defining expression into the asserted goal.
+  a `let`'s full defining expression into the asserted goal. This generalizes past
+  `bit_vector` to *any* obligation that turns on a constant's *value*: an exec division by
+  a named divisor (`len / GRAN`) carries a no-divide-by-zero obligation that discharges
+  only when the prover sees the divisor is a nonzero literal, so a bare module const
+  declared outside `verus!{}` is opaque and must move inside the block (mechanical — it
+  erases to the same exported const at the same path). A clause true for *every* value of
+  the constant (a masking-monotonicity property independent of which bit a flag occupies)
+  needs no literal and proves symbolically; only a value-specific clause does.
 - **It rejects struct/datatype field projections** ("unsupported for bit-vector:
   Field"). Bind the field to a plain fixed-width local first.
 
@@ -956,12 +1068,40 @@ assert forall|j: u64| 0 <= j < 64 implies coherent(j) by { set_bit_other(x, k, j
 //   ensures forall|j: u64| #![trigger used & (1u64 << j)] j < bit ==> used & (1u64 << j) != 0
 ```
 
+**Two recurring shift/scan rules.** A `1 << k` inside a `bit_vector` goal *always* needs an
+explicit `k < width` hypothesis in the `assert`'s `requires`, even when `k < width` is
+obvious from context: the solver models the shift with wrap semantics and is free to pick
+`k >= width`, where `1 << k == 0` makes a masking assertion (`x & (1<<k) != 0`) vacuously
+false. The diagnostic tell is two symmetric arms differing only in their `bit_vector`
+hypotheses — one verifies, its twin fails — because the failing arm dropped the width bound
+the other inherited from context. And the clear-lowest-set-bit loop (`bits &= bits - 1`
+each step) verifies by tracking the processed set as `mask & !bits` with `decreases bits`,
+keyed on one empty-bodied lemma: given a position is the lowest set bit, prove
+`bits & (bits - 1) == bits & !(1 << pos)` and `bits & (bits - 1) < bits`. Supply the
+lowest-bit premise in the trailing-zeros axiom's *aggregate* mask form
+`bits << (width - tz) == 0` — "all bits below `tz` are clear" as one quantifier-free fact,
+never a per-bit `forall` — and the per-step invariant re-proof is then a case split on
+`index == pos` vs `index != pos`.
+
 Push tight bounds into extractor contracts (`ensures r < 512` for a 9-bit field)
 so every downstream index is in-bounds from the contract alone, and state
 "by construction" security claims as ∀-theorems (`assert(forall|r| (r & ALLOWED) &
-FORBIDDEN == 0) by (bit_vector)`) rather than per-site asserts. Don't over-pin:
-align-down facts hold for a *symbolic* mask (`(x & !m) <= x`); pin literals only
-for the genuinely stride-bound step. **Parser gotcha:** a bare `ident < ident`
+FORBIDDEN == 0) by (bit_vector)`) rather than per-site asserts. Don't over-pin, and keep
+the two concerns in *separate* lemmas: align-down / partition identities (`(x & !m) <= x`,
+`(x & !m) + (x & m) == x`, `(x & m) <= m`) hold for *every* mask, so prove them once with a
+single symbolic `bit_vector` lemma taking the mask as a parameter, and reserve the
+value-specific power-of-two reasoning (an exact stride / page count) for a separate modular
+lemma — mixing them drags literals into the bit half for no reason. Keep subtraction *out*
+of a `bit_vector` goal entirely: spec subtraction yields a mathematical integer, on which
+bitwise-and is undefined, so a subtracted expression cannot appear in such a goal. And do
+not try to prove "the difference of two mask-aligned values is mask-aligned" with a
+symbolic mask — it holds only for a contiguous low-bit (power-of-two) mask, false in general
+(under a non-contiguous mask two aligned operands can have a non-aligned difference). Route
+"aligned − aligned is aligned" through the modulus: a low-`k`-bit mask equals the value mod
+`2^k`, so prove both bounds `≡ 0 (mod alignment)` and finish with "difference of two
+multiples is a multiple" plus "x divisible by d ⇒ x/d*d == x" from the modular-arithmetic
+library, so no subtraction reaches a bit-blasted query. **Parser gotcha:** a bare
+`ident < ident`
 misparses (the `<` reads as a turbofish, e.g. `int<…>` taken as generics) — and
 not only inside an inline `... by
 (bit_vector) requires …;`: `(expr as int) < other` mis-parses the same way in
@@ -1043,7 +1183,11 @@ slice `==`. **Broadcast the axioms** — open each byte-reading helper and the
 top-level `decode` with `broadcast use vstd::slice::group_slice_axioms;` (and
 `vstd::array::group_array_axioms` for array literals, closing with extensional
 `=~=`); without it, byte-indexing proofs fail to link exec length to ghost length,
-the near-universal first stumble.
+the near-universal first stumble. To compare against a *named* fixed-byte constant prefix
+(`pub const M: [u8; N]`, a magic number), read it as `M@[i]` in the spec model and index
+`M[i]` in exec, bridged by that same `broadcast use vstd::array::group_array_axioms` — no
+new const and no literal byte duplication, so the proof stays pinned to the single ABI
+constant.
 
 **Spec the codec as accept-iff + a two-direction bijection.** Tie exec functions to
 `spec_encode`/`spec_decode` over `Seq<u8>`, and state totality and acceptance as a
@@ -1084,6 +1228,28 @@ caller or test pins which variant fires for a multiply-malformed input.
 if cond =>`); the erased behaviour is identical but the proof is direct only when
 the rejection branch is syntactically present. Make the explicit `match … { None =>
 return Err(..) }` a uniform convention.
+
+**Bound a strided record's whole stride up front.** For a record parsed at a base offset
+that advances by a fixed stride, prove one bound — `assert(base + stride <= buf@.len())` —
+at the top of the record (it follows from the `checked_add` `Some` arm that produced the
+record end, plus a loop invariant lower-bounding the stride). That single fact discharges
+every in-record field read's `off + N <= len` precondition and every `base + k` `usize`
+overflow check at once, since the widest field read lies inside `[base, base + stride)`.
+Bounding per field instead multiplies the obligations for no gain.
+
+**Compose a decoder on an upstream validator by negating its `Err` condition.** When a
+stage must enforce a property an already-verified validator decides, don't re-derive it:
+bind the validator call to a local so its `ensures` — typically
+`r is Err <==> <failing condition>` — is in scope, refuse on the error arm, and the accept
+arm hands you the negation for free. Choose the downstream accept-predicate's clause to be
+exactly that negated boundary, so the two propositions coincide and the composition is one
+bind plus one branch:
+
+```rust
+let check = field.validate();   // ensures: check is Err <==> overflow_condition(field)
+if check.is_err() { return Err(..); }
+// accept arm: !overflow_condition(field) is now in scope — precisely accept_pred(field)
+```
 
 **Evolving a verified codec is cheaper than building one — budget it that way.**
 *Append* new fields after the existing layout and bump the length constant: the
@@ -1178,6 +1344,24 @@ Note that `external_type_specification` also hides layout: Verus **cannot derive
 every layout/field fact about such a type as something you must *provide* (a
 trusted `external_body` helper with `ensures r > 0` + a host test), not something
 the verifier recovers.
+
+**When the verified core only needs to *signal* failure, return a unit-error and wrap the
+rich error outside.** The twin-enum move above is for a body that must *construct* the
+value; when the verified helper merely needs to report success or failure, have it return
+`Result<(), ()>` (or a `bool`) and let a thin caller map that to the rich exec-only error
+(`map_err(|()| Error::OutOfRange)`). That keeps the rich enum and its derives out of
+verification scope entirely — the proof states the arithmetic/decision, the caller states
+the policy and supplies the vocabulary.
+
+**The same "verified pure core behind a thin shell" generalizes past foreign *types* to a
+foreign *carrier*.** When the function to verify is a method on a struct that is generic
+over an external trait, or that holds a reference/lifetime, do not drag the struct into the
+macro — its trait bound and reference are unverifiable and contaminate every proof. Lift the
+pure state into a free function over explicit arguments — `fn f(state: &mut S, ...)`, or
+by-value `fn f(state: S, ...) -> (S, ...)` (§2) — and have the method delegate to it in one
+line. Only the small payload datatypes the free function names enter the macro; the generic
+parameter, the trait bound, and the reference stay in the plain-Rust shell, and existing
+tests that read the struct's fields keep working unchanged because the fields never move.
 
 ## 10. Proof scaling: small contexts and trigger economy
 
@@ -1445,8 +1629,9 @@ free, so an explicit `ensures P(final)` adds proof surface and a future-edit obl
 heavy op for *no new derivable fact*. Reserve the explicit label for the one site where the
 property genuinely *bites* — the operation the invariant is *about* (the firing site
 `report_terminal`, not the bind-slot-emptying teardown that merely preserves it) — and let the
-corollary carry it everywhere else. This is the deductive twin of a TLA per-step invariant
-named where it is cheaply entailed (Part A §1.3); the discharge across the op's own body uses a
+corollary carry it everywhere else. This is the deductive twin of naming a per-step invariant
+at the site where it is cheaply entailed rather than the site it is *about*; the discharge
+across the op's own body uses a
 *light* frame lemma (read-set: slot caps + `bind_slots` + notif domain), never a re-run of the
 full `caps_consistent` frame the op's heavy ensures already pay for.
 
@@ -1679,7 +1864,23 @@ count by exactly three. A delta matching the lemmas added (and nothing else) is
 positive evidence the change did only what was intended and added no hidden seam.
 (Verus also counts each `while`-loop as an obligation, so replacing two inline loops
 with one helper containing one loop can leave the tally flat — read the *presence* of
-the `verification results::` line, not the count, as proof of a real run.)
+the `verification results::` line, not the count, as proof of a real run.) Moving a struct
+or enum into a `verus!{}` block also surfaces its *derived* impls as obligations: a
+`#[derive(Clone)]` adds its derived `clone` as one (trivial) verified item, while
+`PartialEq`/`Eq`/`Debug` typically add none — count the derives, not just the hand-written
+fns, when forecasting the bump.
+
+**A coherence invariant on a delegating shell surfaces the shell's mid-operation windows.**
+When you lift a struct method's mutation into a verified pure helper `state -> state'` and
+have the method commit `state'`, any *intermediate* incoherence the old in-place method
+silently tolerated becomes visible to the invariant. Fix it by *compute-pure-then-commit-last*:
+compute the full new well-formed state first (the helper proves it well-formed), run every
+fallible bind / I/O step *before* committing, and write the struct's fields only after all of
+them succeed — so a failure leaves the struct untouched. This eliminates a latent bug class
+where an in-place method marked part of its state (a resource allocated) before a fallible
+step and filled the rest after, leaking on failure. That path is typically dead under a
+never-failing mock — hence untested — but live against a real backend; lifting the mutation
+under the invariant is what exposes it.
 
 **An `rlimit` budget must cover every context the proof is re-verified in, not just
 its own gate.** `rlimit` is deterministic only for *byte-identical* SMT input, and a
@@ -1715,6 +1916,31 @@ must `debug_assert!`/`panic!`, forbidden in `verus!{}` exec, whose *static*
 guarantee lives in a caller `requires`; (4) **opaque layout fact** — e.g.
 `size_of > 0` for an opaque type. Audit rule: **every `external_body` names both
 why it is a boundary and the host test that exercises it.**
+
+**A precondition guards the verified arithmetic, not the trusted path that establishes it.**
+When the only call site of a verified pure function is external/trusted code (a hardware
+bring-up path, an init routine outside the macro), the precondition is a caller obligation
+the verifier never checks *at that site* — and that is correct, not a gap. The proof is
+about the function's logic for all inputs satisfying the precondition; the trusted path is
+responsible for satisfying it, including for adversarial-looking values it can produce (a
+clamp that truncates a count to zero). State the boundary explicitly so the unchecked
+precondition reads as a deliberate seam rather than a hole.
+
+**An interpreted codec that is feature-gated *off* during verify is routed out by exclusion,
+not by `external_body` — and adds no seam row.** Verus cannot reason over an
+interpreted/reflective byte codec (a serde/postcard-style body decoder). When such a codec
+is an *optional, feature-gated* dependency and the gate runs with that feature disabled
+(`--no-default-features`), the codec is not compiled during verify at all: there is no
+function to mark `external_body`, so there is no trusted-seam row to add. Verify the pure,
+always-compiled prefix that precedes the interpreted body — the fixed header / magic /
+length / version checks, extracted into an always-compiled `verus!{}` island — and leave the
+body codec feature-gated and host-tested. Do *not* fabricate an `external_body` for the
+interpreted call: that would only drag the interpreted dependency back into verify scope, the
+opposite of what exclusion buys. The enabling restructure is to replace a module's file-level
+`#![cfg(feature = ...)]` with per-item `#[cfg(feature = ...)]` on just the interpreted
+functions, so the pure header layer graduates into verified scope while the body codec and
+the public API stay feature-gated and behaviorally unchanged. Record this as a routing note
+on the crate's ledger row, not a new seam.
 
 **A trusted mutation may have no exec counterpart — the deliverable is then a
 lemma.** When the trusted shell reconstructs state from raw fields on every call (a
@@ -1980,6 +2206,14 @@ with opaque errors:
   one becomes an unresolved import (`E0432`) — the import survives erasure but the
   item does not. Only real exec/struct/trait items may be `use`-imported (a
   spec-only trait whose ghost method a bound names needs `#[allow(unused_imports)]`).
+- **Compose on a dependency crate's verified `ensures`, full-pathed.** A verified
+  `spec`/exec predicate exported by a separate gated dependency is usable at a call site
+  with no extra annotation — verifying the upper crate re-verifies its gated deps in-session
+  (Part A), so the dependency's contract is in scope where it is called. Reference it
+  `crate::path`-qualified (not `use`-imported, per the bullet above) to keep the dependency
+  edge explicit, and let its `ensures` discharge the matching clause of your own spec
+  directly: the true/false branches of a boolean check hand the prover the
+  equality/inequality, so no inline restatement of the dependency's fact is needed.
 - **A `matches`-with-`&&` as an operand of another binary operator** is rejected
   ("matches with && is currently not allowed on the right-hand side …") — wrap it:
   `A ==> (B matches Pat && C)`; the bindings stay in scope across the parenthesized
@@ -2104,7 +2338,13 @@ witnesses a bounded slice:
   composition then closes the bound over *any* sequence of calls — the unbounded twin
   of an N-thread "exactly `min(budget, N)` grants" harness.
 
-The canonical instance is `ipc::session::Admission` (the rev2§3.5 bulk-window quota):
+This unbounded proof retires the *invariant* arm of that concurrent harness — it already
+fixes the bound for every sequence — but **not** the harness's other job: witnessing that
+the plumbing performs the metered op atomically under thread interleaving, which the
+deductive proof says nothing about. Keep the harness's interleaving arm and note the split,
+so the overlap is not misread as license to delete it (§15.3).
+
+The canonical instance is a session admission gate (the rev2§3.5 bulk-window quota):
 
 ```rust
 pub closed spec fn well_formed(self) -> bool { self.granted <= self.budget }
@@ -2131,6 +2371,110 @@ no-double-allocation core, §6) and its slot/used coherence bijection are the sa
 `closed spec fn` invariant + per-op-`ensures` discipline, with a bitmask invariant in
 place of a scalar cap. The accounting bound is the design decision made before any
 property is stated — exactly as in §1 — so it is documented here as a named template.
+
+---
+
+## 15. The concurrency tier: tokenized state machines, ghost tokens, and what stays trust-routed
+
+§§1–14 cover the *sequential* deductive core — first-order models over `Seq`/`Map`/`Set`, `decreases` measures, codec accept-iff specs, census invariants. This section extends the same unbounded-coverage discipline to **concurrent shared state**, and to a handful of sequential decoders/predicates the index-newtype world (§1) had previously left outside `verus!{}`. The governing question throughout is not "can a proof be written" but "does a proof here certify the *shipped binary*, and does it earn its implementation cost over the bounded checker that already guards the property."
+
+### 15.1 The thesis
+
+A deductive proof discharges a property **for all inputs, all values, all sizes** in one mechanical run; a bounded model-checker — a design-level state explorer, or a code-level interleaving explorer — enumerates only a finite slice (a capped message count, a bounded queue depth, a handful of identities, a fixed thread count), because the unbounded version blows a CI time budget. The technique below extends that unbounded, deductive coverage to *concurrent* shared state: describe a protocol once as an abstract transition system, discharge its safety invariants by **induction over transitions** (not by enumerating reachable states), and — where a physical atomic carries the state across threads — connect the abstract ghost state to the running instruction through *tracked tokens*, so the proof is a statement about the erased binary (the erasure guarantee, Part A "The CI job and erasure").
+
+The price is real: rewriting code into the transition shape, threading tokens through call chains, and a higher proof ceiling than a sequential `wf` invariant carries. Accept it **selectively**. Most properties with a concurrency *framing* need none of the concurrency machinery — they are per-step safety facts over finite first-order state that plain Verus (§§1–14) already covers. A faster proof that proves *less* is a regression (§10); equally, a fancier construct that proves *nothing new* over an existing `ensures` is net-negative surface. The decision rule in §15.4 keeps the heavy machinery confined to the cases that genuinely require it.
+
+### 15.2 The toolbox under the pin
+
+The version pin bundles a full state-machine macro suite. A crate that authors one of these adds exactly **one** direct dependency — the ghost prelude does not re-export the macros — and must list the macro-generated `cfg` in its check-cfg lints (every verified crate already does this for the ghost-keep cfg; Part A). Reach for each tool only at the trigger named; the default is still plain Verus.
+
+- **Single-threaded abstract transition system.** Declares typed `fields`, one or more `init!` routines, and `transition!`/`readonly!`/`property!` routines in a restricted transition language (`if`/`match`/`let`, plus the primitives `init`, `update`, `require`, `assert`). You attach `#[invariant]` predicates over `&self` and prove each **inductive** with one `#[inductive(routine)]` lemma per `init!`/`transition!`: the macro generates the two obligations `init(s) ==> inv(s)` and `inv(pre) && step(pre, post) ==> inv(post)`, and by induction the conjoined invariant holds on every reachable state. This proves a *model* sound; **on its own it certifies no exec code.** Reach for it only when a machine-checked model is independently judged worth a new artifact *and* someone commits to writing the exec-refines-model glue — otherwise it is scaffolding restating facts the sequential core already proves.
+
+- **Tokenized transition system (the concurrent extension).** The same machine, but each field declares a *sharding strategy*, and from each strategy Verus generates a **ghost token type** for that field. A state then corresponds to a *collection* of token objects; an `init!` mints the initial tokens, and each `transition!` is expressed as token operations (`add`/`remove`/`have` to add, consume, and assert-presence; `deposit`/`withdraw`/`guard` for the storage strategies). Because tokens follow a partial-monoid composition — two pieces compose when they agree on the shared part and *conflict* (become unsatisfiable) otherwise — they can be **split across threads and recombined**, and holding a token is a proof-carrying claim about the shared protocol state. The strategies in practice:
+  - *variable* / *constant* — one token carrying the field's value; *constant* additionally lets two holders agree it never changes.
+  - *option* / *map* / *multiset* / *count* — zero-or-one, keyed, bag, and counter shardings, so a held token is a claim about *part* of a collection (one key of a map, one element of a multiset) that composes with the rest.
+  - *persistent* variants — duplicable, monotone claims (a fact that, once true, stays true): "this slot was initialized," shared by many readers.
+
+  Reach for this **only** when there is genuine cross-thread sharing of a physical atomic to anchor the tokens to. For a single-threaded `&mut self` object holding no lock, tokens buy nothing — the construct proves an abstract model while leaving the exec code uncertified — so use the plain three-layer pattern instead.
+
+- **Atomic-fused-with-ghost step.** A macro fusing *one* atomic memory operation with *one* ghost transition, opening the atomic cell's invariant for exactly that instruction and handing the proof the tokens inside. This is the bridge from a tokenized machine to a running atomic. **Critical pin constraint: every atomic op in the ghost library is hardcoded to sequentially-consistent ordering, and there is no standalone fence.** A proof built on it therefore models a **SeqCst machine** — faithful only if the ship code also uses SeqCst on those operations. Do **not** certify Relaxed+fence ship code with a SeqCst proof: under erasure that is a *false statement about the binary*. A SeqCst model built for code that ships weaker orderings must be labeled explicitly as a model that does **not** supersede the interleaving-checker proof of record (§15.5).
+
+- **Lower-level single-atomic invariant.** The invariant primitive the fused step is sugar over; reach for it directly only for finer control over which op opens the invariant.
+
+- **Permissioned interior-mutable cell / pointer.** A points-to permission token for a raw cell or pointer, so verified code can *own* and hand out byte/cell permissions (the fungible-memory shape an allocator wants). Reach for it when verified code must thread raw memory permissions through call chains — but see the pin gap in §15.5 on minting such a permission for a pre-existing `static`.
+
+- **Verified reader/writer lock carrying a data invariant.** Reach for it when the design genuinely wants a lock with a ghost-protected payload.
+
+- **Linearizability / logical-atomicity helpers.** For proving a concurrent operation linearizes to one atomic step. Reach for it only for a true linearizability obligation.
+
+- **Plain first-order Verus** — the three-layer `spec fn wf` + `exec fn` `requires`/`ensures` + `proof fn` lemmas of §§1–14, over `Seq`/`Map`/`Set`/bitmasks, with `decreases`, `by (bit_vector)`, `by (nonlinear_arith)`. **Most candidates with a concurrency framing need only this.** A reactor dispatching through a `&mut self` bitmap, a quota metered by a scalar cap, a ring buffer modeled as a `Seq` — all are single-threaded or interrupt-masked *at the verified boundary*, so the concurrency they participate in lives in the surrounding interleaving harness, not in the verified arithmetic.
+
+A worked illustration of the tokenized shape (invented for orientation): a bounded semaphore — the concurrent twin of §14's scalar accounting cap — whose `count` is a SeqCst atomic and whose `cap` is a `constant`-sharded value both ends agree on.
+
+```rust
+tokenized_state_machine!{ Semaphore {
+    fields {
+        #[sharding(variable)] pub count: nat,
+        #[sharding(constant)] pub cap:   nat,
+    }
+    #[invariant] pub fn bounded(&self) -> bool { self.count <= self.cap }
+
+    init!{ empty(c: nat) { init count = 0; init cap = c; } }
+
+    transition!{ acquire() { require(pre.count < pre.cap); update count = pre.count + 1; } }
+    transition!{ release() { require(pre.count > 0);       update count = (pre.count - 1) as nat; } }
+
+    #[inductive(empty)]   fn empty_inv(post: Self, c: nat) {}      // 0 <= c
+    #[inductive(acquire)] fn acquire_inv(pre: Self, post: Self) {} // count < cap ==> count+1 <= cap
+    #[inductive(release)] fn release_inv(pre: Self, post: Self) {} // count-1 <= count <= cap
+}}
+```
+
+The inductive bodies are empty: each transition's `require` already hands the solver the bound it needs (`count < cap` gives `count + 1 <= cap`), the same empty-bodied frame discharge as Part A's visibility note, here generated by the macro. The exec side binds the `count` token to the physical SeqCst atomic through the fused-step macro: each store/load opens the cell invariant, performs the matching `acquire`/`release` ghost transition, and threads the token out — so the proof is a statement about that exact instruction sequence, valid precisely *because* the atomic is SeqCst.
+
+### 15.3 How this composes with the rest of Part B
+
+The concurrency tier does not displace §§1–14; it sits *on top* of them and reuses their machinery wherever the property reduces to first-order state:
+
+- The **index-newtype / typed-arena** enabler (§1) is what keeps even a tokenized model first-order: shard a `Map<Id, Node>`, not a pointer graph, and each token is a claim about one keyed entry, not a separation-logic footprint.
+- A tokenized machine's **`#[invariant]` predicates are `wf` predicates** in the §3 sense: layer them (structural fragment + harder properties), enumerate frames rather than approximate, and split a heavy inductive obligation per conjunct (§10) exactly as for a sequential `wf`.
+- The **accounting template** (§14) — a `well_formed` cap, a non-underflowing observable, every mutator preserving both — is the *sequential* witness that a concurrent quota plumbing is sound: the unbounded deductive proof retires the *invariant* arm of an N-thread "exactly `min(budget, N)` grants" smoke harness, while the harness's *interleaving* arm (that the plumbing performs the metered op atomically under thread interleaving) stays load-bearing — the proof says nothing about interleaving. Document the overlap; keep the harness arm.
+- **Trusted seams** (§11) bound this tier the same way: a hardware/scheduler seam, a thread-spawn boundary, or a weak-ordering atomic the pin cannot model becomes an enumerated seam with a reason and a host/interleaving test, never a silent `assume`.
+- **Proof-perf discipline** (§10, §13) applies unchanged: measure every inductive-lemma change against a freshly re-derived cold-`rlimit` baseline; a tokenized invariant's per-transition lemma is one verified item each, so predict the count delta from new `transition!`/`proof fn`, not from changed lines.
+
+### 15.4 Decision rule — rewrite in Verus vs keep an interleaving checker / design model
+
+Apply in order; stop at the first that fires.
+
+1. **Is the property liveness, fairness, or unbounded environment/crash interleaving?** → keep it in the temporal/design-model tier. Verus has no temporal logic, no fairness, no crash model. Stop.
+2. **Does a faithful proof require a memory ordering weaker than sequential consistency, or a standalone fence, to match the ship code?** → keep the interleaving checker as the proof of record. The pin models only SeqCst; a SeqCst Verus proof would certify a *different* binary (§15.5). Stop.
+3. **Is the load-bearing state a physical atomic genuinely shared across threads?** → only then is a tokenized machine + atomic-fused-with-ghost step warranted, and only if step 2 passed. Otherwise the token machinery buys nothing.
+4. **Is the property a per-step / inductive safety invariant over finite first-order state (`Seq`/`Map`/`Set`/bitmasks), single-threaded or interrupt-masked at the verified boundary?** → **plain Verus** (§§1–14). This is the foundational posture and covers the large majority, *including* most candidates that arrive with a concurrency framing.
+5. **Would the rewrite merely re-state an already-verified `ensures` under a fancier construct, or refine a struct to itself with no second abstraction?** → do not pursue; it is net-negative surface.
+
+A non-tokenized abstract *model* (step 3 unmet, but a machine-checked design↔code bridge is still wanted) is warranted only when someone commits to writing the exec-refines-model glue — otherwise it is scaffolding restating proven facts.
+
+### 15.5 Infeasible under the pin — memory-model and construct gaps
+
+These are not "hard" proofs to schedule; they are *currently inexpressible* faithfully under the pin. Each carries its reason and fallback. Do not schedule them as Verus work.
+
+| Construct / candidate | Why infeasible under the pin | Fallback |
+|---|---|---|
+| **A seqlock whose hot read/write path uses Relaxed data + Acquire/Release fence** | The ghost atomics are SeqCst-only with no standalone fence. A SeqCst proof either certifies a *different* binary than ships (false certification under erasure) or forces a codegen change to the hot path; and under SeqCst a seqlock is trivially untearable, so the proof discharges the trivial case while the real fence-reordering question stays inexpressible. The fused-step macro also opens an invariant for one op only and cannot model a seqlock's retroactive cross-read validation. | Keep the interleaving-checker proof of record (the only tool modeling the fence edge) plus the probabilistic tearing smoke. Verify any genuinely *pure* surface (e.g. a tick→ns conversion) separately as plain arithmetic. |
+| **A speculative seqlock writer critical section with no production writer** | Same SeqCst gap, *plus* no production writer exists to certify (every writer is test/harness-only). It proposes verifying code that does not ship; even built, it would not subsume the interleaving harness it claims to retire. | Keep the interleaving harnesses; revisit only if a real production writer is added — and even then the SeqCst gap blocks harness removal. |
+| **Minting a tracked points-to-raw permission for a pre-existing `static [u8; N]` arena** | No ghost-library constructor mints a root raw permission for a pre-existing static (the constructors are empty / heap-allocate / cell-to-raw; exposing provenance yields only a provenance token). Fabricating one needs a hand-written trusted axiom — a *new* seam invisible to the UB checker, net-worse than the existing checker+proptest guard — and a global-allocator signature cannot carry a tracked permission, so it could never reach the client. | Keep the arena in the UB-checker + proptest tier; the disjointness / no-double-free facts are already proven by the verified free-list dependency. Add a `_has_teeth` negative control to the disjointness proptest if hardening is wanted. |
+| **Verus-side thread spawning in a bare-metal `no_std` runtime** | The ghost-library thread API is std-only and unusable in `no_std`. | No thread-spawning proofs there; concurrency interleaving stays in the interleaving checker. |
+| **(Build-graph prerequisite, not a memory-model gap)** — the state-machine macro crate is not published to a registry; it ships only inside the prover install. | A crate authoring a state machine must add a CI-resolvable path/vendored dependency into the install dir. | Solve this build-graph problem *before* writing any proof, and treat it as the highest-risk part of any state-machine task. |
+
+### 15.6 How this tier divides labor with the design-model tier
+
+The deductive and design-model tiers are complementary, not redundant — and the division must be recorded so a trust-routed property is never mistaken for a mechanized one.
+
+- **Verus replaces the design-model tier where the property is a per-step / inductive safety invariant over finite first-order state** — the unbounded deductive twin of a model's safety arm (a per-channel FIFO discipline, a no-lost-wakeup or no-drop step, a determinism-of-selection fact), expressed as an `#[invariant]` on a tokenized machine or a named `ensures` over a `Seq` model. When a fact moves to Verus it must **re-route, not duplicate**: retire (or explicitly demote to a smoke tier) the model's corresponding safety invariant and record the move. Two independently-drifting copies of the same fact is the failure this rule prevents.
+
+- **The design-model tier stays sole owner of everything Verus cannot express** — liveness, fairness, unbounded cross-restart / cross-process interleaving, and environment/crash/durability modeling: eventual delivery, eventual revocation, cross-quantum walks, multi-outcome crash recovery, any axiom about a durability barrier. Verus has no temporal logic, no fairness, no crash model; these are irreducibly model-tier.
+
+- **A model invariant that stays can still become a labeled obligation on the Rust — but only its local half.** Where a property is liveness-owned yet rests on a *per-step* safety fact the code can carry (a write-once monotone step; a "valid binding slot always names a live capability" firing fact), name that fact as an `ensures` where it is cheaply entailed — preferring an `open` label so it stays transparent to callers — and leave the temporal closure in the model. A live-window data structure (one keeping only `[head, head+count)` and discarding consumed-history / monotonic counters) is *structurally* unable to witness the invariant's global counting or absolute-index arms; those stay the design oracle. State on the labeling spec fn's doc comment that the local half is mechanized **and** the global arm stays externally owned, so the per-step `ensures` is never read as a full mechanization. Two cautions from §3 carry over: a label is **vacuous** if another `ensures` already fixes it (name the predicate with genuine non-derived content, not a length already pinned by a count), and a **fresh projection** of a model invariant discharged only by feeding it its sole producer's `ensures` needs a committed pins/teeth control (a `proof fn` proving the predicate *false* for a deliberately-wrong argument) so the green proof demonstrably constrains its input. Such a label on the operation that *establishes* the underlying invariant is the cheap *establish* side of the §10 asymmetry — a one-step corollary, not a re-unfold inside a quantifier-dense consumer — so place the explicit label on the one operation the invariant is *about* and let the corollary carry it elsewhere; redundancy, not cost, is the reason to omit it on a mere preserver.
 
 ---
 

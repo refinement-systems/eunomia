@@ -36,7 +36,26 @@ strongest-sounding tool.
   atomics (synchronizing only through `Mutex`/`Condvar`) gains nothing from Loom's
   weak-memory modeling, so a thread-interleaving checker (Shuttle) is the
   load-bearing tool there. Name the actually-load-bearing tool, not the
-  strongest-sounding one.
+  strongest-sounding one. A further hard limit fixes which side a *weak-memory*
+  protocol lands on: the Verus ghost atomics under the version pin are
+  sequentially-consistent only, with no standalone fence, so a structure that ships
+  Relaxed data behind an `Acquire`/`Release` fence (the seqlock shape) cannot be proven
+  faithfully in Verus — a SeqCst proof would certify a *different* binary than ships, and
+  under SeqCst the structure is trivially correct, so the proof would also dodge the real
+  reordering question. It is irreducibly Loom-certifying / Shuttle-smoke. Only when the
+  shared state genuinely *is* a SeqCst atomic does the Verus tokenized-state-machine path
+  apply (`verus.md`).
+
+- **A design-level safety invariant can split between the tiers — its per-step inductive
+  arm to Verus, its global/liveness arm to the model.** A protocol whose *design* lives in
+  TLA+ may still rest on a per-step safety fact the running code can carry as a named
+  `ensures` (a FIFO-discipline step, a no-drop step, a write-once monotone step, a "commit
+  never targets the live slot" step): that arm is the unbounded deductive twin and moves to
+  Verus (`verus.md`), while the global counting / liveness / cross-restart arms — which a
+  live-window data structure structurally cannot witness — stay the model's (`tla.md`).
+  When a fact moves it must *re-route, not duplicate*: retire or demote the model's copy
+  and record the split, so a trust-routed property is never mistaken for a mechanized one
+  and two independently-drifting copies never coexist.
 
 - **Provenance, not just concern-class, decides routing.** Adversarial bytes earn
   the decode-totality proof *plus* fuzzing; trusted-provenance input — typed
