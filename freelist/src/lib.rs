@@ -645,7 +645,6 @@ impl<const N: usize> FreeList<N> {
     }
 
     /// `wf` survives the split (the sorted/non-empty/in-bounds conjuncts).
-    #[verifier::spinoff_prover]
     proof fn split_wf(new: FreeList<N>, old: FreeList<N>, i: int, off: int, flen: int,
         pad: int, rest_off: int, rest_len: int, start: int, n: int)
         requires
@@ -952,7 +951,6 @@ impl<const N: usize> FreeList<N> {
     }
 
     /// `covers` half of [`FreeList::free_replace`] (split out for rlimit).
-    #[verifier::spinoff_prover]
     proof fn free_covers_replace(new: FreeList<N>, old: FreeList<N>, g: int, off: int, n: int,
         eoff: int, elen: int)
         requires
