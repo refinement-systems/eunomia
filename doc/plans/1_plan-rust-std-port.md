@@ -299,7 +299,7 @@ Everything else has a `_`→unsupported and can ship unsupported first.
 | **panic/unwind** | panic=abort (no `eh_personality`) | **ready** | Target JSON + build-std flags only |
 | **env / args** | `loader::startup::decode` of the slot-0 boot message | **partial** | Verify the decoder (Phase 1); `sys/args`+`sys/env` arms. `env::vars` empty until a producer emits env entries |
 | **thread: spawn/join/yield/sleep** | `Retype→Thread` + `ThreadStart(13/18)`; `ThreadExit(15)`; join via `ThreadBind(21,on-exit)`+`NotifWait(12)`+`ReadReport(22)`; **`Yield`=op 2**; sleep `TimerArm(14)`+`NotifWait` | **partial** | `urt` in-process thread-spawn primitive (only one scalar arg `x0` — a boxed `FnOnce` ptr fits); fund stack+guard (rev2§5.3). `urt::spawn` has **zero Verus/host coverage** today — net-new test surface |
-| **sync: Mutex/Condvar/RwLock/Once/Parker** | `sys::futex` emulated over `NotifSignal(11)`/`NotifWait(12)` (verified core) → upstream's futex lock impls | **partial** | `eunomia_sys::futex` (4 fns) + committed Loom/Shuttle harness reusing `tla/ipc_reactor`; the locks come free from std. `notif_wait` has **no timeout** → `futex_wait(Some(_))` / `*_timeout` need the unwired timer-as-source path (MVP: `None` only) |
+| **sync: Mutex/Condvar/RwLock/Once/Parker** | `sys::futex` emulated over `NotifSignal(11)`/`NotifWait(12)` (verified core) → upstream's futex lock impls | **partial** | `eunomia_sys::futex` (4 fns) + committed Loom/Shuttle harness reusing `tla/ipc_reactor`; the locks come free from std. Timeouts: MVP yield-poll (`Instant`+`yield_now` → `*_timeout` work, busy); follow-up = timer-bit blocking (per-thread `kcore::timer` on the parker's notification) |
 | **stdio** | (bring-up) `DebugWrite(1)`; (real) console channel over `ipc` | **partial** out / **missing** stdin | `sys/stdio/eunomia.rs` arm; `stdin` op deliberately unassigned (rev2§7) → must read the console channel. `NAME_STDIN`/`NAME_STDOUT` are **already emitted by init** (both → the console slot) and consumed by the shell, so only the std-side wiring remains, not grant delivery. stderr: **add `NAME_STDERR`** (new name id, no codec change), resolve `NAME_STDERR` → stdout → debug-log; panic last-words stay on debug-log |
 | **thread_local / TLS** | `TPIDR_EL0` (absent) + `urt::slots` index alloc (verified) | **missing** | `TPIDR_EL0` save/restore (Phase 3) + `urt` TLS key table + `sys/thread_local` arm |
 | **fs: File/read_dir/metadata** | storage-server openat session (handle-relative, component paths) | **partial** | `sys/fs/eunomia.rs` client + path decode; `File=(HandleId, TreePath, client offset)`; 256-byte `MAX_MSG` → client offset loops |
@@ -406,7 +406,7 @@ global-statics fallback. Time is pulled in here — it is free.*
 |---|---|---|---|---|
 | **3.1** | Real TLS (kernel) | `TPIDR_EL0` save/restore: `tpidr` in `TrapFrame` (272→288 + pad), `mrs/msr` in `exceptions.rs`, grow `sub/add sp,#272`, seed at start; **`offset_of` const-assert** | `cargo clean -p kcore && cargo verus verify -p kcore` re-passes **406/0** (unchanged); host test: 2 threads share an aspace, read distinct TLS markers; ledger routing-note added | **8** |
 | **3.2** | spawn/join/yield/sleep | `urt` in-process thread-spawn primitive (`Box<ThreadInit>` ptr → `x0`); `sys/thread/eunomia.rs` (motor template); stack+guard (rev2§5.3); `yield_now` = op 2; sleep = `TimerArm`+`NotifWait` | QEMU spawn smoke + **new host tests** for the `urt::spawn` invariants (bind-before-start, read-report-before-revoke) — currently uncovered | **9** |
-| **3.3** | Locks | `eunomia_sys::futex` emulated over notifications (the 4 futex fns + types; address→waiter table + bootstrap spinlock); add `eunomia` to the five `sys/sync/*/futex.rs` arms + `pub use eunomia_sys::futex;` in the PAL → Mutex/Condvar/RwLock/Once/Parker come free; lift the heap single-thread no-lock assumption (lock or per-thread arenas). MVP supports `futex_wait(timeout=None)`; `Some(_)` deferred to the timer-as-source path | **Loom** (certifying, the bucket spinlock) + **Shuttle** (breadth, the dispatch) green, **reusing `tla/ipc_reactor`** + its 3 negative controls — **never Verus** (SeqCst pin) | **10** |
+| **3.3** | Locks | `eunomia_sys::futex` emulated over notifications (the 4 futex fns + types; address→waiter table + bootstrap spinlock); add `eunomia` to the five `sys/sync/*/futex.rs` arms + `pub use eunomia_sys::futex;` in the PAL → Mutex/Condvar/RwLock/Once/Parker come free; lift the heap single-thread no-lock assumption (lock or per-thread arenas). Timeouts: MVP **yield-poll** `futex_wait(Some(d))` (`Instant`+`yield_now`, correct but busy → `wait_timeout`/`park_timeout` work); follow-up = timer-bit blocking (arm a per-thread `kcore::timer` on the parker's notification, dedicated `TIMER` bit, decode via `notif_wait`; **not** the reactor's `register_bound`) | **Loom** (certifying, the bucket spinlock + the wake-vs-timeout race) + **Shuttle** (breadth, the dispatch) green, **reusing `tla/ipc_reactor`** + its 3 negative controls — **never Verus** (SeqCst pin); the `Duration`→CNTVCT conversion → Verus | **10** |
 | **3.4** | Entropy + HashMap | startup-block seed grant (likely a new inline-bytes grant kind → extend the task-3 verified decoder + fuzz corpus); init seeds it MVP-predictable (documented non-crypto); `sys/random/eunomia.rs` (mandatory arm) where `fill_bytes` is a **per-process DRBG** over the seed (zeroize the seed after init), and a parent draws a **fresh sub-seed per child**; define the **no-seed behavior** (recommend loud abort at first use, the `now_utc_ns` precedent — `fill_bytes` is infallible, so the alternative is silent predictability); unblock `HashMap` `RandomState` | seed decode Verus+fuzz (rides 1.2); `HashMap` works under smoke; findings doc records the MVP-predictable disclosure + the `RNDR`/virtio-rng upgrade path | **11** |
 | **3.5** | TLS keys | `urt::tls` key table over the verified `SlotAlloc` + per-thread block over the verified heap; `sys/thread_local` arm | `cargo verus verify -p urt` (key-table obligations green); host test | **12** |
 
@@ -545,13 +545,27 @@ blocked; record the final call in the relevant task's findings doc.
    files in the shell, or running storaged at real overlay budgets (rev2§4.4, where a
    few-MiB fixed heap fights the 8 MiB/ref · 128 MiB-global defaults). That signal, not
    a calendar phase, is when growth gets built.
-5. **`*_timeout` APIs in scope? (task 10).** `notif_wait` has no deadline, so
-   `futex_wait`'s `Option<Duration>` (and the `Condvar::wait_timeout` /
-   `park_timeout` it backs) need the timer-as-source reactor path (`timer_arm` +
-   `register_bound`), which has no reactor consumer today. *Recommended: MVP
-   implements `futex_wait(timeout=None)` fully and routes `Some(_)` to the timer
-   path as a follow-up — the lock stack works without timeouts; only the `_timeout`
-   variants wait on the timer wiring.*
+5. **`*_timeout` APIs (task 10) — RESOLVED.** Every `*_timeout`
+   (`Condvar::wait_timeout`, `thread::park_timeout`) funnels through one function,
+   `futex_wait(addr, expected, Some(d))`, so there is one place to implement and verify.
+   *MVP:* a **yield-poll** — `loop { if *addr != expected { true }; if Instant::now() >=
+   deadline { false }; yield_now() }` — using only `Instant` (CNTVCT) and `yield_now`
+   (op 2), both already present. It never lies (`true` only on a real value change,
+   `false` only past the real deadline), so std's clock-checked re-loops stay correct;
+   cost is a busy-poll (re-checks each quantum) — fine for the MVP's rare/short timed
+   waits, so the APIs **work** rather than being unsupported. *Follow-up (power-efficient):*
+   **timer-bit blocking** — the parker arms a per-thread timer object (`kcore::timer`,
+   already verified: absolute-deadline `arm`, re-arm-replace, `disarm`, tick-resolution
+   expiry) bound to **its own notification on a dedicated `TIMER` bit**, then
+   `notif_wait`s on that notification and decodes `WAKE` vs `TIMER`. This is wiring, not
+   new kernel work, and **not** the reactor's `register_bound` (a parker is a
+   self-contained two-source wait, not a multi-source multiplex). The load-bearing part
+   is the wake-vs-timeout race (resolved by the bucket lock's `still_enqueued` check —
+   else a `futex_wake` consumes a departed waiter = lost wakeup), which extends the futex
+   Loom/Shuttle harness with a negative control; the `Duration`→CNTVCT conversion is
+   pure overflow-safe arithmetic → Verus (the `utc_ns_at` inverse). Resolution is one
+   tick (10 ms) for both tiers; std reports actual elapsed via the clock, so coarse late
+   wakeups are semantically fine.
 6. **`TPIDR_EL0` timing (task 8).** *Recommended: land it with real threading
    (Phase 3), not hello-world* — single-threaded bring-up uses the global-statics
    `thread_local` fallback, so Phase 2 is not gated on a kernel change.
