@@ -126,9 +126,26 @@ items needing a human call are consolidated in [Open decisions](#open-decisions)
   `2>` / pipelines separately. **Panic last-words stay on the `debug-log`
   kernel-diagnostic path** (rev2§7's "kept … for panic reporting" clause), separate
   from the userspace stderr stream, so a wedged console can't swallow a panic.
-- **The MVP heap is the fixed `.bss` arena** (`urt::Heap<N>`, no grow). A `heap`
-  named grant for `sbrk`-style growth is a deferred rev2§5.1 convention; the fixed
-  arena suffices through Phase 5.
+- **The MVP heap is the fixed `.bss` arena** (`urt::Heap<N>`, no grow), chosen
+  because the allocation algorithm is *verified* (`freelist`) and growth adds
+  sbrk/retype/map glue. Understand what `N` costs: with no demand paging / COW / lazy
+  zero-page mapping (rev2§5; all deferred in rev2§8.3), the loader commits real frames
+  for the whole `.bss` at spawn — so **`N` is a reservation, not a ceiling: max ==
+  committed RAM**, used or not, bounding concurrency against the `-m 256M` machine.
+  Three caveats bite even early, so they are *disclosed bounds*, not surprises:
+  **(a)** OOM is a **hard abort** (`alloc`→null→`handle_alloc_error`→abort), not a
+  graceful `Err` — any input-proportional allocation can abort on large input, and
+  `N` is fixed at compile time (route that abort through the PAL terminus so it reaps
+  like a panic, not a raw fault); **(b)** the `FreeList<HEAP_RANGES = 1024>`
+  fragmentation cap is a *second, independent* limit — a fragmenting long-lived
+  workload can hit it before `N` is exhausted, and a `dealloc` at the cap **leaks**;
+  **(c)** the heap is **single-threaded** (`unsafe impl Sync`, no lock) — Phase 3 must
+  add a lock or per-thread arenas (and per-thread multiplies the reservation). Mitigate
+  by keeping `N` a per-binary const tuned to each program's workload and over-sizing
+  generously where RAM allows (cheap at MVP scale). Note std raises the baseline:
+  **moving the shell to std (5.3) needs a larger `N` than its current `no_std` 1 MiB.**
+  Growth (the `heap` named grant + sbrk via retype/map, folding under the Store/aspace
+  seam) is deferred — see [Open decisions](#open-decisions) for the un-defer trigger.
 - **The verified startup decoder lives in `loader`** (least churn, reuses the live
   fuzz target + corpus); `eunomia-sys` depends on `loader::startup`.
 - **`net` is permanently `unsupported`** (non-goal, rev2§8.1). `sys/net/connection`
@@ -275,7 +292,7 @@ Everything else has a `_`→unsupported and can ship unsupported first.
 
 | std surface | Backed by | Readiness | New work |
 |---|---|---|---|
-| **alloc (GlobalAlloc)** | `urt::Heap<N>` over verified `freelist` | **ready** | `sys/alloc/eunomia.rs` shim (mandatory). Disclose: single-thread no-lock, `MAX_ALIGN=64` (page-aligned requests → null = clean OOM), frag-cap 1024, dealloc-at-cap leaks |
+| **alloc (GlobalAlloc)** | `urt::Heap<N>` over verified `freelist` | **ready** | `sys/alloc/eunomia.rs` shim (mandatory). `N` is a **reservation** (no demand paging → committed at spawn), per-binary const. Disclose: single-thread no-lock, `MAX_ALIGN=64` (page-aligned requests → null = clean OOM), frag-cap 1024 (2nd limit; dealloc-at-cap leaks), **OOM = abort not `Err`** (route through the PAL terminus) |
 | **time: SystemTime** | `urt::now_utc_ns` (verified `utc_ns_at`, Loom seqlock) | **ready** | Wire `SystemTime::now`; handle the no-time-grant panic (error path or attach invariant) |
 | **time: Instant** | `CNTVCT_EL0` direct (zero-syscall) + verified conversion | **partial** | `sys/time/eunomia.rs` Instant over `cntvct/cntfrq` (trivial) |
 | **process: exit/abort** | `ThreadExit(15)` → verified `report_terminal` | **ready** | Override the PAL `exit()`/`abort_internal()` (std owns the panic handler) to `thread_exit(code)`/`thread_exit(STATUS_PANIC = u64::MAX)`. `Command` thin/unsupported |
@@ -324,7 +341,7 @@ virtio-rng) is upgrade-path work, deferred until an untrusted `HashMap` consumer
 | 3b | Entropy **source** upgrade: `FEAT_RNG`/`RNDR` | machine-config | `-cpu max` (a72 lacks `RNDR`); init reads `RNDR` from EL0 | no DMA seam, no syscall — seam-free *and* random | Upgrade path — when an untrusted `HashMap` consumer arrives |
 | 3c | Entropy **source** upgrade: virtio-rng | device | new driver crate, DMA seam | **new** DMA/hardware seam (rev2§2.5) | Alternative upgrade — only if `RNDR`/`-cpu max` rejected |
 | 4 | Console stdio | marshalling only | std PAL over `chan_send`/`chan_recv` resolving the slots from the already-delivered grant table | no new verified logic; driver + shell path + `NAME_STDIN/STDOUT` grants already exist | **Mostly done — only the std-side stdio wiring** |
-| 5 | Heap named-grant | spec-convention | rev2§5.1 table + `CapSlot` grant | sbrk-grow folds under Store/aspace seam | Deferred — fixed arena suffices |
+| 5 | Heap named-grant | spec-convention | rev2§5.1 table + `CapSlot` grant | sbrk-grow folds under Store/aspace seam | Deferred — fixed (reserved) arena suffices for bounded workloads; un-defer at the first input-proportional consumer |
 | 6 | stderr | spec-convention + marshalling | **add `NAME_STDERR`** to the rev2§5.1 table (new name id, `CapSlot` — **no codec/decoder change**) | `debug_write` bring-up; capability-routed `NAME_STDERR`→stdout→debug-log fallback for production; panic last-words stay on debug-log | **Yes — add the name (folding rejected: breaks pipeline separation)** |
 
 **`TPIDR_EL0` detail.** `TrapFrame` (`kcore/src/thread.rs`, `repr(C)`, **outside**
@@ -376,7 +393,7 @@ global-statics fallback. Time is pulled in here — it is free.*
 | Sub | Goal | Deliverables | Gate | Findings |
 |---|---|---|---|---|
 | **2.1** | Entry + argv/env | non-crt0 `_start`→`lang_start`→`main` reads the slot-0 bootstrap channel's first message, calls the **verified** decoder (1.2); `sys/args`, `sys/env`, and `sys/io/error` (mandatory) arms; io-error map proptested | links; `env::args` visible in QEMU | **4** |
-| **2.2** | GlobalAlloc | `sys/alloc/eunomia.rs` over `urt::Heap<N>` (algorithm verified in `freelist`; arena Miri+proptest). Mandatory arm. Disclose MVP bounds | `cargo verus verify -p urt -p freelist` (green, re-cited) + `urt` Miri sweep | **5** |
+| **2.2** | GlobalAlloc | `sys/alloc/eunomia.rs` over `urt::Heap<N>` (algorithm verified in `freelist`; arena Miri+proptest). Mandatory arm. Pick a per-binary `N` (reservation, committed at spawn). Disclose MVP bounds (reservation-not-ceiling, OOM=abort, frag-cap 1024 leak, single-thread); confirm `handle_alloc_error`'s abort routes through the PAL terminus (reaps like a panic, not a raw fault) | `cargo verus verify -p urt -p freelist` (green, re-cited) + `urt` Miri sweep | **5** |
 | **2.3** | stdio (bring-up) + exit terminus | `sys/stdio/eunomia.rs` stdout/stderr → `DebugWrite(1)` (len ≤ 1024); `panic_output` same path. **Disclose** this EL0 use of the debug-log path as a *temporary §2 deviation* (the pre-console-shell precedent, rev2§7) — replaced for stdout/stdin by the console channel in 5.1, retained only for panic last-words. **Override the PAL `abort_internal()` and `exit()`** to `thread_exit(STATUS_PANIC)` / `thread_exit(code)` (the `motor` template — *not* the `unsupported` `intrinsics::abort()`), preserving the reaper contract for a std binary | boot prints `println!`; a panicking std binary reaps as `STATUS_PANIC` | **6** |
 | **2.4** | Time (free) | `Instant` ← `cntvct/cntfrq`; `SystemTime` ← `urt::now_utc_ns` (verified `utc_ns_at`, Loom seqlock); resolve the no-time-grant panic | `cargo verus verify -p urt` (re-cited); `Instant::now`/`SystemTime::now` work | **7** |
 | **GATE** | CI smoke | green-boot marker (`…M1 PASS`-style) + kill-cleanly harness (background QPID + trap + deadline-poll, per `CLAUDE.md`) in the on-os CI job; asserts `println!`/`format!`/`Vec`/`Box`/`String`/`Instant`/`SystemTime` | QEMU boot smoke green | — |
@@ -517,8 +534,17 @@ blocked; record the final call in the relevant task's findings doc.
    reversal-expensive to retrofit, so it is added now while the table has no external
    consumers. The fallback rule preserves "just works on a terminal" (same console
    endpoint under both names) while allowing `2>` / pipeline wiring.
-4. **Heap growth (tasks 5, later).** *Recommended: fixed `.bss` arena for the MVP.*
-   The `heap` named grant + sbrk-grow (folds under the Store/aspace seam) is deferred.
+4. **Heap growth (tasks 5, later) — RESOLVED for the MVP: fixed `.bss` arena.**
+   `urt::Heap<N>` (verified `freelist` algorithm), per-binary `N`, over-sized
+   generously at MVP scale. `N` is a *reservation* (no demand paging → committed at
+   spawn, max == RAM), OOM is a hard abort, and the `HEAP_RANGES=1024` cap is a second
+   limit that leaks under fragmentation — all disclosed bounds. The growable heap (the
+   `heap` named grant + sbrk via retype/map, folding under the Store/aspace seam) is
+   deferred, with a concrete **un-defer trigger: the first genuinely
+   input-proportional consumer** — realistically `fs::read`/`read_to_string` of large
+   files in the shell, or running storaged at real overlay budgets (rev2§4.4, where a
+   few-MiB fixed heap fights the 8 MiB/ref · 128 MiB-global defaults). That signal, not
+   a calendar phase, is when growth gets built.
 5. **`*_timeout` APIs in scope? (task 10).** `notif_wait` has no deadline, so
    `futex_wait`'s `Option<Duration>` (and the `Condvar::wait_timeout` /
    `park_timeout` it backs) need the timer-as-source reactor path (`timer_arm` +
