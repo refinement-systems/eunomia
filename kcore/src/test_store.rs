@@ -558,24 +558,43 @@ fn cap_frame_aspace_exec(cap: Cap) -> Option<ObjId> {
     }
 }
 
+// A bounded single-start chain walk shared by the waiter / notif / timer / ready
+// mirrors below: follow `start` through `next` until it ends, capped at `cap` nodes
+// so a malformed cyclic fixture can't loop forever. `None` on overrun (the walk
+// exceeded `cap` — a repeated node, i.e. a cycle), `Some(nodes)` otherwise. With
+// `cap = collection.len()+1` this matches each mirror's reject boundary exactly: a
+// duplicate-free chain over `len` nodes has at most `len` of them, so a well-formed
+// walk always returns `Some`. (`no_cycle` is the distinct all-starts bool variant.)
+fn walk_chain<Id, F>(start: Option<Id>, cap: usize, next: F) -> Option<Vec<Id>>
+where
+    Id: Copy,
+    F: Fn(Id) -> Option<Id>,
+{
+    let mut out = Vec::new();
+    let mut cur = start;
+    while let Some(node) = cur {
+        if out.len() >= cap {
+            return None; // overrun: a walk longer than `cap` repeated a node (a cycle)
+        }
+        out.push(node);
+        cur = next(node);
+    }
+    Some(out)
+}
+
 // Exec mirror of `waiter_seq(o).len()`: `o`'s FIFO waiter-chain length, walked from
 // `wait_head` via `qnext` (the `notif_wf_exec` walk). 0 for a non-notification `o`
-// (absent from `notifs`); the bounded guard mirrors the chain's acyclicity.
+// (absent from `notifs`); the bounded walk mirrors the chain's acyclicity.
 fn waiter_count_exec(st: &ArrayStore, o: ObjId) -> u32 {
-    let mut count: u32 = 0;
-    if let Some(nst) = st.notifs.get(&o.0) {
-        let mut cur = nst.wait_head;
-        let mut guard = st.tcbs.len() + 1;
-        while let Some(t) = cur {
-            count += 1;
-            if guard == 0 {
-                break;
-            }
-            guard -= 1;
-            cur = st.tcbs.get(&t.0).and_then(|tc| tc.qnext);
-        }
-    }
-    count
+    let nst = match st.notifs.get(&o.0) {
+        Some(v) => v,
+        None => return 0,
+    };
+    let cap = st.tcbs.len() + 1;
+    walk_chain(nst.wait_head, cap, |t: ObjId| {
+        st.tcbs.get(&t.0).and_then(|tc| tc.qnext)
+    })
+    .map_or((cap + 1) as u32, |seq| seq.len() as u32)
 }
 
 // Exec mirror of `obj_census(o)`: the six census terms summed.
@@ -712,14 +731,13 @@ fn notif_wf_exec(st: &ArrayStore, n: ObjId) -> bool {
     if nv.wait_head.is_none() != nv.wait_tail.is_none() {
         return false; // empty-queue head/tail agreement
     }
-    let mut cur = nv.wait_head;
-    let mut last: Option<ObjId> = None;
-    let mut steps = 0usize;
-    while let Some(c) = cur {
-        steps += 1;
-        if steps > st.tcbs.len() + 1 {
-            return false; // a cycle (walk longer than the TCB count)
-        }
+    let chain = match walk_chain(nv.wait_head, st.tcbs.len() + 1, |c: ObjId| {
+        st.tcbs.get(&c.0).and_then(|tc| tc.qnext)
+    }) {
+        Some(c) => c,
+        None => return false, // a cycle (walk longer than the TCB count)
+    };
+    for &c in &chain {
         let tcb = match st.tcbs.get(&c.0) {
             Some(t) => t,
             None => return false, // a charted node is not a live TCB
@@ -727,11 +745,9 @@ fn notif_wf_exec(st: &ArrayStore, n: ObjId) -> bool {
         if tcb.wait_notif != Some(n) || tcb.state != ThreadState::BlockedNotif {
             return false; // per-node: names n and is BlockedNotif
         }
-        last = cur;
-        cur = tcb.qnext;
     }
     // the walk ended at the chain's last node (its qnext == None); it must be wait_tail.
-    last == nv.wait_tail
+    chain.last().copied() == nv.wait_tail
 }
 
 // The exec mirror of `timer_wf`: the armed list from `timer_armed_head`,
@@ -739,14 +755,16 @@ fn notif_wf_exec(st: &ArrayStore, n: ObjId) -> bool {
 // armed timer with a bound notification (`timer_chain`), and it captures EVERY armed
 // timer (`timer_complete`). The completeness sweep is what makes `disarm`'s walk sound.
 fn timer_wf_exec(st: &ArrayStore) -> bool {
-    let mut cur = st.timer_armed_head;
-    let mut seen: Vec<u64> = Vec::new();
-    let mut steps = 0usize;
-    while let Some(c) = cur {
-        steps += 1;
-        if steps > st.timers.len() + 1 {
-            return false; // a cycle (walk longer than the timer count)
-        }
+    // The walked chain is also the `seen` set the completeness sweep needs; the
+    // None-on-overrun already rejects cycles, so no separate dup-check is needed
+    // (a duplicate in a deterministic-`next` walk loops forever → overrun).
+    let chain = match walk_chain(st.timer_armed_head, st.timers.len() + 1, |c: ObjId| {
+        st.timers.get(&c.0).and_then(|tm| tm.next)
+    }) {
+        Some(c) => c,
+        None => return false, // a cycle (walk longer than the timer count)
+    };
+    for &c in &chain {
         let tm = match st.timers.get(&c.0) {
             Some(v) => v,
             None => return false, // a charted node is not a live timer
@@ -754,15 +772,10 @@ fn timer_wf_exec(st: &ArrayStore) -> bool {
         if !tm.armed || tm.notif.is_none() {
             return false; // a charted node must be armed with a bound notification
         }
-        if seen.contains(&c.0) {
-            return false; // a duplicate (defensive; the steps cap also bounds cycles)
-        }
-        seen.push(c.0);
-        cur = tm.next;
     }
     // completeness: every armed timer is on the chain.
     for (id, tm) in st.timers.iter() {
-        if tm.armed && !seen.contains(id) {
+        if tm.armed && !chain.iter().any(|x| x.0 == *id) {
             return false;
         }
     }
@@ -784,19 +797,21 @@ fn irq_wf_exec(st: &ArrayStore) -> bool {
 // let the host tests assert the invariant those ops preserve, with teeth
 // (`ready_wf_exec_has_teeth`/`ready_complete_exec_has_teeth`).
 
-// Walk `level`'s ready chain from the head through `qnext`, bounded so a malformed cyclic
-// chain can't loop forever (the surplus node makes the duplicate visible to the dup check).
+// Walk `level`'s ready chain from the head through `qnext`, bounded by the TCB count so a
+// malformed cyclic chain can't loop forever. A well-formed chain returns its exact node
+// sequence; an over-long (cyclic) walk returns the head twice so the duplicate stays visible
+// to `ready_wf_exec`'s dup-check (the original returned the over-long walk with its repeat for
+// the same reason). Overrun implies the head was `Some`, so the `expect` cannot fire.
 fn ready_seq_exec(st: &ArrayStore, level: usize) -> Vec<ObjId> {
-    let mut out = Vec::new();
-    let mut cur = st.ready_heads[level];
-    while let Some(t) = cur {
-        out.push(t);
-        if out.len() > st.tcbs.len() + 1 {
-            break; // a cycle (walk longer than the TCB count) — caught by ready_wf_exec
+    match walk_chain(st.ready_heads[level], st.tcbs.len() + 1, |t: ObjId| {
+        st.tcbs.get(&t.0).and_then(|tc| tc.qnext)
+    }) {
+        Some(seq) => seq,
+        None => {
+            let h = st.ready_heads[level].expect("an overrun walk has a non-None head");
+            vec![h, h]
         }
-        cur = st.tcbs.get(&t.0).and_then(|tc| tc.qnext);
     }
-    out
 }
 
 // `ready_seq_exec` as raw `u64` ids — `ObjId` has no `Debug`, so sequence assertions compare
