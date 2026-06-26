@@ -239,7 +239,7 @@ fn raw_to_entry(raw: RawEntry) -> Entry {
     }
 }
 
-fn tlv_err(e: TlvErr) -> FormatError {
+pub(crate) fn tlv_err(e: TlvErr) -> FormatError {
     match e {
         TlvErr::Truncated => FormatError::BadNode("truncated"),
         TlvErr::BadEntry(why) => FormatError::BadEntry(why),
@@ -692,7 +692,7 @@ pub open spec fn canonical_leaf_bytes(es: Seq<RawEntry>) -> Seq<u8> {
     seq![0u8] + le_bytes::u32_le(es.len() as u32) + entries_bytes(es)
 }
 
-fn read_arr32(buf: &[u8], off: usize) -> (a: [u8; 32])
+pub(crate) fn read_arr32(buf: &[u8], off: usize) -> (a: [u8; 32])
     requires
         off + 32 <= buf@.len(),
     ensures
@@ -763,7 +763,7 @@ fn copy_range(buf: &[u8], off: usize, n: usize) -> (v: Vec<u8>)
     v
 }
 
-fn push_arr32(out: &mut Vec<u8>, h: &[u8; 32])
+pub(crate) fn push_arr32(out: &mut Vec<u8>, h: &[u8; 32])
     ensures
         final(out)@ == old(out)@ + h@,
 {
@@ -792,7 +792,7 @@ fn push_u16_le(out: &mut Vec<u8>, x: u16)
     assert(out@ =~= old(out)@ + le_bytes::u16_le(x));
 }
 
-fn push_u32_le(out: &mut Vec<u8>, x: u32)
+pub(crate) fn push_u32_le(out: &mut Vec<u8>, x: u32)
     ensures
         final(out)@ == old(out)@ + le_bytes::u32_le(x),
 {
@@ -868,7 +868,7 @@ pub fn encode_raw(e: &RawEntry, out: &mut Vec<u8>)
 // ── Decode: total ∀ bytes, and accepts only canonical encodings ───────────
 
 /// `seq.subrange(a, b) + seq.subrange(b, c) == seq.subrange(a, c)`.
-proof fn lemma_cat(s: Seq<u8>, a: int, b: int, c: int)
+pub(crate) proof fn lemma_cat(s: Seq<u8>, a: int, b: int, c: int)
     requires
         0 <= a <= b <= c <= s.len(),
     ensures
@@ -878,7 +878,7 @@ proof fn lemma_cat(s: Seq<u8>, a: int, b: int, c: int)
 }
 
 /// Whether `n` more bytes fit before `end` starting at `pos`, overflow-free.
-fn fits(pos: usize, n: usize, end: usize) -> (b: bool)
+pub(crate) fn fits(pos: usize, n: usize, end: usize) -> (b: bool)
     ensures
         b <==> pos + n <= end,
 {
