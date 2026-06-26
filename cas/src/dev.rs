@@ -208,8 +208,15 @@ impl CrashDev {
                 .wrapping_add(1442695040888963407);
             s >> 33
         };
+        // Length stability: `durable` and `current` are each allocated once in
+        // `new` and only ever overwritten by equal-length `copy_from_slice`, and
+        // every pending write was bounds-checked against `current.len()` at
+        // `write()` time — so each replayed slice below stays in range. Debug-only
+        // (a crash replay must never abort in release).
+        debug_assert_eq!(self.durable.len(), self.current.borrow().len());
         let mut disk = self.durable.clone();
         for (off, data) in self.pending.drain(..) {
+            debug_assert!(off as usize + data.len() <= disk.len());
             match next() % 3 {
                 0 => {} // dropped
                 1 => {
