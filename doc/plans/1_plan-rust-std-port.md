@@ -89,12 +89,30 @@ items needing a human call are consolidated in [Open decisions](#open-decisions)
   proof would certify a different binary). `no_threads` locks are the Phase-2
   single-threaded interim. See [Open decisions](#open-decisions) for why the parker
   route was rejected.
-- **Entropy: a startup-block seed grant**, *recommended over* virtio-rng. The seed
-  rides the existing rev2§5.1 named-grant mechanism and its decode is covered by the
-  Phase-1 verified startup parser, so it **adds no trusted seam**. virtio-rng is
-  cleaner long-term but is a genuinely-new DMA/hardware seam (raises the ledger
-  14→15) — recorded as later hardening. Randomness *quality* is not a verification
-  property; only the seed decode is.
+- **Entropy: a startup-block seed grant as the *mechanism*, with a documented,
+  explicitly-non-cryptographic seed as the *MVP source*.** The seed rides the
+  rev2§5.1 named-grant mechanism and its decode is covered by the Phase-1 verified
+  startup parser, so the *plumbing* **adds no trusted seam**. But a seed grant only
+  *distributes* entropy — it verifies the pipe, not the water — and the QEMU `virt`
+  machine as currently configured (`-cpu cortex-a72`) offers init **no good source**:
+  the PL031 RTC is explicitly predictable (rev2§2.6) and there is no virtio-rng (the
+  seam we're avoiding). So the MVP source is **deliberately predictable**, and that is
+  acceptable *only because today's HashDoS surface is thin* — the storage server keys
+  directories in sorted prolly trees, not `HashMap`s (rev2§4.9), and the shell reads
+  trusted interactive input, so no untrusted external input currently reaches a
+  `HashMap`'s SipHash keys. It **must be disclosed loudly** as MVP-only and
+  not-for-cryptography, because the failure is silent (predictable keys look identical
+  to good keys, and the gate cannot catch it — randomness *quality* is not a
+  verification property; only the seed decode is). The real fix, when an untrusted
+  `HashMap` consumer arrives, is **`FEAT_RNG`/`RNDR`** (a hardware RNG readable from
+  EL0 with no syscall and no DMA — dodges both the seam *and* the predictability, but
+  needs `-cpu max`, a machine-config change) or **virtio-rng** (cleaner, but a
+  genuinely-new DMA/hardware seam, ledger 14→15). Both are recorded as the upgrade
+  path, not MVP work. Two requirements hold regardless of source: `fill_bytes` is a
+  per-process **DRBG seeded by the grant**, never a copy of the seed bytes (std's
+  `fill_bytes` is infallible — a finite seed handed back raw repeats/exhausts
+  silently); and a parent spawning children draws a **fresh sub-seed per child** from
+  its own DRBG, never copies its own seed (the classic `fork()`-without-reseed trap).
 - **`stderr` → `debug-log` for bring-up, then folded into the `stdout` console
   channel** (no new `NAME_STDERR`). There is no `NAME_STDERR` constant today; folding
   avoids migrating the rev2§5.1 named-grant table. Add `NAME_STDERR` only if a
@@ -147,7 +165,8 @@ The constraint's escape hatch — *unverified only where tools provably cannot r
 - the concurrent wakeup path (the emulated-futex address→waiter dispatch + its
   bootstrap spinlock, over notifications) — SeqCst-pin infeasible in Verus;
   Loom/Shuttle-of-record + the existing `IpcReactor` TLA model;
-- any `virtio-rng` device seam (DMA/hardware, rev2§2.5) — avoided by the seed-grant decision.
+- any `virtio-rng` device seam (DMA/hardware, rev2§2.5) — *not in the MVP*; the
+  documented-predictable seed and the `RNDR`/`-cpu max` upgrade both avoid it.
 
 **Everything else is verified on arrival**, never stubbed-then-replaced. Note the
 split inside the syscall layer: the *pure byte-level arg encode/decode* is Verus
@@ -180,7 +199,7 @@ register-file marshalling around it are the trusted inline-asm shell above.
 | stdio sinks | **trusted-shell** (marshalling over verified `ipc` Admission/reactor) | No |
 | fs marshalling | **Verus** (path-component decode) + **cargo-fuzz**; rights lattice + `check_header` already verified | No — path decode is verified surface |
 | time (Instant/SystemTime) | **Verus** (`utc_ns_at`, green) + **Loom** (seqlock read, green) | No |
-| entropy seed decode | **Verus** + **cargo-fuzz** (rides the startup parser) | No (seed-grant) |
+| entropy seed decode (likely a new inline-bytes grant kind) | **Verus** + **cargo-fuzz** (extends the task-3 startup-parser obligation + corpus) | No (seed-grant); the DRBG/quality is *not* verified — only the decode is |
 | process exit / abort | **trusted-shell** (already in thread-lifecycle (d)) | No |
 | io-error decode | **proptest** (total policy map; Verus if it becomes byte-parsing) | No |
 
@@ -210,9 +229,10 @@ host test (its §11 admission rule). The port changes it as follows; the tally
   `SlotAlloc`; the per-thread storage block sits over the verified heap. If any
   irreducible plain-Rust pointer step remains (a TPIDR-base + offset read), it folds
   under (d) as a routing note with a host test — not a 15th seam.
-- **Conditional seam (14→15) — only if `virtio-rng` is later chosen:** a real
-  DMA/hardware row with reason + device bring-up host test. The seed-grant decision
-  avoids it.
+- **Conditional seam (14→15) — only if `virtio-rng` is later chosen** as the entropy
+  *source* upgrade: a real DMA/hardware row with reason + device bring-up host test.
+  The MVP (documented-predictable seed) and the `RNDR`/`-cpu max` upgrade both **avoid
+  the seam** (`RNDR` is an EL0 instruction, no DMA); only virtio-rng raises the tally.
 
 ### What keeps the shell honest
 
@@ -257,7 +277,7 @@ Everything else has a `_`→unsupported and can ship unsupported first.
 | **stdio** | (bring-up) `DebugWrite(1)`; (real) console channel over `ipc` | **partial** out / **missing** stdin | `sys/stdio/eunomia.rs` arm; `stdin` op deliberately unassigned (rev2§7) → must read the console channel. `NAME_STDIN`/`NAME_STDOUT` are **already emitted by init** (both → the console slot) and consumed by the shell, so only the std-side wiring remains, not grant delivery |
 | **thread_local / TLS** | `TPIDR_EL0` (absent) + `urt::slots` index alloc (verified) | **missing** | `TPIDR_EL0` save/restore (Phase 3) + `urt` TLS key table + `sys/thread_local` arm |
 | **fs: File/read_dir/metadata** | storage-server openat session (handle-relative, component paths) | **partial** | `sys/fs/eunomia.rs` client + path decode; `File=(HandleId, TreePath, client offset)`; 256-byte `MAX_MSG` → client offset loops |
-| **hashmap_random_keys** | nothing — **hard blocker** | **missing** | seed-grant + `sys/random/eunomia.rs` (mandatory) |
+| **hashmap_random_keys** | nothing — **hard blocker** | **missing** | seed-grant + `sys/random/eunomia.rs` (mandatory). `fill_bytes` = per-process **DRBG** over the seed (not a raw copy); MVP seed is documented-predictable (non-crypto); per-child fresh sub-seeds |
 | **net** | nothing, by design | n/a | none — permanently unsupported |
 
 **fs surface that is `Unsupported` by construction** (rev2§4.9 has none of it):
@@ -281,15 +301,19 @@ unsupported (mtime is server-assigned, not client-set).
 ## Spec & kernel changes (corrected and grounded)
 
 The verification posture is `kernel/`-over-`kcore` throughout. **Net kernel-track
-surface: one change (`TPIDR_EL0`)** — plus virtio-rng only if the entropy decision
-rejects the seam-free seed grant.
+surface: one change (`TPIDR_EL0`)** — the entropy MVP adds no kernel work (the
+seed-grant mechanism is a spec-convention/decoder change and the MVP source is
+documented-predictable init code); a real entropy *source* (`RNDR` via `-cpu max`, or
+virtio-rng) is upgrade-path work, deferred until an untrusted `HashMap` consumer exists.
 
 | # | Change | Kind | Where | Trust posture | Still needed? |
 |---|---|---|---|---|---|
 | 1 | Yield syscall | — | `kcore/src/sysabi.rs` (opcode 2) | verified decode + trusted scheduler shell | **No — already exists; strike** |
 | 2 | `TPIDR_EL0` save/restore | trusted-kernel-shell | `kcore/src/thread.rs` `TrapFrame` (outside `verus!{}`) + `kernel/src/exceptions.rs`, `main.rs`, `syscall.rs` | trusted asm shell (rev2§6.1d); ledger *routing note*, no new seam | **Yes — the one genuine kernel-track touch** |
-| 3 | Entropy: seed grant (A) | spec-convention + verified-decode | rev2§5.1 table; loader/`eunomia-sys` startup parser | no new seam; decode is Verus+fuzz | **Yes (A preferred)** |
-| 3′ | Entropy: virtio-rng (B) | device | new driver crate, DMA seam | **new** DMA/hardware seam (rev2§2.5) | Only if (A) rejected |
+| 3 | Entropy: seed-grant **mechanism** | spec-convention + verified-decode | rev2§5.1 table (likely a new inline-bytes grant kind → touches the verified decoder, task 3); loader/`eunomia-sys` startup parser | no new seam; decode is Verus+fuzz | **Yes — the delivery mechanism** |
+| 3a | Entropy MVP **source**: documented-predictable | none (init seeds from RTC/`CNTVCT`) | init seed generator (trusted shell) | no new seam; **explicitly non-cryptographic**, disclosed MVP-only | **Yes — MVP default** |
+| 3b | Entropy **source** upgrade: `FEAT_RNG`/`RNDR` | machine-config | `-cpu max` (a72 lacks `RNDR`); init reads `RNDR` from EL0 | no DMA seam, no syscall — seam-free *and* random | Upgrade path — when an untrusted `HashMap` consumer arrives |
+| 3c | Entropy **source** upgrade: virtio-rng | device | new driver crate, DMA seam | **new** DMA/hardware seam (rev2§2.5) | Alternative upgrade — only if `RNDR`/`-cpu max` rejected |
 | 4 | Console stdio | marshalling only | std PAL over `chan_send`/`chan_recv` resolving the slots from the already-delivered grant table | no new verified logic; driver + shell path + `NAME_STDIN/STDOUT` grants already exist | **Mostly done — only the std-side stdio wiring** |
 | 5 | Heap named-grant | spec-convention | rev2§5.1 table + `CapSlot` grant | sbrk-grow folds under Store/aspace seam | Deferred — fixed arena suffices |
 | 6 | stderr | spec-convention + marshalling | rev2§5.1 (optional `NAME_STDERR`) or fold into stdout | `debug_write` bring-up; console production | Small — decide sink (folded) |
@@ -357,7 +381,7 @@ global-statics fallback. Time is pulled in here — it is free.*
 | **3.1** | Real TLS (kernel) | `TPIDR_EL0` save/restore: `tpidr` in `TrapFrame` (272→288 + pad), `mrs/msr` in `exceptions.rs`, grow `sub/add sp,#272`, seed at start; **`offset_of` const-assert** | `cargo clean -p kcore && cargo verus verify -p kcore` re-passes **406/0** (unchanged); host test: 2 threads share an aspace, read distinct TLS markers; ledger routing-note added | **8** |
 | **3.2** | spawn/join/yield/sleep | `urt` in-process thread-spawn primitive (`Box<ThreadInit>` ptr → `x0`); `sys/thread/eunomia.rs` (motor template); stack+guard (rev2§5.3); `yield_now` = op 2; sleep = `TimerArm`+`NotifWait` | QEMU spawn smoke + **new host tests** for the `urt::spawn` invariants (bind-before-start, read-report-before-revoke) — currently uncovered | **9** |
 | **3.3** | Locks | `eunomia_sys::futex` emulated over notifications (the 4 futex fns + types; address→waiter table + bootstrap spinlock); add `eunomia` to the five `sys/sync/*/futex.rs` arms + `pub use eunomia_sys::futex;` in the PAL → Mutex/Condvar/RwLock/Once/Parker come free; lift the heap single-thread no-lock assumption (lock or per-thread arenas). MVP supports `futex_wait(timeout=None)`; `Some(_)` deferred to the timer-as-source path | **Loom** (certifying, the bucket spinlock) + **Shuttle** (breadth, the dispatch) green, **reusing `tla/ipc_reactor`** + its 3 negative controls — **never Verus** (SeqCst pin) | **10** |
-| **3.4** | Entropy + HashMap | startup-block seed grant (decision above); `sys/random/eunomia.rs` (mandatory arm) over the seed; unblock `HashMap` default `RandomState` | seed decode Verus+fuzz (rides 1.2); `HashMap` works under smoke | **11** |
+| **3.4** | Entropy + HashMap | startup-block seed grant (likely a new inline-bytes grant kind → extend the task-3 verified decoder + fuzz corpus); init seeds it MVP-predictable (documented non-crypto); `sys/random/eunomia.rs` (mandatory arm) where `fill_bytes` is a **per-process DRBG** over the seed (zeroize the seed after init), and a parent draws a **fresh sub-seed per child**; define the **no-seed behavior** (recommend loud abort at first use, the `now_utc_ns` precedent — `fill_bytes` is infallible, so the alternative is silent predictability); unblock `HashMap` `RandomState` | seed decode Verus+fuzz (rides 1.2); `HashMap` works under smoke; findings doc records the MVP-predictable disclosure + the `RNDR`/virtio-rng upgrade path | **11** |
 | **3.5** | TLS keys | `urt::tls` key table over the verified `SlotAlloc` + per-thread block over the verified heap; `sys/thread_local` arm | `cargo verus verify -p urt` (key-table obligations green); host test | **12** |
 
 ### Phase 4 — Filesystem
@@ -460,9 +484,20 @@ blocked; record the final call in the relevant task's findings doc.
    notification block/wake primitive is needed either way, so nothing is wasted. The
    one added cost over the parker route — the address→waiter table's bootstrap
    spinlock — is a single small Loom/Shuttle-certified component.
-2. **Entropy source (task 11).** *Recommended: startup-block seed grant* (no new
-   seam; decode covered by task 3). virtio-rng only if seed quality proves
-   insufficient — it raises the ledger 14→15.
+2. **Entropy (task 11) — RESOLVED for the MVP.** *Mechanism:* startup-block seed
+   grant (no new seam; decode rides task 3). *MVP source:* **documented-predictable**
+   — init seeds from RTC/`CNTVCT`, disclosed loudly as non-cryptographic, accepted
+   *only because* no untrusted input currently reaches a `HashMap`'s SipHash keys
+   (the store keys directories in sorted prolly trees, not `HashMap`s; the shell reads
+   trusted input). The failure is *silent* (predictable keys look identical to good
+   ones, and the gate can't catch it), so the disclosure is load-bearing, not
+   cosmetic. *Open sub-decision (deferred, not blocking):* the real source when an
+   untrusted `HashMap` consumer arrives — **`RNDR` via `-cpu max`** (seam-free,
+   no-DMA, EL0 instruction; a72 lacks it) *recommended over* virtio-rng (cleaner but a
+   new DMA seam, 14→15). *Invariants regardless of source:* `fill_bytes` is a
+   per-process DRBG over the seed (never a raw copy; std's `fill_bytes` is infallible);
+   parents draw a fresh sub-seed per child (no `fork()`-style reuse); zeroize the seed
+   after DRBG init; the no-seed path is a loud abort, not silent predictability.
 3. **stderr sink (tasks 6, 16).** *Recommended: `debug_write` for bring-up, then
    fold into the `stdout` console channel* (no `NAME_STDERR`). Add a separate name
    only if a distinct stream is required.
