@@ -161,9 +161,15 @@ unsafe impl<const N: usize> GlobalAlloc for Heap<N> {
             return;
         }
         // Double-free / overlap guard. `is_allocated` is the verified accessor
-        // (in `freelist`); heap input is trusted in-process (note 4 of the
-        // verification tier), so this is a debug_assert — release rests on
-        // `core`'s correctness, the same line dma-pool draws.
+        // (in `freelist`); in release, correctness rests on in-process trust
+        // plus freelist's verified postconditions — the pointer was handed out
+        // by our own `alloc`, so `off+need<=N` and arena membership hold by
+        // construction from the matching alloc round-trip. Unlike dma-pool
+        // (whose `DmaBuf` is `Copy`, forgeable across pools, justifying a hard
+        // assert at a cross-pool boundary), a hard assert here would abort on a
+        // drop-unwind path, violating the "dealloc must never abort" invariant
+        // (lib.rs:30-31,154). `debug_assert!` is the correct tier: a
+        // debug-build witness, compiled out in release.
         debug_assert!(
             fl.is_allocated(off, need),
             "urt heap: double free / overlap"
