@@ -54,7 +54,10 @@ pub const EV_PEER_CLOSED: u64 = 2;
 pub const BIND_EXIT: u64 = 0;
 pub const BIND_FAULT: u64 = 1;
 
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "none", target_os = "eunomia")
+))]
 mod imp {
     #[inline(always)]
     pub unsafe fn syscall(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 {
@@ -106,7 +109,10 @@ mod imp {
     }
 }
 
-#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+#[cfg(not(all(
+    target_arch = "aarch64",
+    any(target_os = "none", target_os = "eunomia")
+)))]
 mod imp {
     /// Host builds (tests of the protocol layers) must never reach a raw
     /// syscall.

@@ -72,6 +72,9 @@ verify = true
 # cfg(kani) is injected by cargo-kani; cfg(loom)/cfg(shuttle) by
 # RUSTFLAGS="--cfg loom|shuttle" for the IPC reactor models;
 # cfg(verus_keep_ghost)/cfg(verus_only) by Verus during `cargo verus verify`.
-# Teach plain cargo all are expected (same handling as urt/kcore).
+# target_os="eunomia" is the custom aarch64-unknown-eunomia target (the real
+# `svc #0` syscall arm, alongside the bare-metal "none"); it is unknown to a
+# host/none toolchain's check-cfg. Teach plain cargo all are expected (same
+# handling as urt/kcore).
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)", "cfg(loom)", "cfg(shuttle)", "cfg(verus_keep_ghost)", "cfg(verus_only)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)", "cfg(loom)", "cfg(shuttle)", "cfg(verus_keep_ghost)", "cfg(verus_only)", 'cfg(target_os, values("eunomia"))'] }

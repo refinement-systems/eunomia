@@ -11,11 +11,17 @@ fn build_user(
     bin: &str,
     envs: &[(&str, String)],
 ) -> PathBuf {
-    let triple = "aarch64-unknown-none-softfloat";
+    // Custom JSON target: cargo wants an absolute path for `--target` (the
+    // build runs in user/<pkg>), but names the artifact dir by the file stem.
+    let triple = "aarch64-unknown-eunomia";
+    let spec = root.join("targets").join(format!("{triple}.json"));
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let mut cmd = Command::new(cargo);
     cmd.current_dir(root.join("user").join(pkg))
-        .args(["build", "--release", "--target", triple])
+        .args(["build", "--release", "--target"])
+        .arg(&spec)
+        // `--target <path>.json` is gated behind this unstable cargo flag.
+        .arg("-Zjson-target-spec")
         .arg("-Zbuild-std=core,compiler_builtins,alloc")
         .arg("-Zbuild-std-features=compiler-builtins-mem")
         .arg("--target-dir")
@@ -40,6 +46,7 @@ fn main() {
 
     let root = manifest.parent().unwrap();
     for dep in [
+        "targets/aarch64-unknown-eunomia.json",
         "user/hello",
         "user/selftest",
         "user/init",
