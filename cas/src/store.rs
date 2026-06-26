@@ -3548,6 +3548,23 @@ mod tests {
         rec
     }
 
+    /// Like [`framed`], but stamps the canonical record checksum over
+    /// `seq‖len‖payload` so `WalOp::decode_record` clears the framing *and*
+    /// checksum gates and reaches the structural `decode_payload`. `framed` writes
+    /// `seq = 0` and `len = payload.len()`, so the checksum recomputed by
+    /// `decode_record` (`disk.rs`) is exactly `record_checksum(0, len, payload)`
+    /// — the gate passes by construction, so a `decode_record` rejection is the
+    /// structural decoder's verdict, not a checksum-gate one. A zero-checksum
+    /// `framed` record would instead reject at the checksum gate before the
+    /// structure is inspected, making a negative-direction `is_none()` assertion
+    /// pass vacuously.
+    fn framed_cksum(payload: &[u8]) -> Vec<u8> {
+        let mut rec = framed(payload);
+        let cksum = crate::disk::record_checksum(0, payload.len() as u32, payload);
+        rec[16..48].copy_from_slice(cksum.as_bytes());
+        rec
+    }
+
     // ── refuse-not-panic format contract (rev2§4.5) ──
 
     /// rev2§4.5: `format` is total over device *geometry* — an undersized or
@@ -4558,6 +4575,13 @@ mod tests {
     /// like the other on-disk decoders. This test gives the verified predicate
     /// *teeth* (verus.md §11): it must accept well-formed records and reject
     /// structurally-malformed ones, and the blake3 half must stay independent.
+    /// It also cross-checks the decode/`content_ok_spec` join against the real
+    /// `WalOp::decode_record` (`disk.rs`): a record the content predicate accepts
+    /// (real checksum) must `decode_record` to `Some`, and a payload the
+    /// structural predicate rejects must `decode_record` to `None` *at the
+    /// structural decoder*. The negative direction frames with a valid checksum
+    /// (`framed_cksum`) so the rejection cannot pass vacuously at the checksum
+    /// gate, which `decode_record` checks before the structural `decode_payload`.
     #[test]
     fn wal_struct_ok_has_teeth() {
         // A real Write record's structure is accepted, and (with its real
@@ -4572,6 +4596,9 @@ mod tests {
         let rec = write.encode_record(1);
         assert!(wal_struct_ok(&rec, 0, rec.len()));
         assert!(wal_content_ok(&rec, 0, rec.len()));
+        // …and a content-valid record decodes through the full content-layer path
+        // (the positive half of the decode/`content_ok_spec` join).
+        assert!(WalOp::decode_record(&rec).is_some());
 
         // A complete Unlink record is accepted too (the other tag).
         let unlink = WalOp::Unlink {
@@ -4581,6 +4608,7 @@ mod tests {
         };
         let urec = unlink.encode_record(2);
         assert!(wal_struct_ok(&urec, 0, urec.len()));
+        assert!(WalOp::decode_record(&urec).is_some());
 
         // A complete Rename record (tag 3, two paths) is accepted by both the
         // structural decoder and the content predicate.
@@ -4593,6 +4621,7 @@ mod tests {
         let rnrec = rename.encode_record(3);
         assert!(wal_struct_ok(&rnrec, 0, rnrec.len()));
         assert!(wal_content_ok(&rnrec, 0, rnrec.len()));
+        assert!(WalOp::decode_record(&rnrec).is_some());
 
         // The blake3 half still bites: corrupt one checksum byte and the
         // structure still decodes, but content acceptance fails.
@@ -4600,38 +4629,55 @@ mod tests {
         bad_cksum[16] ^= 0xFF;
         assert!(wal_struct_ok(&bad_cksum, 0, bad_cksum.len()));
         assert!(!wal_content_ok(&bad_cksum, 0, bad_cksum.len()));
+        // The full decode rejects it at the checksum gate (`disk.rs`), before the
+        // structural decoder it would otherwise pass — the join's checksum half.
+        assert!(WalOp::decode_record(&bad_cksum).is_none());
 
-        // Teeth — structurally-malformed payloads must be rejected:
+        // Teeth — each structurally-malformed payload must be rejected by both
+        // the verified predicate (`wal_struct_ok`) and the full content-layer
+        // decode (`WalOp::decode_record`). The decode half frames with a valid
+        // checksum (`framed_cksum`) so the rejection comes from the structural
+        // decoder, not vacuously from the checksum gate (see `framed_cksum`).
+        let reject = |payload: &[u8]| {
+            let f = framed(payload);
+            assert!(!wal_struct_ok(&f, 0, f.len()));
+            let fc = framed_cksum(payload);
+            assert!(WalOp::decode_record(&fc).is_none());
+        };
+        // The mirror for an accepted payload: the predicate accepts and the full
+        // decode round-trips to `Some` — the live witness that `framed_cksum`
+        // records clear the checksum gate, so the `reject` `None`s are non-vacuous.
+        let accept = |payload: &[u8]| {
+            let f = framed(payload);
+            assert!(wal_struct_ok(&f, 0, f.len()));
+            let fc = framed_cksum(payload);
+            assert!(WalOp::decode_record(&fc).is_some());
+        };
         // (a) unknown op tag.
-        let bad_tag = framed(&[99]);
-        assert!(!wal_struct_ok(&bad_tag, 0, bad_tag.len()));
+        reject(&[99]);
         // (b) trailing bytes after a complete Unlink op (the `done()` check).
         //     payload = tag(2) · rl(0) · path-count(0) · mtime(8 zero bytes).
         let mut unlink_payload = vec![2u8, 0u8, 0u8];
         unlink_payload.extend_from_slice(&0u64.to_le_bytes());
         let mut trailing = unlink_payload.clone();
         trailing.push(0xFF);
-        let with_trailing = framed(&trailing);
-        assert!(!wal_struct_ok(&with_trailing, 0, with_trailing.len()));
+        reject(&trailing);
         // the same payload without the trailing byte is accepted.
-        let exact = framed(&unlink_payload);
-        assert!(wal_struct_ok(&exact, 0, exact.len()));
+        accept(&unlink_payload);
         // (c) a path component length that runs past the buffer.
         //     tag(2) · rl(0) · path-count(1) · comp-len(5) · <no comp bytes>.
-        let truncated = framed(&[2, 0, 1, 5]);
-        assert!(!wal_struct_ok(&truncated, 0, truncated.len()));
+        reject(&[2, 0, 1, 5]);
         // (c') a Rename whose *second* path is truncated — the tag-3 walk must
         //      reject. tag(3) · rl(0) · from-count(0) · to-count(1) · comp-len(9)
         //      · <no comp bytes>. The first path is well-formed; the second runs off.
-        let rn_trunc = framed(&[3, 0, 0, 1, 9]);
-        assert!(!wal_struct_ok(&rn_trunc, 0, rn_trunc.len()));
+        reject(&[3, 0, 0, 1, 9]);
         // (c'') a Rename missing its mtime: two empty paths then no 8-byte mtime.
-        let rn_no_mtime = framed(&[3, 0, 0, 0]);
-        assert!(!wal_struct_ok(&rn_no_mtime, 0, rn_no_mtime.len()));
+        reject(&[3, 0, 0, 0]);
         // (d) empty payload (no tag byte at all).
-        let empty = framed(&[]);
-        assert!(!wal_struct_ok(&empty, 0, empty.len()));
-        // (e) a record shorter than the header decodes nothing.
+        reject(&[]);
+        // (e) a record shorter than the header decodes nothing. `decode_record`
+        //     rejects this at the framing length gate (a layer below the
+        //     structural decoder), so only the structural predicate is exercised.
         assert!(!wal_struct_ok(&[0u8; 4], 0, 4));
     }
 
