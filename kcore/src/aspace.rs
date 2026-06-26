@@ -300,8 +300,10 @@ proof fn lemma_pte_bits(pa: u64, ap: u64, sh: u64, attr: u64, xn: u64, pte: u64)
 }
 
 /// A user mapping never touches the two shared kernel L1 entries (indices 0/1):
-/// every page VA in `[USER_VA_BASE, USER_VA_END)` has `l1_index ≥ 2` (consumed
-/// by `walk_alloc`). Stated over the half-open
+/// every page VA in `[USER_VA_BASE, USER_VA_END)` has `l1_index ≥ 2` — the
+/// rev2§2.5 isolation property. Consumed by `walk_alloc`'s `spec_l1_index(va) >= 2`
+/// `ensures` and, per mapped page, by `map_in`'s `Ok` postcondition; its `requires`
+/// is discharged from those callers' user-VA range. Stated over the half-open
 /// mapped-page range, so the `pages == 0` edge (`va` can equal `USER_VA_END`) is
 /// excluded by construction.
 pub proof fn lemma_user_va_l1_index(va: u64)
@@ -1475,6 +1477,10 @@ fn walk_alloc(
         final(pool).len() == old(pool).len(),
         pt_wf(final(l1)@, final(pool)@, pool_base, *final(pool_used) as nat, final(pool).len() as nat),
         *final(pool_used) >= *old(pool_used),
+        // rev2§2.5 isolation: a user VA never lands in a shared kernel L1 entry
+        // (0/1) — the `lemma_user_va_l1_index` corollary, discharged from the
+        // `USER_VA_BASE <= va < USER_VA_END` precondition.
+        spec_l1_index(va) >= 2,
         forall|w: u64| #![trigger pt_lookup(final(l1)@, final(pool)@, pool_base, w)]
             pt_lookup(old(l1)@, old(pool)@, pool_base, w) is Some
                 ==> pt_lookup(final(l1)@, final(pool)@, pool_base, w)
@@ -1504,6 +1510,7 @@ fn walk_alloc(
     let ghost pu_0 = *pool_used;
     proof {
         lemma_va_indices(va);
+        lemma_user_va_l1_index(va);
         lemma_desc_tag(0);
     }
     let plen = pool.len();
@@ -1717,9 +1724,15 @@ pub fn map_in<S: Store>(
                 ==> pt_lookup(final(l1)@, final(pool)@, pool_base, w)
                         == pt_lookup(old(l1)@, old(pool)@, pool_base, w),
         match r {
-            Ok(()) => forall|i: int| #![trigger pg(va, i)] 0 <= i < pages ==>
-                pt_lookup(final(l1)@, final(pool)@, pool_base, pg(va, i))
-                    == Some(spec_pte_encode(pg(pa, i), perms)),
+            Ok(()) => {
+                &&& forall|i: int| #![trigger pg(va, i)] 0 <= i < pages ==>
+                    pt_lookup(final(l1)@, final(pool)@, pool_base, pg(va, i))
+                        == Some(spec_pte_encode(pg(pa, i), perms))
+                // rev2§2.5 isolation: every mapped user page sits in L1 index ≥ 2,
+                // never a shared kernel L1 entry (0/1) — `lemma_user_va_l1_index`.
+                &&& forall|i: int| #![trigger pg(va, i)] 0 <= i < pages ==>
+                    spec_l1_index(pg(va, i)) >= 2
+            },
             Err(e) => e == MapError::BadVa || e == MapError::AlreadyMapped || e == MapError::NeedMemory,
         },
 {
@@ -1730,6 +1743,17 @@ pub fn map_in<S: Store>(
     proof { assert(USER_VA_END == 0x80_0000_0000) by (compute); }
     if !va_range_ok(va, pages) {
         return Err(MapError::BadVa);
+    }
+    // Establish the rev2§2.5 isolation forall up front (depends only on `va`/
+    // `pages`, both loop-immutable): each mapped page's VA is in user range
+    // (`lemma_pg_in_range`), hence has L1 index ≥ 2 (`lemma_user_va_l1_index`).
+    // Both passes carry it as an invariant so it survives to the `Ok` return.
+    proof {
+        assert forall|i: int| #![trigger pg(va, i)] 0 <= i < pages implies
+            spec_l1_index(pg(va, i)) >= 2 by {
+            lemma_pg_in_range(va, pages, i);
+            lemma_user_va_l1_index(pg(va, i));
+        }
     }
     // ── Pass 1: walk-allocate the tables, reject any already-mapped page ──
     let mut i: u64 = 0;
@@ -1752,6 +1776,7 @@ pub fn map_in<S: Store>(
                     ==> pt_lookup(l1@, pool@, pool_base, w) == pt_lookup(l1_0, pool_0, pool_base, w),
             forall|j: int| #![trigger pg(va, j)] 0 <= j < i ==>
                 pt_lookup(l1@, pool@, pool_base, pg(va, j)) == Some(0u64),
+            forall|j: int| #![trigger pg(va, j)] 0 <= j < pages ==> spec_l1_index(pg(va, j)) >= 2,
         decreases pages - i,
     {
         proof { lemma_pg_in_range(va, pages, i as int); }
@@ -1814,6 +1839,7 @@ pub fn map_in<S: Store>(
                 pt_lookup(l1@, pool@, pool_base, pg(va, j)) == Some(spec_pte_encode(pg(pa, j), perms)),
             forall|j: int| #![trigger pg(va, j)] k <= j < pages ==>
                 pt_lookup(l1@, pool@, pool_base, pg(va, j)) == Some(0u64),
+            forall|j: int| #![trigger pg(va, j)] 0 <= j < pages ==> spec_l1_index(pg(va, j)) >= 2,
         decreases pages - k,
     {
         proof { lemma_pg_in_range(va, pages, k as int); }
