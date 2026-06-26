@@ -1262,6 +1262,52 @@ proof fn lemma_two_allocs_disjoint<const N: usize>(
     }
 }
 
+/// **Mechanical teeth for [`lemma_two_allocs_disjoint`].** Drives two real
+/// [`FreeList::alloc`] carves and threads their actual `ensures` — the first's
+/// `!covers` over its freshly-used region, the second's `covers` over the region
+/// it carved from that same post-first state — into the lemma, discharging its
+/// `requires` from code rather than from a doc comment. A drift in `alloc`'s
+/// coverage `ensures` breaks verification here, which the `dma-pool`/`urt`
+/// runtime wrapper-corollary proptests cannot catch.
+#[allow(dead_code)] // run by the `two_allocs_disjoint` host test; the verify/normal
+                    // build cfg's that caller out (cf. the `len` field above).
+fn two_allocs_disjoint_teeth<const N: usize>(
+    fl: &mut FreeList<N>,
+    na: usize,
+    align_a: usize,
+    nb: usize,
+    align_b: usize,
+)
+    requires
+        old(fl).wf(),
+        na > 0,
+        nb > 0,
+        align_a > 0,
+        align_b > 0,
+{
+    let r1 = fl.alloc(na, align_a);
+    let ghost fl1 = *fl; // post-carve-#1 == pre-carve-#2 state
+    let r2 = fl.alloc(nb, align_b);
+    if r1.is_some() && r2.is_some() {
+        // Both carves succeeded; `a`/`b` are their returned offsets, ghost since
+        // they feed only the proof. alloc #1's `!final.covers` over [a, a+na) and
+        // alloc #2's `old.covers` over [b, b+nb) are exactly the lemma's premises,
+        // both about the shared snapshot `fl1`.
+        let ghost a = match r1 {
+            Some(a) => a as int,
+            None => 0,
+        };
+        let ghost b = match r2 {
+            Some(b) => b as int,
+            None => 0,
+        };
+        proof {
+            lemma_two_allocs_disjoint::<N>(fl1, a, na as int, b, nb as int);
+        }
+        assert(a + na as int <= b || b + nb as int <= a);
+    }
+}
+
 } // verus!
 
 #[cfg(test)]
@@ -1278,5 +1324,13 @@ mod tests {
         assert!(fl.is_allocated(start, 16)); // just carved -> allocated
         fl.free(start, 16);
         assert!(!fl.is_allocated(start, 16)); // freed -> not allocated
+    }
+
+    #[test]
+    fn two_allocs_disjoint() {
+        // Run the verified teeth helper through a real double carve so it is
+        // reached by real code (the verify build cfg's this caller out).
+        let mut fl = FreeList::<64>::new(128);
+        two_allocs_disjoint_teeth::<64>(&mut fl, 16, 8, 32, 16);
     }
 }
