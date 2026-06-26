@@ -68,17 +68,19 @@ pub proof fn lemma_clear_bit_self(x: u32, k: u32)
     ;
 }
 
-// A set/clear of bit `k` leaves every *other* bit `j != k` untouched (instantiated per
-// `j` inside the ops' bitmap-coherence re-establishment, so no forall-over-bits trigger).
+// A set/clear of bit `k` leaves every *other* bit `j != k` of the word untouched: the
+// masked word at `j` is unchanged (the mask-equal form, stronger than mere (non)zero
+// equivalence). Instantiated per `j` inside the ops' bitmap-coherence re-establishment,
+// so no forall-over-bits trigger.
 pub proof fn lemma_set_bit_other(x: u32, k: u32, j: u32)
     requires
         k < 32,
         j < 32,
         j != k,
     ensures
-        ((x | (1u32 << k)) & (1u32 << j) != 0u32) == (x & (1u32 << j) != 0u32),
+        (x | (1u32 << k)) & (1u32 << j) == x & (1u32 << j),
 {
-    assert(((x | (1u32 << k)) & (1u32 << j) != 0u32) == (x & (1u32 << j) != 0u32)) by (bit_vector)
+    assert((x | (1u32 << k)) & (1u32 << j) == x & (1u32 << j)) by (bit_vector)
         requires
             j < 32,
             k < 32,
@@ -92,9 +94,9 @@ pub proof fn lemma_clear_bit_other(x: u32, k: u32, j: u32)
         j < 32,
         j != k,
     ensures
-        ((x & !(1u32 << k)) & (1u32 << j) != 0u32) == (x & (1u32 << j) != 0u32),
+        (x & !(1u32 << k)) & (1u32 << j) == x & (1u32 << j),
 {
-    assert(((x & !(1u32 << k)) & (1u32 << j) != 0u32) == (x & (1u32 << j) != 0u32)) by (bit_vector)
+    assert((x & !(1u32 << k)) & (1u32 << j) == x & (1u32 << j)) by (bit_vector)
         requires
             j < 32,
             k < 32,
