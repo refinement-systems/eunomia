@@ -113,10 +113,19 @@ items needing a human call are consolidated in [Open decisions](#open-decisions)
   `fill_bytes` is infallible — a finite seed handed back raw repeats/exhausts
   silently); and a parent spawning children draws a **fresh sub-seed per child** from
   its own DRBG, never copies its own seed (the classic `fork()`-without-reseed trap).
-- **`stderr` → `debug-log` for bring-up, then folded into the `stdout` console
-  channel** (no new `NAME_STDERR`). There is no `NAME_STDERR` constant today; folding
-  avoids migrating the rev2§5.1 named-grant table. Add `NAME_STDERR` only if a
-  separate stream is later required.
+- **`stderr` → `debug-log` for bring-up, then a capability-routed `NAME_STDERR`
+  stream for production**, resolved as **`NAME_STDERR` if granted, else fall back to
+  the `stdout` channel, else `debug-log`.** Folding stderr into stdout was rejected:
+  it would break the very separation rev2§5.1 splits stdout/stdin *for* — in `a | b`
+  it pipes `a`'s diagnostics into `b`'s stdin. Adding `NAME_STDERR` is cheap because
+  it is a new name **id**, not a new grant **kind** (a `CapSlot` like `NAME_STDOUT`):
+  it touches **no codec and no verified decoder** — just a constant, init pushing it,
+  and the PAL resolving a third slot. The fallback rule keeps "just works on a
+  terminal" (init grants the same console endpoint under both `stdout` and `stderr`,
+  the rev2§5.1 "same channel under both names" pattern) while allowing a shell to wire
+  `2>` / pipelines separately. **Panic last-words stay on the `debug-log`
+  kernel-diagnostic path** (rev2§7's "kept … for panic reporting" clause), separate
+  from the userspace stderr stream, so a wedged console can't swallow a panic.
 - **The MVP heap is the fixed `.bss` arena** (`urt::Heap<N>`, no grow). A `heap`
   named grant for `sbrk`-style growth is a deferred rev2§5.1 convention; the fixed
   arena suffices through Phase 5.
@@ -274,7 +283,7 @@ Everything else has a `_`→unsupported and can ship unsupported first.
 | **env / args** | `loader::startup::decode` of the slot-0 boot message | **partial** | Verify the decoder (Phase 1); `sys/args`+`sys/env` arms. `env::vars` empty until a producer emits env entries |
 | **thread: spawn/join/yield/sleep** | `Retype→Thread` + `ThreadStart(13/18)`; `ThreadExit(15)`; join via `ThreadBind(21,on-exit)`+`NotifWait(12)`+`ReadReport(22)`; **`Yield`=op 2**; sleep `TimerArm(14)`+`NotifWait` | **partial** | `urt` in-process thread-spawn primitive (only one scalar arg `x0` — a boxed `FnOnce` ptr fits); fund stack+guard (rev2§5.3). `urt::spawn` has **zero Verus/host coverage** today — net-new test surface |
 | **sync: Mutex/Condvar/RwLock/Once/Parker** | `sys::futex` emulated over `NotifSignal(11)`/`NotifWait(12)` (verified core) → upstream's futex lock impls | **partial** | `eunomia_sys::futex` (4 fns) + committed Loom/Shuttle harness reusing `tla/ipc_reactor`; the locks come free from std. `notif_wait` has **no timeout** → `futex_wait(Some(_))` / `*_timeout` need the unwired timer-as-source path (MVP: `None` only) |
-| **stdio** | (bring-up) `DebugWrite(1)`; (real) console channel over `ipc` | **partial** out / **missing** stdin | `sys/stdio/eunomia.rs` arm; `stdin` op deliberately unassigned (rev2§7) → must read the console channel. `NAME_STDIN`/`NAME_STDOUT` are **already emitted by init** (both → the console slot) and consumed by the shell, so only the std-side wiring remains, not grant delivery |
+| **stdio** | (bring-up) `DebugWrite(1)`; (real) console channel over `ipc` | **partial** out / **missing** stdin | `sys/stdio/eunomia.rs` arm; `stdin` op deliberately unassigned (rev2§7) → must read the console channel. `NAME_STDIN`/`NAME_STDOUT` are **already emitted by init** (both → the console slot) and consumed by the shell, so only the std-side wiring remains, not grant delivery. stderr: **add `NAME_STDERR`** (new name id, no codec change), resolve `NAME_STDERR` → stdout → debug-log; panic last-words stay on debug-log |
 | **thread_local / TLS** | `TPIDR_EL0` (absent) + `urt::slots` index alloc (verified) | **missing** | `TPIDR_EL0` save/restore (Phase 3) + `urt` TLS key table + `sys/thread_local` arm |
 | **fs: File/read_dir/metadata** | storage-server openat session (handle-relative, component paths) | **partial** | `sys/fs/eunomia.rs` client + path decode; `File=(HandleId, TreePath, client offset)`; 256-byte `MAX_MSG` → client offset loops |
 | **hashmap_random_keys** | nothing — **hard blocker** | **missing** | seed-grant + `sys/random/eunomia.rs` (mandatory). `fill_bytes` = per-process **DRBG** over the seed (not a raw copy); MVP seed is documented-predictable (non-crypto); per-child fresh sub-seeds |
@@ -316,7 +325,7 @@ virtio-rng) is upgrade-path work, deferred until an untrusted `HashMap` consumer
 | 3c | Entropy **source** upgrade: virtio-rng | device | new driver crate, DMA seam | **new** DMA/hardware seam (rev2§2.5) | Alternative upgrade — only if `RNDR`/`-cpu max` rejected |
 | 4 | Console stdio | marshalling only | std PAL over `chan_send`/`chan_recv` resolving the slots from the already-delivered grant table | no new verified logic; driver + shell path + `NAME_STDIN/STDOUT` grants already exist | **Mostly done — only the std-side stdio wiring** |
 | 5 | Heap named-grant | spec-convention | rev2§5.1 table + `CapSlot` grant | sbrk-grow folds under Store/aspace seam | Deferred — fixed arena suffices |
-| 6 | stderr | spec-convention + marshalling | rev2§5.1 (optional `NAME_STDERR`) or fold into stdout | `debug_write` bring-up; console production | Small — decide sink (folded) |
+| 6 | stderr | spec-convention + marshalling | **add `NAME_STDERR`** to the rev2§5.1 table (new name id, `CapSlot` — **no codec/decoder change**) | `debug_write` bring-up; capability-routed `NAME_STDERR`→stdout→debug-log fallback for production; panic last-words stay on debug-log | **Yes — add the name (folding rejected: breaks pipeline separation)** |
 
 **`TPIDR_EL0` detail.** `TrapFrame` (`kcore/src/thread.rs`, `repr(C)`, **outside**
 `verus!{}`) is `{x:[u64;31], sp_el0, elr, spsr}` = **272 bytes**; `ThreadStart`
@@ -368,7 +377,7 @@ global-statics fallback. Time is pulled in here — it is free.*
 |---|---|---|---|---|
 | **2.1** | Entry + argv/env | non-crt0 `_start`→`lang_start`→`main` reads the slot-0 bootstrap channel's first message, calls the **verified** decoder (1.2); `sys/args`, `sys/env`, and `sys/io/error` (mandatory) arms; io-error map proptested | links; `env::args` visible in QEMU | **4** |
 | **2.2** | GlobalAlloc | `sys/alloc/eunomia.rs` over `urt::Heap<N>` (algorithm verified in `freelist`; arena Miri+proptest). Mandatory arm. Disclose MVP bounds | `cargo verus verify -p urt -p freelist` (green, re-cited) + `urt` Miri sweep | **5** |
-| **2.3** | stdio (bring-up) + exit terminus | `sys/stdio/eunomia.rs` → `DebugWrite(1)` (len ≤ 1024); `panic_output` same path; **override the PAL `abort_internal()` and `exit()`** to `thread_exit(STATUS_PANIC)` / `thread_exit(code)` (the `motor` template — *not* the `unsupported` `intrinsics::abort()`), preserving the reaper contract for a std binary | boot prints `println!`; a panicking std binary reaps as `STATUS_PANIC` | **6** |
+| **2.3** | stdio (bring-up) + exit terminus | `sys/stdio/eunomia.rs` stdout/stderr → `DebugWrite(1)` (len ≤ 1024); `panic_output` same path. **Disclose** this EL0 use of the debug-log path as a *temporary §2 deviation* (the pre-console-shell precedent, rev2§7) — replaced for stdout/stdin by the console channel in 5.1, retained only for panic last-words. **Override the PAL `abort_internal()` and `exit()`** to `thread_exit(STATUS_PANIC)` / `thread_exit(code)` (the `motor` template — *not* the `unsupported` `intrinsics::abort()`), preserving the reaper contract for a std binary | boot prints `println!`; a panicking std binary reaps as `STATUS_PANIC` | **6** |
 | **2.4** | Time (free) | `Instant` ← `cntvct/cntfrq`; `SystemTime` ← `urt::now_utc_ns` (verified `utc_ns_at`, Loom seqlock); resolve the no-time-grant panic | `cargo verus verify -p urt` (re-cited); `Instant::now`/`SystemTime::now` work | **7** |
 | **GATE** | CI smoke | green-boot marker (`…M1 PASS`-style) + kill-cleanly harness (background QPID + trap + deadline-poll, per `CLAUDE.md`) in the on-os CI job; asserts `println!`/`format!`/`Vec`/`Box`/`String`/`Instant`/`SystemTime` | QEMU boot smoke green | — |
 
@@ -398,7 +407,7 @@ parallel with the threading track.*
 
 | Sub | Goal | Deliverables | Gate | Findings |
 |---|---|---|---|---|
-| **5.1** | console stdio | move `stdout`/`stdin` off `debug-log` onto the `user/console` channel via `ipc` (reactor poll-once loop = the validated `reactor_no_lost_wakeup` harness; `send_blocking` for write backpressure); keep `debug-log` for panics only. The std PAL resolves the stdin/stdout cspace slots from the startup grant table — `NAME_STDIN/STDOUT` are **already emitted by init and consumed by the shell today**, so no grant-delivery change is needed | Shuttle reactor harness green; QEMU interactive stdio | **16** |
+| **5.1** | console stdio + stderr | move `stdout`/`stdin` off `debug-log` onto the `user/console` channel via `ipc` (reactor poll-once loop = the validated `reactor_no_lost_wakeup` harness; `send_blocking` for write backpressure). The std PAL resolves the stdin/stdout cspace slots from the startup grant table — `NAME_STDIN/STDOUT` are **already emitted by init and consumed by the shell today**, so no grant-delivery change is needed. **Add `NAME_STDERR`** (new name id, `CapSlot`, no codec change) and resolve stderr as **`NAME_STDERR` → else stdout channel → else debug-log**; init grants the same console endpoint under both `stdout` and `stderr` for a terminal. **Keep panic last-words on `debug-log`** (kernel-diagnostic, separate from the userspace stderr stream) | Shuttle reactor harness green; QEMU interactive stdio + a piped `a \| b` where `a`'s stderr does not corrupt `b`'s stdin | **16** |
 | **5.2** | process/env | `process::exit(code)` → PAL `exit()` → `ThreadExit` `exited(status)`; `abort` → PAL `abort_internal()` → `thread_exit(STATUS_PANIC)` (both overridden in 2.3, re-confirmed here); `Command` thin/unsupported; `temp_dir` → `tmp` grant; `current_dir`/`set_current_dir` handle-relative or unsupported; populate env entries (producer side) | smoke | **17** |
 | **5.3** | rewrite a user binary | `hello` on std first (validates entry/argv/alloc/exit/`STATUS_PANIC`), then `shell` (alloc + `SystemTime`/`Instant` + console stdio + args + fs) — **keep spawn/reap on raw `loader::spawn`/`urt::spawn`** (std::process can't model it yet) | extended boot smoke exercising fs + console stdio | **18** |
 
@@ -498,9 +507,16 @@ blocked; record the final call in the relevant task's findings doc.
    per-process DRBG over the seed (never a raw copy; std's `fill_bytes` is infallible);
    parents draw a fresh sub-seed per child (no `fork()`-style reuse); zeroize the seed
    after DRBG init; the no-seed path is a loud abort, not silent predictability.
-3. **stderr sink (tasks 6, 16).** *Recommended: `debug_write` for bring-up, then
-   fold into the `stdout` console channel* (no `NAME_STDERR`). Add a separate name
-   only if a distinct stream is required.
+3. **stderr sink (tasks 6, 16) — RESOLVED: add `NAME_STDERR`.** Bring-up:
+   `debug_write` (disclosed §2 deviation). Production: a capability-routed
+   `NAME_STDERR` stream, resolved **`NAME_STDERR` → else stdout channel → else
+   debug-log**; panic last-words stay on debug-log. Folding stderr into stdout was
+   rejected — it pipes a process's diagnostics into the next stage's stdin in `a | b`,
+   breaking the separation rev2§5.1 splits stdout/stdin *for*. Adding the name is
+   cheap (a new name id, not a grant kind → no codec/decoder change) and
+   reversal-expensive to retrofit, so it is added now while the table has no external
+   consumers. The fallback rule preserves "just works on a terminal" (same console
+   endpoint under both names) while allowing `2>` / pipeline wiring.
 4. **Heap growth (tasks 5, later).** *Recommended: fixed `.bss` arena for the MVP.*
    The `heap` named grant + sbrk-grow (folds under the Store/aspace seam) is deferred.
 5. **`*_timeout` APIs in scope? (task 10).** `notif_wait` has no deadline, so
