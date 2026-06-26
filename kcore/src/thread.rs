@@ -182,10 +182,27 @@ pub fn report_terminal<S: Store>(store: &mut S, t: ObjId, r: Report)
         // later call hits the absorbing path above — "at most one transition").
         old(store).tcb_view()[t].report matches Report::Running ==>
             final(store).tcb_view()[t].report == r,
+        // CapRevocation `FireSafe` (rev2§5.1) preserved across the death fire: a consistent
+        // cap store in ⇒ every resident TCB binding slot still names a live notification
+        // out, so the fire signalled a live object, never freed memory
+        // (`cspace::fire_safe`). The local per-step half of the TLA invariant; the
+        // conditional form mirrors `signal`'s `refcount_sound`/`caps_consistent` idiom, so
+        // it burdens no caller. Discharged by the `caps_consistent ⇒ fire_safe` corollary plus
+        // the `slot_view`/`bind_slots`/notif-domain frame `set_tcb_report` + `signal` already give.
+        cspace::caps_consistent(old(store)) ==> cspace::fire_safe(final(store)),
 {
     match store.tcb_report(t) {
         Report::Running => {}
-        _ => { return; }
+        _ => {
+            proof {
+                // Absorbing path: the store is untouched, so `fire_safe` carries straight
+                // from the entry `caps_consistent` via the corollary.
+                if cspace::caps_consistent(old(store)) {
+                    cspace::lemma_fire_safe_from_caps_consistent(old(store));
+                }
+            }
+            return;
+        }
     }
     store.set_tcb_report(t, r);
     proof {
@@ -219,6 +236,24 @@ pub fn report_terminal<S: Store>(store: &mut S, t: ObjId, r: Report)
                 store.notif_view(), store.tcb_view(), n);
         }
         crate::notification::signal(store, n, bits);
+        proof {
+            // `signal` reinserts the fired `n` (live by the `requires`), so the notif domain
+            // is unchanged — the one frame fact the corollary-frame discharge below needs that
+            // does not auto-compose across the `set_tcb_report`/`signal` pair (it rests on
+            // `n` being resident, in scope only here). Trivial on the no-fire path (the notif
+            // view is then untouched), so it survives the branch merge.
+            assert(store.notif_view().dom() == old(store).notif_view().dom());
+        }
+    }
+    proof {
+        // FireSafe out: `set_tcb_report` rewrites only `t`'s `report` (slot caps, every
+        // TCB's `bind_slots`, and the notif domain all fixed) and `signal` (if reached)
+        // frames the same three, so `fire_safe(old)` from the corollary carries to the final
+        // store by the frame lemma — far cheaper than re-deriving `caps_consistent(final)`.
+        if cspace::caps_consistent(old(store)) {
+            cspace::lemma_fire_safe_from_caps_consistent(old(store));
+            cspace::lemma_fire_safe_frame(old(store), store);
+        }
     }
 }
 

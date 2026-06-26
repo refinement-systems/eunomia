@@ -5560,6 +5560,90 @@ pub open spec fn caps_consistent<S: Store>(store: &S) -> bool {
             ==> cap_consistent(store, store.slot_view()[s].cap)
 }
 
+/// CapRevocation `FireSafe` (rev2§5.1, the firing obligation), as a whole-store
+/// corollary of `caps_consistent`: every *resident* TCB binding slot is empty ("NULL")
+/// or names a *live* notification. So a thread-death firing (`thread::report_terminal`
+/// → `notification::signal`) only ever signals a live object or skips a cleared slot —
+/// it never touches freed memory. This is the TLA `FireSafe`
+/// (`tla/cap_revocation/CapRevocation.tla:388`,
+/// `\A t, k: bindings[t][k] = NULL \/ bindings[t][k] \in live`) mechanized over the live
+/// first-order store: a bind slot holds only an empty or a `Notification` cap
+/// (`thread::report_terminal`/`thread::bind`), so `cap_notif` returning `Some(nn)` is the
+/// non-NULL case and the implication demands `nn` live. ONLY this local per-step half is
+/// Verus-mechanized — the *global* cross-restart arm stays the TLA design oracle:
+/// `DeadNowhere` over the whole `CapIds` space (`CapRevocation.tla:374`, which *implies*
+/// `FireSafe`) and the preemptible revoke walk's `EventuallyRevoked` liveness.
+pub open spec fn fire_safe<S: Store>(store: &S) -> bool {
+    forall|t: ObjId, k: int|
+        #![trigger store.tcb_view()[t].bind_slots[k]]
+        store.tcb_view().dom().contains(t) && 0 <= k < store.tcb_view()[t].bind_slots.len()
+            && store.slot_view().dom().contains(store.tcb_view()[t].bind_slots[k])
+            ==> (cap_notif(store.slot_view()[store.tcb_view()[t].bind_slots[k]].cap)
+                    matches Some(nn) ==> store.notif_view().dom().contains(nn))
+}
+
+/// `caps_consistent ⇒ fire_safe`: the rev2§5.1 LiveParent⇒FireSafe entailment, named
+/// where it is cheaply discharged. A resident bind slot holding a `Notification(nn)` cap
+/// is non-empty (`cap_notif` `Some` ⇒ not `CapKind::Empty`), so `caps_consistent`'s
+/// per-slot clause yields `cap_consistent` of that cap, whose `Notification` arm is
+/// `notif_wf(nn)`, whose first clause is `notif_view.dom().contains(nn)` — `nn` is live.
+pub proof fn lemma_fire_safe_from_caps_consistent<S: Store>(store: &S)
+    requires
+        caps_consistent(store),
+    ensures
+        fire_safe(store),
+{
+    assert forall|t: ObjId, k: int|
+        #![trigger store.tcb_view()[t].bind_slots[k]]
+        store.tcb_view().dom().contains(t) && 0 <= k < store.tcb_view()[t].bind_slots.len()
+            && store.slot_view().dom().contains(store.tcb_view()[t].bind_slots[k]) implies (cap_notif(
+        store.slot_view()[store.tcb_view()[t].bind_slots[k]].cap,
+    ) matches Some(nn) ==> store.notif_view().dom().contains(nn)) by {
+        let s = store.tcb_view()[t].bind_slots[k];
+        if let Some(nn) = cap_notif(store.slot_view()[s].cap) {
+            // `cap_notif` is `Some` only on the `Notification` arm, never `Empty`, so the
+            // resident slot's cap is non-empty and `caps_consistent` (keyed on
+            // `store.slot_view()[s]`) gives `cap_consistent`, whose `Notification(nn)` arm
+            // unfolds to `notif_wf(nn)` ⇒ `notif_view.dom().contains(nn)`.
+            assert(store.slot_view()[s].cap.kind == CapKind::Notification(nn));
+            assert(!is_empty_cap(store.slot_view()[s].cap));
+            assert(cap_consistent(store, store.slot_view()[s].cap));
+        }
+    }
+}
+
+/// `fire_safe` is a frame property: it reads only slot caps, each TCB's `bind_slots`, and
+/// the notification domain, so it carries across any edit that frames those — the shape a
+/// thread-death fire (`thread::report_terminal`) has (`set_tcb_report` rewrites one
+/// `report` field; `signal` frames `slot_view`, every TCB's `bind_slots`, and the
+/// `notif_view` domain). The companion of `lemma_caps_consistent_frame`, but far lighter
+/// (no per-cap `notif_wf` re-derivation), so a consuming caller pays almost nothing.
+pub proof fn lemma_fire_safe_frame<S: Store>(s0: &S, s1: &S)
+    requires
+        fire_safe(s0),
+        s1.slot_view() == s0.slot_view(),
+        s1.tcb_view().dom() == s0.tcb_view().dom(),
+        s1.notif_view().dom() == s0.notif_view().dom(),
+        forall|k: ObjId| #[trigger] s1.tcb_view()[k].bind_slots == s0.tcb_view()[k].bind_slots,
+    ensures
+        fire_safe(s1),
+{
+    assert forall|t: ObjId, k: int|
+        #![trigger s1.tcb_view()[t].bind_slots[k]]
+        s1.tcb_view().dom().contains(t) && 0 <= k < s1.tcb_view()[t].bind_slots.len()
+            && s1.slot_view().dom().contains(s1.tcb_view()[t].bind_slots[k]) implies (cap_notif(
+        s1.slot_view()[s1.tcb_view()[t].bind_slots[k]].cap,
+    ) matches Some(nn) ==> s1.notif_view().dom().contains(nn)) by {
+        // `bind_slots` and `slot_view` are framed, so the same resident slot carries the
+        // same cap in `s0`; `fire_safe(s0)` (instantiated at the framed
+        // `s0.tcb_view()[t].bind_slots[k]`) then places the named notification in `s0`'s
+        // notif domain, which equals `s1`'s.
+        assert(s1.tcb_view()[t].bind_slots == s0.tcb_view()[t].bind_slots);
+        let s = s0.tcb_view()[t].bind_slots[k];
+        assert(s1.tcb_view()[t].bind_slots[k] == s);
+    }
+}
+
 // `caps_consistent` is preserved by a **signal-shaped** edit: one that frames the slot/chan/
 // timer/cspace views, changes the notif view only at the signalled `n` (keeping `notif_wf(n)`),
 // and changes only TCBs that were waiting on `n`, leaving every TCB's `bind_slots` fixed. Each
