@@ -37,7 +37,8 @@
 //! (hostile shapes) and a randomized proptest (realistic snapshot-family
 //! shapes) — both Miri-replayed. The walk's termination/bound is guaranteed
 //! **structurally** (above), exercised by the fuzz refuse-not-crash oracle;
-//! no Verus obligation is added, so the gate stays 58/0.
+//! no Verus obligation is added, so the gate is unchanged (see the `cas` Baselines row in
+//! `doc/guidelines/verus_trusted-base.md`).
 
 use crate::chunk::ChunkerParams;
 use crate::file::{chunk_list_entries, make_file_entry, read_file};
