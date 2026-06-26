@@ -338,11 +338,16 @@ jobs:
           cargo verus verify -p virtio-blk
           # storage-server rights lattice — `attenuate` is `parent & mask`:
           # monotone (sets no bit absent from the parent), strips `R_STAT_STORE`
-          # whenever the mask omits bit 5, and `R_ALL` denies it by default ∀ u8.
-          # The session/handle dispatch + the serde/postcard wire codec stay
-          # external; like cas it verifies in the no_std+alloc variant
-          # (--no-default-features), and --lib skips the placeholder bin (which
-          # carries no proofs). Links cas+ipc, re-verified under the alloc prelude.
+          # whenever the mask omits bit 5, and `R_ALL` denies it by default ∀ u8 —
+          # plus the wire-decode header/version prefix (`check_header`, rev2§3.7):
+          # total ∀ bytes, refuses BadHeader exactly on short/bad-magic and
+          # Version exactly on good-magic-wrong-version (composing on the verified
+          # `ipc::version_ok`), magic before version. The session/handle dispatch
+          # stays external; the postcard body decode stays the trusted seam by
+          # feature-exclusion (serde-gated, dropped here — no external_body). Like
+          # cas it verifies in the no_std+alloc variant (--no-default-features),
+          # and --lib skips the placeholder bin (which carries no proofs). Links
+          # cas+ipc, re-verified under the alloc prelude.
           cargo verus verify -p storage-server --no-default-features --lib
           # loader ELF page geometry — `Segment::page_layout` is total and
           # overflow-safe ∀ (vaddr, memsz): Err exactly when the page-up rounding
