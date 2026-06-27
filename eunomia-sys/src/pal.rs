@@ -14,7 +14,36 @@
 
 #![cfg(any(target_os = "eunomia", target_os = "none"))]
 
-use crate::{bootstrap, io_error, syscall};
+use core::alloc::{GlobalAlloc, Layout};
+
+use crate::{bootstrap, heap, io_error, syscall};
+
+/// The process-global std `System` heap (std-port 2.2): a fixed `.bss` arena over
+/// the Verus-verified `freelist` allocator. A plain `static` — interior
+/// `UnsafeCell` plus `urt`'s `unsafe impl Sync` (eunomia processes are
+/// single-threaded, so the allocator takes no lock); `Heap::new()` is all-zero, so
+/// it lands in `.bss`, which the loader maps and zeroes with the RW segment. `N` is
+/// the per-binary reservation [`heap::HEAP_BYTES`] (committed RAM at spawn — no
+/// demand paging in the MVP).
+static HEAP: urt::Heap<{ heap::HEAP_BYTES }> = urt::Heap::new();
+
+/// `GlobalAlloc::alloc` for the std `System` allocator. `urt::Heap` is total over
+/// every `Layout` — null on over-`MAX_ALIGN`/exhaustion/fragmentation-cap — so this
+/// shim re-establishes no precondition; it is the thinnest possible delegation.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_alloc(layout: Layout) -> *mut u8 {
+    // SAFETY: GlobalAlloc::alloc's only contract (a non-zero-size layout) is upheld
+    // by std's caller; `urt::Heap` additionally defends it with `size.max(1)`.
+    unsafe { HEAP.alloc(layout) }
+}
+
+/// `GlobalAlloc::dealloc` for the std `System` allocator.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_dealloc(ptr: *mut u8, layout: Layout) {
+    // SAFETY: `ptr` was handed out by `__eunomia_alloc` for this same `layout`
+    // (std's GlobalAlloc contract); `urt::Heap::dealloc` round-trips the offset.
+    unsafe { HEAP.dealloc(ptr, layout) }
+}
 
 /// Receive + verified-decode the slot-0 startup block and stash argv/env/grants.
 /// Called once by the std PAL `_start` before `main`.

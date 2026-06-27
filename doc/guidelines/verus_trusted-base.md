@@ -295,6 +295,26 @@ surfaces above. The PAL arms (`vendor/rust`'s `sys/pal/eunomia`, `sys/args`/`sys
 gate. The QEMU boot of a std binary is the end-to-end witness (the live argv print
 needs the allocator, std-port 2.2).
 
+Std-port Phase 2.2 backs the mandatory `GlobalAlloc` arm, again **trusted shell over a
+separately-verified algorithm — no `verus!{}` obligation, no new seam, tally stays
+14**. `pal` gains a process-global `static HEAP: urt::Heap<N>` and two more
+`#[no_mangle]` shims (`__eunomia_alloc`/`__eunomia_dealloc`, the `__rust_alloc`
+pattern) that delegate term-for-term to it; the vendored `sys/alloc/eunomia.rs` arm
+routes std's `System` to them (with no `#[global_allocator]` declared, the compiler
+routes `__rust_alloc → __rdl_alloc → System.alloc`, so this is the active allocator).
+The allocation **algorithm** is the Verus-verified `freelist` (the urt Baseline row,
+30/0 transitively); the arena byte-region is the existing **Miri+proptest** seam that
+is *not* one of the 14 (see the urt heap-arena note above). The §11 inverse-leak check
+is **vacuous** here: `urt::Heap::alloc` has no Verus `requires` and is total over every
+`Layout` (null on over-`MAX_ALIGN`/exhaustion/fragmentation-cap), so the shim
+re-establishes no precondition — the thinnest possible delegation. The reservation size
+`N` is a host-tested compile-time const (`eunomia-sys/src/heap.rs`, 1 MiB default,
+`EUNOMIA_HEAP_BYTES`-overridable via a `const fn` decimal parser — a build-time error,
+not a runtime one). `eunomia-sys` takes `urt` as a target-gated dependency, so a cold
+`-p eunomia-sys` session now also re-verifies urt (25) + freelist (30) transitively,
+`rlimit` byte-identical to their standalone gates; eunomia-sys's **own** count stays 7
+(`heap.rs`/the `pal` shims add no `verus!{}`).
+
 ## The seams (14 named constructs + the by-construction category)
 
 Grouped by the `verus.md` §11 category. Each interpreted-hash / size / std-gap seam is a

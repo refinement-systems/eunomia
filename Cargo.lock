@@ -204,6 +204,7 @@ dependencies = [
  "kcore",
  "loader",
  "proptest",
+ "urt",
  "vstd",
 ]
 
