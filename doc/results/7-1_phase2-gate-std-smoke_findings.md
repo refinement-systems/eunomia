@@ -165,6 +165,30 @@ re-verifying). The 406 base matches the phase-2 kcore baseline the plan cites.
   Verus-counted item, no new seam); the verusfmt edit is tooling. Nothing here
   adds or removes one of the 14 seams.
 
+## Drive-by fix — `cas::prolly::split_locality` proptest bound (CI flake)
+
+This PR's CI surfaced a failure in `cas::prolly::tests::split_locality`, a
+proptest in a crate this change does not touch — a pre-existing latent issue the
+random seed happened to hit (seed `cc 46e0da84…`, now committed to
+`cas/proptest-regressions/prolly.txt` as a permanent guard).
+
+**Root cause (confirmed by instrumentation, not guessed):** the test asserts a
+one-entry edit rewrites `≤ 4 * (depth + 1)` nodes, but it used the **pre-edit**
+`depth`. The failing case was a single leaf (`depth_before = 0`, 54 entries); the
+content edit flipped that item's boundary bit, splitting the leaf in two, and the
+new child hashes cascaded a boundary one level up — growing the tree to
+`depth_after = 2` (2 leaves + 2 level-1 nodes + 1 root = **5 new nodes**). Five
+nodes for 54 entries is still O(depth) ≪ O(N); the locality property holds. The
+bug was the bound's depth proxy: an edit at a level boundary grows/shrinks the
+tree, and the rewritten spine is the *taller* of the before/after trees.
+
+**Fix:** bound against `max(depth_before, depth_after)` (the spanning depth), with
+the comment rewritten to explain the per-level ≈2-node spine growth and the
+depth-0→2 case. Verified: the saved seed now passes, the 512-case sweep passes,
+and a **20,000-case** stress run passes clean (`PROPTEST_CASES=20000`). Not a tree
+bug and not a weakening — the corrected bound captures the true O(depth) property
+the old proxy undercounted.
+
 ## Follow-ups
 
 - **5.3** — rewrite the real `hello`, then `shell`, onto std. This gate proves the

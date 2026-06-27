@@ -2157,21 +2157,27 @@ mod tests {
                 e.size = b"locality-probe-edit".len() as u64;
                 dir.upsert(e).unwrap();
             }
-            dir.save(&mut store);
+            let new_root = dir.save(&mut store);
             let new_nodes = store.len() - before;
+            let depth_after = tree_depth(&store, &new_root);
 
-            // An edit touches at most the holding leaf and one neighbor (a
-            // boundary flip merges/splits leaves) plus the shared spine; a flag
-            // flip inside a cap-dominated run shifts only that run's
-            // ⌈len/128⌉ cap-cuts. So the rewrite is O(depth), well under a
-            // whole-tree rewrite for the multi-level shapes here. The constant
-            // is empirically tuned: `3 * (depth + 1)` already survives 8000
-            // cases, so `4 * (depth + 1)` keeps margin without losing the
-            // O(depth) ≪ O(N) locality claim.
-            let bound = 4 * (depth as usize + 1);
+            // An edit touches at most the holding node and one neighbor (a
+            // boundary flip merges/splits a node) at each level of the spine: a
+            // leaf-level flip can split one leaf into two, whose new child hashes
+            // can in turn flip a boundary one level up, and so on. So the rewrite
+            // is ≈2 nodes per spine level — O(depth), well under a whole-tree
+            // rewrite. Crucially the spine spans the *taller* of the before/after
+            // trees: an edit can grow or shrink the tree by levels (a single
+            // overfull leaf splitting can carry the root up two levels — depth
+            // 0→2, five nodes), and the nodes written are the new spine. So the
+            // bound scales with `max(before, after)` depth, not the pre-edit
+            // depth alone (which undercounts exactly this growth). The 2× margin
+            // on the ≈2-per-level structural bound is empirical headroom.
+            let span = depth.max(depth_after) as usize;
+            let bound = 4 * (span + 1);
             prop_assert!(
                 new_nodes <= bound,
-                "edit rewrote {new_nodes} nodes (depth {depth}, bound {bound})"
+                "edit rewrote {new_nodes} nodes (depth {depth}→{depth_after}, bound {bound})"
             );
         }
 
