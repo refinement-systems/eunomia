@@ -40,6 +40,8 @@
 pub mod bootstrap;
 pub mod encode;
 pub mod grant;
+// Internal: the compile-time `System`-heap reservation size for the `pal` arm.
+mod heap;
 pub mod io_error;
 pub mod pal;
 pub mod syscall;

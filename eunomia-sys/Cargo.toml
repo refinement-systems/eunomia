@@ -22,6 +22,17 @@ loader = { path = "../loader", default-features = false }
 # (=version) in lockstep with the other gated crates: an upgrade is a deliberate PR.
 vstd = { version = "=0.0.0-2026-05-31-0205", default-features = false }
 
+# The global allocator backing the std `System` arm (std-port 2.2): a fixed `.bss`
+# `urt::Heap<N>` over the Verus-verified `freelist` algorithm. Target-gated to the
+# userspace cross-build, matching `pal.rs`'s own `#![cfg(...)]` (its only user), so
+# the host `cargo verus verify` / `cargo test` graph stays byte-identical — no urt
+# obligations enter this crate's session; they verify under their own `-p urt` /
+# `-p freelist` gate. No cycle: `urt -> ipc/freelist/vstd`, none reach back here;
+# `vstd` is already pulled transitively via `loader`. `user/shell`/`user/storaged`
+# already link `urt` under these same build flags.
+[target.'cfg(any(target_os = "eunomia", target_os = "none"))'.dependencies]
+urt = { path = "../urt" }
+
 [dev-dependencies]
 # The host round-trip oracle pins the local ABI twin against the *real* kernel decoder
 # (`decode(encode(call)) == Ok(call)`). A dev-dep only — it compiles solely for the
