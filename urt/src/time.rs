@@ -418,6 +418,29 @@ pub fn now_utc_ns() -> i64 {
     page.sample().utc_ns_at(cntvct())
 }
 
+/// Current monotonic nanoseconds from the virtual counter — `Instant`'s basis
+/// (std-port 2.4). Reuses the Verus-verified `Sample::utc_ns_at` over a zero
+/// wall/counter base, so the result is `clamp_i64(cntvct * 1e9 / cntfrq)` (ns
+/// since the counter epoch): total (saturating) and monotone by
+/// `lemma_utc_ns_at_monotone` — cntvct is hardware-monotone and cntfrq is a
+/// constant register, so consecutive calls sample the same `Sample`.
+///
+/// Independent of the time *page*: it reads CNTVCT/CNTFRQ directly and needs no
+/// `attach`/`"time"` grant, so a process without one still measures durations
+/// (the rev2§2.6 monotonic counter, separate from the wall clock above).
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "none", target_os = "eunomia")
+))]
+pub fn now_mono_ns() -> i64 {
+    Sample {
+        wall_base_ns: 0,
+        cntvct_base: 0,
+        cntfrq: cntfrq(),
+    }
+    .utc_ns_at(cntvct())
+}
+
 // The native tier: conversion proptests (breadth) + the probabilistic
 // std-thread seqlock race (also the Miri weak-memory pass). Excluded under
 // loom/shuttle, which construct their atomics inside the model/run — the
@@ -625,6 +648,20 @@ mod tests {
         ) {
             let s = Sample { wall_base_ns, cntvct_base, cntfrq };
             let _ = s.utc_ns_at(cntvct);
+        }
+
+        /// `Instant`'s basis (std-port 2.4): the zero-base conversion that
+        /// `now_mono_ns` uses is never negative, ∀ counter and frequency. The std
+        /// time PAL feeds the result to `Duration::from_nanos` as `u64`, so a
+        /// negative value would wrap to a huge duration. (Monotonicity is the
+        /// general `conversion_is_monotone` above, which covers the fixed `Sample`.)
+        #[test]
+        fn zero_base_conversion_is_non_negative(
+            cntfrq in any::<u64>(),
+            cntvct in any::<u64>(),
+        ) {
+            let s = Sample { wall_base_ns: 0, cntvct_base: 0, cntfrq };
+            prop_assert!(s.utc_ns_at(cntvct) >= 0);
         }
     }
 }

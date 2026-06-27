@@ -35,7 +35,27 @@ pub fn init() {
     let len = recv_bootstrap();
     // SAFETY: `len <= MAX_BLOCK`; runs once, before any reader.
     unsafe { commit(len) };
+    // std-port 2.4: attach the pre-mapped grant pages (today only the time page) so
+    // the std `sys/time` arm can read them. Must follow `commit` — it reads `startup()`.
+    attach_grants();
 }
+
+/// Attach the kernel-mapped pages the startup block grants. Today only the rev2§2.6
+/// time page (`NAME_TIME`): a process granted it can read `SystemTime`; one without
+/// it gets urt's loud panic at first `now_utc_ns` (mis-wired, not degraded). Reading
+/// `Instant` needs no grant — it reads the counter directly. Target-gated: `urt` is
+/// only a dependency on the userspace cross-build (matching [`crate::pal`]).
+#[cfg(any(target_os = "eunomia", target_os = "none"))]
+fn attach_grants() {
+    if let Some(va) = startup().and_then(|s| crate::grant::time_va(s)) {
+        // SAFETY: `va` is the base of the read-only `TimePage` granted under
+        // `NAME_TIME` (rev2§2.6); it stays mapped for the process lifetime.
+        unsafe { urt::time::attach(va as usize) };
+    }
+}
+
+#[cfg(not(any(target_os = "eunomia", target_os = "none")))]
+fn attach_grants() {}
 
 /// Block until the bootstrap message arrives (it is queued before the child starts,
 /// so the first `chan_recv` succeeds; the loop is plain defensiveness — the

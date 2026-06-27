@@ -338,6 +338,26 @@ a disclosed **temporary deviation from the rev2§2 capability model** (rev2§2.7
 rev2§7 / C-M9 pre-console scaffold — replaced by the userspace console channel in std-port
 5.1 and retained only for kernel-internal panic last-words.
 
+Std-port Phase 2.4 backs the `sys/time` arm (`Instant` + `SystemTime`), again **trusted
+shell over verified `urt::time` — no new `verus!{}` obligation, no new seam, tally stays
+14**. `SystemTime` reads `urt::time::now_utc_ns` (the rev2§2.6 time page, whose `utc_ns_at`
+tick→ns conversion is verified total + monotone — the urt time row, 25/0); `Instant` reads
+`urt::time::now_mono_ns` (std-port 2.4), which reuses that *same* verified conversion over a
+zero wall/counter base to get monotonic ns straight from CNTVCT/CNTFRQ — so it needs no
+`"time"` grant (a process measuring durations without one still works; the futex timeouts of
+3.3 depend on this). `now_mono_ns` is a non-`verus!{}` exec fn, `aarch64`-gated out of the
+Verus host build, so urt's own count stays **25**. `pal` gains two more `#[no_mangle]` shims
+(`__eunomia_mono_ns`/`__eunomia_wall_ns`) delegating term-for-term, and `bootstrap::init`
+gains a target-gated `attach_grants` that calls `urt::time::attach` when the startup block
+carries the `NAME_TIME` region grant — so a granted std binary reads wall time and an
+ungranted one keeps urt's loud `now_utc_ns` panic (mis-wired, not degraded, by design). The
+§11 inverse-leak re-establishment lives in the vendored `sys/time/eunomia.rs` arm: the seam
+returns raw `i64` ns and the arm guards `Duration::from_nanos`'s `u64` domain with
+`ns.max(0)` before wrapping; every other `Instant`/`SystemTime` method is pure `Duration`
+arithmetic copied from `sys/time/unsupported.rs`. Host witness: the urt `utc_ns_at`
+proptests (extended with a zero-base non-negativity case pinning the `Instant` invariant)
+and the urt Miri sweep.
+
 ## The seams (14 named constructs + the by-construction category)
 
 Grouped by the `verus.md` §11 category. Each interpreted-hash / size / std-gap seam is a
