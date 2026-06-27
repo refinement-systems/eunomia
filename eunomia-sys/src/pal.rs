@@ -16,7 +16,7 @@
 
 use core::alloc::{GlobalAlloc, Layout};
 
-use crate::{bootstrap, heap, io_error, syscall};
+use crate::{bootstrap, heap, io_error, stdio, syscall};
 
 /// The process-global std `System` heap (std-port 2.2): a fixed `.bss` arena over
 /// the Verus-verified `freelist` allocator. A plain `static` — interior
@@ -69,6 +69,14 @@ pub extern "Rust" fn __eunomia_env() -> &'static [&'static [u8]] {
 #[unsafe(no_mangle)]
 pub extern "Rust" fn __eunomia_thread_exit(code: u64) -> ! {
     syscall::thread_exit(code)
+}
+
+/// Write `buf` to the kernel debug-log (rev2§7) for the bring-up `sys/stdio` arm,
+/// split into `DEBUG_WRITE_MAX`-byte `DebugWrite` chunks — the kernel `ERR_FAULT`s a
+/// longer write, so the chunking re-establishes that cap at the seam (std-port 2.3).
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_stdio_write(buf: &[u8]) -> usize {
+    stdio::write(buf)
 }
 
 /// Classify a raw syscall error code into the [`io_error::Kind`] discriminant
