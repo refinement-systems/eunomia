@@ -79,6 +79,24 @@ pub extern "Rust" fn __eunomia_stdio_write(buf: &[u8]) -> usize {
     stdio::write(buf)
 }
 
+/// Monotonic nanoseconds for the `sys/time` `Instant` arm (std-port 2.4): the
+/// CNTVCT/CNTFRQ virtual counter via urt's Verus-verified `utc_ns_at`, needing no
+/// `"time"` grant. Total + monotone (the urt time row); this shim re-establishes
+/// no precondition.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_mono_ns() -> i64 {
+    urt::time::now_mono_ns()
+}
+
+/// Wall-clock nanoseconds since the Unix epoch for the `sys/time` `SystemTime` arm
+/// (std-port 2.4): the rev2§2.6 time page. Panics if no `"time"` grant was attached
+/// (a process asking for wall time without it is mis-wired, not degraded — the urt
+/// posture); `bootstrap::init` attaches the page when the grant is present.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_wall_ns() -> i64 {
+    urt::time::now_utc_ns()
+}
+
 /// Classify a raw syscall error code into the [`io_error::Kind`] discriminant
 /// (`#[repr(u8)]`) the PAL maps to `io::ErrorKind`.
 #[unsafe(no_mangle)]
