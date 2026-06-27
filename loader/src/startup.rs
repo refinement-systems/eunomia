@@ -7,11 +7,15 @@
 //! input** consumed in `_start` before anything else exists, so `decode` is
 //! **total over arbitrary bytes** — a malformed block is refused (`None`),
 //! never a panic / out-of-bounds read / unbounded allocation (rev2§2.7
-//! refuse-not-crash). The producer side is total the other way: `encode`
-//! refuses an over-budget block with a clean `Err`, never a panic or a silent
-//! truncation. `no_std`/`core`-only (no `alloc`): argv/env decode as borrowed
-//! slices into the message buffer, and the grant table lives in a fixed-size
-//! arena, so a `no_std` `_start` reads a block without touching a heap.
+//! refuse-not-crash). That totality is **mechanized in Verus** (the `elf::parse`
+//! tier): `decode` carries a total ∀-bytes contract — on `Some`, the counts are
+//! within their arenas and every borrowed argv/env byte-string is a subrange of
+//! the input buffer (`well_formed_startup`). The producer side is total the
+//! other way: `encode` refuses an over-budget block with a clean `Err`, never a
+//! panic or a silent truncation. `no_std`/`core`-only (no `alloc`): argv/env
+//! decode as borrowed slices into the message buffer, and the grant table lives
+//! in a fixed-size arena, so a `no_std` `_start` reads a block without touching
+//! a heap.
 //!
 //! ## Wire layout
 //!
@@ -38,6 +42,13 @@
 //! `time` is a pre-mapped VA in every block, and an MMIO/DMA grant has the
 //! same shape (VA + len, plus a device PA for DMA). A region carries **no new
 //! authority**: the parent maps the page before start; only the VA travels.
+// `vstd::prelude` supplies the `verus!{}` macro + ghost vocabulary for the
+// startup decoder's total bounded-decoder proof (below); Verus requires it
+// imported at the crate root, and in an ordinary build the macro erases ghost
+// code, so the import is otherwise unused — hence the allow (same as elf.rs /
+// freelist / virtio-blk).
+#[allow(unused_imports)]
+use vstd::prelude::*;
 
 /// Magic for the unified startup block, version 1.
 pub const MAGIC: [u8; 4] = *b"EUS1";
@@ -76,21 +87,38 @@ pub const NAME_DMA: u8 = 17;
 /// hardcoded 0x0900_0000, exactly as storaged reads `NAME_VIRTIO_MMIO`.
 pub const NAME_PL011_MMIO: u8 = 18;
 
-/// Grant kind: a kernel cap, named by the cspace slot it was installed into.
-pub const KIND_CAP_SLOT: u8 = 1;
-/// Grant kind: a storage grant, named by its handle number on the session.
-pub const KIND_STORAGE_HANDLE: u8 = 2;
-/// Grant kind: a pre-mapped region (VA, length, and an optional device PA).
-pub const KIND_REGION: u8 = 3;
+// The startup-block decoder is the Verus-verified deductive core, the twin of
+// the `elf::parse` decoder: the arena-cap and grant-kind constants, the
+// `GrantKind`/`Grant`/`Startup` types, the `well_formed_startup`/`subseq_of`
+// predicates, the bounds-checked cursor helpers (`take_*`, reading fixed-width
+// little-endian fields through the shared `le-bytes` crate's verified
+// `read_u*_le` readers), and `decode`'s total bounded-decoder contract all live
+// in the `verus!{}` block so the proofs can name them (doc/guidelines/verus.md
+// §6). The startup *encoder* (`encode`/`Writer`), the rich `Startup` builder API
+// (`new`/`push_*`/`grant`, the prefix-comparing `PartialEq`), and `EncodeError`
+// stay external plain Rust — after erasure these are ordinary items, so the
+// callers of `decode` keep working unchanged.
+verus! {
 
 /// Maximum grant-table entries a block may carry. The fixed arena `decode`
 /// fills and the bound it validates `ngrants` against. Comfortably above the
 /// real blocks (storaged's is 3; the shell's is ≤ 4).
 pub const MAX_GRANTS: usize = 8;
+
 /// Maximum argv byte-strings a block may carry.
 pub const MAX_ARGV: usize = 8;
+
 /// Maximum env byte-strings a block may carry.
 pub const MAX_ENV: usize = 8;
+
+/// Grant kind: a kernel cap, named by the cspace slot it was installed into.
+pub const KIND_CAP_SLOT: u8 = 1;
+
+/// Grant kind: a storage grant, named by its handle number on the session.
+pub const KIND_STORAGE_HANDLE: u8 = 2;
+
+/// Grant kind: a pre-mapped region (VA, length, and an optional device PA).
+pub const KIND_REGION: u8 = 3;
 
 /// What a named grant resolves to. `CapSlot`/`StorageHandle` are the spec's two
 /// kinds; `Region` is the additive pre-mapped-region kind (carries no new
@@ -113,19 +141,16 @@ pub struct Grant {
     pub kind: GrantKind,
 }
 
-impl Grant {
-    /// Arena placeholder (filler for the unused tail of `Startup::grants`).
-    const PLACEHOLDER: Grant = Grant {
-        name: NAME_STRING,
-        kind: GrantKind::CapSlot(0),
-    };
-}
-
 /// A decoded (or to-be-encoded) startup block. The grant table and the
 /// argv/env vectors live in fixed-size arenas with explicit counts; only the
 /// first `n*` entries of each are meaningful. argv/env entries borrow into the
 /// backing byte buffer (the message, for `decode`).
-#[derive(Debug, Clone)]
+///
+/// `Clone` is hand-written below rather than derived: Verus does not spec a
+/// derived non-`Copy` `Clone` inside `verus!{}` (it would warn), and the type
+/// is deliberately `Clone`-not-`Copy` to keep the few-hundred-byte struct from
+/// copying silently.
+#[derive(Debug)]
 pub struct Startup<'a> {
     pub grants: [Grant; MAX_GRANTS],
     pub ngrants: usize,
@@ -135,6 +160,289 @@ pub struct Startup<'a> {
     pub nenv: usize,
 }
 
+/// `sub` is some contiguous subrange of `buf` (⊆ `buf`): the provenance fact
+/// for a borrowed argv/env byte-string, the startup analog of `elf::seg_ok`'s
+/// `offset + filesz <= len` file-extent bound.
+pub open spec fn subseq_of(sub: Seq<u8>, buf: Seq<u8>) -> bool {
+    exists|a: int, b: int| 0 <= a <= b <= buf.len() && sub == buf.subrange(a, b)
+}
+
+/// What `decode` guarantees of a returned block — the `elf::well_formed_image`
+/// twin: the three counts are within their arenas, and every borrowed argv/env
+/// byte-string is a subrange of the input buffer (nothing the decoder hands
+/// back can index out of `buf`).
+pub open spec fn well_formed_startup(s: Startup, buf: Seq<u8>) -> bool {
+    &&& s.ngrants <= MAX_GRANTS
+    &&& s.nargv <= MAX_ARGV
+    &&& s.nenv <= MAX_ENV
+    &&& forall|j: int| 0 <= j < s.nargv ==> subseq_of(#[trigger] s.argv@[j]@, buf)
+    &&& forall|j: int| 0 <= j < s.nenv ==> subseq_of(#[trigger] s.env@[j]@, buf)
+}
+
+// ── Bounds-checked cursor helpers (the verified replacement for the hand-rolled
+//    `Reader`): each is total — any read past the end / offset overflow yields
+//    `None`, never a panic or out-of-bounds access — and advances the cursor by
+//    exactly the field width, keeping it within the buffer. The fixed-width
+//    little-endian fields read through the shared `le-bytes` crate's verified
+//    `read_u*_le` readers (whose `requires off+N <= len` is discharged here). ──
+fn take_u8(buf: &[u8], pos: usize) -> (r: Option<(u8, usize)>)
+    ensures
+        r matches Some((_, end)) ==> pos + 1 == end && end <= buf@.len(),
+{
+    broadcast use vstd::slice::group_slice_axioms;
+
+    if pos < buf.len() {
+        Some((buf[pos], pos + 1))
+    } else {
+        None
+    }
+}
+
+fn take_u16(buf: &[u8], pos: usize) -> (r: Option<(u16, usize)>)
+    ensures
+        r matches Some((_, end)) ==> pos + 2 == end && end <= buf@.len(),
+{
+    let end = match pos.checked_add(2) {
+        Some(e) => e,
+        None => return None,
+    };
+    if end > buf.len() {
+        return None;
+    }
+    Some((le_bytes::read_u16_le(buf, pos), end))
+}
+
+fn take_u32(buf: &[u8], pos: usize) -> (r: Option<(u32, usize)>)
+    ensures
+        r matches Some((_, end)) ==> pos + 4 == end && end <= buf@.len(),
+{
+    let end = match pos.checked_add(4) {
+        Some(e) => e,
+        None => return None,
+    };
+    if end > buf.len() {
+        return None;
+    }
+    Some((le_bytes::read_u32_le(buf, pos), end))
+}
+
+fn take_u64(buf: &[u8], pos: usize) -> (r: Option<(u64, usize)>)
+    ensures
+        r matches Some((_, end)) ==> pos + 8 == end && end <= buf@.len(),
+{
+    let end = match pos.checked_add(8) {
+        Some(e) => e,
+        None => return None,
+    };
+    if end > buf.len() {
+        return None;
+    }
+    Some((le_bytes::read_u64_le(buf, pos), end))
+}
+
+/// Borrow `n` bytes at `pos`, returning the slice and the advanced cursor. On
+/// `Some`, the returned slice is exactly `buf[pos..pos+n]` (so ⊆ `buf`).
+fn take_bytes<'a>(buf: &'a [u8], pos: usize, n: usize) -> (r: Option<(&'a [u8], usize)>)
+    ensures
+        r matches Some((sl, end)) ==> {
+            &&& pos + n == end
+            &&& end <= buf@.len()
+            &&& sl@ == buf@.subrange(pos as int, end as int)
+        },
+{
+    let end = match pos.checked_add(n) {
+        Some(e) => e,
+        None => return None,
+    };
+    if end > buf.len() {
+        return None;
+    }
+    Some((vstd::slice::slice_subrange(buf, pos, end), end))
+}
+
+/// Decode a startup block. Mechanized **total** over arbitrary bytes (rev2§2.7):
+/// for every `&[u8]`, `decode` returns without panicking or reading out of
+/// bounds, and every accepted block satisfies [`well_formed_startup`] — counts
+/// within their arenas and every borrowed argv/env byte-string a subrange of
+/// `buf`. It validates the magic, then each count against its arena cap, then
+/// bounds-checks every grant body / argv / env length against the remaining
+/// slice before reading. Any shortfall, unknown grant `kind`, bad magic, or
+/// over-cap count returns `None`. Trailing bytes after the last field are
+/// tolerated (the `elf`/`parse_config` precedent). Returned argv/env slices
+/// borrow into `buf`.
+pub fn decode(buf: &[u8]) -> (res: Option<Startup<'_>>)
+    ensures
+        res matches Some(s) ==> well_formed_startup(s, buf@),
+{
+    broadcast use vstd::slice::group_slice_axioms;
+    // The 7-byte header (magic + three counts) must be present.
+
+    if buf.len() < 7 {
+        return None;
+    }
+    // Magic `b"EUS1"`, checked byte-wise (Verus does not spec slice equality) —
+    // the `elf::parse` inline-magic discipline; `MAGIC` stays the encode-side
+    // const, coupled to these bytes by the round-trip oracle tests.
+
+    if buf[0] != 0x45 || buf[1] != 0x55 || buf[2] != 0x53 || buf[3] != 0x31 {
+        return None;
+    }
+    let ngrants = buf[4] as usize;
+    let nargv = buf[5] as usize;
+    let nenv = buf[6] as usize;
+    if ngrants > MAX_GRANTS || nargv > MAX_ARGV || nenv > MAX_ENV {
+        return None;
+    }
+    // Fixed-size arenas; only the first `n*` entries are meaningful. The argv/env
+    // fillers are empty subranges of `buf` (borrow `buf`'s lifetime; their view
+    // is irrelevant — `well_formed_startup` only constrains `j < n*`).
+
+    let empty = vstd::slice::slice_subrange(buf, 0, 0);
+    let mut grants = [Grant { name: 0, kind: GrantKind::CapSlot(0) };MAX_GRANTS];
+    let mut argv: [&[u8]; MAX_ARGV] = [empty;MAX_ARGV];
+    let mut env: [&[u8]; MAX_ENV] = [empty;MAX_ENV];
+    let mut pos: usize = 7;
+
+    // Grants: each entry is `name:u8, kind:u8`, then a kind-tagged body.
+    let mut i: usize = 0;
+    while i < ngrants
+        invariant
+            i <= ngrants,
+            ngrants <= MAX_GRANTS,
+            pos <= buf@.len(),
+        decreases ngrants - i,
+    {
+        let (name, p0) = match take_u8(buf, pos) {
+            Some(x) => x,
+            None => return None,
+        };
+        let (tag, p1) = match take_u8(buf, p0) {
+            Some(x) => x,
+            None => return None,
+        };
+        let (kind, p_next) = if tag == KIND_CAP_SLOT {
+            let (slot, q) = match take_u32(buf, p1) {
+                Some(x) => x,
+                None => return None,
+            };
+            (GrantKind::CapSlot(slot), q)
+        } else if tag == KIND_STORAGE_HANDLE {
+            let (handle, q) = match take_u32(buf, p1) {
+                Some(x) => x,
+                None => return None,
+            };
+            (GrantKind::StorageHandle(handle), q)
+        } else if tag == KIND_REGION {
+            let (va, q1) = match take_u64(buf, p1) {
+                Some(x) => x,
+                None => return None,
+            };
+            let (len, q2) = match take_u64(buf, q1) {
+                Some(x) => x,
+                None => return None,
+            };
+            let (pa, q3) = match take_u64(buf, q2) {
+                Some(x) => x,
+                None => return None,
+            };
+            (GrantKind::Region { va, len, pa }, q3)
+        } else {
+            return None;
+        };
+        grants[i] = Grant { name, kind };
+        pos = p_next;
+        i = i + 1;
+    }
+
+    // Argv: each is `len:u16`, then `len` borrowed bytes (⊆ `buf`).
+    let mut k: usize = 0;
+    while k < nargv
+        invariant
+            k <= nargv,
+            nargv <= MAX_ARGV,
+            pos <= buf@.len(),
+            forall|j: int| 0 <= j < k ==> subseq_of(#[trigger] argv@[j]@, buf@),
+        decreases nargv - k,
+    {
+        let (len, p1) = match take_u16(buf, pos) {
+            Some(x) => x,
+            None => return None,
+        };
+        let (sl, p2) = match take_bytes(buf, p1, len as usize) {
+            Some(x) => x,
+            None => return None,
+        };
+        assert(subseq_of(sl@, buf@)) by {
+            assert(0 <= p1 <= p2 <= buf@.len());
+            assert(sl@ == buf@.subrange(p1 as int, p2 as int));
+        }
+        let ghost prev = argv@;
+        let ghost prev_k = k;
+        argv[k] = sl;
+        proof {
+            assert forall|j: int| 0 <= j < prev_k + 1 implies subseq_of(
+                #[trigger] argv@[j]@,
+                buf@,
+            ) by {
+                if j < prev_k {
+                    assert(argv@[j] == prev[j]);
+                } else {
+                    assert(argv@[j] == sl);
+                }
+            }
+        }
+        pos = p2;
+        k = k + 1;
+    }
+
+    // Env: identical shape; the finished argv quantifier rides along unchanged
+    // (the loop never touches `argv`), so both survive to the return.
+    let mut m: usize = 0;
+    while m < nenv
+        invariant
+            m <= nenv,
+            nargv <= MAX_ARGV,
+            nenv <= MAX_ENV,
+            pos <= buf@.len(),
+            forall|j: int| 0 <= j < nargv ==> subseq_of(#[trigger] argv@[j]@, buf@),
+            forall|j: int| 0 <= j < m ==> subseq_of(#[trigger] env@[j]@, buf@),
+        decreases nenv - m,
+    {
+        let (len, p1) = match take_u16(buf, pos) {
+            Some(x) => x,
+            None => return None,
+        };
+        let (sl, p2) = match take_bytes(buf, p1, len as usize) {
+            Some(x) => x,
+            None => return None,
+        };
+        assert(subseq_of(sl@, buf@)) by {
+            assert(0 <= p1 <= p2 <= buf@.len());
+            assert(sl@ == buf@.subrange(p1 as int, p2 as int));
+        }
+        let ghost prev = env@;
+        let ghost prev_m = m;
+        env[m] = sl;
+        proof {
+            assert forall|j: int| 0 <= j < prev_m + 1 implies subseq_of(
+                #[trigger] env@[j]@,
+                buf@,
+            ) by {
+                if j < prev_m {
+                    assert(env@[j] == prev[j]);
+                } else {
+                    assert(env@[j] == sl);
+                }
+            }
+        }
+        pos = p2;
+        m = m + 1;
+    }
+
+    Some(Startup { grants, ngrants, argv, nargv, env, nenv })
+}
+
+} // verus!
 /// Equality compares only the meaningful prefixes (`[..n*]`) of each arena, so
 /// two blocks built different ways — e.g. a producer-built one and the result
 /// of decoding its encoding — compare equal regardless of arena filler.
@@ -150,6 +458,23 @@ impl PartialEq for Startup<'_> {
 }
 
 impl Eq for Startup<'_> {}
+
+/// Every field is `Copy` (`[Grant; _]`, `[&[u8]; _]`, `usize`), so the clone is
+/// a field-wise copy — but the type stays `Clone`-not-`Copy` so a copy is always
+/// an explicit `.clone()`. Hand-written (not derived) to keep it out of the
+/// `verus!{}` block; see [`Startup`].
+impl Clone for Startup<'_> {
+    fn clone(&self) -> Self {
+        Startup {
+            grants: self.grants,
+            ngrants: self.ngrants,
+            argv: self.argv,
+            nargv: self.nargv,
+            env: self.env,
+            nenv: self.nenv,
+        }
+    }
+}
 
 impl Default for Startup<'_> {
     fn default() -> Self {
@@ -172,7 +497,10 @@ impl<'a> Startup<'a> {
     /// An empty block (no grants, no argv, no env), ready to push onto.
     pub const fn new() -> Self {
         Startup {
-            grants: [Grant::PLACEHOLDER; MAX_GRANTS],
+            grants: [Grant {
+                name: NAME_STRING,
+                kind: GrantKind::CapSlot(0),
+            }; MAX_GRANTS],
             ngrants: 0,
             argv: [&[]; MAX_ARGV],
             nargv: 0,
@@ -220,88 +548,6 @@ impl<'a> Startup<'a> {
             .find(|g| g.name == name)
             .map(|g| g.kind)
     }
-}
-
-/// A bounds-checked cursor over the input. Every read is `get`-checked with
-/// `checked_add` (the same bounds discipline as the verified `elf::parse`
-/// decoder), so decode is total: any read past the end yields `None`, never a
-/// panic or an out-of-bounds access.
-struct Reader<'a> {
-    buf: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
-        let end = self.pos.checked_add(n)?;
-        let s = self.buf.get(self.pos..end)?;
-        self.pos = end;
-        Some(s)
-    }
-
-    fn u8(&mut self) -> Option<u8> {
-        self.take(1).map(|s| s[0])
-    }
-
-    fn u16(&mut self) -> Option<u16> {
-        self.take(2).map(|s| u16::from_le_bytes([s[0], s[1]]))
-    }
-
-    fn u32(&mut self) -> Option<u32> {
-        self.take(4)
-            .map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
-    }
-
-    fn u64(&mut self) -> Option<u64> {
-        self.take(8)
-            .map(|s| u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]))
-    }
-}
-
-/// Decode a startup block. Total over arbitrary bytes (rev2§2.7): validates the
-/// magic, then each count against its arena cap, then bounds-checks every grant
-/// body / argv / env length against the remaining slice before reading. Any
-/// shortfall, unknown grant `kind`, bad magic, or over-cap count returns `None`
-/// — never a panic, an out-of-bounds read, or an unbounded allocation. Trailing
-/// bytes after the last field are tolerated (the `elf`/`parse_config`
-/// precedent). Returned argv/env slices borrow into `buf`.
-pub fn decode(buf: &[u8]) -> Option<Startup<'_>> {
-    let mut r = Reader { buf, pos: 0 };
-    if r.take(4)? != MAGIC {
-        return None;
-    }
-    let ngrants = r.u8()? as usize;
-    let nargv = r.u8()? as usize;
-    let nenv = r.u8()? as usize;
-    if ngrants > MAX_GRANTS || nargv > MAX_ARGV || nenv > MAX_ENV {
-        return None;
-    }
-
-    let mut s = Startup::new();
-    for _ in 0..ngrants {
-        let name = r.u8()?;
-        let kind = match r.u8()? {
-            KIND_CAP_SLOT => GrantKind::CapSlot(r.u32()?),
-            KIND_STORAGE_HANDLE => GrantKind::StorageHandle(r.u32()?),
-            KIND_REGION => GrantKind::Region {
-                va: r.u64()?,
-                len: r.u64()?,
-                pa: r.u64()?,
-            },
-            _ => return None,
-        };
-        // `_ < ngrants <= MAX_GRANTS`, so the push cannot exceed the arena.
-        s.push_grant(Grant { name, kind }).ok()?;
-    }
-    for _ in 0..nargv {
-        let len = r.u16()? as usize;
-        s.push_argv(r.take(len)?).ok()?;
-    }
-    for _ in 0..nenv {
-        let len = r.u16()? as usize;
-        s.push_env(r.take(len)?).ok()?;
-    }
-    Some(s)
 }
 
 /// A bounds-checked writer over the output buffer. Every write is `get_mut`-
