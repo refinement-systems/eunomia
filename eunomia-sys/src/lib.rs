@@ -44,4 +44,6 @@ pub mod grant;
 mod heap;
 pub mod io_error;
 pub mod pal;
+// Internal: the bring-up debug-log stdio chunker for the `pal`/`sys/stdio` arm.
+mod stdio;
 pub mod syscall;

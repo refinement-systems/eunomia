@@ -315,6 +315,29 @@ not a runtime one). `eunomia-sys` takes `urt` as a target-gated dependency, so a
 `rlimit` byte-identical to their standalone gates; eunomia-sys's **own** count stays 7
 (`heap.rs`/the `pal` shims add no `verus!{}`).
 
+Std-port Phase 2.3 backs the bring-up `stdio` arm and the process exit/abort terminus,
+again **trusted shell over a host-tested seam — no `verus!{}` obligation, no new seam,
+tally stays 14**. `stdio` (`eunomia-sys/src/stdio.rs`) splits a write into
+`DEBUG_WRITE_MAX`(=1024)-byte `DebugWrite` chunks before issuing the trusted `svc`
+shell, because the kernel rejects a longer write with `ERR_FAULT`
+(`kernel/src/syscall.rs`'s `Sys::DebugWrite` arm) — the chunking is the §11 inverse-leak
+re-establishment of that length cap at the seam, host-tested (`cargo test -p
+eunomia-sys`: every chunk ≤ cap, the chunks reassemble to the input, and the cap pinned
+against the kernel literal). `pal` gains one more `#[no_mangle]` shim
+(`__eunomia_stdio_write`) delegating to it. The vendored PAL arms — `sys/stdio/eunomia.rs`
+(stdout/stderr → debug-log, stdin EOF until the 5.1 console, `panic_output` → debug-log),
+the `sys/exit.rs` eunomia arm (`thread_exit(code as u32 as u64)`), and
+`sys/pal/eunomia/common.rs::abort_internal` (`thread_exit(u64::MAX == STATUS_PANIC)`) —
+are the trusted term-for-term shell that preserves the rev2§5.1 reaper contract for a std
+binary: a panic/OOM reaps as `STATUS_PANIC`, distinct from `exit(0)`, and the exit code
+is **zero-extended** so no 32-bit code collides with the all-ones sentinel (the
+`u64::MAX` literal is duplicated in `common.rs` because std cannot depend on the seam
+crate — the same posture as the `ERR_*` discriminants in `sys/io/error/eunomia.rs`, kept
+in lockstep with `eunomia-sys/src/syscall.rs`). The EL0 debug-log use of stdout/stderr is
+a disclosed **temporary deviation from the rev2§2 capability model** (rev2§2.7), the
+rev2§7 / C-M9 pre-console scaffold — replaced by the userspace console channel in std-port
+5.1 and retained only for kernel-internal panic last-words.
+
 ## The seams (14 named constructs + the by-construction category)
 
 Grouped by the `verus.md` §11 category. Each interpreted-hash / size / std-gap seam is a
