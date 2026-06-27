@@ -15,9 +15,12 @@
 //! inverse-leak rule, host-tested below); the PAL arm is then a one-line delegate.
 
 /// The maximum byte length the kernel `DebugWrite` (opcode 1) accepts in one call: it
-/// returns `ERR_FAULT` (writing nothing) for anything longer. Kept in lockstep with the
-/// `len > 1024` guard in `kernel/src/syscall.rs`'s `Sys::DebugWrite` arm; the
-/// `cap_matches_kernel` test pins the value.
+/// returns `ERR_FAULT` (writing nothing) for anything longer. The canonical value is
+/// `kcore::sysabi::DEBUG_WRITE_MAX` (the const the kernel's `Sys::DebugWrite` arm
+/// guards); this is its `usize` twin for the slice chunker, since eunomia-sys cannot
+/// take a non-dev dependency on `kcore` (the userspace/kernel decoupling `ipc::sys`
+/// keeps). The `cap_matches_kernel` test pins this twin against the real const through
+/// the kcore dev-dep.
 ///
 /// `allow(dead_code)`: consumed by [`write`] (target-gated) and the test module, so a
 /// host non-test build sees it unused.
@@ -55,9 +58,11 @@ mod tests {
 
     #[test]
     fn cap_matches_kernel() {
-        // Lockstep with the `len > 1024` guard in `kernel/src/syscall.rs`'s
-        // `Sys::DebugWrite` arm. If the kernel cap ever changes, change both.
-        assert_eq!(DEBUG_WRITE_MAX, 1024);
+        // The local `usize` twin must equal the canonical kernel ABI const
+        // (`kcore::sysabi::DEBUG_WRITE_MAX`, the value the `Sys::DebugWrite` arm
+        // guards). Pinned through the kcore dev-dep so a kernel change to the cap
+        // fails here, the way encode.rs's `constants_match_kcore` pins its twins.
+        assert_eq!(DEBUG_WRITE_MAX as u64, kcore::sysabi::DEBUG_WRITE_MAX);
     }
 
     #[test]

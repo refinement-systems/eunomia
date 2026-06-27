@@ -207,6 +207,12 @@ jobs:
         run: bash scripts/m1-test.sh
       - name: Spawn/reclaim burn loop + fault / panic / time demo
         run: bash scripts/spawn-test.sh
+      - name: std-port Phase-2 GATE (println!/format!/Vec/Box/String/Instant/SystemTime)
+        # The first live std user binary (user/stdsmoke): boots it under the shell
+        # and asserts the whole std stack works at EL0, plus the std-owned panic
+        # reaps as STATUS_PANIC. The combined demonstration Phase 2's sub-phases
+        # (2.1–2.4) each deferred to this gate.
+        run: bash scripts/std-smoke-test.sh
 
   # There is no `kani` job. Kani was the interim bounded mechanized tier; every
   # target it covered — the kcore kernel core (proven in the `verus` job) and

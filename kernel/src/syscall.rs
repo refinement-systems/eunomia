@@ -214,7 +214,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
         Sys::DebugWrite { ptr, len } => {
             #[cfg(feature = "debug-log")]
             {
-                if !user_range_ok(ptr, len) || len > 1024 {
+                if !user_range_ok(ptr, len) || len > sysabi::DEBUG_WRITE_MAX {
                     return Some(ERR_FAULT);
                 }
                 use core::fmt::Write;

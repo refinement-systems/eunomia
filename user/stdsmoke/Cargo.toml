@@ -1,0 +1,30 @@
+[package]
+name = "stdsmoke"
+version = "0.1.0"
+edition = "2021"
+
+# Built by kernel/build.rs for aarch64-unknown-eunomia via build-std; not a
+# workspace member (host builds make no sense for an EL0 binary). The first
+# *std* user binary — the std-port Phase-2 GATE fixture (findings 7-1), not the
+# real `hello` (that is rewritten on std in Phase 5.3). It links the PAL↔seam
+# bridge through eunomia-sys so the live std stack runs end to end in QEMU.
+[workspace]
+
+[dependencies]
+# Satisfies std's undefined `__eunomia_*` extern "Rust" symbols (the __rust_alloc
+# pattern). `extern crate eunomia_sys;` in main.rs forces the rlib into the link
+# so the linker pulls in the #[no_mangle] definitions in eunomia-sys/src/pal.rs.
+eunomia-sys = { path = "../../eunomia-sys" }
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+# strip the symbol table (deviation vs hello/selftest): the shell loads the whole
+# ELF into its fixed 1 MiB heap, so a smaller on-disk image keeps comfortable
+# headroom (the .bss heap reservation is memsz, not file bytes, so it does not
+# inflate the image — only code/symbols do).
+strip = true
+
+[profile.dev]
+panic = "abort"
