@@ -384,3 +384,14 @@ jobs:
           # stay external; verified as the no_std core (--no-default-features).
           # Links ipc, re-verified transitively.
           cargo verus verify -p loader --no-default-features
+          # eunomia-sys syscall encoder — `encode` (the inverse of sysabi::decode,
+          # rev2§3.7): total over every `Call`, always a defined opcode (nr < 27),
+          # each argument placed in decode's register, and out-of-range fields refused
+          # (the message-length cap, the ObjType/event/which/priority ranges) — so the
+          # PAL provably cannot issue a shape-rejectable syscall (the §11 inverse-leak
+          # rule). The local ABI bound consts are pinned against kcore by the host
+          # round-trip test (a kcore dev-dep, out of this verify session). The raw
+          # `svc` register marshalling + the typed wrappers are the trusted shell
+          # (rev2§6.1(d), the §6.1(d) thread-lifecycle-shell row — no new seam). Links
+          # loader, re-verified transitively (ipc, le-bytes).
+          cargo verus verify -p eunomia-sys

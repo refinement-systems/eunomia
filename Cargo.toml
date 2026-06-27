@@ -13,6 +13,7 @@ members = [
     "loader",
     "mkfs",
     "urt",
+    "eunomia-sys",
     "scratchpad",
 ]
 # cargo-fuzz crates are standalone workspaces (own target dir, own nightly
