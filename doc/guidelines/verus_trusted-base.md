@@ -276,6 +276,25 @@ logic of its own. The local opcode/bound constants are an independent twin of re
 the real kernel decoder, and the QEMU boot exercises the asm path end-to-end once the
 PAL calls it (std-port Phase 2).
 
+Three further `eunomia-sys` modules join in std-port Phase 2.1, all **plain Rust
+trusted-shell / host-tested surface — no `verus!{}` obligation, no new seam, tally
+stays 14**. `bootstrap` (`src/bootstrap.rs`) receives the slot-0 startup block via the
+trusted `chan_recv` shell and stashes the result of the **separately-verified**
+`loader::startup::decode` — single-threaded init-once bookkeeping, the same posture as
+the grant resolver. `io_error` (`src/io_error.rs`) is the syscall-`ERR_*`→`Kind`
+classification policy, a total `match`; its **host proptest** (`cargo test -p
+eunomia-sys`: totality ∀ `i64`, the exact ABI table, non-ABI ⇒ `Uncategorized`) is the
+load-bearing tool — not byte-parsing, so deliberately proptest, not Verus. `pal`
+(`src/pal.rs`) is the `#[no_mangle] extern "Rust"` shims the vendored std PAL links
+against (the `__rust_alloc` pattern): std cannot take `eunomia-sys` as a sysroot
+dependency because its verified deps pull `vstd`, whose `verus_builtin` is not
+buildable as a `rustc-dep-of-std` crate, so each shim is a one-line delegation to the
+surfaces above. The PAL arms (`vendor/rust`'s `sys/pal/eunomia`, `sys/args`/`sys/env`/
+`sys/io/error/eunomia.rs`) are the trusted term-for-term shell over these — the
+`kernel/`-over-`kcore` posture, a submodule fork that by construction never runs the
+gate. The QEMU boot of a std binary is the end-to-end witness (the live argv print
+needs the allocator, std-port 2.2).
+
 ## The seams (14 named constructs + the by-construction category)
 
 Grouped by the `verus.md` §11 category. Each interpreted-hash / size / std-gap seam is a

@@ -22,8 +22,24 @@
 //! Verus proof — `decode`'s `ensures` are shape-only, so a functional inverse is not
 //! provable against it; the test is the cross-check oracle (the `loader::startup`
 //! round-trip-proptest tier).
+//!
+//! Two further surfaces serve the std PAL, both plain Rust (no `verus!{}`) over the
+//! verified core:
+//!
+//! - [`bootstrap`] — receives the slot-0 startup block in `_start` and stashes the
+//!   decoded [`grant::Startup`] for the `sys/args`/`sys/env` arms; bookkeeping over
+//!   the verified `loader::startup::decode` and the trusted `chan_recv` shell.
+//! - [`io_error`] — the proptested map from the syscall ABI `ERR_*` codes to a
+//!   std-agnostic error [`io_error::Kind`] the PAL translates into `io::ErrorKind`.
+//! - [`pal`] — the `#[no_mangle]` `extern "Rust"` shims the vendored std PAL links
+//!   against (the `__rust_alloc` pattern); std cannot depend on this crate directly
+//!   because its verified deps pull `vstd` (not sysroot-buildable), so it reaches the
+//!   three surfaces above through these one-line delegations.
 #![cfg_attr(not(test), no_std)]
 
+pub mod bootstrap;
 pub mod encode;
 pub mod grant;
+pub mod io_error;
+pub mod pal;
 pub mod syscall;
