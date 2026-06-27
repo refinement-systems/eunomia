@@ -33,6 +33,15 @@ pub const NUM_PRIOS: usize = 32;
 /// canonical one. A lower `prio_ceiling` strictly attenuates (`derived_kind`).
 pub const NO_PRIO_CEILING: u8 = 0xFF;
 
+/// The maximum byte length the `DebugWrite` syscall (rev2§7) accepts in one
+/// call; a longer write is refused outright (`ERR_FAULT`, writing nothing). The
+/// canonical home for both the kernel's `Sys::DebugWrite` length guard
+/// (`kernel::syscall`) and the userspace chunker that re-establishes it at the
+/// seam (`eunomia_sys::stdio`, whose host test pins its local twin against this).
+/// A plain ABI value (the `NUM_PRIOS` idiom); not a decode obligation — `decode`
+/// passes the length through, the kernel checks it at use time.
+pub const DEBUG_WRITE_MAX: u64 = 1024;
+
 /// A decoded, shape-validated syscall. Slot indices stay `u64` — the
 /// cspace-size bound is `CSpaceObj::slot`'s job at *use* time (kernel
 /// `cur_slot`), so error codes and ordering for bad slots are unchanged.
