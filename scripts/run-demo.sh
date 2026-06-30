@@ -21,6 +21,11 @@ cp "$ROOT/target/user/aarch64-unknown-eunomia/release/hello" "$DEMO_ROOT/bin/hel
 #   run bin/selftest 255     → faulted(translation, 0xdead0000)
 #   runloop bin/selftest 100 → 100 spawn/wait/reclaim cycles, slots 56/56
 cp "$ROOT/target/user/aarch64-unknown-eunomia/release/selftest" "$DEMO_ROOT/bin/selftest"
+# stdsmoke is the std-port Phase-2 GATE fixture (findings 7-1) — the first std
+# user binary. Drive it interactively (its dedicated harness is std-smoke-test.sh):
+#   run bin/stdsmoke alpha beta → [stdsmoke] arms + STD2 PASS + exited(0)
+#   run bin/stdsmoke panic      → std panic reaps as 'panicked' (STATUS_PANIC)
+cp "$ROOT/target/user/aarch64-unknown-eunomia/release/stdsmoke" "$DEMO_ROOT/bin/stdsmoke"
 
 "$ROOT/target/debug/mkfs" "$IMG" "$DEMO_ROOT" 64
 
