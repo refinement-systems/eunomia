@@ -26,8 +26,15 @@
 //! host test build because the shell's spawn/clock path depends on `urt::spawn`
 //! and `urt::time::cntvct`, which are aarch64-bare-metal only.
 
-#![cfg_attr(not(test), no_std)]
-#![cfg_attr(not(test), no_main)]
+// The shell is a std binary (std-port 5.3): std owns `_start`, the allocator (a
+// `urt::Heap` sized by `EUNOMIA_HEAP_BYTES`), and the panic handler — so there is no
+// `#![no_std]`/`#![no_main]`. The syscall-/spawn-bound `runtime` and the PAL↔seam bridge
+// are target-only (`cfg(not(test))`), so a host `cargo test` builds just the pure logic
+// below + `tests` against host std (the rev2§6 Baseline split is preserved).
+// `extern crate eunomia_sys;` forces the seam rlib into the link so std's undefined
+// `__eunomia_*` symbols resolve (the `__rust_alloc` pattern) on the eunomia target.
+#[cfg(not(test))]
+extern crate eunomia_sys;
 
 extern crate alloc;
 
@@ -37,6 +44,13 @@ use storage_server::SnapInfo;
 
 #[cfg(not(test))]
 mod runtime;
+
+/// The std entry: hand off to the target-only REPL runtime (which never returns). Under
+/// a host `cargo test` this is `cfg`-excluded and the test harness supplies `main`.
+#[cfg(not(test))]
+fn main() {
+    runtime::run()
+}
 
 // ---------------------------------------------------------------------------
 // Pure, host-testable logic (rev2§6 Baseline tier). No syscalls, spawn,
@@ -120,6 +134,13 @@ pub(crate) fn fmt_utc(buf: &mut Vec<u8>, ns: u64) {
 
 /// Split a path on `'/'`, dropping empty components (so leading, trailing, and
 /// repeated slashes are absorbed). `cas` paths are `Vec<Vec<u8>>`.
+///
+/// std-port 5.3: on the eunomia target the shell's file built-ins now pass paths to
+/// `std::fs`, which resolves them through the *verified* `eunomia_sys::path` resolver, so
+/// this hand splitter is no longer on the target path. It is retained as the host-tested
+/// reference for the rev2§4.9 path model (a follow-up shares the verified resolver with
+/// it); `allow(dead_code)` covers its target-build orphaning while the tests keep it live.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn parse_path(s: &[u8]) -> Vec<Vec<u8>> {
     s.split(|&b| b == b'/')
         .filter(|c| !c.is_empty())
@@ -187,74 +208,13 @@ pub(crate) fn prune_victims(rows: &[SnapInfo], keep_n: u64) -> Vec<u64> {
     candidates[..excess].to_vec()
 }
 
-// ---------------------------------------------------------------------------
-// Standard-name resolution (rev2§5.1). init delivers the shell's world as
-// a `loader::startup` named-grant table; `runtime::_start` resolves each name
-// once at boot. These are pure (no syscalls) so they are host-tested below; the
-// `runtime` callers store the results and read them on every request. An absent
-// or wrong-kind grant yields `None` — the caller keeps today's default
-// (graceful degradation, e.g. `date` reports "no time grant").
-// ---------------------------------------------------------------------------
-
-/// `storage` → the cspace slot holding the storage-session channel.
-fn resolve_storage_slot(s: &loader::startup::Startup) -> Option<u32> {
-    match s.grant(loader::startup::NAME_STORAGE)? {
-        loader::startup::GrantKind::CapSlot(slot) => Some(slot),
-        _ => None,
-    }
-}
-
-/// `root` → the storage handle number for the full-rights ref root.
-fn resolve_root_handle(s: &loader::startup::Startup) -> Option<u32> {
-    match s.grant(loader::startup::NAME_ROOT)? {
-        loader::startup::GrantKind::StorageHandle(h) => Some(h),
-        _ => None,
-    }
-}
-
-/// `stdin` → the cspace slot holding the console-channel endpoint the shell
-/// reads keystrokes from (rev2§5.1). The userspace console driver
-/// owns the PL011 RX line, so there is no ambient input path, and an absent
-/// grant is fatal (no silent `debug_getc` fallback — the driver would have
-/// stolen the FIFO from under it); the caller refuses cleanly.
-fn resolve_stdin_slot(s: &loader::startup::Startup) -> Option<u32> {
-    match s.grant(loader::startup::NAME_STDIN)? {
-        loader::startup::GrantKind::CapSlot(slot) => Some(slot),
-        _ => None,
-    }
-}
-
-/// `stdout` → the cspace slot holding the console-channel endpoint the shell
-/// writes terminal output to (rev2§5.1). An interactive console is one
-/// channel granted under both `stdin` and `stdout` (init points both names at
-/// the same slot), so this resolves to the same endpoint as
-/// [`resolve_stdin_slot`]. An absent grant is fatal — with the console driver
-/// owning the UART there is no ambient `debug_write` path for user-facing I/O.
-fn resolve_stdout_slot(s: &loader::startup::Startup) -> Option<u32> {
-    match s.grant(loader::startup::NAME_STDOUT)? {
-        loader::startup::GrantKind::CapSlot(slot) => Some(slot),
-        _ => None,
-    }
-}
-
-/// `time` → the virtual address of the read-only time page (rev2§2.6).
-fn resolve_time_va(s: &loader::startup::Startup) -> Option<u64> {
-    match s.grant(loader::startup::NAME_TIME)? {
-        loader::startup::GrantKind::Region { va, .. } => Some(va),
-        _ => None,
-    }
-}
-
-/// `random_seed` → the shell's per-run 256-bit entropy seed (rev2§5.1, std-port
-/// 3.4). The shell seeds its own DRBG (`urt::random`) from it and draws a fresh
-/// sub-seed for each child. Absent leaves the DRBG unseeded, so a `spawn` would
-/// abort at `fresh_seed` — but init always grants it (the seed-tree contract).
-fn resolve_seed(s: &loader::startup::Startup) -> Option<[u64; 4]> {
-    match s.grant(loader::startup::NAME_RANDOM_SEED)? {
-        loader::startup::GrantKind::Seed(words) => Some(words),
-        _ => None,
-    }
-}
+// Standard-name resolution for the shell's *own* world (`storage`/`root`/`time`/
+// `stdin`/`stdout`/`random_seed`) used to live here, but as a std binary the shell no
+// longer resolves them by hand: `eunomia_sys::bootstrap` (via std) attaches the time
+// page, seeds `urt::random`, connects the storaged session, and wires stdio over the
+// console at bootstrap, and the storage root handle is init's convention (0). The
+// child-facing producer `build_child_block` below (which *emits* these names to the
+// children the shell spawns) is unchanged and stays host-tested.
 
 /// The time page is one frame (kcore `PAGE`, rev2§2.6). The child reads only the
 /// VA; the length is informational on the `REGION` grant (matches init's `TIME_LEN`).

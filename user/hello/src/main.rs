@@ -1,47 +1,75 @@
-//! The first program ever spawned by another Eunomia process. Its whole
-//! world arrives via the startup convention (rev2§5.1): a bootstrap channel
-//! cap in cspace slot 0 with the startup block as the first queued
-//! message. It decodes the block (the unified `b"EUS1"` format), replies,
-//! exits.
+//! The real `hello` — the first *non-fixture* user program on std (std-port 5.3,
+//! findings #18). Where `user/stdsmoke` is a gate fixture, this is the actual
+//! "hello world" a user runs from the shell (`run bin/hello`), and its whole point
+//! is that a real program now boots on the std runtime with no bare-metal
+//! scaffolding of its own.
+//!
+//! It is a real std program — no `#![no_std]`, no `#![no_main]`, no
+//! `#[panic_handler]`. std owns `_start` (the eunomia PAL, rev2§5.1), the
+//! allocator, and the panic handler. `extern crate eunomia_sys;` is the one
+//! non-obvious line: it forces the seam rlib into the link so the linker resolves
+//! the PAL's undefined `__eunomia_*` `extern "Rust"` symbols against eunomia-sys's
+//! `#[no_mangle]` definitions (the `__rust_alloc` pattern).
+//!
+//! Arms (the plan's "validates entry/argv/alloc/exit/STATUS_PANIC"):
+//!   - argv via `env::args`, allocation via `Vec`/`String`/`format!`,
+//!   - the inherited environment via `env::var` (init→shell→child, 5.2),
+//!   - a monotonic `Instant` delta (2.4),
+//!   - a clean `exit(0)` (returning from `main`), and
+//!   - `run bin/hello panic` → std's own handler terminates as STATUS_PANIC so the
+//!     parent shell reaps `panicked`, not `exited(_)`.
 
-#![no_std]
-#![no_main]
+extern crate eunomia_sys; // links the PAL↔seam bridge (see module doc)
 
-use ipc::sys;
-use loader::startup;
+use std::time::Instant;
 
-const BOOT_CHAN: u32 = 0;
+fn main() {
+    // stdio (5.1): `println!` rides the `user/console` channel (the shell donates
+    // its console endpoint to every child). The `[hello]` prefix keeps the markers
+    // from colliding with kernel/shell/storaged lines on the shared console.
+    println!("[hello] alive in its own aspace on std");
 
-#[no_mangle]
-#[link_section = ".text._start"]
-pub extern "C" fn _start() -> ! {
-    sys::debug_write(b"[hello] child alive in its own aspace\n");
+    // argv (2.1) + allocation (2.2): the shell delivers the command line as the
+    // startup block's argv; collecting into a `Vec<String>` exercises the heap.
+    let args: Vec<String> = std::env::args().collect();
+    println!("[hello] argv={args:?}");
 
-    let mut buf = [0u8; 256];
-    // The startup block was queued before we started, so the first recv
-    // succeeds; the loop is plain defensiveness.
-    let len = loop {
-        let (len, _) = sys::chan_recv(BOOT_CHAN, buf.as_mut_ptr(), None);
-        if len >= 0 {
-            break len as usize;
-        }
-        sys::yield_now();
-    };
-
-    // Decode the unified startup block (rev2§2.7: total, refuse-not-crash). A
-    // well-formed EUS1 block from the shell's `build_child_block` acks; anything
-    // else is a malformed bootstrap. (The retired `b"startup:hello"` magic-string
-    // check predated the real format — no producer ever sent it.)
-    if startup::decode(&buf[..len]).is_some() {
-        sys::chan_send(BOOT_CHAN, b"hello-ok", None);
-    } else {
-        sys::chan_send(BOOT_CHAN, b"hello-BAD", None);
+    // The std-owned panic path (2.3): std's handler must terminate as STATUS_PANIC
+    // so the parent distinguishes a crash from a clean exit.
+    if args.get(1).map(String::as_str) == Some("panic") {
+        println!("[hello] panicking");
+        panic!("hello deliberate panic");
     }
-    sys::exit()
-}
 
-#[panic_handler]
-fn on_panic(_: &core::panic::PanicInfo) -> ! {
-    sys::debug_write(b"[hello] PANIC\n");
-    sys::thread_exit(sys::STATUS_PANIC)
+    // A little heap churn through `format!`/`String` — the allocator on a real
+    // (non-fixture) workload.
+    let mut greeting = String::new();
+    for who in args.iter().skip(1) {
+        greeting.push_str(&format!("hello, {who}! "));
+    }
+    if greeting.is_empty() {
+        greeting.push_str("hello, world!");
+    }
+    println!("[hello] {}", greeting.trim_end());
+
+    // Inherited environment (5.2): init defines `TERM=eunomia`, the shell forwards
+    // it. Reading it back witnesses the init→shell→child inheritance from a real
+    // program (not just the stdsmoke fixture).
+    match std::env::var("TERM") {
+        Ok(term) => println!("[hello] TERM={term}"),
+        Err(_) => println!("[hello] TERM unset"),
+    }
+
+    // Monotonic clock (2.4): `Instant` is zero-syscall (reads CNTVCT), no grant.
+    let t0 = Instant::now();
+    let mut acc: u64 = 0;
+    for i in 0..1000u64 {
+        acc = acc.wrapping_add(i);
+    }
+    let elapsed = t0.elapsed();
+    println!("[hello] sum={acc} in {}us", elapsed.as_micros());
+
+    // The green marker the boot harness greps, then a clean exit(0) (returning from
+    // `main`; std's runtime calls the PAL `exit(0)`).
+    println!("STD53 PASS");
 }

@@ -171,7 +171,19 @@ fn main() {
     // demonstrator, copied onto the demo disk by scripts/std-smoke-test.sh.
     let stdio = build_user(root, &user_target, "stdio", "stdio", &[]);
     let storaged = build_user(root, &user_target, "storaged", "storaged", &[]);
-    let shell = build_user(root, &user_target, "shell", "ushell", &[]);
+    // The shell is a std binary (std-port 5.3): size its `System` heap above the 1 MiB
+    // default via `EUNOMIA_HEAP_BYTES`, threaded here into the sub-build that compiles
+    // `eunomia-sys` for it (parsed by `eunomia-sys/src/heap.rs`'s `option_env!`). It loads
+    // whole child ELFs into this heap on `run`, so it wants the headroom — 4 MiB is a
+    // reservation (committed RAM at spawn, no demand paging) comfortably within `-m 256M`.
+    // Only std binaries honor it; the no_std ones never compile `heap.rs`.
+    let shell = build_user(
+        root,
+        &user_target,
+        "shell",
+        "ushell",
+        &[("EUNOMIA_HEAP_BYTES", "4194304".to_string())],
+    );
     let console = build_user(root, &user_target, "console", "console", &[]);
     let init = build_user(
         root,

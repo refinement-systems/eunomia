@@ -81,7 +81,15 @@ fn version() -> Option<u8> {
 /// encode at the negotiated version, `send` (retry on backpressure), `recv` (yield on
 /// an empty ring), decode. Every message is message-bounded (≤ 256 bytes, rev2§3.1);
 /// the caller's chunk loops keep it so. A dead/absent session is [`ERR_FS_NO_SESSION`].
-fn request(req: &Request) -> Result<Response, i64> {
+///
+/// Public as the **admin escape hatch** for a client that delegates its whole storaged
+/// session to this crate (the std-port 5.3 shell): its `std::fs` file ops ride the arms
+/// below, while its versioned-store admin ops (`Snapshot`/`ListSnapshots`/`Rollback`/
+/// `DeleteSnapshot`/`SetClass`/`Gc`/`Statfs`) — which `std::fs` cannot express — send
+/// their `Request` here directly and read the raw `Response`. It reuses the one session
+/// [`attach`] already connected ([`SESSION_CHAN`]/[`VERSION`]), so a caller must **not**
+/// run its own connect handshake (storaged admits slot 1 exactly once, rev2§3.5).
+pub fn request(req: &Request) -> Result<Response, i64> {
     let ver = version().ok_or(ERR_FS_NO_SESSION)?;
     let chan = SESSION_CHAN.load(Ordering::Relaxed);
     let bytes = wire::encode_request(req, ver).map_err(|_| ERR_FS_INTERNAL)?;

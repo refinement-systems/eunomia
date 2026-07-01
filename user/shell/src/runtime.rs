@@ -9,28 +9,31 @@
 //! aarch64-bare-metal only (no host stub). The pure formatting/parsing/policy
 //! logic these built-ins use lives in `main.rs` and is host-tested there.
 
-use crate::{
-    fault_class, fmt_hex, fmt_num, fmt_utc, parse_path, parse_u64, prune_victims,
-    resolve_root_handle, resolve_seed, resolve_stdin_slot, resolve_stdout_slot,
-    resolve_storage_slot, resolve_time_va,
-};
+use crate::{fault_class, fmt_hex, fmt_num, fmt_utc, parse_u64, prune_victims};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use ipc::{sys, Reactor, SyscallTransport};
-use storage_server::{wire, DirEnt, Request, Response};
+use std::io::{Read, Write};
+use storage_server::{ErrorCode, Request, Response};
 use urt::slots::SlotAlloc;
 use urt::spawn::{Exit, SpawnRec};
 
-#[global_allocator]
-static HEAP: urt::Heap<{ 1024 * 1024 }> = urt::Heap::new();
+// The shell is now a std binary (std-port 5.3): std owns `_start`, the allocator
+// (a `urt::Heap` sized by `EUNOMIA_HEAP_BYTES`, threaded by `kernel/build.rs`), the
+// panic handler, and stdio/time/args/env — so there is no `#[global_allocator]` or
+// `#[panic_handler]` here. It keeps raw `urt::spawn`/`loader::spawn` for capability
+// spawn/reap (`std::process` cannot model it) and raw `ipc` for the versioned-store
+// admin ops (`snap`/`gc`/`df`/… — `std::fs` cannot express them); its plain file
+// built-ins ride `std::fs` over the one storaged session `eunomia_sys::fs` connected
+// at bootstrap.
 
-// Shell cspace (built by init, rev2§5.1): slot 0 = bootstrap channel, slot 1 =
-// storage session, slot 2 = the untyped pool for spawning, slot 5 = a
-// read-only time cap re-granted per child. The shell carves two persistent
-// objects from the pool at startup and keeps slots 8.. as a recyclable
-// window for per-child object caps.
-const BOOT_CHAN: u32 = 0;
-const STORE_CHAN: u32 = 1;
+// Shell cspace (built by init, rev2§5.1). slot 0 = bootstrap channel and slot 1 =
+// storage session are consumed by the std runtime and `eunomia_sys` at bootstrap
+// (argv/env/grants; the fs-session connect) — the shell no longer touches them by
+// hand. It still references by number the caps init installs for its own
+// spawn/console work: slot 2 = the untyped pool, slot 5 = a read-only time cap
+// re-granted per child, slot 6 = the console endpoint it donates to children,
+// slot 7 = the delegatable fs session. It carves two persistent objects from the
+// pool at startup and keeps slots 8.. as a recyclable window for per-child caps.
 const POOL: u32 = 2;
 /// Persistent event notification: the shell's wait point and the target of
 /// every child's on-exit/on-fault bindings (rev2§3.6). Carved once; survives
@@ -44,6 +47,14 @@ const DONATION: u32 = 4;
 /// the init→shell time grant, one hop further. Lives in pool memory the
 /// per-child reclaim never touches.
 const SH_TIME: u32 = 5;
+/// The shell's own console-channel endpoint (init's `SHELL_CONSOLE_SLOT`, rev2§5.1):
+/// the cap it copies into every child's cspace to donate the foreground terminal.
+/// As a std binary the shell's own stdio rides this slot via `eunomia_sys::console`
+/// (resolved from the `stdin`/`stdout`/`stderr` grants at bootstrap); this constant
+/// is the same init-convention slot, used only as the copy *source* for the child
+/// donation in `spawn_inner`. Hardcoded like the other init-installed slots above
+/// (a shell↔init co-designed cspace).
+const CONSOLE_SLOT: u32 = 6;
 const SPAWN_BASE: u32 = 8;
 const SPAWN_CAP: usize = 56; // slots 8..64
 
@@ -78,8 +89,9 @@ const CHILD_THREAD_SLOT_BASE: u32 = 4;
 // authority (no session). An fs-capable child is not thread-capable, so
 // `CHILD_STORAGE_SLOT` (1) does not clash with the thread self-cap slots.
 /// The shell cspace slot holding the delegatable storaged session (init installs it;
-/// its `SHELL_FS_SESSION_SLOT`). Distinct from `STORE_SLOT` (the shell's *own*
-/// session for its built-in fs commands) — this one is only ever copied to children.
+/// its `SHELL_FS_SESSION_SLOT`). Distinct from the shell's *own* session at slot 1
+/// (which `eunomia_sys::fs` connected at bootstrap for the shell's own built-in fs
+/// commands) — this one is only ever copied to fs-capable children.
 const SHELL_FS_SESSION_SLOT: u32 = 7;
 /// The child cspace slot the delegated session lands in, named `storage` in the
 /// child's startup block; the root handle is 0 (named `root`).
@@ -87,7 +99,7 @@ const CHILD_STORAGE_SLOT: u32 = 1;
 
 // Console provisioning (std-port 5.1): *every* child inherits the shell's console endpoint
 // (true foreground-terminal inheritance) — the shell copies its own console cap
-// (`STDOUT_SLOT`) into the child's cspace, named `stdin`/`stdout` in the startup block, so the
+// (`CONSOLE_SLOT`) into the child's cspace, named `stdin`/`stdout` in the startup block, so the
 // child's std `sys/stdio` arm rides the `user/console` channel instead of the debug-log. stderr
 // resolves to the stdout channel in the child (the terminal case — `eunomia_sys::console`), so
 // no separate `stderr` grant is pushed and even a thread-capable child stays within
@@ -138,93 +150,40 @@ const FAULT_BIT: u64 = 1 << 1;
 const EXIT_KEY: ipc::Key = 0;
 const FAULT_KEY: ipc::Key = 1;
 
-/// The shell's storage authority, resolved from the init→shell `b"EUS1"`
-/// named-grant table once in `_start` (rev2§5.1): `storage` → the session
-/// channel slot, `root` → the handle on that session. Defaults match init's
-/// convention (`STORE_CHAN`, handle 0) so an absent grant degrades to today's
-/// behaviour. The shell is single-threaded (cooperative `yield_now`) and these
-/// are written before the REPL runs, so `Relaxed` ordering is sufficient.
-static STORE_SLOT: AtomicU32 = AtomicU32::new(STORE_CHAN);
-static ROOT_HANDLE: AtomicU32 = AtomicU32::new(0);
-
-/// The storage wire version negotiated with storaged in `_start` (rev2§3.7),
-/// stamped into every request header and validated on every response.
-/// Defaults to `wire::PROTO_VERSION` so the value is well-defined before the
-/// one-shot connect runs; the handshake overwrites it with the server's choice.
-static NEGOTIATED_VERSION: AtomicU8 = AtomicU8::new(wire::PROTO_VERSION);
-
-/// The cspace slot of the shell's `stdout` console-channel endpoint (rev2§5.1).
-/// No default: `_start` resolves it from the startup table and refuses
-/// to run without it, so `out()` never runs before this is set (the sentinel
-/// would make any stray early write fail loudly on a bad slot rather than leak
-/// to a wrong channel).
-static STDOUT_SLOT: AtomicU32 = AtomicU32::new(u32::MAX);
-
-/// One console message caps at `kcore::channel::MSG_PAYLOAD` (256); `out()`
-/// chunks at this so any length streams in order.
-const STDOUT_CHUNK: usize = 256;
-
-// The shell's inherited environment (std-port 5.2), stashed once in `_start` and
-// forwarded verbatim to every child it spawns (`build_child_block`) — the POSIX
-// inheritance model, with init the single definition point. The byte data lives in
-// `SHELL_BOOT`, the `'static` buffer the block was decoded from, so the stored slices
-// are genuinely `'static`; stashing slices of a *local* boot buffer would dangle
-// after `_start`. Written once before the REPL and any spawn (single-threaded shell),
-// read-only after — the same init-once discipline as `eunomia_sys::bootstrap`.
-static mut SHELL_BOOT: [u8; loader::startup::MAX_BLOCK] = [0; loader::startup::MAX_BLOCK];
-static mut SHELL_ENV: [&[u8]; loader::startup::MAX_ENV] = [&[]; loader::startup::MAX_ENV];
-static mut SHELL_NENV: usize = 0;
-
-/// The inherited environment as raw `KEY=VALUE` byte-strings (rev2§5.1), empty
-/// before `_start` stashes it. Forwarded to children by `build_child_block`.
-fn shell_env() -> &'static [&'static [u8]] {
-    // SAFETY: `SHELL_ENV`/`SHELL_NENV` are written once in `_start` before the REPL
-    // and any spawn; the single-threaded shell never mutates them afterwards. Bind an
-    // explicit array reference before slicing so no implicit autoref of a raw-pointer
-    // deref is formed.
-    unsafe {
-        let n = *core::ptr::addr_of!(SHELL_NENV);
-        let arr: &'static [&'static [u8]; loader::startup::MAX_ENV] =
-            &*core::ptr::addr_of!(SHELL_ENV);
-        &arr[..n]
-    }
-}
-
-/// The cspace slot of the storage-session channel (`storage`, rev2§5.1).
-fn store_slot() -> u32 {
-    STORE_SLOT.load(Ordering::Relaxed)
-}
-
-/// The storage handle for the ref root (`root`, rev2§5.1).
+/// The storage handle for the ref root (`root`, rev2§5.1). init grants the shell the
+/// full-rights ref root at handle 0 (its convention); `eunomia_sys::fs` connected the
+/// session against that handle at bootstrap, so the shell's raw admin `Request`s
+/// (which `std::fs` cannot express) target handle 0 too.
 fn root_handle() -> u32 {
-    ROOT_HANDLE.load(Ordering::Relaxed)
+    0
 }
 
-/// The wire version negotiated at session establishment (rev2§3.7).
-fn negotiated_version() -> u8 {
-    NEGOTIATED_VERSION.load(Ordering::Relaxed)
+/// The inherited environment as raw `KEY=VALUE` byte-strings (rev2§5.1), forwarded to
+/// every child the shell spawns (`build_child_block`) — the POSIX inheritance model.
+/// `eunomia_sys::bootstrap` stashed it (from the init→shell startup block) for the std
+/// `env` arm; the shell reuses that exact byte view rather than re-deriving it from
+/// `std::env::vars_os()`, so a non-UTF-8 value round-trips losslessly.
+fn shell_env() -> &'static [&'static [u8]] {
+    eunomia_sys::bootstrap::env()
 }
 
-/// All terminal output (banner, prompt, command results, echo) crosses the
-/// `stdout` console channel (rev2§5.1) — the shell does *no* ambient
-/// debug-UART output. Chunk at the message payload bound and yield on a full
-/// channel (the console driver runs at a higher priority and drains promptly).
+/// All terminal output (banner, prompt, command results, echo) rides std `stdout`,
+/// which `eunomia_sys::console` routes over the `user/console` channel (rev2§5.1) —
+/// the shell does *no* ambient debug-UART output. std stdout is line-buffered, so
+/// flush after every write (the prompt and per-keystroke echo carry no newline).
 fn out(s: &[u8]) {
-    let slot = STDOUT_SLOT.load(Ordering::Relaxed);
-    for chunk in s.chunks(STDOUT_CHUNK) {
-        while sys::chan_send(slot, chunk, None) == sys::ERR_FULL {
-            sys::yield_now();
-        }
-    }
+    let mut so = std::io::stdout();
+    let _ = so.write_all(s);
+    let _ = so.flush();
 }
 
-/// Pre-console / panic diagnostics: the build-gated kernel-diagnostic path
-/// (rev2§7 "kept, if at all, only for kernel-internal panic reporting"). The
-/// shell's *only* use of a debug syscall — for failures that fire before the
-/// console channel is usable, or during a panic when it may be the cause. All
-/// user-facing I/O uses `out()` (the channel).
+/// A diagnostic on std `stderr` (routed to the console's stdout channel in a terminal,
+/// rev2§5.1) — for the boot FATALs that abort before the REPL. Panic last-words stay
+/// on std's own debug-log path (std owns the panic handler now).
 fn diag(s: &[u8]) {
-    sys::debug_write(s);
+    let mut se = std::io::stderr();
+    let _ = se.write_all(s);
+    let _ = se.flush();
 }
 
 fn out_num(n: u64) {
@@ -245,49 +204,15 @@ fn out_utc(ns: u64) {
     out(&buf);
 }
 
+/// One admin round-trip against storaged over the shell's single storaged session
+/// (std-port 5.3): the versioned-store ops (`Snapshot`/`ListSnapshots`/`Rollback`/
+/// `DeleteSnapshot`/`SetClass`/`Gc`/`Statfs`/`Sync`) that `std::fs` cannot express.
+/// `eunomia_sys::fs` owns the session it connected at bootstrap (the connect
+/// handshake + negotiated version), so the shell hands it a raw `Request` and reads
+/// back the `Response` — sharing the one session its `std::fs` file ops also ride. A
+/// dead/absent session surfaces as an `Internal` error (shown on the console).
 fn request(req: &Request) -> Response {
-    let version = negotiated_version();
-    let bytes = match wire::encode_request(req, version) {
-        Ok(b) => b,
-        Err(_) => return Response::Err(storage_server::ErrorCode::Internal),
-    };
-    let store = store_slot();
-    while sys::chan_send(store, &bytes, None) == sys::ERR_FULL {
-        sys::yield_now();
-    }
-    let mut buf = [0u8; 256];
-    loop {
-        let (len, _) = sys::chan_recv(store, buf.as_mut_ptr(), None);
-        if len >= 0 {
-            return wire::decode_response(&buf[..len as usize], version)
-                .unwrap_or(Response::Err(storage_server::ErrorCode::Internal));
-        }
-        sys::yield_now();
-    }
-}
-
-/// Read a whole file through size-bounded Read requests.
-fn read_file(path: &[u8]) -> Option<Vec<u8>> {
-    let p = parse_path(path);
-    let mut data = Vec::new();
-    loop {
-        match request(&Request::Read {
-            handle: root_handle(),
-            path: p.clone(),
-            offset: data.len() as u64,
-            len: 160,
-        }) {
-            Response::Data(chunk) => {
-                let done = chunk.len() < 160;
-                data.extend_from_slice(&chunk);
-                if done {
-                    return Some(data);
-                }
-            }
-            Response::NotFound => return None,
-            _ => return None,
-        }
-    }
+    eunomia_sys::fs::request(req).unwrap_or(Response::Err(ErrorCode::Internal))
 }
 
 fn err_name(e: storage_server::ErrorCode) -> &'static [u8] {
@@ -324,40 +249,70 @@ fn report(resp: Response) {
     }
 }
 
-fn cmd_ls(arg: &[u8]) {
-    match request(&Request::List {
-        handle: root_handle(),
-        path: parse_path(arg),
-    }) {
-        Response::Listing(ents) => {
-            for e in ents {
-                match e {
-                    DirEnt::Dir { name } => {
-                        out(&name);
-                        out(b"/\n");
-                    }
-                    DirEnt::File { name, size } => {
-                        out(&name);
-                        out(b"  (");
-                        out_num(size);
-                        out(b" bytes)\n");
-                    }
-                }
-            }
+/// Render a std `io::Error` onto the console as the shell's `error: …` line — the
+/// `std::fs` replacement for the raw `Response::Err` → [`err_name`] path (std-port 5.3).
+fn out_io_err(e: &std::io::Error) {
+    out(b"error: ");
+    out(e.to_string().as_bytes());
+    out(b"\n");
+}
+
+/// A command path argument as `&str` (paths are UTF-8 in practice; the verified
+/// `eunomia_sys::path` resolver owns the `.`/`..` and confinement handling on the fs
+/// arm). An empty argument means the ref root, rendered `.` so the resolver drops it.
+/// A non-UTF-8 path is refused cleanly here (a std `Path` needs valid `str` on eunomia
+/// — there is no byte-`OsStr` ext — a disclosed MVP limit, not a crash).
+fn path_arg(arg: &[u8]) -> Option<&str> {
+    match core::str::from_utf8(arg) {
+        Ok("") => Some("."),
+        Ok(p) => Some(p),
+        Err(_) => {
+            out(b"error: invalid path (not utf-8)\n");
+            None
         }
-        r => report(r),
     }
 }
 
+/// `ls [path]` over `std::fs::read_dir` (std-port 5.3): the listing rides the shared
+/// storaged session `eunomia_sys::fs` owns, and the entry kind/size arrive cached in
+/// the listing (no per-entry re-probe). Directories print with a trailing `/`.
+fn cmd_ls(arg: &[u8]) {
+    let Some(path) = path_arg(arg) else { return };
+    let entries = match std::fs::read_dir(path) {
+        Ok(e) => e,
+        Err(e) => return out_io_err(&e),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => return out_io_err(&e),
+        };
+        let name = entry.file_name();
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            out(name.as_encoded_bytes());
+            out(b"/\n");
+        } else {
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            out(name.as_encoded_bytes());
+            out(b"  (");
+            out_num(size);
+            out(b" bytes)\n");
+        }
+    }
+}
+
+/// `cat <path>` over `std::fs::read` (std-port 5.3). A trailing newline is added when
+/// the file does not end in one, matching the pre-std behaviour.
 fn cmd_cat(arg: &[u8]) {
-    match read_file(arg) {
-        Some(data) => {
+    let Some(path) = path_arg(arg) else { return };
+    match std::fs::read(path) {
+        Ok(data) => {
             out(&data);
             if data.last() != Some(&b'\n') {
                 out(b"\n");
             }
         }
-        None => out(b"error: not found\n"),
+        Err(e) => out_io_err(&e),
     }
 }
 
@@ -386,15 +341,16 @@ fn cmd_snaps() {
     }
 }
 
-/// Wall-clock time end to end: two register reads and the time page,
-/// zero syscalls, zero IPC on the read path (rev2§2.6).
+/// Wall-clock time via std `SystemTime` (std-port 5.3): `eunomia_sys` reads the same
+/// rev2§2.6 time page under the hood (the granted page + CNTVCT), so `date` is still
+/// off the IPC path. init grants the shell the time page, so `now()` never panics here.
 fn cmd_date() {
-    match urt::time::page() {
-        Some(p) => {
-            out_utc(p.sample().utc_ns_at(urt::time::cntvct()) as u64);
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => {
+            out_utc(d.as_nanos() as u64);
             out(b"\n");
         }
-        None => out(b"error: no time grant\n"),
+        Err(_) => out(b"error: clock before epoch\n"),
     }
 }
 
@@ -658,13 +614,13 @@ impl Spawner {
         };
         // std-port 5.1: donate the shell's console endpoint to every child so its std
         // `sys/stdio` arm rides the `user/console` channel instead of the debug-log. Copy the
-        // shell's own console cap (`STDOUT_SLOT`, resolved in `_start`) into the child's cspace
+        // shell's own console cap (`CONSOLE_SLOT`, init's convention) into the child's cspace
         // at the console slot, named `stdin`/`stdout` in the block; stderr falls back to the
         // stdout channel in the child. Best-effort: on failure the child keeps the debug-log
         // fallback rather than failing the spawn, and the staged cap is deleted so `s.scratch`
         // is empty for the notif bind below.
         let console_slot = {
-            let src = STDOUT_SLOT.load(Ordering::Relaxed);
+            let src = CONSOLE_SLOT;
             let dst = if thread_capable {
                 THREAD_CHILD_CONSOLE_SLOT
             } else {
@@ -683,8 +639,8 @@ impl Spawner {
         };
         // std-port 3.4: draw a fresh entropy sub-seed for this child from the
         // shell's own DRBG (the fork-without-reseed guard) — never the shell's
-        // seed raw. The shell seeded `urt::random` from its `NAME_RANDOM_SEED`
-        // grant in `_start`.
+        // seed raw. `eunomia_sys::bootstrap` seeded `urt::random` from the shell's
+        // `NAME_RANDOM_SEED` grant at bootstrap (the shell still draws from it here).
         let mut block = [0u8; loader::startup::MAX_BLOCK];
         let n = match crate::build_child_block(
             &mut block,
@@ -787,6 +743,14 @@ fn run_err(e: RunErr) {
     });
 }
 
+/// Load a program image from the store via `std::fs::read` (std-port 5.3): the ELF the
+/// shell spawns, read over the shared storaged session. `None` — not found, unreadable,
+/// or a non-UTF-8 path — is the caller's clean "error: not found".
+fn read_image(path: &[u8]) -> Option<Vec<u8>> {
+    let path = core::str::from_utf8(path).ok()?;
+    std::fs::read(path).ok()
+}
+
 fn cmd_run(sp: &mut Spawner, arg: &[u8]) {
     // argv from the command line (rev2§5.1): whitespace-split tokens,
     // empties dropped. argv[0] is the program path; the rest are arguments the
@@ -797,7 +761,7 @@ fn cmd_run(sp: &mut Spawner, arg: &[u8]) {
         .collect();
     let path = argv.first().copied().unwrap_or(b"");
 
-    let Some(image) = read_file(path) else {
+    let Some(image) = read_image(path) else {
         out(b"error: not found\n");
         return;
     };
@@ -821,7 +785,7 @@ fn cmd_runloop(sp: &mut Spawner, arg: &[u8]) {
         out(b"usage: runloop <path> <count>\n");
         return;
     };
-    let Some(image) = read_file(path) else {
+    let Some(image) = read_image(path) else {
         out(b"error: not found\n");
         return;
     };
@@ -858,6 +822,47 @@ fn cmd_runloop(sp: &mut Spawner, arg: &[u8]) {
     out(b"\n");
 }
 
+/// `rm <path>` over `std::fs::remove_file` (std-port 5.3).
+fn cmd_rm(arg: &[u8]) {
+    let Some(path) = path_arg(arg) else { return };
+    match std::fs::remove_file(path) {
+        Ok(()) => out(b"ok\n"),
+        Err(e) => out_io_err(&e),
+    }
+}
+
+/// `write <path> <text>` over `std::fs::write` (std-port 5.3): create-or-overwrite the
+/// file with `text`. `File::create`'s truncate is emulated by an unlink (rev2§4.9 has
+/// no `set_len`), so a re-`write` replaces the content rather than overlaying it.
+fn cmd_write(arg: &[u8]) {
+    let mut wa = arg.splitn(2, |&b| b == b' ');
+    let path = wa.next().unwrap_or(b"");
+    let text = wa.next().unwrap_or(b"");
+    let Some(path) = path_arg(path) else { return };
+    match std::fs::write(path, text) {
+        Ok(()) => out(b"ok\n"),
+        Err(e) => out_io_err(&e),
+    }
+}
+
+/// `mv <from> <to>` over `std::fs::rename` (std-port 5.3). Cross-subtree rename is
+/// `EXDEV` by construction (rev2§4.9); within the ref it is a tree move.
+fn cmd_mv(arg: &[u8]) {
+    let mut ma = arg.splitn(2, |&b| b == b' ');
+    let from = ma.next().unwrap_or(b"");
+    let to = ma.next().unwrap_or(b"").trim_ascii();
+    if from.is_empty() || to.is_empty() {
+        out(b"usage: mv <from> <to>\n");
+        return;
+    }
+    let Some(from) = path_arg(from) else { return };
+    let Some(to) = path_arg(to) else { return };
+    match std::fs::rename(from, to) {
+        Ok(()) => out(b"ok\n"),
+        Err(e) => out_io_err(&e),
+    }
+}
+
 fn dispatch(sp: &mut Spawner, line: &[u8]) {
     let mut parts = line.splitn(2, |&b| b == b' ');
     let cmd = parts.next().unwrap_or(b"");
@@ -870,7 +875,7 @@ fn dispatch(sp: &mut Spawner, line: &[u8]) {
         b"date" => cmd_date(),
         b"ls" => cmd_ls(arg),
         b"cat" => cmd_cat(arg),
-        b"rm" => report(request(&Request::Unlink { handle: root_handle(), path: parse_path(arg) })),
+        b"rm" => cmd_rm(arg),
         b"sync" => report(request(&Request::Sync { handle: root_handle() })),
         // class 1 = auto: subject to `prune`; promote survivors via `keep`.
         b"snap" => report(request(&Request::Snapshot {
@@ -899,225 +904,60 @@ fn dispatch(sp: &mut Spawner, line: &[u8]) {
         },
         b"gc" => cmd_gc(),
         b"df" => cmd_df(),
-        b"write" => {
-            let mut wa = arg.splitn(2, |&b| b == b' ');
-            let path = wa.next().unwrap_or(b"");
-            let text = wa.next().unwrap_or(b"");
-            report(request(&Request::Write {
-                handle: root_handle(),
-                path: parse_path(path),
-                offset: 0,
-                data: text.to_vec(),
-            }));
-        }
-        b"mv" => {
-            let mut ma = arg.splitn(2, |&b| b == b' ');
-            let from = ma.next().unwrap_or(b"");
-            let to = ma.next().unwrap_or(b"").trim_ascii();
-            if from.is_empty() || to.is_empty() {
-                out(b"usage: mv <from> <to>\n");
-            } else {
-                report(request(&Request::Rename {
-                    handle: root_handle(),
-                    from: parse_path(from),
-                    to: parse_path(to),
-                }));
-            }
-        }
+        b"write" => cmd_write(arg),
+        b"mv" => cmd_mv(arg),
         b"run" => cmd_run(sp, arg),
         b"runloop" => cmd_runloop(sp, arg),
         _ => out(b"unknown command (try help)\n"),
     }
 }
 
-/// The shell's stdin (rev2§5.1): keystrokes arrive from the userspace
-/// console driver as channel messages on the `stdin` endpoint, not the ambient
-/// `debug_getc` syscall (the driver owns the PL011 RX line, so there is no
-/// ambient input path to poll). Buffer one message and hand the REPL one
-/// byte at a time — the exact `debug_getc` shape the loop already consumes
-/// (negative = nothing queued, the caller yields).
-struct Stdin {
-    slot: u32,
-    buf: [u8; 256],
-    pos: usize,
-    len: usize,
-}
-
-impl Stdin {
-    const fn new(slot: u32) -> Self {
-        Self {
-            slot,
-            buf: [0u8; 256],
-            pos: 0,
-            len: 0,
-        }
-    }
-
-    /// One byte, or a negative `ERR_EMPTY` when the channel has nothing queued.
-    fn getc(&mut self) -> i64 {
-        if self.pos >= self.len {
-            let (n, _) = sys::chan_recv(self.slot, self.buf.as_mut_ptr(), None);
-            if n <= 0 {
-                return sys::ERR_EMPTY;
-            }
-            self.len = n as usize;
-            self.pos = 0;
-        }
-        let b = self.buf[self.pos];
-        self.pos += 1;
-        b as i64
-    }
-}
-
-#[no_mangle]
-#[link_section = ".text._start"]
-pub extern "C" fn _start() -> ! {
-    // The rev2§5.1 startup block, queued by init before this thread started: the
-    // unified `b"EUS1"` named-grant table (`loader::startup`). Resolve the
-    // standard names `storage`/`root`/`time` once here. A malformed block is
-    // refused, not a crash (decode is total, rev2§2.7); an absent name keeps the
-    // default — no `time` grant means no clock (`date` degrades), `storage`/`root`
-    // default to init's convention.
-    // Receive into the `'static` boot buffer (std-port 5.2) so the decoded argv/env
-    // slices are `'static` and the environment can be stashed for child inheritance.
-    // SAFETY: `chan_recv` fills `SHELL_BOOT` with this thread's slot-0 startup block;
-    // single-threaded, runs once. Using the raw pointer directly avoids forming a
-    // `&mut` that would alias the `&` view below.
-    let blen = {
-        let ptr = core::ptr::addr_of_mut!(SHELL_BOOT) as *mut u8;
-        let (n, _) = sys::chan_recv(BOOT_CHAN, ptr, None);
-        n
-    };
-    // SAFETY: `SHELL_BOOT` was filled to `blen` bytes above and is not mutated after
-    // (init-once, single-threaded), so a `'static` read-only view is sound. Bind an
-    // explicit array reference before slicing (no implicit autoref of a raw deref).
-    let boot: &'static [u8] = unsafe {
-        let buf: &'static [u8; loader::startup::MAX_BLOCK] = &*core::ptr::addr_of!(SHELL_BOOT);
-        &buf[..blen.max(0) as usize]
-    };
-    // `stdin`/`stdout`: the console-channel endpoint the REPL reads
-    // keystrokes from and writes output to (one channel under both names,
-    // rev2§5.1). Unlike the other names they have no graceful default — the
-    // console driver owns the PL011 line, so there is no ambient I/O path — so an
-    // absent grant is fatal below.
-    let mut stdin_slot: Option<u32> = None;
-    let mut stdout_slot: Option<u32> = None;
-    if let Some(s) = loader::startup::decode(boot) {
-        if let Some(slot) = resolve_storage_slot(&s) {
-            STORE_SLOT.store(slot, Ordering::Relaxed);
-        }
-        if let Some(h) = resolve_root_handle(&s) {
-            ROOT_HANDLE.store(h, Ordering::Relaxed);
-        }
-        if let Some(va) = resolve_time_va(&s) {
-            // Safety: init mapped the read-only time page at this address
-            // before starting us; the mapping outlives the process.
-            unsafe { urt::time::attach(va as usize) };
-        }
-        // std-port 3.4: seed the shell's DRBG from its per-run entropy grant, then
-        // zeroize this transient copy. The shell draws a fresh sub-seed from it for
-        // each child it spawns (`spawn_inner`).
-        if let Some(mut sd) = resolve_seed(&s) {
-            urt::random::seed(sd);
-            for w in sd.iter_mut() {
-                // Safety: `w` is a live stack word; volatile so it is not elided.
-                unsafe { core::ptr::write_volatile(w, 0) };
-            }
-        }
-        stdin_slot = resolve_stdin_slot(&s);
-        stdout_slot = resolve_stdout_slot(&s);
-        if let Some(slot) = stdout_slot {
-            STDOUT_SLOT.store(slot, Ordering::Relaxed);
-        }
-        // std-port 5.2: stash the inherited environment so it is forwarded to every
-        // child (`build_child_block`). The slices borrow `SHELL_BOOT` (a `'static`
-        // buffer), so they stay valid for the process lifetime; `decode` guarantees
-        // `s.nenv <= MAX_ENV`.
-        // SAFETY: written once here before the REPL and any spawn; single-threaded.
-        unsafe {
-            let env = &mut *core::ptr::addr_of_mut!(SHELL_ENV);
-            for i in 0..s.nenv {
-                env[i] = s.env[i];
-            }
-            *core::ptr::addr_of_mut!(SHELL_NENV) = s.nenv;
-        }
-    }
-
-    // Carve the two persistent spawn objects from the pool (slot 2): the
-    // event notification every child's death will signal, and one reusable
-    // child-sized donation untyped (rev2§5.1). Both sit in pool memory the
-    // per-child reclaim never touches.
+/// The shell's entry (std-port 5.3). std owns `_start`, the allocator, and the panic
+/// handler; `eunomia_sys` at bootstrap has already decoded the rev2§5.1 startup block —
+/// argv/env, the time page (`SystemTime`), the DRBG seed (`urt::random`, for per-child
+/// sub-seeds), the storaged session (`eunomia_sys::fs` connected it), and
+/// stdin/stdout/stderr over the `user/console` channel. So the shell no longer receives
+/// or decodes the block, resolves grants, or runs a storage connect handshake by hand.
+///
+/// `main` (in `main.rs`) calls this after that bootstrap. Its only remaining setup is
+/// the spawn machinery init hands it by cspace-slot number: carve the persistent event
+/// notification + the reusable donation untyped from the pool (slot 2). It never returns
+/// (the REPL loops).
+pub fn run() -> ! {
+    // Carve the two persistent spawn objects from the pool (slot 2): the event
+    // notification every child's death signals, and one reusable child-sized donation
+    // untyped (rev2§5.1). Both sit in pool memory the per-child reclaim never touches.
     if sys::retype(POOL, sys::OBJ_NOTIF, 0, EVENT_NOTIF, 0) < 0
         || sys::retype(POOL, sys::OBJ_UNTYPED, DONATION_BYTES, DONATION, 0) < 0
     {
         diag(b"[shell] FATAL: could not carve spawn objects\n");
-        sys::exit();
+        std::process::exit(1);
     }
     let mut spawner = Spawner::new();
 
-    // The console must be wired: with the userspace driver owning the
-    // PL011 line, an unbound `stdin`/`stdout` means no I/O path at all — fail
-    // cleanly and visibly on the kernel-diagnostic path (the no-console
-    // negative control); there is no ambient debug-syscall fallback.
-    // `stdout` is stored in `STDOUT_SLOT` above;
-    // both must be present before the banner.
-    let Some(stdin_slot) = stdin_slot else {
-        diag(b"[shell] FATAL: stdin unbound (console not wired)\n");
-        sys::exit();
-    };
-    if stdout_slot.is_none() {
-        diag(b"[shell] FATAL: stdout unbound (console not wired)\n");
-        sys::exit();
-    }
-    let mut stdin = Stdin::new(stdin_slot);
-
-    // Connect handshake (rev2§3.5/§3.7): negotiate the storage wire version
-    // with storaged once, before the REPL. We offer `[PROTO_VERSION,
-    // PROTO_VERSION]` in the *storage* version namespace (`wire::PROTO_VERSION`,
-    // not `ipc::PROTOCOL_VERSION` — the connect codec's own version) and a zero
-    // bulk window (the inline path needs none yet). The request rides the raw
-    // `ipc` connect codec over the pre-wired storage channel — not a storage
-    // `Request` (which could not itself be versioned). Record the selected
-    // version to stamp on every request; a refusal means no shared version,
-    // fatal for a single-version build (rev2§3.7: refuse cleanly, never crash).
-    {
-        let store = store_slot();
-        let req = ipc::ConnectReq::new(
-            0,
-            ipc::VersionRange::new(wire::PROTO_VERSION, wire::PROTO_VERSION),
-        );
-        let bytes = req.encode();
-        while sys::chan_send(store, &bytes, None) == sys::ERR_FULL {
-            sys::yield_now();
-        }
-        let mut rbuf = [0u8; 16];
-        let ver = loop {
-            let (len, _) = sys::chan_recv(store, rbuf.as_mut_ptr(), None);
-            if len >= 0 {
-                match ipc::GrantReply::decode(&rbuf[..len.max(0) as usize]) {
-                    Some(ipc::GrantReply::Grant(_, ver)) => break ver,
-                    _ => {
-                        out(b"[shell] FATAL: storage connect refused\n");
-                        sys::exit();
-                    }
-                }
-            }
-            sys::yield_now();
-        };
-        NEGOTIATED_VERSION.store(ver, Ordering::Relaxed);
-    }
-
     out(b"\nEunomia shell - type help\n");
+    // The REPL reads keystrokes one byte at a time from std `stdin` (routed over the
+    // `user/console` channel by `eunomia_sys::console`) and echoes them itself: the
+    // console driver owns the raw UART line and does no echo, so the shell provides the
+    // line editing (printable echo, backspace) it always has. `StdinLock` is buffered,
+    // so a whole piped/typed line is one console read, then served byte by byte.
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    let mut byte = [0u8; 1];
     let mut line = [0u8; 200];
     let mut len = 0usize;
     out(b"eunomia> ");
     loop {
-        let c = stdin.getc();
-        if c < 0 {
-            sys::yield_now();
-            continue;
+        match input.read(&mut byte) {
+            Ok(1) => {}
+            // EOF (peer closed) or a transient read error: park politely and retry — an
+            // interactive console never truly ends (the harness kills QEMU at teardown).
+            _ => {
+                sys::yield_now();
+                continue;
+            }
         }
-        match c as u8 {
+        match byte[0] {
             b'\r' | b'\n' => {
                 out(b"\n");
                 dispatch(&mut spawner, line[..len].trim_ascii());
@@ -1138,12 +978,4 @@ pub extern "C" fn _start() -> ! {
             _ => {}
         }
     }
-}
-
-#[panic_handler]
-fn on_panic(_: &core::panic::PanicInfo) -> ! {
-    // A panic must not depend on the console channel (it may be the cause), so
-    // report on the kernel-diagnostic path (rev2§7), not `out()`.
-    diag(b"[shell] PANIC\n");
-    sys::thread_exit(sys::STATUS_PANIC)
 }
