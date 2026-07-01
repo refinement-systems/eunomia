@@ -16,7 +16,7 @@
 
 use core::alloc::{GlobalAlloc, Layout};
 
-use crate::{bootstrap, futex, heap, io_error, stdio, syscall, thread, tls};
+use crate::{bootstrap, futex, heap, io_error, random, stdio, syscall, thread, tls};
 use core::sync::atomic::AtomicU32;
 
 /// The process-global std `System` heap (std-port 2.2): a fixed `.bss` arena over
@@ -165,6 +165,16 @@ pub extern "Rust" fn __eunomia_mono_ns() -> i64 {
 #[unsafe(no_mangle)]
 pub extern "Rust" fn __eunomia_wall_ns() -> i64 {
     urt::time::now_utc_ns()
+}
+
+/// Fill `bytes` with random data for the `sys/random` arm (std-port 3.4): std's
+/// `fill_bytes`/`hashmap_random_keys` over the per-process DRBG (`urt::random`)
+/// seeded from the `NAME_RANDOM_SEED` grant. Loudly aborts if unseeded (the seam
+/// re-establishes the "seed attached" precondition as a runtime guard, never a
+/// bogus fill); all logic lives in `urt::random`, this arm only forwards.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_fill_bytes(bytes: &mut [u8]) {
+    random::fill_bytes(bytes)
 }
 
 /// Classify a raw syscall error code into the [`io_error::Kind`] discriminant

@@ -13,12 +13,14 @@
 //! definitions (the `__rust_alloc` pattern; the first std user binary must do
 //! this).
 //!
-//! What it deliberately does NOT touch: `HashMap`/`fill_bytes`/`std::random`.
-//! The eunomia `sys/random` arm is `unsupported` until Phase 3.4 — `fill_bytes`
-//! panics — so the gate stays clear of entropy. Argument `argv[1] == "panic"`
-//! drives the std-owned panic path (panic → `abort_internal` →
-//! `__eunomia_thread_exit(STATUS_PANIC)`, the Phase-2.3 override) so the parent
-//! shell reaps `panicked`, not `exited(_)`.
+//! Argument `argv[1]` selects an arm: `panic` drives the std-owned panic path
+//! (panic → `abort_internal` → `__eunomia_thread_exit(STATUS_PANIC)`, the
+//! Phase-2.3 override) so the parent shell reaps `panicked`, not `exited(_)`;
+//! `spawn`/`sync` exercise threads and locks (3.2/3.3); `hashmap` exercises
+//! `HashMap` over the per-process entropy DRBG (3.4) — building a default-hasher
+//! map draws `hashmap_random_keys` → `fill_bytes` → `urt::random`, seeded from
+//! the `NAME_RANDOM_SEED` grant the shell hands each child. A process not granted
+//! a seed would abort loudly here rather than hash predictably.
 
 extern crate eunomia_sys; // links the PAL↔seam bridge (see module doc)
 
@@ -143,6 +145,45 @@ fn main() {
         }
         println!("[stdsmoke] sync done total={total}");
         println!("STD33 PASS");
+        return;
+    }
+
+    // std-port 3.4: the entropy path via `HashMap`. Building a default-hasher map
+    // constructs `RandomState`, which calls `hashmap_random_keys` → `fill_bytes` →
+    // the per-process DRBG (`urt::random`) seeded from the `NAME_RANDOM_SEED` grant
+    // the shell handed this child. An unseeded process aborts loudly here (the
+    // no-seed posture); a correctly-provisioned one hashes and looks up normally.
+    // This is the on-target witness that the whole seed-grant → DRBG → SipHash path
+    // works end to end, unblocking `HashMap` for real std binaries.
+    if args.get(1).map(String::as_str) == Some("hashmap") {
+        use std::collections::HashMap;
+        println!("[stdsmoke] hashmap start");
+        let mut m: HashMap<String, u64> = HashMap::new();
+        for i in 0..1000u64 {
+            m.insert(format!("k{i}"), i.wrapping_mul(i));
+        }
+        // Every inserted key reads back its value (the hasher round-trips).
+        let mut sum: u64 = 0;
+        for i in 0..1000u64 {
+            match m.get(&format!("k{i}")) {
+                Some(&v) if v == i.wrapping_mul(i) => sum = sum.wrapping_add(v),
+                other => {
+                    println!("[stdsmoke] hashmap-bad k{i}={other:?}");
+                    std::process::exit(8);
+                }
+            }
+        }
+        // A key never inserted is absent (no phantom hit from a broken hasher).
+        if m.get("absent").is_some() {
+            println!("[stdsmoke] hashmap-bad phantom-hit");
+            std::process::exit(9);
+        }
+        if m.len() != 1000 {
+            println!("[stdsmoke] hashmap-bad len={}", m.len());
+            std::process::exit(10);
+        }
+        println!("[stdsmoke] hashmap done entries={} sum={sum}", m.len());
+        println!("STD34 PASS");
         return;
     }
 

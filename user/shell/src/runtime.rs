@@ -11,8 +11,8 @@
 
 use crate::{
     fault_class, fmt_hex, fmt_num, fmt_utc, parse_path, parse_u64, prune_victims,
-    resolve_root_handle, resolve_stdin_slot, resolve_stdout_slot, resolve_storage_slot,
-    resolve_time_va,
+    resolve_root_handle, resolve_seed, resolve_stdin_slot, resolve_stdout_slot,
+    resolve_storage_slot, resolve_time_va,
 };
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
@@ -575,8 +575,18 @@ impl Spawner {
         } else {
             None
         };
+        // std-port 3.4: draw a fresh entropy sub-seed for this child from the
+        // shell's own DRBG (the fork-without-reseed guard) — never the shell's
+        // seed raw. The shell seeded `urt::random` from its `NAME_RANDOM_SEED`
+        // grant in `_start`.
         let mut block = [0u8; loader::startup::MAX_BLOCK];
-        let n = match crate::build_child_block(&mut block, CHILD_TIME_VA, argv, thread_grants) {
+        let n = match crate::build_child_block(
+            &mut block,
+            CHILD_TIME_VA,
+            argv,
+            thread_grants,
+            urt::random::fresh_seed(),
+        ) {
             Ok(n) => n,
             Err(_) => {
                 self.scrub(s.time_copy);
@@ -877,6 +887,16 @@ pub extern "C" fn _start() -> ! {
             // Safety: init mapped the read-only time page at this address
             // before starting us; the mapping outlives the process.
             unsafe { urt::time::attach(va as usize) };
+        }
+        // std-port 3.4: seed the shell's DRBG from its per-run entropy grant, then
+        // zeroize this transient copy. The shell draws a fresh sub-seed from it for
+        // each child it spawns (`spawn_inner`).
+        if let Some(mut sd) = resolve_seed(&s) {
+            urt::random::seed(sd);
+            for w in sd.iter_mut() {
+                // Safety: `w` is a live stack word; volatile so it is not elided.
+                unsafe { core::ptr::write_volatile(w, 0) };
+            }
         }
         stdin_slot = resolve_stdin_slot(&s);
         stdout_slot = resolve_stdout_slot(&s);

@@ -63,6 +63,15 @@
 use vstd::prelude::*;
 
 pub mod lock;
+// The per-process entropy DRBG (std-port 3.4). Portable plain-Rust arithmetic
+// over the Loom-certified `lock::SpinLock`; carries no `verus!{}` (randomness
+// quality is not a verification property, only the seed decode in `loader` is).
+// Gated off the loom/shuttle model builds only: it holds a process-global
+// `static` over the *const* `SpinLock::new()`, which those builds drop, and it
+// has no interleaving model of its own to run there (the lock it reuses is
+// already modeled). Present for the target, plain `cargo test`, and Miri.
+#[cfg(not(any(loom, shuttle)))]
+pub mod random;
 pub mod slots;
 // Pure thread-stack geometry (host-tested); `thread` (bare-metal) drives it.
 pub mod thread_layout;
