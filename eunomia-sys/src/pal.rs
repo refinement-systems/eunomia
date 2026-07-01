@@ -62,6 +62,52 @@ pub extern "Rust" fn __eunomia_tls_init_thread() {
     tls::init_thread();
 }
 
+/// Allocate a TLS key + register its destructor (std-port 3.5): std's key-based TLS
+/// (`sys/thread_local/os.rs` via the `key/eunomia.rs` bridge) over the verified
+/// `urt::tls` key table. `dtor` is `os::destroy_value::<T>` (or `None` for a
+/// `local_pointer!`). Returns `0` when the table is full — the std side aborts.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_tls_create(dtor: Option<unsafe extern "C" fn(*mut u8)>) -> usize {
+    tls::create(dtor)
+}
+
+/// This thread's value for `key` (the raw pointer std stored).
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_tls_get(key: usize) -> *mut u8 {
+    // SAFETY: `key` came from `__eunomia_tls_create` (std's `LazyKey`), so it is in
+    // `1..=TLS_SLOTS`; the read is confined to this thread's own block.
+    unsafe { tls::get(key) }
+}
+
+/// Store `val` as this thread's value for `key`.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_tls_set(key: usize, val: *mut u8) {
+    // SAFETY: as `__eunomia_tls_get`.
+    unsafe { tls::set(key, val) }
+}
+
+/// Free a TLS key (std's `LazyKey` race-loser cleanup).
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_tls_destroy(key: usize) {
+    // SAFETY: `key` came from `__eunomia_tls_create` and is currently live.
+    unsafe { tls::destroy(key) }
+}
+
+/// Run this thread's `thread_local!` destructors at thread exit (std-port 3.5).
+/// Called by the std trampoline / `_start` after the thread body, before
+/// `free_thread`. Eunomia owns thread exit, so it drives destructors itself.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_tls_run_dtors() {
+    tls::run_thread_dtors();
+}
+
+/// Reclaim a spawned thread's heap TLS block at thread exit (std-port 3.5 — fixes
+/// the 3.2 leak). A no-op for the main thread's static block.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_tls_free_thread() {
+    tls::free_thread_block();
+}
+
 /// Receive + verified-decode the slot-0 startup block and stash argv/env/grants.
 /// Called once by the std PAL `_start` before `main`.
 #[unsafe(no_mangle)]

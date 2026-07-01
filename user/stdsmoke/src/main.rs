@@ -187,6 +187,70 @@ fn main() {
         return;
     }
 
+    // std-port 3.5: real `thread_local!` macro storage + destructors. A spawned
+    // thread touches two `thread_local!`s — a `Drop` sentinel and a per-thread
+    // `Cell` — then exits. Two things must hold that the old single-threaded
+    // `no_threads` storage got wrong: (a) the sentinel's destructor **runs on the
+    // spawned thread's exit** (the 3.5 key-based teardown — `DROPS` bumps), and (b)
+    // the `Cell` is **genuinely per-thread** — the child sets its own to 7 while the
+    // main thread's stays 0 (shared `no_threads` storage would leak the 7 across).
+    // This is the on-target witness for the verified `urt::tls` key table + the
+    // trampoline dtor runner.
+    if args.get(1).map(String::as_str) == Some("tls") {
+        use std::cell::Cell;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::thread;
+        println!("[stdsmoke] tls start");
+
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+
+        struct Sentinel;
+        impl Drop for Sentinel {
+            fn drop(&mut self) {
+                DROPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        thread_local! {
+            static MARKER: Sentinel = Sentinel;
+            static COUNTER: Cell<u64> = Cell::new(0);
+        }
+
+        // The child inits its thread_local!s (first touch), mutates its own COUNTER,
+        // and returns the value it observes.
+        let child = thread::spawn(|| {
+            MARKER.with(|_| {});
+            COUNTER.with(|c| c.set(c.get() + 7));
+            COUNTER.with(|c| c.get())
+        });
+        let child_counter = child.join().expect("tls thread join failed");
+
+        // (a) The child's MARKER destructor ran at its exit — join returns only after
+        // the trampoline's `run_dtors`, so `DROPS` is already bumped here.
+        let drops = DROPS.load(Ordering::SeqCst);
+        if drops == 0 {
+            println!("[stdsmoke] tls-bad no-dtor drops=0");
+            std::process::exit(11);
+        }
+        // (b) The child saw its own per-thread COUNTER (7), not a shared global.
+        if child_counter != 7 {
+            println!("[stdsmoke] tls-bad child-counter={child_counter}");
+            std::process::exit(11);
+        }
+        // The main thread's COUNTER is independent — 0, never having touched it.
+        // Shared `no_threads` storage would surface the child's 7 here.
+        let main_counter = COUNTER.with(|c| c.get());
+        if main_counter != 0 {
+            println!("[stdsmoke] tls-bad main-counter={main_counter}");
+            std::process::exit(11);
+        }
+        println!(
+            "[stdsmoke] tls done drops={drops} child_counter={child_counter} main_counter={main_counter}"
+        );
+        println!("STD35 PASS");
+        return;
+    }
+
     // alloc (2.2): Vec growth + Box, with a checked value the harness asserts.
     let v: Vec<u64> = (1..=100).collect();
     let sum: u64 = v.iter().sum();
