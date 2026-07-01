@@ -110,6 +110,17 @@ wait_for '\[stdsmoke\] sync start' 30
 wait_for '\[stdsmoke\] sync done total=' 30
 wait_for 'STD33 PASS' 30
 
+# 2c. The entropy path (std-port 3.4): build a default-hasher HashMap of 1000
+#     entries and read every key back. RandomState draws hashmap_random_keys →
+#     fill_bytes → the per-process DRBG seeded from the NAME_RANDOM_SEED grant the
+#     shell handed this child. An unseeded child would abort loudly (no STD34); a
+#     broken hasher would exit(8/9/10). STD34 PASS witnesses seed-grant → DRBG →
+#     SipHash → HashMap end to end.
+printf 'run bin/stdsmoke hashmap\r' >&3
+wait_for '\[stdsmoke\] hashmap start' 30
+wait_for '\[stdsmoke\] hashmap done entries=1000' 30
+wait_for 'STD34 PASS' 30
+
 # 3. The std-owned panic path: the parent must read 'panicked' (STATUS_PANIC),
 #    not exited(_). std's own panic hook prints 'panicked at …' first.
 printf 'run bin/stdsmoke panic\r' >&3
@@ -146,6 +157,23 @@ fi
 # A wrong critical-section count (lost/duplicated mutual exclusion) exits with 7.
 if grep -q '\[stdsmoke\] sync-bad' "$LOG"; then
     echo "STD SMOKE TEST FAIL: sync counter wrong — lock did not serialize the critical section" >&2
+    fail=1
+fi
+# The entropy/HashMap marker (std-port 3.4): a default-hasher HashMap worked over
+# the seed-grant → DRBG → SipHash path. Its absence means the seed never attached
+# (a loud abort) or the hasher round-trip failed.
+if ! grep -q 'STD34 PASS' "$LOG"; then
+    echo "STD SMOKE TEST FAIL: never reached STD34 PASS (HashMap over the entropy seed failed)" >&2
+    fail=1
+fi
+# A wrong HashMap lookup / phantom hit / bad len exits with 8/9/10.
+if grep -q '\[stdsmoke\] hashmap-bad' "$LOG"; then
+    echo "STD SMOKE TEST FAIL: HashMap lookup wrong — the DRBG-seeded hasher misbehaved" >&2
+    fail=1
+fi
+# The no-seed abort message would mean a child was spawned without NAME_RANDOM_SEED.
+if grep -q 'no entropy seed attached' "$LOG"; then
+    echo "STD SMOKE TEST FAIL: a child ran without an entropy seed grant (NAME_RANDOM_SEED missing)" >&2
     fail=1
 fi
 # env::args delivered the command line (2.1).
@@ -190,6 +218,7 @@ echo "STD SMOKE TEST PASS:"
 echo "  STD2 PASS — println!/format!/Vec/Box/String/Instant/SystemTime live at EL0"
 echo "  STD32 PASS — two std threads spawned/joined, concurrent heap alloc under the lock, per-thread TLS"
 echo "  STD33 PASS — two std threads ping-ponged under a Mutex + Condvar over sys::futex"
+echo "  STD34 PASS — HashMap over the per-process entropy seed (seed-grant → DRBG → SipHash)"
 echo "  env::args delivered the command line (alpha beta)"
 echo "  SystemTime read its granted time page; Instant monotonic"
 echo "  std panic reaped as STATUS_PANIC (parent read 'panicked'), not exited/faulted"

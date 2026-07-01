@@ -51,6 +51,8 @@ pub mod grant;
 mod heap;
 pub mod io_error;
 pub mod pal;
+// The entropy DRBG bridge (std-port 3.4); target-gated internally like `pal`.
+pub mod random;
 // Internal: the bring-up debug-log stdio chunker for the `pal`/`sys/stdio` arm.
 mod stdio;
 pub mod syscall;

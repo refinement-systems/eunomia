@@ -140,6 +140,7 @@ fn build_storaged_block(
     dma_pa: u64,
     dma_len: u64,
     time_va: u64,
+    seed: [u64; 4],
 ) -> Result<usize, startup::EncodeError> {
     let mut s = startup::Startup::new();
     s.push_grant(Grant {
@@ -166,6 +167,13 @@ fn build_storaged_block(
             pa: 0,
         },
     })?;
+    // The per-run entropy seed (std-port 3.4): a fresh sub-seed for this child.
+    // storaged keys directories in sorted prolly trees, not `HashMap`s (rev2§4.9),
+    // so it does not consume it today — but every child is seeded uniformly.
+    s.push_grant(Grant {
+        name: startup::NAME_RANDOM_SEED,
+        kind: GrantKind::Seed(seed),
+    })?;
     startup::encode(&s, out)
 }
 
@@ -176,7 +184,11 @@ fn build_storaged_block(
 /// frame before start, so only the VA travels). Returns the encoded length or a
 /// clean `EncodeError` (the producer maps it to a boot failure — refuse, never
 /// panic). The console needs no time page (it never reads the clock).
-fn build_console_block(out: &mut [u8], pl011_va: u64) -> Result<usize, startup::EncodeError> {
+fn build_console_block(
+    out: &mut [u8],
+    pl011_va: u64,
+    seed: [u64; 4],
+) -> Result<usize, startup::EncodeError> {
     let mut s = startup::Startup::new();
     s.push_grant(Grant {
         name: startup::NAME_PL011_MMIO,
@@ -185,6 +197,12 @@ fn build_console_block(out: &mut [u8], pl011_va: u64) -> Result<usize, startup::
             len: PL011_LEN,
             pa: 0,
         },
+    })?;
+    // A fresh per-run entropy sub-seed (std-port 3.4); the console never uses it
+    // (it does no hashing), but every child is seeded uniformly.
+    s.push_grant(Grant {
+        name: startup::NAME_RANDOM_SEED,
+        kind: GrantKind::Seed(seed),
     })?;
     startup::encode(&s, out)
 }
@@ -204,7 +222,10 @@ const SHELL_SESSION_SLOT: u32 = 1;
 /// subtree today) stays a reserved, unemitted name. Returns the encoded length, or
 /// an `EncodeError` the caller maps to a clean boot failure (refuse-not-crash,
 /// rev2§2.7) — never a panic.
-fn build_shell_block(out: &mut [u8]) -> Result<usize, loader::startup::EncodeError> {
+fn build_shell_block(
+    out: &mut [u8],
+    seed: [u64; 4],
+) -> Result<usize, loader::startup::EncodeError> {
     use loader::startup::*;
     let mut s = Startup::new();
     s.push_grant(Grant {
@@ -214,6 +235,12 @@ fn build_shell_block(out: &mut [u8]) -> Result<usize, loader::startup::EncodeErr
             len: 4096,
             pa: 0,
         },
+    })?;
+    // The shell's per-run entropy seed (std-port 3.4): the shell seeds its own
+    // DRBG from it and draws a fresh sub-seed for each child it spawns.
+    s.push_grant(Grant {
+        name: NAME_RANDOM_SEED,
+        kind: GrantKind::Seed(seed),
     })?;
     s.push_grant(Grant {
         name: NAME_STORAGE,
@@ -317,6 +344,16 @@ pub extern "C" fn _start() -> ! {
     // correct form: the supervisor whose liveness dominates everyone's
     // funds the mapping everyone shares, so nobody can fault anybody.
     let (wall_base_ns, cntvct_base, cntfrq) = read_boot_utc();
+    // std-port 3.4: seed init's DRBG — the root of the entropy seed-tree. QEMU
+    // `virt` offers no good entropy source (rev2§2.6), so this MVP seed is
+    // deliberately *predictable* and *non-cryptographic*: it mixes the one-shot
+    // RTC wall time with the boot CNTVCT/CNTFRQ. Each child then receives a
+    // distinct DRBG-drawn sub-seed (`fresh_seed`), never this value raw; the real
+    // entropy source is a deferred backend swap that moves only these bytes'
+    // origin, leaving the per-child-reseed contract unchanged.
+    urt::random::seed(urt::random::expand_seed(
+        (wall_base_ns as u64) ^ cntvct_base.rotate_left(21) ^ cntfrq.rotate_left(43),
+    ));
     check(
         sys::retype(UNTYPED, OBJ_FRAME, 1, TIME_FRAME, 0),
         b"time frame",
@@ -372,6 +409,7 @@ pub extern "C" fn _start() -> ! {
         dma_pa,
         DMA_PAGES * 4096,
         TIME_VA,
+        urt::random::fresh_seed(),
     ) {
         Ok(n) => n,
         // The block is built from fixed init constants, so an overflow would be
@@ -453,7 +491,7 @@ pub extern "C" fn _start() -> ! {
         b"console notif",
     );
     let mut con_block = [0u8; startup::MAX_BLOCK];
-    let con_len = match build_console_block(&mut con_block, PL011_VA) {
+    let con_len = match build_console_block(&mut con_block, PL011_VA, urt::random::fresh_seed()) {
         Ok(n) => n,
         Err(_) => {
             sys::debug_write(b"[init] FAILED: build console block\n");
@@ -520,7 +558,7 @@ pub extern "C" fn _start() -> ! {
     );
 
     let mut sh_config = [0u8; loader::startup::MAX_BLOCK];
-    let sh_len = match build_shell_block(&mut sh_config) {
+    let sh_len = match build_shell_block(&mut sh_config, urt::random::fresh_seed()) {
         Ok(n) => n,
         Err(_) => {
             sys::debug_write(b"[init] FAILED: encode shell startup block\n");
@@ -583,10 +621,15 @@ mod tests {
             0x4321_0000,
             64 * 4096,
             0xA300_0000,
+            [1, 2, 3, 4],
         )
         .unwrap();
         let s = startup::decode(&buf[..n]).unwrap();
-        assert_eq!(s.ngrants, 3);
+        assert_eq!(s.ngrants, 4);
+        assert_eq!(
+            s.grant(startup::NAME_RANDOM_SEED),
+            Some(GrantKind::Seed([1, 2, 3, 4]))
+        );
         assert_eq!(
             s.grant(startup::NAME_VIRTIO_MMIO),
             Some(GrantKind::Region {
@@ -623,8 +666,13 @@ mod tests {
         // `loader::startup`) — no mirrored hand-parser.
         use loader::startup::*;
         let mut buf = [0u8; MAX_BLOCK];
-        let n = build_shell_block(&mut buf).expect("encode shell block");
+        let n = build_shell_block(&mut buf, [7, 8, 9, 10]).expect("encode shell block");
         let s = decode(&buf[..n]).expect("decode shell block");
+        // `random_seed`: the shell's per-run entropy sub-seed (rev2§5.1).
+        assert_eq!(
+            s.grant(NAME_RANDOM_SEED),
+            Some(GrantKind::Seed([7, 8, 9, 10]))
+        );
         // `time`: the read-only page init mapped at TIME_VA (rev2§2.6).
         assert_eq!(
             s.grant(NAME_TIME),
@@ -657,9 +705,9 @@ mod tests {
         // window as a region grant — the driver builds its `MmioWindow` from the
         // VA. Drive the real shared codec (encode here, decode via the crate).
         let mut buf = [0u8; startup::MAX_BLOCK];
-        let n = build_console_block(&mut buf, 0xA000_0000).unwrap();
+        let n = build_console_block(&mut buf, 0xA000_0000, [5, 6, 7, 8]).unwrap();
         let s = startup::decode(&buf[..n]).unwrap();
-        assert_eq!(s.ngrants, 1);
+        assert_eq!(s.ngrants, 2);
         assert_eq!(
             s.grant(startup::NAME_PL011_MMIO),
             Some(GrantKind::Region {
@@ -667,6 +715,10 @@ mod tests {
                 len: PL011_LEN,
                 pa: 0
             })
+        );
+        assert_eq!(
+            s.grant(startup::NAME_RANDOM_SEED),
+            Some(GrantKind::Seed([5, 6, 7, 8]))
         );
         // No argv/env, and no time page (the console never reads the clock).
         assert_eq!(s.nargv, 0);
@@ -702,8 +754,14 @@ mod tests {
             dma_len in any::<u64>(), time_va in any::<u64>(),
         ) {
             let mut buf = [0u8; startup::MAX_BLOCK];
-            let n = build_storaged_block(&mut buf, mmio_va, dma_va, dma_pa, dma_len, time_va).unwrap();
+            let n = build_storaged_block(
+                &mut buf, mmio_va, dma_va, dma_pa, dma_len, time_va, [0xAB; 4],
+            ).unwrap();
             let s = startup::decode(&buf[..n]).unwrap();
+            prop_assert_eq!(
+                s.grant(startup::NAME_RANDOM_SEED),
+                Some(GrantKind::Seed([0xAB; 4]))
+            );
             prop_assert_eq!(
                 s.grant(startup::NAME_VIRTIO_MMIO),
                 Some(GrantKind::Region { va: mmio_va, len: MMIO_LEN, pa: 0 })

@@ -500,12 +500,16 @@ fn resolve_wrong_kind_yields_none() {
 // silent truncation.
 // ---------------------------------------------------------------------------
 
-use loader::startup::{decode, GrantKind, NAME_TIME};
+use loader::startup::{decode, GrantKind, NAME_RANDOM_SEED, NAME_TIME};
+
+/// A fixed sub-seed the child-block tests thread through the producer (the real
+/// shell draws it from `urt::random::fresh_seed`, unavailable in a host test).
+const TEST_SEED: [u64; 4] = [0x00C0_FFEE, 1, 2, 3];
 
 /// Encode a child block and decode it back, asserting it is well-formed.
 fn child_block(time_va: u64, argv: &[&[u8]]) -> Vec<u8> {
     let mut out = [0u8; startup::MAX_BLOCK];
-    let n = build_child_block(&mut out, time_va, argv, None).expect("within budget");
+    let n = build_child_block(&mut out, time_va, argv, None, TEST_SEED).expect("within budget");
     out[..n].to_vec()
 }
 
@@ -529,6 +533,8 @@ fn build_child_block_round_trips_time_and_argv() {
     assert_eq!(s.argv[1], b"254");
     // env is carried empty (defined, unpopulated — rev2§5.1).
     assert_eq!(s.nenv, 0);
+    // The per-run entropy sub-seed round-trips (std-port 3.4).
+    assert_eq!(s.grant(NAME_RANDOM_SEED), Some(GrantKind::Seed(TEST_SEED)));
 }
 
 #[test]
@@ -551,10 +557,12 @@ fn build_child_block_emits_thread_grants() {
         0xA300_0000,
         &[b"bin/stdsmoke"],
         Some([1, 2, 3, 4]),
+        TEST_SEED,
     )
     .expect("within budget");
     let s = decode(&out[..n]).expect("valid EUS1 block");
     assert!(s.grant(NAME_TIME).is_some());
+    assert_eq!(s.grant(NAME_RANDOM_SEED), Some(GrantKind::Seed(TEST_SEED)));
     assert_eq!(
         s.grant(startup::NAME_SELF_ASPACE),
         Some(GrantKind::CapSlot(1))
@@ -572,7 +580,7 @@ fn build_child_block_emits_thread_grants() {
         Some(GrantKind::CapSlot(4))
     );
     // A non-thread-capable child (`None`) carries none of them.
-    let n2 = build_child_block(&mut out, 0xA300_0000, &[b"bin/selftest"], None).unwrap();
+    let n2 = build_child_block(&mut out, 0xA300_0000, &[b"bin/selftest"], None, TEST_SEED).unwrap();
     let s2 = decode(&out[..n2]).unwrap();
     assert_eq!(s2.grant(startup::NAME_SELF_ASPACE), None);
 }
@@ -583,16 +591,17 @@ fn build_child_block_refuses_over_arena() {
     // not truncated — the spawn path maps this to RunErr::Startup.
     let many = [b"p" as &[u8]; 9];
     let mut out = [0u8; startup::MAX_BLOCK];
-    assert!(build_child_block(&mut out, 0, &many, None).is_err());
+    assert!(build_child_block(&mut out, 0, &many, None, TEST_SEED).is_err());
 }
 
 #[test]
 fn build_child_block_refuses_over_budget() {
     // A single argv string large enough to push the block past MAX_BLOCK (256):
-    // 7-byte header + 26-byte TIME grant + (2 + 300) argv ≈ 335 bytes.
+    // 7-byte header + 26-byte TIME grant + 34-byte SEED grant + (2 + 300) argv
+    // ≈ 369 bytes.
     let big = vec![b'x'; 300];
     let mut out = [0u8; startup::MAX_BLOCK];
-    assert!(build_child_block(&mut out, 0, &[&big], None).is_err());
+    assert!(build_child_block(&mut out, 0, &[&big], None, TEST_SEED).is_err());
 }
 
 #[test]

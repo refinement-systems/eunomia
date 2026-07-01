@@ -99,3 +99,34 @@ fn startup1_oversized_counts_refused() {
     c.extend_from_slice(b"short");
     assert_eq!(startup::decode(&c), None);
 }
+
+/// startup-2: the `KIND_SEED` inline-bytes grant (std-port 3.4). A declared seed
+/// grant whose 32-byte body is cut short must `decode` to `None` (the
+/// `KIND_REGION` truncation discipline extended to the new kind); the well-formed
+/// counterpart must decode with the four words intact. The pair pins both the
+/// refusal and the acceptance of the new arm.
+#[test]
+fn startup2_truncated_seed_refused() {
+    // A SEED grant declared, but only 20 of its 32 body bytes present.
+    let mut t = startup::MAGIC.to_vec();
+    t.extend_from_slice(&[1, 0, 0]); // one grant, no argv/env
+    t.push(startup::NAME_RANDOM_SEED);
+    t.push(startup::KIND_SEED); // promises 32 body bytes…
+                                // …only 20 follow.
+    t.extend_from_slice(&[0u8; 20]);
+    assert_eq!(startup::decode(&t), None);
+
+    // The well-formed counterpart decodes with the seed words intact.
+    let mut ok = startup::MAGIC.to_vec();
+    ok.extend_from_slice(&[1, 0, 0]);
+    ok.push(startup::NAME_RANDOM_SEED);
+    ok.push(startup::KIND_SEED);
+    for w in [1u64, 2, 3, 4] {
+        ok.extend_from_slice(&w.to_le_bytes());
+    }
+    let s = startup::decode(&ok).expect("well-formed seed block decodes");
+    assert_eq!(
+        s.grant(startup::NAME_RANDOM_SEED),
+        Some(startup::GrantKind::Seed([1, 2, 3, 4]))
+    );
+}

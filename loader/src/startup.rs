@@ -28,10 +28,11 @@
 //!     [6]     nenv    : u8
 //!   Grants (ngrants entries; each tagged, so its size is a function of kind):
 //!     name : u8     well-known name id (NAME_*)
-//!     kind : u8     KIND_CAP_SLOT | KIND_STORAGE_HANDLE | KIND_REGION
+//!     kind : u8     KIND_CAP_SLOT | KIND_STORAGE_HANDLE | KIND_REGION | KIND_SEED
 //!       KIND_CAP_SLOT       : slot:u32                  (entry = 6 bytes)
 //!       KIND_STORAGE_HANDLE : handle:u32                (entry = 6 bytes)
 //!       KIND_REGION         : va:u64, len:u64, pa:u64   (entry = 26 bytes)
+//!       KIND_SEED           : seed:[u64;4]              (entry = 34 bytes)
 //!   Argv (nargv entries):  each  len:u16, then len bytes
 //!   Env  (nenv  entries):  each  len:u16, then len bytes
 //! ```
@@ -42,6 +43,11 @@
 //! `time` is a pre-mapped VA in every block, and an MMIO/DMA grant has the
 //! same shape (VA + len, plus a device PA for DMA). A region carries **no new
 //! authority**: the parent maps the page before start; only the VA travels.
+//! `SEED` is the sole *inline-bytes* kind: it carries 256 bits of entropy by
+//! value (the `NAME_RANDOM_SEED` grant, rev2§5.1) — the parent's per-child
+//! sub-seed for the process DRBG (std-port 3.4). Unlike the others it holds
+//! *owned* bytes, not a reference to a cap or a mapped page, so the decoder
+//! copies the four words out of the message and borrows nothing new.
 // `vstd::prelude` supplies the `verus!{}` macro + ghost vocabulary for the
 // startup decoder's total bounded-decoder proof (below); Verus requires it
 // imported at the crate root, and in an ordinary build the macro erases ghost
@@ -93,6 +99,12 @@ pub const NAME_THREAD_UNTYPED: u8 = 9;
 /// The base of the reserved free cspace-slot range for per-thread caps; the count
 /// is the fixed `urt::thread_layout::WORKING_SLOTS` convention (rev2§5.3).
 pub const NAME_THREAD_SLOT_BASE: u8 = 10;
+/// The process's per-run entropy seed: 256 bits the parent drew from its own DRBG
+/// (rev2§5.1, std-port 3.4). A `KIND_SEED` inline-bytes grant — the sole grant
+/// carrying an owned value rather than a cap/handle/region reference. The child
+/// seeds its process DRBG (`urt::random`) from it; absent ⇒ `fill_bytes` loudly
+/// aborts at first use (the `NAME_TIME` posture), never silently predictable.
+pub const NAME_RANDOM_SEED: u8 = 11;
 /// The virtio MMIO transport window (bring-up; storaged).
 pub const NAME_VIRTIO_MMIO: u8 = 16;
 /// The DMA pool region (bring-up; storaged).
@@ -135,9 +147,13 @@ pub const KIND_STORAGE_HANDLE: u8 = 2;
 /// Grant kind: a pre-mapped region (VA, length, and an optional device PA).
 pub const KIND_REGION: u8 = 3;
 
+/// Grant kind: 256 bits of entropy inline (the `NAME_RANDOM_SEED` seed).
+pub const KIND_SEED: u8 = 4;
+
 /// What a named grant resolves to. `CapSlot`/`StorageHandle` are the spec's two
 /// kinds; `Region` is the additive pre-mapped-region kind (carries no new
-/// authority — only a VA the parent already mapped).
+/// authority — only a VA the parent already mapped); `Seed` is the additive
+/// inline-bytes kind (carries an owned 256-bit value, no reference).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrantKind {
     /// A kernel cap, installed at this cspace slot index before start.
@@ -147,6 +163,11 @@ pub enum GrantKind {
     /// A pre-mapped region: virtual address, length, and device physical
     /// address (`pa == 0` unless it is a DMA region read through a phys-cap).
     Region { va: u64, len: u64, pa: u64 },
+    /// An inline entropy seed: 256 bits (four LE `u64` words) the parent drew
+    /// from its own DRBG for this child (rev2§5.1). Owned by value — nothing is
+    /// borrowed out of the message — so `well_formed_startup` needs no clause
+    /// for it (the argv/env subrange discipline is for borrowed data only).
+    Seed([u64; 4]),
 }
 
 /// One named-grant-table entry: a well-known `name` id and what it resolves to.
@@ -361,6 +382,29 @@ pub fn decode(buf: &[u8]) -> (res: Option<Startup<'_>>)
                 None => return None,
             };
             (GrantKind::Region { va, len, pa }, q3)
+        } else if tag == KIND_SEED {
+            // Four LE words, read through the same verified `take_u64` as the
+            // region body. The seed is copied by value into the `Seed` variant,
+            // so — unlike argv/env — nothing is borrowed out of `buf` and there
+            // is no `subseq_of` obligation to discharge; only `pos` stays bounded
+            // (each `take_u64` ensures its returned cursor `<= buf.len()`).
+            let (w0, q1) = match take_u64(buf, p1) {
+                Some(x) => x,
+                None => return None,
+            };
+            let (w1, q2) = match take_u64(buf, q1) {
+                Some(x) => x,
+                None => return None,
+            };
+            let (w2, q3) = match take_u64(buf, q2) {
+                Some(x) => x,
+                None => return None,
+            };
+            let (w3, q4) = match take_u64(buf, q3) {
+                Some(x) => x,
+                None => return None,
+            };
+            (GrantKind::Seed([w0, w1, w2, w3]), q4)
         } else {
             return None;
         };
@@ -638,6 +682,13 @@ pub fn encode(s: &Startup, out: &mut [u8]) -> Result<usize, EncodeError> {
                 w.u64(len)?;
                 w.u64(pa)?;
             }
+            GrantKind::Seed(seed) => {
+                w.u8(KIND_SEED)?;
+                w.u64(seed[0])?;
+                w.u64(seed[1])?;
+                w.u64(seed[2])?;
+                w.u64(seed[3])?;
+            }
         }
     }
     for v in s.argv[..s.nargv].iter().chain(&s.env[..s.nenv]) {
@@ -736,6 +787,54 @@ mod tests {
         assert_eq!(d.grant(NAME_ROOT), Some(GrantKind::StorageHandle(0)));
         assert_eq!(&d.argv[..d.nargv], &[b"selftest".as_slice(), b"254"]);
         assert_eq!(&d.env[..d.nenv], &[b"K=V".as_slice()]);
+    }
+
+    #[test]
+    fn seed_grant_golden() {
+        // A block carrying one NAME_RANDOM_SEED grant: name, kind, then the four
+        // LE seed words at the pinned offsets, and decode reads them back.
+        let seed = [0x0011_2233_4455_6677u64, 0x8899_AABB_CCDD_EEFF, 1, u64::MAX];
+        let mut s = Startup::new();
+        s.push_grant(Grant {
+            name: NAME_RANDOM_SEED,
+            kind: GrantKind::Seed(seed),
+        })
+        .unwrap();
+        let mut buf = [0u8; MAX_BLOCK];
+        let n = encode(&s, &mut buf).unwrap();
+        let got = &buf[..n];
+
+        // Header: one grant, no argv/env.
+        assert_eq!(&got[0..4], b"EUS1");
+        assert_eq!(got[4], 1);
+        assert_eq!(got[5], 0);
+        assert_eq!(got[6], 0);
+        // Grant 0: SEED = name, kind, 4×u64 = 34 bytes at offset 7.
+        assert_eq!(got[7], NAME_RANDOM_SEED);
+        assert_eq!(got[8], KIND_SEED);
+        assert_eq!(&got[9..17], &seed[0].to_le_bytes());
+        assert_eq!(&got[17..25], &seed[1].to_le_bytes());
+        assert_eq!(&got[25..33], &seed[2].to_le_bytes());
+        assert_eq!(&got[33..41], &seed[3].to_le_bytes());
+        assert_eq!(n, 41);
+
+        // …and decode of those exact bytes yields the seed back.
+        let d = decode(got).unwrap();
+        assert_eq!(d.ngrants, 1);
+        assert_eq!(d.grant(NAME_RANDOM_SEED), Some(GrantKind::Seed(seed)));
+    }
+
+    #[test]
+    fn decode_refuses_truncated_seed() {
+        // A SEED grant declared but its 32-byte body cut short → None (the
+        // region-truncation discipline extended to the new kind).
+        let mut t = Vec::new();
+        t.extend_from_slice(&MAGIC);
+        t.extend_from_slice(&[1, 0, 0]); // one grant, no argv/env
+        t.push(NAME_RANDOM_SEED);
+        t.push(KIND_SEED);
+        t.extend_from_slice(&[0u8; 20]); // only 20 of the 32 seed bytes
+        assert_eq!(decode(&t), None);
     }
 
     #[test]
@@ -860,6 +959,7 @@ mod tests {
             any::<u32>().prop_map(GrantKind::StorageHandle),
             (any::<u64>(), any::<u64>(), any::<u64>())
                 .prop_map(|(va, len, pa)| GrantKind::Region { va, len, pa }),
+            any::<[u64; 4]>().prop_map(GrantKind::Seed),
         ]
     }
 

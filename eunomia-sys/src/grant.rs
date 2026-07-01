@@ -11,9 +11,9 @@
 //! not this module's; here we only resolve grants out of the decoded block.
 
 pub use loader::startup::{
-    decode, Grant, GrantKind, Startup, NAME_DMA, NAME_PL011_MMIO, NAME_ROOT, NAME_SELF_ASPACE,
-    NAME_SELF_CSPACE, NAME_STDIN, NAME_STDOUT, NAME_STORAGE, NAME_STRING, NAME_THREAD_SLOT_BASE,
-    NAME_THREAD_UNTYPED, NAME_TIME, NAME_TMP, NAME_VIRTIO_MMIO,
+    decode, Grant, GrantKind, Startup, NAME_DMA, NAME_PL011_MMIO, NAME_RANDOM_SEED, NAME_ROOT,
+    NAME_SELF_ASPACE, NAME_SELF_CSPACE, NAME_STDIN, NAME_STDOUT, NAME_STORAGE, NAME_STRING,
+    NAME_THREAD_SLOT_BASE, NAME_THREAD_UNTYPED, NAME_TIME, NAME_TMP, NAME_VIRTIO_MMIO,
 };
 
 /// The cspace slot holding a child's bootstrap channel (rev2§5.1): init installs the
@@ -82,6 +82,17 @@ pub fn time_va(s: &Startup) -> Option<u64> {
     region_va(s, NAME_TIME)
 }
 
+/// `random_seed` → the process's 256-bit entropy seed (std-port 3.4), if present and
+/// a `Seed`. The child seeds its process DRBG (`urt::random`) from it; absent leaves
+/// the DRBG unseeded, so `fill_bytes`/`HashMap` loudly abort at first use (the
+/// `NAME_TIME` posture — mis-provisioned, not degraded).
+pub fn seed(s: &Startup) -> Option<[u64; 4]> {
+    match s.grant(NAME_RANDOM_SEED)? {
+        GrantKind::Seed(words) => Some(words),
+        _ => None,
+    }
+}
+
 /// The four in-process-threading self-cap slots (std-port 3.2), all present iff the
 /// process is thread-capable: (self-aspace, self-cspace, thread-untyped,
 /// free-slot-range base). `None` if any is missing — the least-authority default,
@@ -135,6 +146,11 @@ mod tests {
             },
         })
         .unwrap();
+        s.push_grant(Grant {
+            name: NAME_RANDOM_SEED,
+            kind: GrantKind::Seed([0x11, 0x22, 0x33, 0x44]),
+        })
+        .unwrap();
 
         let mut buf = [0u8; MAX_BLOCK];
         let n = encode(&s, &mut buf).unwrap();
@@ -146,13 +162,28 @@ mod tests {
         assert_eq!(stdout_slot(&d), Some(9));
         assert_eq!(time_va(&d), Some(0xA300_0000));
         assert_eq!(region(&d, NAME_TIME), Some((0xA300_0000, 4096, 0)));
+        assert_eq!(seed(&d), Some([0x11, 0x22, 0x33, 0x44]));
 
         // A grant that is not present resolves to None.
         assert_eq!(stdin_slot(&Startup::new()), None);
+        assert_eq!(seed(&Startup::new()), None);
         // A wrong-kind lookup (storage handle asked of a cap-slot grant) is None, not
         // a misread.
         assert_eq!(storage_handle(&d, NAME_STORAGE), None);
         assert_eq!(cap_slot(&d, NAME_ROOT), None);
         assert_eq!(region_va(&d, NAME_STORAGE), None);
+        // A seed lookup of a non-seed grant is None, not a misread.
+        assert_eq!(
+            seed(&{
+                let mut w = Startup::new();
+                w.push_grant(Grant {
+                    name: NAME_RANDOM_SEED,
+                    kind: GrantKind::CapSlot(1),
+                })
+                .unwrap();
+                w
+            }),
+            None
+        );
     }
 }

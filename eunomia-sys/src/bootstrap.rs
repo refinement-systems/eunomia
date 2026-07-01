@@ -56,6 +56,19 @@ fn attach_grants() {
         // `NAME_TIME` (rev2§2.6); it stays mapped for the process lifetime.
         unsafe { urt::time::attach(va as usize) };
     }
+    // std-port 3.4: seed the process DRBG from the per-run entropy grant, then
+    // zeroize this transient copy. Absent ⇒ the DRBG stays unseeded and
+    // `fill_bytes`/`HashMap` loudly abort at first use (mis-provisioned, not
+    // degraded — the `NAME_TIME` posture). The seed still lives in the stashed
+    // startup block (`BOOT`); a full scrub of that is a disclosed MVP follow-up.
+    if let Some(mut sd) = startup().and_then(|s| crate::grant::seed(s)) {
+        urt::random::seed(sd);
+        // Volatile write so the scrub is not dead-store-eliminated.
+        for w in sd.iter_mut() {
+            // SAFETY: `w` is a live stack word; the volatile store cannot be elided.
+            unsafe { core::ptr::write_volatile(w, 0) };
+        }
+    }
 }
 
 #[cfg(not(any(target_os = "eunomia", target_os = "none")))]

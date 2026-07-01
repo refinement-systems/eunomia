@@ -245,6 +245,17 @@ fn resolve_time_va(s: &loader::startup::Startup) -> Option<u64> {
     }
 }
 
+/// `random_seed` → the shell's per-run 256-bit entropy seed (rev2§5.1, std-port
+/// 3.4). The shell seeds its own DRBG (`urt::random`) from it and draws a fresh
+/// sub-seed for each child. Absent leaves the DRBG unseeded, so a `spawn` would
+/// abort at `fresh_seed` — but init always grants it (the seed-tree contract).
+fn resolve_seed(s: &loader::startup::Startup) -> Option<[u64; 4]> {
+    match s.grant(loader::startup::NAME_RANDOM_SEED)? {
+        loader::startup::GrantKind::Seed(words) => Some(words),
+        _ => None,
+    }
+}
+
 /// The time page is one frame (kcore `PAGE`, rev2§2.6). The child reads only the
 /// VA; the length is informational on the `REGION` grant (matches init's `TIME_LEN`).
 pub(crate) const TIME_LEN: u64 = 4096;
@@ -269,6 +280,10 @@ pub(crate) fn build_child_block(
     // range — emitted as `CapSlot` grants so `eunomia_sys::bootstrap` configures the
     // thread pool. `None` for a non-thread-capable child (no grants, least authority).
     thread_grants: Option<[u32; 4]>,
+    // std-port 3.4: a fresh 256-bit sub-seed the shell drew from its own DRBG for
+    // this child (the fork-without-reseed guard). The child seeds `urt::random`
+    // from it, unblocking `HashMap`/`fill_bytes`.
+    seed: [u64; 4],
 ) -> Result<usize, startup::EncodeError> {
     let mut s = startup::Startup::new();
     s.push_grant(Grant {
@@ -278,6 +293,10 @@ pub(crate) fn build_child_block(
             len: TIME_LEN,
             pa: 0,
         },
+    })?;
+    s.push_grant(Grant {
+        name: startup::NAME_RANDOM_SEED,
+        kind: GrantKind::Seed(seed),
     })?;
     if let Some([self_aspace, self_cspace, thread_untyped, slot_base]) = thread_grants {
         for (name, slot) in [
