@@ -38,6 +38,10 @@ pub fn init() {
     // std-port 2.4: attach the pre-mapped grant pages (today only the time page) so
     // the std `sys/time` arm can read them. Must follow `commit` — it reads `startup()`.
     attach_grants();
+    // std-port 3.2: if this process was granted the threading self-caps (scoped,
+    // opt-in), configure the in-process thread pool. Absent ⇒ threads are
+    // `Unsupported` (the least-authority default). Also reads `startup()`.
+    configure_threads();
 }
 
 /// Attach the kernel-mapped pages the startup block grants. Today only the rev2§2.6
@@ -56,6 +60,29 @@ fn attach_grants() {
 
 #[cfg(not(any(target_os = "eunomia", target_os = "none")))]
 fn attach_grants() {}
+
+/// Configure the `urt` in-process thread pool from the std-port 3.2 threading
+/// self-cap grants (self-aspace/self-cspace/thread-untyped + the free-slot-range
+/// base). Present only for a thread-capable process; absent leaves threads
+/// unconfigured, so the std `sys/thread` arm refuses `spawn` cleanly. Target-gated
+/// like [`attach_grants`] (`urt` is a userspace-cross-build-only dependency).
+#[cfg(any(target_os = "eunomia", target_os = "none"))]
+fn configure_threads() {
+    if let Some((aspace, cspace, untyped, slot_base)) =
+        startup().and_then(|s| crate::grant::thread_caps(s))
+    {
+        urt::thread::configure(
+            aspace,
+            cspace,
+            untyped,
+            slot_base,
+            urt::thread_layout::WORKING_SLOTS,
+        );
+    }
+}
+
+#[cfg(not(any(target_os = "eunomia", target_os = "none")))]
+fn configure_threads() {}
 
 /// Block until the bootstrap message arrives (it is queued before the child starts,
 /// so the first `chan_recv` succeeds; the loop is plain defensiveness — the

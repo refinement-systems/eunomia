@@ -16,12 +16,13 @@
 
 use core::alloc::{GlobalAlloc, Layout};
 
-use crate::{bootstrap, heap, io_error, stdio, syscall};
+use crate::{bootstrap, heap, io_error, stdio, syscall, thread, tls};
 
 /// The process-global std `System` heap (std-port 2.2): a fixed `.bss` arena over
 /// the Verus-verified `freelist` allocator. A plain `static` — interior
-/// `UnsafeCell` plus `urt`'s `unsafe impl Sync` (eunomia processes are
-/// single-threaded, so the allocator takes no lock); `Heap::new()` is all-zero, so
+/// `UnsafeCell` plus `urt`'s `unsafe impl Sync`, whose soundness is the heap's
+/// yielding spinlock (std-port 3.2): in-process threads allocate concurrently, so
+/// the allocator serializes its free-list access. `Heap::new()` is all-zero, so
 /// it lands in `.bss`, which the loader maps and zeroes with the RW segment. `N` is
 /// the per-binary reservation [`heap::HEAP_BYTES`] (committed RAM at spawn — no
 /// demand paging in the MVP).
@@ -45,6 +46,21 @@ pub extern "Rust" fn __eunomia_dealloc(ptr: *mut u8, layout: Layout) {
     unsafe { HEAP.dealloc(ptr, layout) }
 }
 
+/// Point the main thread's `TPIDR_EL0` at its TLS block (std-port 3.2). Called once
+/// by the std PAL `_start`, before `bootstrap_init`/`main` and before any
+/// `local_pointer!` access, so `set_current` works on the main thread.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_tls_init_main() {
+    tls::init_main();
+}
+
+/// Set up a spawned thread's `TPIDR_EL0` TLS block (std-port 3.2). Called first in
+/// the `sys/thread` trampoline, before `ThreadInit::init` runs `set_current`.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_tls_init_thread() {
+    tls::init_thread();
+}
+
 /// Receive + verified-decode the slot-0 startup block and stash argv/env/grants.
 /// Called once by the std PAL `_start` before `main`.
 #[unsafe(no_mangle)]
@@ -65,10 +81,38 @@ pub extern "Rust" fn __eunomia_env() -> &'static [&'static [u8]] {
 }
 
 /// Exit through the kernel thread-exit terminus (rev2§5.1); the parent reaper reads
-/// `code` as the child's status.
+/// `code` as the child's status. Also ends an in-process thread (std-port 3.2): the
+/// thread's on-exit binding raises its notif, waking the joiner.
 #[unsafe(no_mangle)]
 pub extern "Rust" fn __eunomia_thread_exit(code: u64) -> ! {
     syscall::thread_exit(code)
+}
+
+/// Spawn an in-process thread (std-port 3.2): `entry` is the std trampoline, `arg`
+/// its closure pointer (crosses in `x0`). Returns the join handle (`>= 0`) or a
+/// negative `ERR_*`; the `sys/thread` arm maps `< 0` through `from_raw_os_error`.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_thread_spawn(entry: usize, stack: usize, arg: u64) -> i64 {
+    thread::spawn(entry, stack, arg)
+}
+
+/// Join the in-process thread whose handle is `handle`. Returns 0 or a negative
+/// `ERR_*`.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_thread_join(handle: u64) -> i64 {
+    thread::join(handle)
+}
+
+/// Cooperative yield (op 2), for `thread::yield_now`.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_thread_yield() {
+    thread::yield_now();
+}
+
+/// Sleep at least `nanos` (the MVP yield-poll), for `thread::sleep`.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_thread_sleep(nanos: u64) {
+    thread::sleep(nanos);
 }
 
 /// Write `buf` to the kernel debug-log (rev2§7) for the bring-up `sys/stdio` arm,

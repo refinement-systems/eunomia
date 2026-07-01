@@ -505,7 +505,7 @@ use loader::startup::{decode, GrantKind, NAME_TIME};
 /// Encode a child block and decode it back, asserting it is well-formed.
 fn child_block(time_va: u64, argv: &[&[u8]]) -> Vec<u8> {
     let mut out = [0u8; startup::MAX_BLOCK];
-    let n = build_child_block(&mut out, time_va, argv).expect("within budget");
+    let n = build_child_block(&mut out, time_va, argv, None).expect("within budget");
     out[..n].to_vec()
 }
 
@@ -541,12 +541,49 @@ fn build_child_block_no_argv_is_just_the_time_grant() {
 }
 
 #[test]
+fn build_child_block_emits_thread_grants() {
+    // std-port 3.2: a thread-capable child's block carries the four self-cap
+    // CapSlot grants (self-aspace/self-cspace/thread-untyped/slot-base) alongside
+    // the time grant and argv — each resolving to the child cspace slot it names.
+    let mut out = [0u8; startup::MAX_BLOCK];
+    let n = build_child_block(
+        &mut out,
+        0xA300_0000,
+        &[b"bin/stdsmoke"],
+        Some([1, 2, 3, 4]),
+    )
+    .expect("within budget");
+    let s = decode(&out[..n]).expect("valid EUS1 block");
+    assert!(s.grant(NAME_TIME).is_some());
+    assert_eq!(
+        s.grant(startup::NAME_SELF_ASPACE),
+        Some(GrantKind::CapSlot(1))
+    );
+    assert_eq!(
+        s.grant(startup::NAME_SELF_CSPACE),
+        Some(GrantKind::CapSlot(2))
+    );
+    assert_eq!(
+        s.grant(startup::NAME_THREAD_UNTYPED),
+        Some(GrantKind::CapSlot(3))
+    );
+    assert_eq!(
+        s.grant(startup::NAME_THREAD_SLOT_BASE),
+        Some(GrantKind::CapSlot(4))
+    );
+    // A non-thread-capable child (`None`) carries none of them.
+    let n2 = build_child_block(&mut out, 0xA300_0000, &[b"bin/selftest"], None).unwrap();
+    let s2 = decode(&out[..n2]).unwrap();
+    assert_eq!(s2.grant(startup::NAME_SELF_ASPACE), None);
+}
+
+#[test]
 fn build_child_block_refuses_over_arena() {
     // More argv entries than the arena holds (MAX_ARGV = 8) is refused cleanly,
     // not truncated — the spawn path maps this to RunErr::Startup.
     let many = [b"p" as &[u8]; 9];
     let mut out = [0u8; startup::MAX_BLOCK];
-    assert!(build_child_block(&mut out, 0, &many).is_err());
+    assert!(build_child_block(&mut out, 0, &many, None).is_err());
 }
 
 #[test]
@@ -555,7 +592,7 @@ fn build_child_block_refuses_over_budget() {
     // 7-byte header + 26-byte TIME grant + (2 + 300) argv ≈ 335 bytes.
     let big = vec![b'x'; 300];
     let mut out = [0u8; startup::MAX_BLOCK];
-    assert!(build_child_block(&mut out, 0, &[&big]).is_err());
+    assert!(build_child_block(&mut out, 0, &[&big], None).is_err());
 }
 
 #[test]

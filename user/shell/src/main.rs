@@ -264,6 +264,11 @@ pub(crate) fn build_child_block(
     out: &mut [u8],
     time_va: u64,
     argv: &[&[u8]],
+    // std-port 3.2: for a thread-capable child, the child cspace slots holding its
+    // self-aspace/self-cspace/thread-untyped caps and the base of its working-slot
+    // range — emitted as `CapSlot` grants so `eunomia_sys::bootstrap` configures the
+    // thread pool. `None` for a non-thread-capable child (no grants, least authority).
+    thread_grants: Option<[u32; 4]>,
 ) -> Result<usize, startup::EncodeError> {
     let mut s = startup::Startup::new();
     s.push_grant(Grant {
@@ -274,6 +279,19 @@ pub(crate) fn build_child_block(
             pa: 0,
         },
     })?;
+    if let Some([self_aspace, self_cspace, thread_untyped, slot_base]) = thread_grants {
+        for (name, slot) in [
+            (startup::NAME_SELF_ASPACE, self_aspace),
+            (startup::NAME_SELF_CSPACE, self_cspace),
+            (startup::NAME_THREAD_UNTYPED, thread_untyped),
+            (startup::NAME_THREAD_SLOT_BASE, slot_base),
+        ] {
+            s.push_grant(Grant {
+                name,
+                kind: GrantKind::CapSlot(slot),
+            })?;
+        }
+    }
     for &a in argv {
         s.push_argv(a)?;
     }

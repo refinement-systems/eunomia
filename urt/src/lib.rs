@@ -1,8 +1,11 @@
 //! Userspace runtime: a global allocator over a static in-image heap.
 //!
-//! Eunomia processes are single-threaded; the allocator is first-fit with
-//! address-ordered two-sided coalescing, no locking. The heap lives in .bss,
-//! so the loader maps and zeroes it with the RW segment — no untyped or
+//! The allocator is first-fit with address-ordered two-sided coalescing. Its
+//! free-list critical section is serialized by a yielding spinlock ([`lock`]) so
+//! in-process threads (rev2§5.3) can allocate concurrently on the one process
+//! `static HEAP`; the lock's mutual exclusion is Loom-certified (never Verus — an
+//! Acquire/Release protocol, `doc/guidelines/verification.md`). The heap lives in
+//! .bss, so the loader maps and zeroes it with the RW segment — no untyped or
 //! mapping calls needed to get a heap.
 //!
 //! The free list is **side-stored, not intrusive**: the arena `[u8; N]` is
@@ -59,7 +62,10 @@
 #[allow(unused_imports)]
 use vstd::prelude::*;
 
+pub mod lock;
 pub mod slots;
+// Pure thread-stack geometry (host-tested); `thread` (bare-metal) drives it.
+pub mod thread_layout;
 pub mod time;
 
 // The spawn-lifecycle helper issues syscalls, so it only exists on the
@@ -70,9 +76,21 @@ pub mod time;
 ))]
 pub mod spawn;
 
+// The in-process thread primitive (std-port 3.2) issues syscalls, so it is
+// bare-metal-only like `spawn`. Its host-reachable invariant — the stack-VA / slot
+// arithmetic — is host-tested in `thread_layout`; the syscall path is witnessed by
+// the QEMU spawn smoke.
+#[cfg(all(
+    target_arch = "aarch64",
+    any(target_os = "none", target_os = "eunomia")
+))]
+pub mod thread;
+
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::ptr;
+
+use lock::SpinLock;
 
 // The verified free-list core (shared with dma-pool). The
 // heap's whole allocation algorithm is this proof — see the module doc.
@@ -96,22 +114,46 @@ pub struct Heap<const N: usize> {
     /// builds it lazily; `None`'s all-zero representation keeps the static in
     /// `.bss` (the loader zeroes it with the RW segment).
     fl: UnsafeCell<Option<FreeList<HEAP_RANGES>>>,
+    /// Serializes the `fl` critical section so in-process threads (rev2§5.3) can
+    /// allocate concurrently on the one process heap. All-zero (unlocked) keeps
+    /// the static in `.bss` alongside `mem`/`fl`.
+    lock: SpinLock,
 }
 
-// Single-threaded processes; no concurrent access by construction.
+// Mutual exclusion by the heap spinlock (`lock.rs`, Loom-certified): `alloc` and
+// `dealloc` hold `lock` across the whole `fl` access, so the `UnsafeCell` interior
+// is never reached by two threads at once. (Before in-process threads this was
+// "single-threaded, no concurrent access by construction"; std-port 3.2 replaced
+// that argument with the lock when `thread::spawn` opened concurrent allocation.)
 unsafe impl<const N: usize> Sync for Heap<N> {}
 
 impl<const N: usize> Heap<N> {
+    // loom's / shuttle's `AtomicU32::new` (behind `SpinLock::new`) is not `const`,
+    // so a model build drops `const`; the body is identical. The real heap is the
+    // `.bss` `static`, where const construction (all-zero = unlocked + empty) is
+    // load-bearing — the loader maps+zeroes it, no runtime init.
+    #[cfg(all(not(loom), not(shuttle)))]
     pub const fn new() -> Self {
         Heap {
             mem: UnsafeCell::new([0; N]),
             fl: UnsafeCell::new(None),
+            lock: SpinLock::new(),
+        }
+    }
+
+    #[cfg(any(loom, shuttle))]
+    pub fn new() -> Self {
+        Heap {
+            mem: UnsafeCell::new([0; N]),
+            fl: UnsafeCell::new(None),
+            lock: SpinLock::new(),
         }
     }
 
     /// Borrow the free list, building the fresh full-arena state on first use.
     /// `FreeList::new(N)` `ensures` the single extent `[0, N)` + `wf` (proven);
-    /// `HEAP_RANGES >= 1` satisfies its `N >= 1` requirement.
+    /// `HEAP_RANGES >= 1` satisfies its `N >= 1` requirement. The caller must hold
+    /// [`Self::lock`] — `alloc`/`dealloc` are the only callers and both do.
     unsafe fn fl_mut(&self) -> &mut FreeList<HEAP_RANGES> {
         (*self.fl.get()).get_or_insert_with(|| FreeList::new(N))
     }
@@ -133,6 +175,9 @@ unsafe impl<const N: usize> GlobalAlloc for Heap<N> {
         // Round up to MIN_ALIGN so carved offsets stay 16-aligned; `.max(1)`
         // keeps `need > 0` (FreeList::alloc returns None for n == 0).
         let need = layout.size().max(1).next_multiple_of(MIN_ALIGN);
+        // Hold the lock across the whole free-list access: concurrent allocation
+        // by in-process threads (rev2§5.3) is serialized here (std-port 3.2).
+        let _guard = self.lock.lock();
         let fl = self.fl_mut();
         // `align.max(MIN_ALIGN) >= 16 > 0` discharges FreeList::alloc's sole
         // `align > 0` precondition (it computes `off % align`).
@@ -149,6 +194,8 @@ unsafe impl<const N: usize> GlobalAlloc for Heap<N> {
         // Identical rounding to `alloc`, so the extent round-trips exactly.
         let need = layout.size().max(1).next_multiple_of(MIN_ALIGN);
         let off = (p as usize) - (self.mem.get() as usize);
+        // Serialize the free-list mutation against concurrent alloc/dealloc.
+        let _guard = self.lock.lock();
         let fl = self.fl_mut();
         // Decision 3: at the cap, leak rather than abort a free. FreeList::free's
         // no-merge arm calls insert_at, which would index free[N] (out of bounds)
@@ -182,7 +229,11 @@ unsafe impl<const N: usize> GlobalAlloc for Heap<N> {
     // realloc is the default GlobalAlloc impl (alloc-new + copy + dealloc-old).
 }
 
-#[cfg(test)]
+// Gated off the model builds: these construct `static H: Heap<_> = Heap::new()`,
+// which needs the `const fn new()` that loom/shuttle drop (their `AtomicU32::new`
+// is not const). The heap is not itself Loom-modeled — only its `lock` is, in
+// `lock::loom_tests`; the arena stays a Miri+proptest seam.
+#[cfg(all(test, not(loom), not(shuttle)))]
 mod tests {
     use super::*;
 

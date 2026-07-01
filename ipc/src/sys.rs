@@ -76,6 +76,38 @@ mod imp {
         ret as i64
     }
 
+    /// The seven-argument variant: the only syscall that reads the 7th register
+    /// (x6) is `ThreadStartAs` (op 18), which carries the new thread's initial `x0`
+    /// there (rev2§5.1). Every other call uses the six-argument `syscall`; the
+    /// kernel decodes x6 for all opcodes but reads it only for op 18, so leaving it
+    /// undefined on the six-arg path is harmless.
+    #[inline(always)]
+    pub unsafe fn syscall7(
+        nr: u64,
+        a0: u64,
+        a1: u64,
+        a2: u64,
+        a3: u64,
+        a4: u64,
+        a5: u64,
+        a6: u64,
+    ) -> i64 {
+        let ret: u64;
+        core::arch::asm!(
+            "svc #0",
+            inout("x0") a0 => ret,
+            inout("x1") a1 => _,
+            in("x2") a2,
+            in("x3") a3,
+            in("x4") a4,
+            in("x5") a5,
+            in("x6") a6,
+            in("x7") nr,
+            options(nostack),
+        );
+        ret as i64
+    }
+
     #[inline(always)]
     pub unsafe fn syscall2(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> (i64, u64) {
         let ret: u64;
@@ -120,6 +152,10 @@ mod imp {
         unreachable!("Eunomia syscall on a non-Eunomia target")
     }
 
+    pub unsafe fn syscall7(_: u64, _: u64, _: u64, _: u64, _: u64, _: u64, _: u64, _: u64) -> i64 {
+        unreachable!("Eunomia syscall on a non-Eunomia target")
+    }
+
     pub unsafe fn syscall2(_: u64, _: u64, _: u64, _: u64, _: u64) -> (i64, u64) {
         unreachable!("Eunomia syscall on a non-Eunomia target")
     }
@@ -129,7 +165,7 @@ mod imp {
     }
 }
 
-use imp::{syscall, syscall2, syscall3};
+use imp::{syscall, syscall2, syscall3, syscall7};
 
 // The EL0 debug-print scaffold (rev2§7) is a disclosed
 // kernel-diagnostic path behind the `debug-log` feature (default-on). Used by
@@ -303,9 +339,19 @@ pub fn frame_write(frame: u32, offset: u64, data: &[u8]) -> i64 {
     }
 }
 
-pub fn thread_start_as(tcb: u32, cspace: u32, aspace: u32, entry: u64, sp: u64, prio: u64) -> i64 {
+pub fn thread_start_as(
+    tcb: u32,
+    cspace: u32,
+    aspace: u32,
+    entry: u64,
+    sp: u64,
+    prio: u64,
+    arg: u64,
+) -> i64 {
+    // op 18 is the sole caller of the seven-arg shell: `arg` lands in the new
+    // thread's initial `x0` (rev2§5.1), the in-process-spawn closure pointer.
     unsafe {
-        syscall(
+        syscall7(
             18,
             tcb as u64,
             cspace as u64,
@@ -313,6 +359,7 @@ pub fn thread_start_as(tcb: u32, cspace: u32, aspace: u32, entry: u64, sp: u64, 
             entry,
             sp,
             prio,
+            arg,
         )
     }
 }

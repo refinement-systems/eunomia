@@ -382,6 +382,32 @@ marker) boots two threads sharing one address space that each write a distinct
 `TPIDR_EL0` and, after handoffs during which the other thread set a different value,
 read back their own — failing red if the kernel drops the save/restore.
 
+**Heap-spinlock + per-thread-TLS routing note (std-port 3.2).** In-process
+`std::thread` (findings #9) adds three trusted, non-Verus constructs, all folding under
+categories already enumerated — **no `external_body`, no new seam, the tally stays 14**:
+
+- **The `urt::Heap` yielding spinlock (`urt/src/lock.rs`)** serializes the free-list
+  critical section once threads allocate concurrently. It is a raw `AtomicU32` acquired
+  and released through an `Acquire`/`Release` pair — a **concurrency interleaving, routed
+  to Loom-certifying, never Verus**: the version-pinned Verus ghost atomics are
+  SeqCst-only, so a proof would certify a different binary (`doc/guidelines/verification.md`).
+  Same tier and category as the 3.3 futex bucket lock (which reuses this primitive). Its
+  §11 host test is the `lock::loom_tests` mutual-exclusion model (`RUSTFLAGS="--cfg loom"
+  cargo test -p urt --lib`) + the QEMU simultaneous-alloc smoke (`STD32 PASS`). The
+  `urt::Heap` `unsafe impl Sync` justification moves from "single-threaded by
+  construction" to "mutual exclusion by this lock"; the arena byte-region stays the
+  existing Miri+proptest seam (not one of the 14).
+- **The per-thread `TPIDR_EL0` TLS block (`eunomia-sys/src/tls.rs` `msr`,
+  `vendor/rust` `sys/thread_local/eunomia.rs` `mrs` + the `sys/thread` trampoline)** —
+  std's `local_pointer!` current-thread/id storage over a `TPIDR_EL0`-based block, set up
+  in `_start` (main) and the thread trampoline (spawned). This is the userspace mirror of
+  the trusted TLS-register marshalling; it **extends the TPIDR_EL0 routing note above** (the
+  thread-lifecycle asm shell, §6.1(d)) to the userspace block setup. On-target witnesses:
+  the QEMU spawn smoke + its distinct-per-thread-TLS-id check.
+- **The `ThreadStartAs` `x6` arg (change 2a) stays verified, not trusted:** the widened
+  `kcore::sysabi::decode` (`[u64;6]→[u64;7]`) and `eunomia-sys::encode` are re-proven
+  (kcore 407, eunomia-sys 7 — count-neutral; `rlimit-run` +0.00%), adding no `external_body`.
+
 ## The seams (14 named constructs + the by-construction category)
 
 Grouped by the `verus.md` §11 category. Each interpreted-hash / size / std-gap seam is a

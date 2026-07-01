@@ -11,8 +11,9 @@
 //! not this module's; here we only resolve grants out of the decoded block.
 
 pub use loader::startup::{
-    decode, Grant, GrantKind, Startup, NAME_DMA, NAME_PL011_MMIO, NAME_ROOT, NAME_STDIN,
-    NAME_STDOUT, NAME_STORAGE, NAME_STRING, NAME_TIME, NAME_TMP, NAME_VIRTIO_MMIO,
+    decode, Grant, GrantKind, Startup, NAME_DMA, NAME_PL011_MMIO, NAME_ROOT, NAME_SELF_ASPACE,
+    NAME_SELF_CSPACE, NAME_STDIN, NAME_STDOUT, NAME_STORAGE, NAME_STRING, NAME_THREAD_SLOT_BASE,
+    NAME_THREAD_UNTYPED, NAME_TIME, NAME_TMP, NAME_VIRTIO_MMIO,
 };
 
 /// The cspace slot holding a child's bootstrap channel (rev2§5.1): init installs the
@@ -79,6 +80,19 @@ pub fn root_handle(s: &Startup) -> Option<u32> {
 /// `time` → the virtual address of the read-only monotonic time page (rev2§2.6).
 pub fn time_va(s: &Startup) -> Option<u64> {
     region_va(s, NAME_TIME)
+}
+
+/// The four in-process-threading self-cap slots (std-port 3.2), all present iff the
+/// process is thread-capable: (self-aspace, self-cspace, thread-untyped,
+/// free-slot-range base). `None` if any is missing — the least-authority default,
+/// which the PAL maps to an `Unsupported` `thread::spawn`.
+pub fn thread_caps(s: &Startup) -> Option<(u32, u32, u32, u32)> {
+    Some((
+        cap_slot(s, NAME_SELF_ASPACE)?,
+        cap_slot(s, NAME_SELF_CSPACE)?,
+        cap_slot(s, NAME_THREAD_UNTYPED)?,
+        cap_slot(s, NAME_THREAD_SLOT_BASE)?,
+    ))
 }
 
 #[cfg(test)]
