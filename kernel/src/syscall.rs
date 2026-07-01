@@ -181,6 +181,7 @@ pub unsafe fn dispatch(frame: *mut TrapFrame) -> Option<i64> {
         (*frame).x[3],
         (*frame).x[4],
         (*frame).x[5],
+        (*frame).x[6],
     ];
     match sysabi::decode(nr, a) {
         Ok(sys) => execute(sys, frame),
@@ -680,6 +681,7 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             entry,
             sp,
             prio,
+            arg,
         } => {
             let ts = cur_slot(tcb);
             let cs_slot = cur_slot(cspace);
@@ -721,7 +723,8 @@ unsafe fn execute(sys: Sys, frame: *mut TrapFrame) -> Option<i64> {
             (*tp).frame = TrapFrame::zeroed();
             (*tp).frame.elr = entry;
             (*tp).frame.sp_el0 = sp;
-            (*tp).frame.spsr = 0;
+            (*tp).frame.spsr = 0; // EL0t, interrupts enabled
+            (*tp).frame.x[0] = arg; // rev2§5.1: the new thread's initial x0 (in-process spawn)
             thread::enqueue(tp);
             Some(0)
         }

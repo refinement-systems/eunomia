@@ -48,6 +48,57 @@ fn main() {
         panic!("stdsmoke deliberate panic");
     }
 
+    // std-port 3.2: the thread-spawn path. Spawn two threads that each allocate in a
+    // tight loop, forcing simultaneous access to the one process heap — the concurrent
+    // allocation the heap spinlock serializes (Loom-certified; here the on-target
+    // witness). Each reads `thread::current().id()`, which lives in the per-thread
+    // `TPIDR_EL0` TLS (3.1/3.2): distinct ids across the two threads prove the storage
+    // is genuinely per-thread, not the process-global it was before real TLS. Join
+    // both, check the results, and confirm the ids differ.
+    if args.get(1).map(String::as_str) == Some("spawn") {
+        use std::thread;
+        println!("[stdsmoke] spawning threads");
+        let handles: Vec<thread::JoinHandle<(u64, thread::ThreadId)>> = (0..2u64)
+            .map(|id| {
+                thread::spawn(move || {
+                    let mut acc: u64 = 0;
+                    for i in 0..500u64 {
+                        // Heap churn: a fresh Vec + String every iteration.
+                        let v: Vec<u64> = (0..64u64)
+                            .map(|x| x.wrapping_add(i).wrapping_add(id))
+                            .collect();
+                        acc = acc.wrapping_add(v.iter().copied().sum::<u64>());
+                        let s = format!("t{id}-{i}");
+                        acc = acc.wrapping_add(s.len() as u64);
+                    }
+                    // The current-thread handle lives in per-thread TLS.
+                    (acc, thread::current().id())
+                })
+            })
+            .collect();
+        let mut total: u64 = 0;
+        let mut ids: Vec<thread::ThreadId> = Vec::new();
+        for h in handles {
+            let (acc, tid) = h.join().expect("thread join failed");
+            total = total.wrapping_add(acc);
+            ids.push(tid);
+        }
+        // A nonzero total proves both threads ran their allocation loops to completion.
+        if total == 0 {
+            println!("[stdsmoke] spawn-bad total=0");
+            std::process::exit(5);
+        }
+        // Distinct ids prove per-thread TLS: a shared (global) current-thread handle
+        // would give both the same id (and, before real TLS, an abort at spawn).
+        if ids[0] == ids[1] {
+            println!("[stdsmoke] spawn-bad shared-tls-id");
+            std::process::exit(6);
+        }
+        println!("[stdsmoke] threads joined total={total} distinct-tls-ids");
+        println!("STD32 PASS");
+        return;
+    }
+
     // alloc (2.2): Vec growth + Box, with a checked value the harness asserts.
     let v: Vec<u64> = (1..=100).collect();
     let sum: u64 = v.iter().sum();

@@ -1,5 +1,5 @@
 //! Syscall ABI decode + validation (rev2§3.7). The pure half of
-//! `kernel/src/syscall.rs`: turn the raw register file `(nr, a[0..6])` into a
+//! `kernel/src/syscall.rs`: turn the raw register file `(nr, a[0..7])` into a
 //! typed [`Sys`] value, performing every check that needs **no** capability or
 //! thread state — `ObjType` totality, the message-length cap before
 //! `channel::send`'s `as u16` truncation, the event/which/priority ranges. The
@@ -7,7 +7,7 @@
 //! checks, user-pointer validation, and the operation itself (all of which
 //! need live state and stay kernel-side).
 //!
-//! `decode` is **total**: for any `(nr, a) : u64⁷` it returns `Ok(Sys)` or
+//! `decode` is **total**: for any `(nr, a) : u64⁸` it returns `Ok(Sys)` or
 //! `Err(SysError)`, never panics, never overflows, never UB — an unknown
 //! `nr` is an error, never a crash (rev2§3.7). This makes "no
 //! user-controlled value reaches kernel arithmetic unvalidated" a checked
@@ -67,7 +67,7 @@ pub enum Sys {
     ThreadExit { status: u64 },
     Map { aspace: u64, frame: u64, va: u64, perms: u64 },
     FrameWrite { frame: u64, off: u64, buf: u64, len: u64 },
-    ThreadStartAs { tcb: u64, cspace: u64, aspace: u64, entry: u64, sp: u64, prio: u8 },
+    ThreadStartAs { tcb: u64, cspace: u64, aspace: u64, entry: u64, sp: u64, prio: u8, arg: u64 },
     FramePaddr { slot: u64 },
     ThreadBind { tcb: u64, which: usize, notif: u64, bits: u64 },
     ReadReport { tcb: u64 },
@@ -105,9 +105,11 @@ fn decode_prio(raw: u64) -> (result: Result<u8, SysError>)
 }
 
 /// Decode the register file into a typed syscall (rev2§3.7). `nr` is x7;
-/// `a` is x0..x5 (the kernel's trap-frame read — six argument registers).
+/// `a` is x0..x6 (the kernel's trap-frame read — seven argument registers).
+/// The seventh (x6) carries `ThreadStartAs`'s initial-`x0` arg (rev2§5.1); every
+/// other opcode ignores it (`ThreadStart` already carries its arg in x5/a[5]).
 ///
-/// Verified **total**: for any `(nr, a) : (u64, [u64;6])` it returns
+/// Verified **total**: for any `(nr, a) : (u64, [u64;7])` it returns
 /// `Ok`/`Err`, never panics, overflows, or UBs (the rev2§3.7 "unknown `nr` is
 /// an error, never a crash" as a theorem, not a review convention). The
 /// `ensures` pin the shape-validation: the `ChanSend` length cap that precedes
@@ -117,7 +119,7 @@ fn decode_prio(raw: u64) -> (result: Result<u8, SysError>)
 /// unknown call or bad `ObjType` discriminant maps to the right error. The body
 /// uses explicit `match`/early-return (not `?`/`ok_or`) so the control flow is
 /// in the verified fragment.
-pub fn decode(nr: u64, a: [u64; 6]) -> (result: Result<Sys, SysError>)
+pub fn decode(nr: u64, a: [u64; 7]) -> (result: Result<Sys, SysError>)
     ensures
 // rev2§3.7: every `nr` outside the defined 0..=26 range is `UnknownCall`.
 
@@ -199,6 +201,7 @@ pub fn decode(nr: u64, a: [u64; 6]) -> (result: Result<Sys, SysError>)
                         entry: a[3],
                         sp: a[4],
                         prio,
+                        arg: a[6],
                     },
                     Err(e) => return Err(e),
                 }
@@ -237,12 +240,12 @@ mod tests {
     #[test]
     fn known_calls_decode() {
         assert_eq!(
-            decode(0, [b'x' as u64, 0, 0, 0, 0, 0]),
+            decode(0, [b'x' as u64, 0, 0, 0, 0, 0, 0]),
             Ok(Sys::DebugPutc { ch: b'x' as u64 })
         );
-        assert_eq!(decode(2, [0; 6]), Ok(Sys::Yield));
+        assert_eq!(decode(2, [0; 7]), Ok(Sys::Yield));
         assert_eq!(
-            decode(8, [1, 0x1000, MSG_PAYLOAD as u64, 0, 0, 0]),
+            decode(8, [1, 0x1000, MSG_PAYLOAD as u64, 0, 0, 0, 0]),
             Ok(Sys::ChanSend {
                 chan: 1,
                 buf: 0x1000,
@@ -252,7 +255,7 @@ mod tests {
         );
         // The top-up opcode packs three raw u64s.
         assert_eq!(
-            decode(24, [3, 5, 8, 0, 0, 0]),
+            decode(24, [3, 5, 8, 0, 0, 0, 0]),
             Ok(Sys::AspaceTopUp {
                 aspace: 3,
                 ut: 5,
@@ -261,33 +264,36 @@ mod tests {
         );
         // The two IRQ opcodes pack raw u64s.
         assert_eq!(
-            decode(25, [2, 4, 0xF, 0, 0, 0]),
+            decode(25, [2, 4, 0xF, 0, 0, 0, 0]),
             Ok(Sys::IrqBind {
                 irq: 2,
                 notif: 4,
                 bits: 0xF
             })
         );
-        assert_eq!(decode(26, [2, 0, 0, 0, 0, 0]), Ok(Sys::IrqAck { irq: 2 }));
+        assert_eq!(
+            decode(26, [2, 0, 0, 0, 0, 0, 0]),
+            Ok(Sys::IrqAck { irq: 2 })
+        );
     }
 
     #[test]
     fn validation_rejects() {
-        assert_eq!(decode(99, [0; 6]), Err(SysError::UnknownCall));
+        assert_eq!(decode(99, [0; 7]), Err(SysError::UnknownCall));
         // The defined range is 0..=26, so 27 is the first unknown opcode.
-        assert_eq!(decode(27, [0; 6]), Err(SysError::UnknownCall));
+        assert_eq!(decode(27, [0; 7]), Err(SysError::UnknownCall));
         // Opcode 20 is unassigned (no ambient input syscall), so it is an interior
         // gap that decodes to UnknownCall.
-        assert_eq!(decode(20, [0; 6]), Err(SysError::UnknownCall));
-        assert_eq!(decode(3, [0, 99, 0, 0, 0, 0]), Err(SysError::BadObjType)); // bad ObjType
+        assert_eq!(decode(20, [0; 7]), Err(SysError::UnknownCall));
+        assert_eq!(decode(3, [0, 99, 0, 0, 0, 0, 0]), Err(SysError::BadObjType)); // bad ObjType
         assert_eq!(
-            decode(8, [0, 0, MSG_PAYLOAD as u64 + 1, 0, 0, 0]),
+            decode(8, [0, 0, MSG_PAYLOAD as u64 + 1, 0, 0, 0, 0]),
             Err(SysError::MsgTooLong)
         );
-        assert_eq!(decode(10, [0, 3, 0, 0, 0, 0]), Err(SysError::BadEvent)); // event > 2
-        assert_eq!(decode(21, [0, 2, 0, 0, 0, 0]), Err(SysError::BadWhich)); // which > 1
+        assert_eq!(decode(10, [0, 3, 0, 0, 0, 0, 0]), Err(SysError::BadEvent)); // event > 2
+        assert_eq!(decode(21, [0, 2, 0, 0, 0, 0, 0]), Err(SysError::BadWhich)); // which > 1
         assert_eq!(
-            decode(13, [0, 0, 0, 0, NUM_PRIOS as u64, 0]),
+            decode(13, [0, 0, 0, 0, NUM_PRIOS as u64, 0, 0]),
             Err(SysError::BadPrio)
         );
     }
@@ -296,7 +302,7 @@ mod tests {
     fn prio_is_masked_then_bounded() {
         // Low byte < NUM_PRIOS decodes; the high bits are ignored.
         assert_eq!(
-            decode(13, [0, 0, 0, 0, 0xFF00 | 5, 0]),
+            decode(13, [0, 0, 0, 0, 0xFF00 | 5, 0, 0]),
             Ok(Sys::ThreadStart {
                 tcb: 0,
                 cspace: 0,

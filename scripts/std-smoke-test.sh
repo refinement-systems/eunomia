@@ -91,7 +91,16 @@ wait_for '\[stdsmoke\] systemtime-ok' 30
 wait_for 'STD2 PASS' 30
 wait_for 'exited(0)' 30
 
-# 2. The std-owned panic path: the parent must read 'panicked' (STATUS_PANIC),
+# 2. The thread-spawn path (std-port 3.2): two std threads each allocate in a tight
+#    loop (concurrent access to the one process heap — the race the heap spinlock
+#    serializes), each with its own TPIDR_EL0 TLS, then join. `STD32 PASS` and a
+#    clean reap witness the whole spawn/join/heap-lock/per-thread-TLS stack live.
+printf 'run bin/stdsmoke spawn\r' >&3
+wait_for '\[stdsmoke\] spawning threads' 30
+wait_for '\[stdsmoke\] threads joined total=' 30
+wait_for 'STD32 PASS' 30
+
+# 3. The std-owned panic path: the parent must read 'panicked' (STATUS_PANIC),
 #    not exited(_). std's own panic hook prints 'panicked at …' first.
 printf 'run bin/stdsmoke panic\r' >&3
 wait_for 'panicked' 30
@@ -104,6 +113,17 @@ fail=0
 # The green-boot marker — the gate's headline assertion.
 if ! grep -q 'STD2 PASS' "$LOG"; then
     echo "STD SMOKE TEST FAIL: never reached STD2 PASS (a std arm failed)" >&2
+    fail=1
+fi
+# The thread-spawn marker (std-port 3.2): two threads spawned, allocated
+# concurrently, and joined. Its absence means spawn/join/heap-lock/TLS failed.
+if ! grep -q 'STD32 PASS' "$LOG"; then
+    echo "STD SMOKE TEST FAIL: never reached STD32 PASS (thread spawn/join failed)" >&2
+    fail=1
+fi
+# A "current thread handle already set" abort means per-thread TLS regressed.
+if grep -q 'current thread handle already set' "$LOG"; then
+    echo "STD SMOKE TEST FAIL: per-thread TLS regressed (set_current aborted on a spawned thread)" >&2
     fail=1
 fi
 # env::args delivered the command line (2.1).
@@ -146,6 +166,7 @@ fi
 
 echo "STD SMOKE TEST PASS:"
 echo "  STD2 PASS — println!/format!/Vec/Box/String/Instant/SystemTime live at EL0"
+echo "  STD32 PASS — two std threads spawned/joined, concurrent heap alloc under the lock, per-thread TLS"
 echo "  env::args delivered the command line (alpha beta)"
 echo "  SystemTime read its granted time page; Instant monotonic"
 echo "  std panic reaped as STATUS_PANIC (parent read 'panicked'), not exited/faulted"

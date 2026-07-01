@@ -78,6 +78,21 @@ pub const NAME_TMP: u8 = 4;
 pub const NAME_STORAGE: u8 = 5;
 /// The monotonic time page (rev2§2.6). The one named grant delivered today.
 pub const NAME_TIME: u8 = 6;
+// In-process-threading self-caps (std-port 3.2, scoped/opt-in). A thread-capable
+// process holds caps to its own aspace (WRITE, to map thread stacks), its own
+// cspace (to name in `thread_start_as`), and a thread-untyped to retype the
+// per-thread objects from, plus the base of a reserved free cspace-slot range.
+// All `CapSlot` grants — no codec/verified-decoder change (the `NAME_STDERR`
+// posture). Absent for a non-thread-capable process (least-authority default).
+/// The process's own aspace cap slot (rev2§5.3).
+pub const NAME_SELF_ASPACE: u8 = 7;
+/// The process's own cspace cap slot (rev2§5.3).
+pub const NAME_SELF_CSPACE: u8 = 8;
+/// The untyped the process retypes thread objects from (rev2§5.3).
+pub const NAME_THREAD_UNTYPED: u8 = 9;
+/// The base of the reserved free cspace-slot range for per-thread caps; the count
+/// is the fixed `urt::thread_layout::WORKING_SLOTS` convention (rev2§5.3).
+pub const NAME_THREAD_SLOT_BASE: u8 = 10;
 /// The virtio MMIO transport window (bring-up; storaged).
 pub const NAME_VIRTIO_MMIO: u8 = 16;
 /// The DMA pool region (bring-up; storaged).

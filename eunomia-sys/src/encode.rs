@@ -31,8 +31,10 @@ pub const NUM_PRIOS: u64 = 32;
 /// (`kcore::untyped::ObjType::from_u64` is `None` iff `v >= 8`).
 pub const OBJ_COUNT: u64 = 8;
 
-/// The register file a syscall lowers to: `nr` (x7) and the six argument registers
-/// (x0..x5). The pure output of [`encode`]; the trusted shell spreads it into `svc`.
+/// The register file a syscall lowers to: `nr` (x7) and the seven argument registers
+/// (x0..x6). The pure output of [`encode`]; the trusted shell spreads it into `svc`.
+/// `a6` (x6) carries only `ThreadStartAs`'s initial-`x0` arg (rev2§5.1); every other
+/// call leaves it 0 (`ThreadStart` already carries its arg in `a5`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Encoded {
     pub nr: u64,
@@ -42,6 +44,7 @@ pub struct Encoded {
     pub a3: u64,
     pub a4: u64,
     pub a5: u64,
+    pub a6: u64,
 }
 
 /// Why [`encode`] refused a call: a field the kernel decode would reject for shape.
@@ -80,7 +83,7 @@ pub enum Call {
     ThreadExit { status: u64 },
     Map { aspace: u64, frame: u64, va: u64, perms: u64 },
     FrameWrite { frame: u64, off: u64, buf: u64, len: u64 },
-    ThreadStartAs { tcb: u64, cspace: u64, aspace: u64, entry: u64, sp: u64, prio: u64 },
+    ThreadStartAs { tcb: u64, cspace: u64, aspace: u64, entry: u64, sp: u64, prio: u64, arg: u64 },
     FramePaddr { slot: u64 },
     ThreadBind { tcb: u64, which: u64, notif: u64, bits: u64 },
     ReadReport { tcb: u64 },
@@ -152,8 +155,9 @@ pub fn encode(call: Call) -> (result: Result<Encoded, CallError>)
             entry,
             sp,
             prio,
+            arg,
         } ==> e.nr == 18 && e.a0 == tcb && e.a1 == cspace && e.a2 == aspace && e.a3 == entry && e.a4
-            == sp && e.a5 == prio),
+            == sp && e.a5 == prio && e.a6 == arg),
         result matches Ok(e) ==> (call matches Call::FramePaddr { slot } ==> e.nr == 19 && e.a0
             == slot),
         result matches Ok(e) ==> (call matches Call::ThreadBind { tcb, which, notif, bits } ==> e.nr
@@ -194,7 +198,16 @@ pub fn encode(call: Call) -> (result: Result<Encoded, CallError>)
 {
     Ok(
         match call {
-            Call::DebugPutc { ch } => Encoded { nr: 0, a0: ch, a1: 0, a2: 0, a3: 0, a4: 0, a5: 0 },
+            Call::DebugPutc { ch } => Encoded {
+                nr: 0,
+                a0: ch,
+                a1: 0,
+                a2: 0,
+                a3: 0,
+                a4: 0,
+                a5: 0,
+                a6: 0,
+            },
             Call::DebugWrite { ptr, len } => Encoded {
                 nr: 1,
                 a0: ptr,
@@ -203,13 +216,14 @@ pub fn encode(call: Call) -> (result: Result<Encoded, CallError>)
                 a3: 0,
                 a4: 0,
                 a5: 0,
+                a6: 0,
             },
-            Call::Yield => Encoded { nr: 2, a0: 0, a1: 0, a2: 0, a3: 0, a4: 0, a5: 0 },
+            Call::Yield => Encoded { nr: 2, a0: 0, a1: 0, a2: 0, a3: 0, a4: 0, a5: 0, a6: 0 },
             Call::Retype { ut, ty, param, dst, dst2 } => {
                 if ty >= OBJ_COUNT {
                     return Err(CallError::BadObjType);
                 }
-                Encoded { nr: 3, a0: ut, a1: ty, a2: param, a3: dst, a4: dst2, a5: 0 }
+                Encoded { nr: 3, a0: ut, a1: ty, a2: param, a3: dst, a4: dst2, a5: 0, a6: 0 }
             },
             Call::CapCopy { src, dst, mask, prio_ceiling } => Encoded {
                 nr: 4,
@@ -219,6 +233,7 @@ pub fn encode(call: Call) -> (result: Result<Encoded, CallError>)
                 a3: prio_ceiling,
                 a4: 0,
                 a5: 0,
+                a6: 0,
             },
             Call::CapDelete { slot } => Encoded {
                 nr: 5,
@@ -228,6 +243,7 @@ pub fn encode(call: Call) -> (result: Result<Encoded, CallError>)
                 a3: 0,
                 a4: 0,
                 a5: 0,
+                a6: 0,
             },
             Call::CapRevoke { slot } => Encoded {
                 nr: 6,
@@ -237,6 +253,7 @@ pub fn encode(call: Call) -> (result: Result<Encoded, CallError>)
                 a3: 0,
                 a4: 0,
                 a5: 0,
+                a6: 0,
             },
             Call::CapInstall { cs, src, dst_index } => Encoded {
                 nr: 7,
@@ -246,12 +263,13 @@ pub fn encode(call: Call) -> (result: Result<Encoded, CallError>)
                 a3: 0,
                 a4: 0,
                 a5: 0,
+                a6: 0,
             },
             Call::ChanSend { chan, buf, len, caps } => {
                 if len > MSG_PAYLOAD {
                     return Err(CallError::MsgTooLong);
                 }
-                Encoded { nr: 8, a0: chan, a1: buf, a2: len, a3: caps, a4: 0, a5: 0 }
+                Encoded { nr: 8, a0: chan, a1: buf, a2: len, a3: caps, a4: 0, a5: 0, a6: 0 }
             },
             Call::ChanRecv { chan, buf, dests } => Encoded {
                 nr: 9,
@@ -261,12 +279,13 @@ pub fn encode(call: Call) -> (result: Result<Encoded, CallError>)
                 a3: 0,
                 a4: 0,
                 a5: 0,
+                a6: 0,
             },
             Call::ChanBind { chan, event, notif, bits } => {
                 if event > 2 {
                     return Err(CallError::BadEvent);
                 }
-                Encoded { nr: 10, a0: chan, a1: event, a2: notif, a3: bits, a4: 0, a5: 0 }
+                Encoded { nr: 10, a0: chan, a1: event, a2: notif, a3: bits, a4: 0, a5: 0, a6: 0 }
             },
             Call::NotifSignal { slot, bits } => Encoded {
                 nr: 11,
@@ -276,6 +295,7 @@ pub fn encode(call: Call) -> (result: Result<Encoded, CallError>)
                 a3: 0,
                 a4: 0,
                 a5: 0,
+                a6: 0,
             },
             Call::NotifWait { slot } => Encoded {
                 nr: 12,
@@ -285,12 +305,13 @@ pub fn encode(call: Call) -> (result: Result<Encoded, CallError>)
                 a3: 0,
                 a4: 0,
                 a5: 0,
+                a6: 0,
             },
             Call::ThreadStart { tcb, cspace, entry, sp, prio, arg } => {
                 if prio >= NUM_PRIOS {
                     return Err(CallError::BadPrio);
                 }
-                Encoded { nr: 13, a0: tcb, a1: cspace, a2: entry, a3: sp, a4: prio, a5: arg }
+                Encoded { nr: 13, a0: tcb, a1: cspace, a2: entry, a3: sp, a4: prio, a5: arg, a6: 0 }
             },
             Call::TimerArm { timer, notif, bits, delta } => Encoded {
                 nr: 14,
@@ -300,6 +321,7 @@ pub fn encode(call: Call) -> (result: Result<Encoded, CallError>)
                 a3: delta,
                 a4: 0,
                 a5: 0,
+                a6: 0,
             },
             Call::ThreadExit { status } => Encoded {
                 nr: 15,
@@ -309,6 +331,7 @@ pub fn encode(call: Call) -> (result: Result<Encoded, CallError>)
                 a3: 0,
                 a4: 0,
                 a5: 0,
+                a6: 0,
             },
             Call::Map { aspace, frame, va, perms } => Encoded {
                 nr: 16,
@@ -318,6 +341,7 @@ pub fn encode(call: Call) -> (result: Result<Encoded, CallError>)
                 a3: perms,
                 a4: 0,
                 a5: 0,
+                a6: 0,
             },
             Call::FrameWrite { frame, off, buf, len } => Encoded {
                 nr: 17,
@@ -327,12 +351,22 @@ pub fn encode(call: Call) -> (result: Result<Encoded, CallError>)
                 a3: len,
                 a4: 0,
                 a5: 0,
+                a6: 0,
             },
-            Call::ThreadStartAs { tcb, cspace, aspace, entry, sp, prio } => {
+            Call::ThreadStartAs { tcb, cspace, aspace, entry, sp, prio, arg } => {
                 if prio >= NUM_PRIOS {
                     return Err(CallError::BadPrio);
                 }
-                Encoded { nr: 18, a0: tcb, a1: cspace, a2: aspace, a3: entry, a4: sp, a5: prio }
+                Encoded {
+                    nr: 18,
+                    a0: tcb,
+                    a1: cspace,
+                    a2: aspace,
+                    a3: entry,
+                    a4: sp,
+                    a5: prio,
+                    a6: arg,
+                }
             },
             Call::FramePaddr { slot } => Encoded {
                 nr: 19,
@@ -342,12 +376,13 @@ pub fn encode(call: Call) -> (result: Result<Encoded, CallError>)
                 a3: 0,
                 a4: 0,
                 a5: 0,
+                a6: 0,
             },
             Call::ThreadBind { tcb, which, notif, bits } => {
                 if which > 1 {
                     return Err(CallError::BadWhich);
                 }
-                Encoded { nr: 21, a0: tcb, a1: which, a2: notif, a3: bits, a4: 0, a5: 0 }
+                Encoded { nr: 21, a0: tcb, a1: which, a2: notif, a3: bits, a4: 0, a5: 0, a6: 0 }
             },
             Call::ReadReport { tcb } => Encoded {
                 nr: 22,
@@ -357,6 +392,7 @@ pub fn encode(call: Call) -> (result: Result<Encoded, CallError>)
                 a3: 0,
                 a4: 0,
                 a5: 0,
+                a6: 0,
             },
             Call::UntypedReset { slot } => Encoded {
                 nr: 23,
@@ -366,6 +402,7 @@ pub fn encode(call: Call) -> (result: Result<Encoded, CallError>)
                 a3: 0,
                 a4: 0,
                 a5: 0,
+                a6: 0,
             },
             Call::AspaceTopUp { aspace, ut, pages } => Encoded {
                 nr: 24,
@@ -375,6 +412,7 @@ pub fn encode(call: Call) -> (result: Result<Encoded, CallError>)
                 a3: 0,
                 a4: 0,
                 a5: 0,
+                a6: 0,
             },
             Call::IrqBind { irq, notif, bits } => Encoded {
                 nr: 25,
@@ -384,8 +422,18 @@ pub fn encode(call: Call) -> (result: Result<Encoded, CallError>)
                 a3: 0,
                 a4: 0,
                 a5: 0,
+                a6: 0,
             },
-            Call::IrqAck { irq } => Encoded { nr: 26, a0: irq, a1: 0, a2: 0, a3: 0, a4: 0, a5: 0 },
+            Call::IrqAck { irq } => Encoded {
+                nr: 26,
+                a0: irq,
+                a1: 0,
+                a2: 0,
+                a3: 0,
+                a4: 0,
+                a5: 0,
+                a6: 0,
+            },
         },
     )
 }
@@ -398,9 +446,9 @@ mod tests {
     use kcore::untyped::ObjType;
     use proptest::prelude::*;
 
-    /// The args of an [`Encoded`] in the `[u64;6]` form `kcore::sysabi::decode` reads.
-    fn args(e: &Encoded) -> [u64; 6] {
-        [e.a0, e.a1, e.a2, e.a3, e.a4, e.a5]
+    /// The args of an [`Encoded`] in the `[u64;7]` form `kcore::sysabi::decode` reads.
+    fn args(e: &Encoded) -> [u64; 7] {
+        [e.a0, e.a1, e.a2, e.a3, e.a4, e.a5, e.a6]
     }
 
     /// Bridge a local [`Call`] to the kernel `Sys` value it must decode back to —
@@ -519,6 +567,7 @@ mod tests {
                 entry,
                 sp,
                 prio,
+                arg,
             } => Sys::ThreadStartAs {
                 tcb,
                 cspace,
@@ -526,6 +575,7 @@ mod tests {
                 entry,
                 sp,
                 prio: prio as u8,
+                arg,
             },
             Call::FramePaddr { slot } => Sys::FramePaddr { slot },
             Call::ThreadBind {
@@ -633,6 +683,7 @@ mod tests {
                 entry: 0x134,
                 sp: 0x135,
                 prio: NUM_PRIOS - 1,
+                arg: 0x137,
             },
             Call::FramePaddr { slot: 0x141 },
             Call::ThreadBind {
@@ -710,7 +761,7 @@ mod tests {
             Err(CallError::BadObjType)
         );
         assert_eq!(
-            decode(3, [0, OBJ_COUNT, 0, 0, 0, 0]),
+            decode(3, [0, OBJ_COUNT, 0, 0, 0, 0, 0]),
             Err(SysError::BadObjType)
         );
 
@@ -724,7 +775,7 @@ mod tests {
             Err(CallError::MsgTooLong)
         );
         assert_eq!(
-            decode(8, [0, 0, MSG_PAYLOAD + 1, 0, 0, 0]),
+            decode(8, [0, 0, MSG_PAYLOAD + 1, 0, 0, 0, 0]),
             Err(SysError::MsgTooLong)
         );
 
@@ -737,7 +788,7 @@ mod tests {
             }),
             Err(CallError::BadEvent)
         );
-        assert_eq!(decode(10, [0, 3, 0, 0, 0, 0]), Err(SysError::BadEvent));
+        assert_eq!(decode(10, [0, 3, 0, 0, 0, 0, 0]), Err(SysError::BadEvent));
 
         assert_eq!(
             encode(Call::ThreadBind {
@@ -748,7 +799,7 @@ mod tests {
             }),
             Err(CallError::BadWhich)
         );
-        assert_eq!(decode(21, [0, 2, 0, 0, 0, 0]), Err(SysError::BadWhich));
+        assert_eq!(decode(21, [0, 2, 0, 0, 0, 0, 0]), Err(SysError::BadWhich));
 
         assert_eq!(
             encode(Call::ThreadStart {
@@ -762,7 +813,7 @@ mod tests {
             Err(CallError::BadPrio)
         );
         assert_eq!(
-            decode(13, [0, 0, 0, 0, NUM_PRIOS, 0]),
+            decode(13, [0, 0, 0, 0, NUM_PRIOS, 0, 0]),
             Err(SysError::BadPrio)
         );
         assert_eq!(
@@ -772,12 +823,13 @@ mod tests {
                 aspace: 0,
                 entry: 0,
                 sp: 0,
-                prio: NUM_PRIOS
+                prio: NUM_PRIOS,
+                arg: 0
             }),
             Err(CallError::BadPrio)
         );
         assert_eq!(
-            decode(18, [0, 0, 0, 0, 0, NUM_PRIOS]),
+            decode(18, [0, 0, 0, 0, 0, NUM_PRIOS, 0]),
             Err(SysError::BadPrio)
         );
     }

@@ -112,5 +112,8 @@ pub fn start(p: &Prepared, prio: u64) -> Result<(), SpawnError> {
         p.entry,
         p.sp,
         prio,
+        // A process's main thread receives its argv via the startup block, not
+        // `x0`; the in-process-thread arg register (rev2§5.1) is unused here.
+        0,
     ))
 }

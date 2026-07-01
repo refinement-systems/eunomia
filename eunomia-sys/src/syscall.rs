@@ -96,7 +96,16 @@ pub const STATUS_PANIC: u64 = u64::MAX;
 ))]
 mod imp {
     #[inline(always)]
-    pub unsafe fn syscall(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 {
+    pub unsafe fn syscall(
+        nr: u64,
+        a0: u64,
+        a1: u64,
+        a2: u64,
+        a3: u64,
+        a4: u64,
+        a5: u64,
+        a6: u64,
+    ) -> i64 {
         let ret: u64;
         core::arch::asm!(
             "svc #0",
@@ -106,6 +115,7 @@ mod imp {
             in("x3") a3,
             in("x4") a4,
             in("x5") a5,
+            in("x6") a6,
             in("x7") nr,
             options(nostack),
         );
@@ -152,7 +162,7 @@ mod imp {
 mod imp {
     /// Host builds (tests of the protocol/encode layers) must never reach a raw
     /// syscall.
-    pub unsafe fn syscall(_: u64, _: u64, _: u64, _: u64, _: u64, _: u64, _: u64) -> i64 {
+    pub unsafe fn syscall(_: u64, _: u64, _: u64, _: u64, _: u64, _: u64, _: u64, _: u64) -> i64 {
         unreachable!("Eunomia syscall on a non-Eunomia target")
     }
 
@@ -172,7 +182,7 @@ mod imp {
 /// Encode `c` and issue a single-result syscall; an `encode` refusal is `ERR_ARG`.
 fn dispatch(c: Call) -> i64 {
     match encode(c) {
-        Ok(e) => unsafe { imp::syscall(e.nr, e.a0, e.a1, e.a2, e.a3, e.a4, e.a5) },
+        Ok(e) => unsafe { imp::syscall(e.nr, e.a0, e.a1, e.a2, e.a3, e.a4, e.a5, e.a6) },
         Err(_) => ERR_ARG,
     }
 }
@@ -400,7 +410,15 @@ pub fn thread_start(tcb: u32, cspace: u32, entry: u64, sp: u64, prio: u64, arg: 
     })
 }
 
-pub fn thread_start_as(tcb: u32, cspace: u32, aspace: u32, entry: u64, sp: u64, prio: u64) -> i64 {
+pub fn thread_start_as(
+    tcb: u32,
+    cspace: u32,
+    aspace: u32,
+    entry: u64,
+    sp: u64,
+    prio: u64,
+    arg: u64,
+) -> i64 {
     dispatch(Call::ThreadStartAs {
         tcb: tcb as u64,
         cspace: cspace as u64,
@@ -408,6 +426,7 @@ pub fn thread_start_as(tcb: u32, cspace: u32, aspace: u32, entry: u64, sp: u64, 
         entry,
         sp,
         prio,
+        arg,
     })
 }
 

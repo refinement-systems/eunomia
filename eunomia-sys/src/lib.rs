@@ -37,6 +37,11 @@
 //!   three surfaces above through these one-line delegations.
 #![cfg_attr(not(test), no_std)]
 
+// The per-thread TLS block (std-port 3.2) is heap-allocated over the process-global
+// allocator; pull `alloc` on the target build (where `tls` is compiled).
+#[cfg(any(target_os = "eunomia", target_os = "none"))]
+extern crate alloc;
+
 pub mod bootstrap;
 pub mod encode;
 pub mod grant;
@@ -47,3 +52,7 @@ pub mod pal;
 // Internal: the bring-up debug-log stdio chunker for the `pal`/`sys/stdio` arm.
 mod stdio;
 pub mod syscall;
+// The in-process thread bridge (std-port 3.2); target-gated internally like `pal`.
+pub mod thread;
+// The per-thread TLS block (std-port 3.2); target-gated internally like `pal`.
+pub mod tls;

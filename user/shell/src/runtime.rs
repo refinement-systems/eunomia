@@ -49,9 +49,36 @@ const SPAWN_CAP: usize = 56; // slots 8..64
 
 /// One child's memory: aspace pool + stack + segments + bootstrap channel,
 /// with generous slack. The pool (slot 2) is ~100 MiB, and only this one
-/// donation is ever outstanding, so 4 MiB costs nothing and never runs short.
-const DONATION_BYTES: u64 = 4 * 1024 * 1024;
+/// donation is ever outstanding. Sized to also cover a thread-capable child's
+/// thread-untyped (`urt::thread::THREAD_UNTYPED_BYTES` = 2 MiB) on top of the base
+/// (std-port 3.2) — 16 MiB costs nothing and never runs short.
+const DONATION_BYTES: u64 = 16 * 1024 * 1024;
+/// Default child cspace: slot 0 = bootstrap, the rest a child-carved window.
 const CHILD_CSPACE_SLOTS: u64 = 8;
+
+// In-process-threading provisioning (std-port 3.2, scoped/opt-in). A thread-capable
+// child gets a wider cspace and, installed at these fixed slots, caps to its own
+// aspace (WRITE)/cspace + a thread-untyped, plus a reserved working-slot range —
+// named for the child by the `NAME_*` grants (`build_child_block`). Every other
+// binary keeps the least-authority default above.
+/// A thread-capable child's cspace: slot 0 bootstrap, 1..=3 the self-caps, and
+/// `[CHILD_THREAD_SLOT_BASE, +WORKING_SLOTS)` the working range — 4 + 80 = 84 used,
+/// rounded up.
+const THREAD_CHILD_CSPACE_SLOTS: u64 = 128;
+const CHILD_SELF_ASPACE: u32 = 1;
+const CHILD_SELF_CSPACE: u32 = 2;
+const CHILD_THREAD_UNTYPED: u32 = 3;
+const CHILD_THREAD_SLOT_BASE: u32 = 4;
+
+/// The MVP thread-capability marker: a shell-side allowlist of run paths (the
+/// plan's sanctioned fallback — the verified `loader::elf::parse` extracts only
+/// PT_LOAD, so an ELF-note marker travelling in the binary is a noted upgrade that
+/// avoids touching the verified parser). Only a listed binary is provisioned.
+const THREAD_CAPABLE: &[&[u8]] = &[b"bin/stdsmoke"];
+
+fn is_thread_capable(path: &[u8]) -> bool {
+    THREAD_CAPABLE.contains(&path)
+}
 /// Children run below the shell so a blocked-shell, running-child handoff is
 /// the common case, and the rev2§5.4 ceiling keeps a child from outranking us.
 const CHILD_PRIO: u64 = 3;
@@ -444,7 +471,12 @@ impl Spawner {
     /// read its report, then reclaim every resource it held. Returns how it
     /// terminated. The donation untyped and the slot window come back clean
     /// for the next call — this is the whole burn fix.
-    fn run_once(&mut self, image: &[u8], argv: &[&[u8]]) -> Result<Exit, RunErr> {
+    fn run_once(
+        &mut self,
+        image: &[u8],
+        argv: &[&[u8]],
+        thread_capable: bool,
+    ) -> Result<Exit, RunErr> {
         let img = loader::elf::parse(image).map_err(|_| RunErr::BadElf)?;
         // Loader slot layout: aspace, tcb, cspace, one frame per segment,
         // stack frame (loader/spawn.rs).
@@ -457,7 +489,7 @@ impl Spawner {
             scratch: self.slots.alloc().ok_or(RunErr::NoSlots)?,
             time_copy: self.slots.alloc().ok_or(RunErr::NoSlots)?,
         };
-        let exit = self.spawn_inner(image, argv, &s);
+        let exit = self.spawn_inner(image, argv, &s, thread_capable);
         // Whether it ran to completion or aborted mid-setup, the donation is
         // now empty (reap revoked it, or abort below did) and these slots
         // with it — return the window to the free list.
@@ -470,6 +502,7 @@ impl Spawner {
         image: &[u8],
         argv: &[&[u8]],
         s: &SpawnSlots,
+        thread_capable: bool,
     ) -> Result<Exit, RunErr> {
         // Bootstrap channel and every child object descend from DONATION, so
         // the child is one CDT subtree teardown collapses in one revoke.
@@ -477,7 +510,15 @@ impl Spawner {
             self.scrub(s.time_copy);
             return Err(RunErr::Carve);
         }
-        let prepared = match loader::spawn::prepare(image, DONATION, s.range, CHILD_CSPACE_SLOTS) {
+        // A thread-capable child needs a wider cspace to hold its self-caps and the
+        // per-thread working-slot range (std-port 3.2); every other child keeps the
+        // minimal default (least-authority).
+        let cspace_slots = if thread_capable {
+            THREAD_CHILD_CSPACE_SLOTS
+        } else {
+            CHILD_CSPACE_SLOTS
+        };
+        let prepared = match loader::spawn::prepare(image, DONATION, s.range, cspace_slots) {
             Ok(p) => p,
             Err(_) => {
                 self.scrub(s.time_copy);
@@ -500,8 +541,41 @@ impl Spawner {
         // the command-line argv) queued before the child runs. An over-budget
         // block is a clean spawn failure, never a panic (rev2§2.7).
         sys::cap_install(prepared.cspace_slot, s.chan_b, 0);
+        // Thread-capability (std-port 3.2, scoped): install into the child's own
+        // cspace copies of its aspace (WRITE, to map thread stacks) and cspace caps
+        // (to name in `thread_start_as`), and a thread-untyped carved from DONATION
+        // (so it collapses under the reap revoke like every other child object). Each
+        // cap is staged in `s.scratch` and `cap_install`-moved out (leaving it empty
+        // for the bind below). All descend from DONATION, so `scrub` reclaims a
+        // partial install via its revoke.
+        let thread_grants = if thread_capable {
+            let install_ok = sys::cap_copy(prepared.aspace_slot, s.scratch, sys::RIGHTS_ALL) >= 0
+                && sys::cap_install(prepared.cspace_slot, s.scratch, CHILD_SELF_ASPACE) >= 0
+                && sys::cap_copy(prepared.cspace_slot, s.scratch, sys::RIGHTS_ALL) >= 0
+                && sys::cap_install(prepared.cspace_slot, s.scratch, CHILD_SELF_CSPACE) >= 0
+                && sys::retype(
+                    DONATION,
+                    sys::OBJ_UNTYPED,
+                    urt::thread::THREAD_UNTYPED_BYTES,
+                    s.scratch,
+                    0,
+                ) >= 0
+                && sys::cap_install(prepared.cspace_slot, s.scratch, CHILD_THREAD_UNTYPED) >= 0;
+            if !install_ok {
+                self.scrub(s.time_copy);
+                return Err(RunErr::Carve);
+            }
+            Some([
+                CHILD_SELF_ASPACE,
+                CHILD_SELF_CSPACE,
+                CHILD_THREAD_UNTYPED,
+                CHILD_THREAD_SLOT_BASE,
+            ])
+        } else {
+            None
+        };
         let mut block = [0u8; loader::startup::MAX_BLOCK];
-        let n = match crate::build_child_block(&mut block, CHILD_TIME_VA, argv) {
+        let n = match crate::build_child_block(&mut block, CHILD_TIME_VA, argv, thread_grants) {
             Ok(n) => n,
             Err(_) => {
                 self.scrub(s.time_copy);
@@ -609,7 +683,7 @@ fn cmd_run(sp: &mut Spawner, arg: &[u8]) {
     out(b"loaded ");
     out_num(image.len() as u64);
     out(b" bytes from the store\n");
-    match sp.run_once(&image, &argv) {
+    match sp.run_once(&image, &argv, is_thread_capable(path)) {
         Ok(exit) => print_exit(exit),
         Err(e) => run_err(e),
     }
@@ -636,7 +710,9 @@ fn cmd_runloop(sp: &mut Spawner, arg: &[u8]) {
     // mode 0, a clean exit(0)) — the burn-fix witness wants a trivial child.
     let argv: [&[u8]; 1] = [path];
     for _ in 0..n {
-        match sp.run_once(&image, &argv) {
+        // The burn-fix witness runs `selftest` (a no_std child), never a
+        // thread-capable binary — no self-caps provisioned.
+        match sp.run_once(&image, &argv, false) {
             Ok(Exit::Exited(0)) => ok += 1,
             Ok(other) => {
                 out(b"unexpected: ");
