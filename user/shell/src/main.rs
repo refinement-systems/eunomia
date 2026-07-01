@@ -265,16 +265,21 @@ pub(crate) const TIME_LEN: u64 = 4096;
 /// command-line `argv` (`argv[0]` is the program path). The codec is shared with
 /// the consumer (selftest's `parse_startup`), so the round-trip drives the real
 /// `encode`.
-/// Total in the producer direction (rev2§2.7): an over-arena (`> MAX_ARGV`) or
-/// over-budget (`> MAX_BLOCK`) block returns a clean `EncodeError` the spawn path
-/// maps to a `RunErr` — refuse, never panic or silently truncate. `env` is left
-/// empty (defined and round-tripped, unpopulated; rev2§5.1). The region carries
-/// no new authority: the shell `map`s the time page before start, only the VA
-/// travels.
+/// Total in the producer direction (rev2§2.7): an over-arena (`> MAX_ARGV`/
+/// `> MAX_ENV`) or over-budget (`> MAX_BLOCK`) block returns a clean `EncodeError`
+/// the spawn path maps to a `RunErr` — refuse, never panic or silently truncate.
+/// `env` carries the shell's inherited environment (std-port 5.2), forwarded
+/// verbatim to the child so its `std::env::vars()` is non-empty (POSIX inheritance).
+/// The region carries no new authority: the shell `map`s the time page before start,
+/// only the VA travels.
 pub(crate) fn build_child_block(
     out: &mut [u8],
     time_va: u64,
     argv: &[&[u8]],
+    // std-port 5.2: the environment inherited from init, forwarded to the child as
+    // raw `KEY=VALUE` byte-strings (rev2§5.1). `push_env` refuses past `MAX_ENV` and
+    // `encode` past `MAX_BLOCK`, both mapped to a clean spawn refusal.
+    env: &[&[u8]],
     // std-port 3.2: for a thread-capable child, the child cspace slots holding its
     // self-aspace/self-cspace/thread-untyped caps and the base of its working-slot
     // range — emitted as `CapSlot` grants so `eunomia_sys::bootstrap` configures the
@@ -346,6 +351,12 @@ pub(crate) fn build_child_block(
     }
     for &a in argv {
         s.push_argv(a)?;
+    }
+    // std-port 5.2: the inherited environment, so the child's `std::env::vars()` is
+    // non-empty. Env lives in its own arena (`MAX_ENV`), separate from the grant
+    // budget; every byte still counts against `MAX_BLOCK` (enforced by `encode`).
+    for &e in env {
+        s.push_env(e)?;
     }
     startup::encode(&s, out)
 }
