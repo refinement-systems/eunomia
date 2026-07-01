@@ -5175,6 +5175,62 @@ fn endpoint_cap_dropped_decrement_and_fire() {
 }
 
 #[test]
+fn derive_channel_endpoint_bumps_census_no_false_peer_closed() {
+    // Regression for the `cap_copy`/`derive` endpoint-census bug (findings 16-1): copying a
+    // channel end cap must bump `end_caps[end]`, so deleting the *copy* while the original lives
+    // does NOT fire peer-closed. Before the fix `derive` left `end_caps` at `[1, 1]`, so the very
+    // next drop hit `0` and spuriously fired peer-closed on the still-live end (wedging, e.g., the
+    // shell's console after a donated child reaped).
+    let (mut st, ch, ring_slots) = chan_fixture(1, 2);
+    let (src, dst) = (SlotId(ring_slots as u64), SlotId(ring_slots as u64 + 1));
+    // The channel's existing end-A cap in `src` (object refcount = the two live end caps).
+    st.refs.insert(ch.0, 2);
+    st.slots[src.0 as usize] = detached(Cap {
+        kind: CapKind::Channel(ch, ChanEnd::A),
+        rights: Rights(0xff),
+    });
+
+    // The real `derive` (the `cap_copy` body) copies end A into `dst`.
+    derive(&mut st, src, dst, 0xff, 0xFF).expect("copy channel endpoint A");
+    assert_eq!(
+        st.chan(ch).end_caps,
+        [2, 1],
+        "the copy bumped end_caps[A]: 1 -> 2 (the fix; was left at 1)"
+    );
+    assert!(
+        cap_kind_eq(st.at(dst).cap.kind, CapKind::Channel(ch, ChanEnd::A)),
+        "dst holds the endpoint-A copy"
+    );
+    assert_eq!(st.refs[&ch.0], 3, "object refcount rose with the copy");
+
+    // Bind end B's peer-closed to a live notif, then drop *one* of the two end-A caps (the copy).
+    // With end_caps[A] = 2 -> 1 the drop must NOT fire: the original end-A cap still lives.
+    let n = ObjId(100);
+    st.refs.insert(100, 1);
+    st.notifs.insert(
+        100,
+        NotifState {
+            word: 0,
+            wait_head: None,
+            wait_tail: None,
+        },
+    );
+    st.chan_mut(ch).bindings.insert(
+        (1, EV_PEER_CLOSED),
+        Binding {
+            notif: Some(n),
+            bits: 0b100,
+        },
+    );
+    check_endpoint_cap_dropped(&mut st, ch, ChanEnd::A);
+    assert_eq!(st.chan(ch).end_caps, [1, 1], "one end-A cap remains live");
+    assert_eq!(
+        st.notifs[&100].word, 0,
+        "peer NOT closed while the original end-A cap lives"
+    );
+}
+
+#[test]
 fn bind_install_rebind_unbind() {
     // The four refcount cases on one binding, in sequence (each `check_bind`
     // snapshots and asserts its own delta): install onto unbound, rebind to a
