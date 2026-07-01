@@ -22,13 +22,17 @@ pub const STRIDE: u64 = (STACK_PAGES + GUARD_PAGES) * PAGE;
 pub const MAX_THREADS: usize = 16;
 
 /// Working cspace slots per thread slot: {sub-untyped, TCB, stack frame, notif,
-/// scratch} (carved once per slot, reused across its spawn/join cycles).
-pub const SLOTS_PER_THREAD: u32 = 5;
+/// scratch, park-notif} (carved once per slot, reused across its spawn/join
+/// cycles). The park-notif (base+5) is the per-thread notification a `sys::futex`
+/// waiter blocks on and a waker signals (std-port 3.3).
+pub const SLOTS_PER_THREAD: u32 = 6;
 
 /// Total free cspace slots the thread pool needs, the convention shared by the
 /// producer (which reserves the range and sizes the child cspace) and
-/// `thread::configure`. `5 * 16 = 80 <= 128`, the `SlotAlloc<2>` cap.
-pub const WORKING_SLOTS: u32 = SLOTS_PER_THREAD * (MAX_THREADS as u32);
+/// `thread::configure`. `6 * 16 + 1 = 97 <= 128`, the `SlotAlloc<2>` cap; the
+/// trailing `+ 1` is the main thread's own futex park-notif slot (std-port 3.3),
+/// which is not one of the pool slots.
+pub const WORKING_SLOTS: u32 = SLOTS_PER_THREAD * (MAX_THREADS as u32) + 1;
 
 /// The `(top, bottom)` VA of slot `slot`'s stack: `top` is the initial SP (16-byte
 /// aligned, exclusive), `bottom` the lowest mapped byte; `[bottom - PAGE, bottom)`
@@ -37,6 +41,27 @@ pub const fn stack_region(slot: usize) -> (u64, u64) {
     let top = STACK_TOP - (slot as u64 + 1) * STRIDE;
     let bottom = top - STACK_PAGES * PAGE;
     (top, bottom)
+}
+
+/// The pool slot whose stack contains `sp`, or `None` for the main thread (whose
+/// stack sits above `STACK_TOP`, outside every pool region). The inverse of
+/// [`stack_region`]: a running thread reads its own `sp` to find which slot it
+/// occupies — hence which per-thread futex park-notif is its own (std-port 3.3) —
+/// without threading a slot index through the spawn trampoline. Well-defined
+/// because the regions are disjoint and guard-separated (the tests below), so at
+/// most one contains `sp`.
+pub fn slot_of_sp(sp: u64) -> Option<usize> {
+    let mut i = 0;
+    while i < MAX_THREADS {
+        let (top, bottom) = stack_region(i);
+        // A live SP lies in `[bottom, top]`: it starts at `top` (exclusive of the
+        // guard above) and descends toward `bottom` as the stack grows.
+        if bottom <= sp && sp <= top {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -92,5 +117,31 @@ mod tests {
             let (top, _) = stack_region(i);
             assert_eq!(top % 16, 0, "slot {i} SP not 16-aligned");
         }
+    }
+
+    #[test]
+    fn slot_of_sp_inverts_stack_region() {
+        // A SP anywhere inside slot `i`'s stack (top, midpoint, one byte above the
+        // bottom) maps back to `i` — the inverse the running-thread lookup relies on.
+        for i in 0..MAX_THREADS {
+            let (top, bottom) = stack_region(i);
+            assert_eq!(slot_of_sp(top), Some(i), "slot {i} top misroutes");
+            assert_eq!(slot_of_sp(bottom), Some(i), "slot {i} bottom misroutes");
+            assert_eq!(slot_of_sp(bottom + (top - bottom) / 2), Some(i));
+        }
+    }
+
+    #[test]
+    fn slot_of_sp_rejects_the_main_stack_and_guards() {
+        // The main thread's SP (its stack is [STACK_TOP - STACK_PAGES*PAGE,
+        // STACK_TOP), above every pool region) maps to None — the main-thread case.
+        let main_bottom = STACK_TOP - STACK_PAGES * PAGE;
+        assert_eq!(slot_of_sp(main_bottom), None);
+        assert_eq!(slot_of_sp(STACK_TOP - 16), None);
+        // A guard page between two slots belongs to neither: slot i's bottom sits
+        // one guard page above slot i+1's top, and the byte just below i's bottom
+        // is the guard — outside [bottom, top] of both.
+        let (_top0, bot0) = stack_region(0);
+        assert_eq!(slot_of_sp(bot0 - 1), None, "guard byte routed to a slot");
     }
 }

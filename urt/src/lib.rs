@@ -86,6 +86,20 @@ pub mod spawn;
 ))]
 pub mod thread;
 
+// The `sys::futex` backend (std-port 3.3). Unlike `lock`, `futex` is not fully
+// portable — its park primitive is either the kernel notification (target) or a
+// std/loom/shuttle `Mutex`+`Condvar` parker (the model), so it is compiled only for
+// the real target and for the host test/loom/shuttle models, and absent on a plain
+// no_std host build (verus, plain `cargo build`), where nothing references it.
+#[cfg(any(
+    test,
+    all(
+        target_arch = "aarch64",
+        any(target_os = "none", target_os = "eunomia")
+    )
+))]
+pub mod futex;
+
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
 use core::ptr;

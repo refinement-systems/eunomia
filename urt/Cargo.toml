@@ -53,4 +53,4 @@ verify = true
 # are expected (same handling as ipc/kcore). `urt` carries no Kani harness, so
 # nothing injects cfg(kani).
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(shuttle)", "cfg(verus_keep_ghost)", "cfg(verus_only)", 'cfg(target_os, values("eunomia"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(shuttle)", "cfg(futex_neg_control)", "cfg(verus_keep_ghost)", "cfg(verus_only)", 'cfg(target_os, values("eunomia"))'] }

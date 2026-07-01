@@ -16,7 +16,8 @@
 
 use core::alloc::{GlobalAlloc, Layout};
 
-use crate::{bootstrap, heap, io_error, stdio, syscall, thread, tls};
+use crate::{bootstrap, futex, heap, io_error, stdio, syscall, thread, tls};
+use core::sync::atomic::AtomicU32;
 
 /// The process-global std `System` heap (std-port 2.2): a fixed `.bss` arena over
 /// the Verus-verified `freelist` allocator. A plain `static` — interior
@@ -113,6 +114,31 @@ pub extern "Rust" fn __eunomia_thread_yield() {
 #[unsafe(no_mangle)]
 pub extern "Rust" fn __eunomia_thread_sleep(nanos: u64) {
     thread::sleep(nanos);
+}
+
+/// Wait on the futex `*futex` while it equals `expected` (std-port 3.3): the
+/// `sys::futex` backend for the whole upstream lock stack (Mutex/Condvar/RwLock/
+/// Once/Parker). `timeout_ns == u64::MAX` means no timeout; returns `false` only on
+/// timeout. All logic lives in the seam (`urt::futex`); this arm only marshals.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_futex_wait(
+    futex: &AtomicU32,
+    expected: u32,
+    timeout_ns: u64,
+) -> bool {
+    futex::wait(futex, expected, timeout_ns)
+}
+
+/// Wake one waiter on `*futex`; `true` iff one was woken.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_futex_wake(futex: &AtomicU32) -> bool {
+    futex::wake(futex)
+}
+
+/// Wake all waiters on `*futex`.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_futex_wake_all(futex: &AtomicU32) {
+    futex::wake_all(futex)
 }
 
 /// Write `buf` to the kernel debug-log (rev2§7) for the bring-up `sys/stdio` arm,

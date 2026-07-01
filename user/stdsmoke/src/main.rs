@@ -99,6 +99,53 @@ fn main() {
         return;
     }
 
+    // std-port 3.3: the lock stack over `sys::futex`. Two threads alternate turns
+    // incrementing a shared counter, each guarding it with a `Mutex` and blocking on
+    // a `Condvar` until its parity comes up — real cross-thread `futex_wait`/
+    // `futex_wake` (the *blocking* path, not just the uncontended CAS fast path). If
+    // the futex backend lost a wakeup, a thread would park forever and the join would
+    // hang; a wrong count would mean lost/duplicated critical sections. This is the
+    // on-target witness for the whole Mutex/Condvar stack the Loom/Shuttle models
+    // certify in the abstract.
+    if args.get(1).map(String::as_str) == Some("sync") {
+        use std::sync::{Arc, Condvar, Mutex};
+        use std::thread;
+        println!("[stdsmoke] sync start");
+        const ROUNDS: u64 = 50;
+        // (counter, condvar): thread `me` acts only when `counter % 2 == me`, so the
+        // two strictly alternate and each performs exactly ROUNDS increments.
+        let shared = Arc::new((Mutex::new(0u64), Condvar::new()));
+        let handles: Vec<thread::JoinHandle<()>> = (0..2u64)
+            .map(|me| {
+                let shared = Arc::clone(&shared);
+                thread::spawn(move || {
+                    let (lock, cv) = &*shared;
+                    for _ in 0..ROUNDS {
+                        let mut counter = lock.lock().unwrap();
+                        // Not my turn → block on the condvar (releases the mutex).
+                        while *counter % 2 != me {
+                            counter = cv.wait(counter).unwrap();
+                        }
+                        *counter += 1;
+                        cv.notify_all();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("sync thread join failed");
+        }
+        let total = *shared.0.lock().unwrap();
+        let expected = 2 * ROUNDS;
+        if total != expected {
+            println!("[stdsmoke] sync-bad total={total} expected={expected}");
+            std::process::exit(7);
+        }
+        println!("[stdsmoke] sync done total={total}");
+        println!("STD33 PASS");
+        return;
+    }
+
     // alloc (2.2): Vec growth + Box, with a checked value the harness asserts.
     let v: Vec<u64> = (1..=100).collect();
     let sum: u64 = v.iter().sum();

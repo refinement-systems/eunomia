@@ -22,9 +22,9 @@
 #                                         verusfmt wrongly indents the plain-Rust
 #                                         comments BETWEEN the blocks.
 #   eunomia-sys/src/bootstrap.rs,         files with NO `verus!{}` macro block —
-#   eunomia-sys/src/io_error.rs           they only name the token in a doc
-#                                         comment, but `git grep -l 'verus!'`
-#                                         still selects them, and verusfmt then
+#   eunomia-sys/src/io_error.rs,          they only name the token in a doc
+#   eunomia-sys/src/tls.rs,               comment, but `git grep -l 'verus!'`
+#   urt/src/thread.rs                     still selects them, and verusfmt then
 #                                         reformats their plain-Rust layout
 #                                         (e.g. dropping the blank line after the
 #                                         module doc) against `cargo fmt`.
@@ -39,7 +39,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # Files verusfmt cannot format correctly (see header).
-SKIP="cas/src/disk.rs cas/src/prolly.rs cas/src/store.rs kcore/src/aspace.rs eunomia-sys/src/bootstrap.rs eunomia-sys/src/io_error.rs"
+SKIP="cas/src/disk.rs cas/src/prolly.rs cas/src/store.rs kcore/src/aspace.rs eunomia-sys/src/bootstrap.rs eunomia-sys/src/io_error.rs eunomia-sys/src/tls.rs urt/src/thread.rs"
 
 is_skipped() {
 	case " $SKIP " in
