@@ -9,8 +9,14 @@ use proptest::prelude::*;
 
 /// The obvious reference resolver, owning its components (differential oracle):
 /// split on `/`; drop empty and `.`; pop on `..`, denying at depth 0; reject a
-/// NUL / > 255-byte component; reject past `MAX_COMPONENTS`.
-fn reference(buf: &[u8]) -> Option<Vec<Vec<u8>>> {
+/// NUL / > 255-byte component; reject past `MAX_COMPONENTS`. On refusal it returns
+/// the reject **tag** — `ESCAPE` for a depth-0 `..`, `MALFORMED` otherwise —
+/// mirroring `path::RejectReason` so the differential also pins the std-port 4.3
+/// escape/malformed split, not just the accept/reject verdict.
+const ESCAPE: u8 = 1;
+const MALFORMED: u8 = 2;
+
+fn reference(buf: &[u8]) -> Result<Vec<Vec<u8>>, u8> {
     let mut out: Vec<Vec<u8>> = Vec::new();
     for comp in buf.split(|&b| b == b'/') {
         if comp.is_empty() {
@@ -21,25 +27,34 @@ fn reference(buf: &[u8]) -> Option<Vec<Vec<u8>>> {
         }
         if comp.len() == 2 && comp[0] == b'.' && comp[1] == b'.' {
             if out.is_empty() {
-                return None;
+                return Err(ESCAPE);
             }
             out.pop();
             continue;
         }
         if comp.len() > 255 || comp.iter().any(|&b| b == 0 || b == b'/') {
-            return None;
+            return Err(MALFORMED);
         }
         if out.len() >= path::MAX_COMPONENTS {
-            return None;
+            return Err(MALFORMED);
         }
         out.push(comp.to_vec());
     }
-    Some(out)
+    Ok(out)
+}
+
+/// `resolve` projected to the same shape as [`reference`]: owned components on
+/// success, or the matching reject tag.
+fn resolve_full(input: &[u8]) -> Result<Vec<Vec<u8>>, u8> {
+    match path::resolve(input) {
+        Ok(r) => Ok((0..r.n).map(|j| r.comps[j].to_vec()).collect()),
+        Err(path::RejectReason::Escape) => Err(ESCAPE),
+        Err(path::RejectReason::Malformed) => Err(MALFORMED),
+    }
 }
 
 fn resolve_vec(input: &[u8]) -> Option<Vec<Vec<u8>>> {
-    let r = path::resolve(input)?;
-    Some((0..r.n).map(|j| r.comps[j].to_vec()).collect())
+    resolve_full(input).ok()
 }
 
 /// Join components with `/` — the presentation direction (std owns real display;
@@ -57,7 +72,8 @@ fn join(comps: &[Vec<u8>]) -> Vec<u8> {
 
 proptest! {
     /// Over a dense path alphabet (`/ . a b` + NUL), `resolve` agrees with the
-    /// reference on both the accept/reject verdict and the resolved components.
+    /// reference on the accept/reject verdict, the resolved components, *and* the
+    /// reject reason (escape vs malformed) — the whole `Result` matches.
     #[test]
     fn matches_reference_structured(
         bytes in prop::collection::vec(
@@ -65,13 +81,13 @@ proptest! {
             0..48usize,
         )
     ) {
-        prop_assert_eq!(resolve_vec(&bytes), reference(&bytes));
+        prop_assert_eq!(resolve_full(&bytes), reference(&bytes));
     }
 
     /// The same agreement over fully arbitrary bytes.
     #[test]
     fn matches_reference_arbitrary(bytes in prop::collection::vec(any::<u8>(), 0..64usize)) {
-        prop_assert_eq!(resolve_vec(&bytes), reference(&bytes));
+        prop_assert_eq!(resolve_full(&bytes), reference(&bytes));
     }
 
     /// Every accepted component is a storable name with no surviving `.`/`..`, and

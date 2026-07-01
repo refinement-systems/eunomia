@@ -25,7 +25,7 @@ fn corpus_files(target: &str) -> Vec<Vec<u8>> {
 #[test]
 fn path() {
     for data in corpus_files("path") {
-        let Some(r) = path::resolve(&data) else {
+        let Ok(r) = path::resolve(&data) else {
             continue;
         };
         assert!(r.n <= path::MAX_COMPONENTS);

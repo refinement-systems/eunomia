@@ -256,6 +256,15 @@ pub extern "Rust" fn __eunomia_fs_stat(path: &[u8]) -> i64 {
     fs::stat(path)
 }
 
+/// Directory-aware metadata (kind + size) for the `sys/fs` `stat`/`lstat`/`file_attr`
+/// arm (std-port 4.3): [`fs::Meta`] `{ code, size, is_dir }`, `#[repr(C)]` so it crosses
+/// the seam with a fixed layout the std side mirrors. All probe logic (Stat then List)
+/// lives in `crate::fs`; this arm only forwards.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_fs_metadata(path: &[u8]) -> fs::Meta {
+    fs::metadata(path)
+}
+
 /// Rename `from` to `to`. `0` or a negative fs code.
 #[unsafe(no_mangle)]
 pub extern "Rust" fn __eunomia_fs_rename(from: &[u8], to: &[u8]) -> i64 {

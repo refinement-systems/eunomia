@@ -5,8 +5,9 @@
 //! accepted component is well-formed (1..=255 bytes, no NUL, no `/`, and not
 //! `.`/`..` — so no `..` ever survives into the output, the confinement fact) and
 //! lies inside the input; the depth is within `MAX_COMPONENTS`; and — the semantic
-//! oracle Verus's totality theorem cannot state — the accepted/rejected verdict
-//! and the resolved components match a straightforward reference resolver.
+//! oracle Verus's totality theorem cannot state — the accepted/rejected verdict,
+//! the resolved components, *and* the reject reason (escape vs malformed, std-port
+//! 4.3) match a straightforward reference resolver.
 //!
 //! Run: `cargo +nightly fuzz run path`.
 use libfuzzer_sys::fuzz_target;
@@ -16,8 +17,13 @@ use eunomia_sys::path;
 /// A plain, obvious reference resolver, the differential oracle for
 /// [`path::resolve`]: split on `/`; drop empty and `.`; pop on `..`, denying at
 /// depth 0 (escape); reject a component with NUL or > 255 bytes; reject past
-/// `MAX_COMPONENTS`. Returns the borrowed component list, or `None` on rejection.
-fn reference(buf: &[u8]) -> Option<Vec<&[u8]>> {
+/// `MAX_COMPONENTS`. Returns the borrowed component list, or the reject **tag** —
+/// `ESCAPE` for a depth-0 `..`, `MALFORMED` otherwise — mirroring
+/// `path::RejectReason` (std-port 4.3).
+const ESCAPE: u8 = 1;
+const MALFORMED: u8 = 2;
+
+fn reference(buf: &[u8]) -> Result<Vec<&[u8]>, u8> {
     let mut out: Vec<&[u8]> = Vec::new();
     for comp in buf.split(|&b| b == b'/') {
         if comp.is_empty() {
@@ -28,32 +34,41 @@ fn reference(buf: &[u8]) -> Option<Vec<&[u8]>> {
         }
         if comp.len() == 2 && comp[0] == b'.' && comp[1] == b'.' {
             if out.is_empty() {
-                return None;
+                return Err(ESCAPE);
             }
             out.pop();
             continue;
         }
         if comp.len() > 255 || comp.iter().any(|&b| b == 0 || b == b'/') {
-            return None;
+            return Err(MALFORMED);
         }
         if out.len() >= path::MAX_COMPONENTS {
-            return None;
+            return Err(MALFORMED);
         }
         out.push(comp);
     }
-    Some(out)
+    Ok(out)
+}
+
+fn reject_tag(reason: path::RejectReason) -> u8 {
+    match reason {
+        path::RejectReason::Escape => ESCAPE,
+        path::RejectReason::Malformed => MALFORMED,
+    }
 }
 
 fuzz_target!(|data: &[u8]| {
     let reference = reference(data);
     match path::resolve(data) {
-        None => {
-            assert!(
-                reference.is_none(),
-                "resolve rejected a path the reference accepted",
+        Err(reason) => {
+            assert_eq!(
+                Err(reject_tag(reason)),
+                reference,
+                "resolve's reject reason disagrees with the reference (or it rejected \
+                 a path the reference accepted)",
             );
         }
-        Some(r) => {
+        Ok(r) => {
             let ref_ok = reference.expect("resolve accepted a path the reference rejected");
             assert_eq!(r.n, ref_ok.len(), "component count differs from reference");
             assert!(r.n <= path::MAX_COMPONENTS, "depth over the cap");

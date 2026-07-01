@@ -7,8 +7,18 @@ use eunomia_sys::path;
 
 /// Collect a successful resolution into owned components, or `None` if refused.
 fn resolve_vec(input: &[u8]) -> Option<Vec<Vec<u8>>> {
-    let r = path::resolve(input)?;
+    let r = path::resolve(input).ok()?;
     Some((0..r.n).map(|j| r.comps[j].to_vec()).collect())
+}
+
+/// `true` iff `input` is refused as a confinement **escape** (std-port 4.3).
+fn is_escape(input: &[u8]) -> bool {
+    matches!(path::resolve(input), Err(path::RejectReason::Escape))
+}
+
+/// `true` iff `input` is refused as a **malformed** / too-deep path (std-port 4.3).
+fn is_malformed(input: &[u8]) -> bool {
+    matches!(path::resolve(input), Err(path::RejectReason::Malformed))
 }
 
 /// Owned component list from string literals, for terse expectations.
@@ -17,15 +27,16 @@ fn comps(parts: &[&[u8]]) -> Vec<Vec<u8>> {
 }
 
 /// A `..` that would pop above the process root handle names something
-/// unreachable (rev2§2.3 confinement) — denied with `None`, never clamped to root
-/// and never sent to storaged.
+/// unreachable (rev2§2.3 confinement) — denied as an **escape** (std-port 4.3:
+/// `RejectReason::Escape` → `ERR_FS_DENIED`), never clamped to root and never sent
+/// to storaged.
 #[test]
 fn dotdot_escaping_root_is_denied() {
-    assert_eq!(resolve_vec(b".."), None);
-    assert_eq!(resolve_vec(b"../x"), None);
-    assert_eq!(resolve_vec(b"a/../../x"), None); // pop `a`, then escape
-    assert_eq!(resolve_vec(b"/../x"), None);
-    assert_eq!(resolve_vec(b"a/b/../../.."), None);
+    assert!(is_escape(b".."));
+    assert!(is_escape(b"../x"));
+    assert!(is_escape(b"a/../../x")); // pop `a`, then escape
+    assert!(is_escape(b"/../x"));
+    assert!(is_escape(b"a/b/../../.."));
 }
 
 /// rev2§4.9: `.`/`..` are path syntax resolved by the walk, never stored/sent.
@@ -54,12 +65,13 @@ fn empty_components_collapsed() {
 }
 
 /// A NUL byte or a > 255-byte component is not a storable name
-/// (`cas::prolly::validate_name`); refused client-side rather than round-tripped
-/// into a server `BadPath`.
+/// (`cas::prolly::validate_name`); refused client-side as **malformed** (std-port
+/// 4.3: `RejectReason::Malformed` → `ERR_FS_BAD_PATH`, distinct from an escape)
+/// rather than round-tripped into a server `BadPath`.
 #[test]
 fn malformed_components_refused() {
-    assert_eq!(resolve_vec(b"a\0b"), None);
-    assert_eq!(resolve_vec(&vec![b'a'; 256]), None);
+    assert!(is_malformed(b"a\0b"));
+    assert!(is_malformed(&vec![b'a'; 256]));
     // Exactly 255 bytes is the largest valid name.
     let max = vec![b'a'; 255];
     assert_eq!(resolve_vec(&max), Some(vec![max.clone()]));
@@ -81,7 +93,8 @@ fn depth_cap_enforced() {
         .collect::<Vec<_>>()
         .join("/")
         .into_bytes();
-    assert_eq!(resolve_vec(&too_deep), None);
+    // Over-deep is a malformed refusal (std-port 4.3), not an escape.
+    assert!(is_malformed(&too_deep));
     // Churn far past the cap via `..` re-pushes stays within it (depth ≤ 1).
     let churn = (0..1000)
         .map(|_| "a/..")
