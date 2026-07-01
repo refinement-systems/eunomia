@@ -121,6 +121,17 @@ wait_for '\[stdsmoke\] hashmap start' 30
 wait_for '\[stdsmoke\] hashmap done entries=1000' 30
 wait_for 'STD34 PASS' 30
 
+# 2d. Real thread_local! storage + destructors (std-port 3.5): a spawned thread
+#     touches a Drop-sentinel thread_local! and a per-thread Cell, then exits. Its
+#     destructor must run on the spawned thread's exit (drops>0), and the Cell must
+#     be genuinely per-thread (child sees 7, main sees 0) — the old single-threaded
+#     no_threads storage got both wrong. A regression exits(11) (tls-bad). STD35 PASS
+#     witnesses the verified urt::tls key table + the trampoline dtor runner.
+printf 'run bin/stdsmoke tls\r' >&3
+wait_for '\[stdsmoke\] tls start' 30
+wait_for '\[stdsmoke\] tls done drops=' 30
+wait_for 'STD35 PASS' 30
+
 # 3. The std-owned panic path: the parent must read 'panicked' (STATUS_PANIC),
 #    not exited(_). std's own panic hook prints 'panicked at …' first.
 printf 'run bin/stdsmoke panic\r' >&3
@@ -176,6 +187,17 @@ if grep -q 'no entropy seed attached' "$LOG"; then
     echo "STD SMOKE TEST FAIL: a child ran without an entropy seed grant (NAME_RANDOM_SEED missing)" >&2
     fail=1
 fi
+# The TLS marker (std-port 3.5): a spawned thread's thread_local! destructor ran on
+# exit and the macro storage was genuinely per-thread. Its absence means the key
+# table / dtor runner failed; a per-thread-storage or missed-destructor bug exits(11).
+if ! grep -q 'STD35 PASS' "$LOG"; then
+    echo "STD SMOKE TEST FAIL: never reached STD35 PASS (thread_local! storage/destructors failed)" >&2
+    fail=1
+fi
+if grep -q '\[stdsmoke\] tls-bad' "$LOG"; then
+    echo "STD SMOKE TEST FAIL: thread_local! wrong — destructor missed or storage not per-thread" >&2
+    fail=1
+fi
 # env::args delivered the command line (2.1).
 if ! grep -q '\[stdsmoke\] argv=.*alpha.*beta' "$LOG"; then
     echo "STD SMOKE TEST FAIL: argv not delivered to the std binary (env::args)" >&2
@@ -219,6 +241,7 @@ echo "  STD2 PASS — println!/format!/Vec/Box/String/Instant/SystemTime live at
 echo "  STD32 PASS — two std threads spawned/joined, concurrent heap alloc under the lock, per-thread TLS"
 echo "  STD33 PASS — two std threads ping-ponged under a Mutex + Condvar over sys::futex"
 echo "  STD34 PASS — HashMap over the per-process entropy seed (seed-grant → DRBG → SipHash)"
+echo "  STD35 PASS — thread_local! per-thread storage + destructor ran on spawned-thread exit"
 echo "  env::args delivered the command line (alpha beta)"
 echo "  SystemTime read its granted time page; Instant monotonic"
 echo "  std panic reaped as STATUS_PANIC (parent read 'panicked'), not exited/faulted"

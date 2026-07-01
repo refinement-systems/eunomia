@@ -73,6 +73,15 @@ pub mod lock;
 #[cfg(not(any(loom, shuttle)))]
 pub mod random;
 pub mod slots;
+// The verified thread-local key table (std-port 3.5): a `KeyTable` over the
+// verified `slots::SlotAlloc`, plus a plain per-key destructor registry guarded by
+// the Loom-certified `lock::SpinLock`. Gated off the loom/shuttle model builds for
+// the same reason as `random` — it holds a process-global `static` over the *const*
+// `SpinLock::new()` those builds drop, and reuses the already-modeled lock rather
+// than adding its own interleaving model. Present for the target, plain `cargo
+// test`, Miri, and verus.
+#[cfg(not(any(loom, shuttle)))]
+pub mod tls;
 // Pure thread-stack geometry (host-tested); `thread` (bare-metal) drives it.
 pub mod thread_layout;
 pub mod time;
