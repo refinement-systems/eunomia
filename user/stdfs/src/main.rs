@@ -1,9 +1,12 @@
-//! The std-port Phase-4.1 fs GATE fixture (findings #13): the first std binary to
-//! drive the real `sys/fs/eunomia` client against storaged. It exercises the whole
+//! The std-port fs GATE fixture (findings #13, extended by #15): the first std binary
+//! to drive the real `sys/fs/eunomia` client against storaged. It exercises the whole
 //! file surface the gate names — create/write, read-back, `read_dir`, `rename`,
-//! `remove_file`, and `sync_all` — over the storaged session the shell delegated to
-//! it (a fresh session storaged multiplexes, negotiated by the client-side connect
-//! handshake at bootstrap), then prints the green marker `STD4 PASS`.
+//! `remove_file`, and `sync_all` — plus the std-port 4.3 additions: directory/file
+//! `metadata` (`is_dir`/`is_file`/`len`) and the errno split (a confinement escape →
+//! `PermissionDenied`, a malformed name → `InvalidFilename`) — over the storaged
+//! session the shell delegated to it (a fresh session storaged multiplexes, negotiated
+//! by the client-side connect handshake at bootstrap), then prints the green marker
+//! `STD4 PASS`.
 //!
 //! It is a real std program — no `#![no_std]`, no `#[panic_handler]`. std owns
 //! `_start` (the eunomia PAL) and the panic handler; `extern crate eunomia_sys;`
@@ -14,7 +17,7 @@
 extern crate eunomia_sys; // links the PAL↔seam bridge (incl. the fs client)
 
 use std::fs;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 
 fn main() {
     println!("[stdfs] alive");
@@ -52,11 +55,25 @@ fn main() {
             std::process::exit(7);
         }
     }
-    if fs::read("../escape").is_ok() {
-        println!("[stdfs] fs-bad escaping `..` accepted");
-        std::process::exit(8);
+    // A `..` escaping the root handle is a rev2§2.3 confinement violation, so the
+    // std-port 4.3 errno split surfaces it as `PermissionDenied` (distinct from a
+    // malformed name, below), never a wire round-trip.
+    match fs::read("../escape") {
+        Err(e) if e.kind() == ErrorKind::PermissionDenied => {}
+        other => {
+            println!("[stdfs] fs-bad escape kind {other:?}");
+            std::process::exit(8);
+        }
     }
-    println!("[stdfs] dotdot resolves + escape refused");
+    // A NUL in a component is unnameable but not an escape → `InvalidFilename`.
+    match fs::read("a\0b") {
+        Err(e) if e.kind() == ErrorKind::InvalidFilename => {}
+        other => {
+            println!("[stdfs] fs-bad malformed kind {other:?}");
+            std::process::exit(9);
+        }
+    }
+    println!("[stdfs] dotdot resolves; escape->denied, malformed->invalid");
 
     // 3. read_dir the parent and confirm the entry is listed (the `List` path).
     let mut found = false;
@@ -71,6 +88,31 @@ fn main() {
         std::process::exit(3);
     }
     println!("[stdfs] readdir found smoke");
+
+    // 3b. metadata (std-port 4.3): `docs/smoke` is a file of the written length;
+    //     `docs` is a directory. The directory type comes from the seam's Stat->List
+    //     probe (a directory has no file content, so `Stat` reports it absent and
+    //     `List` confirms the directory, rev2§4.9).
+    let fm = fs::metadata(path).expect("metadata docs/smoke");
+    if !fm.is_file() || fm.is_dir() || fm.len() != content.len() as u64 {
+        println!(
+            "[stdfs] fs-bad file metadata is_file={} is_dir={} len={}",
+            fm.is_file(),
+            fm.is_dir(),
+            fm.len()
+        );
+        std::process::exit(10);
+    }
+    let dm = fs::metadata("docs").expect("metadata docs");
+    if !dm.is_dir() || dm.is_file() {
+        println!(
+            "[stdfs] fs-bad dir metadata is_dir={} is_file={}",
+            dm.is_dir(),
+            dm.is_file()
+        );
+        std::process::exit(11);
+    }
+    println!("[stdfs] metadata ok");
 
     // 4. rename: the old name resolves away, the new one carries the content.
     fs::rename(path, renamed).expect("rename");

@@ -7,7 +7,9 @@
 //! (`cas::prolly::validate_name`). The client must therefore resolve them before
 //! it sends: drop `.`, pop on `..`. rev2§2.3's subtree cap ("confinement by
 //! unreachability") makes a `..` that would pop above the process root handle
-//! *unnameable*, so it is **denied** (not clamped): [`resolve`] returns `None`.
+//! *unnameable*, so it is **denied** (not clamped): [`resolve`] returns
+//! `Err(RejectReason::Escape)`, distinct from `Err(RejectReason::Malformed)` for a
+//! badly-formed component (std-port 4.3).
 //!
 //! The verified theorem is **totality** — over every `&[u8]`, `resolve` returns
 //! without panicking or reading out of bounds — plus **output well-formedness**:
@@ -48,6 +50,21 @@ pub const DOT: u8 = 0x2E;
 pub struct ResolvedPath<'a> {
     pub comps: [&'a [u8]; MAX_COMPONENTS],
     pub n: usize,
+}
+
+/// Why [`resolve`] refused a path (std-port 4.3). The distinction is carried so the
+/// fs client can give a confinement escape a different errno from a malformed name:
+/// a `..` popping above the process root handle is a rev2§2.3 confinement violation
+/// (denied — `PermissionDenied`), whereas a NUL / over-long / too-deep component is
+/// merely unnameable (`InvalidFilename`). The reject *reason* is not a verified
+/// property — [`resolve`]'s theorem constrains only the accepted (`Ok`) path; which
+/// bucket a rejection lands in is checked by the fuzz differential.
+pub enum RejectReason {
+    /// A `..` that would name above the process root handle (rev2§2.3).
+    Escape,
+    /// A malformed component (NUL, `/`, empty, or > 255 bytes) or a path deeper
+    /// than [`MAX_COMPONENTS`].
+    Malformed,
 }
 
 /// `sub` is a contiguous subrange of `buf` — the provenance fact for a borrowed
@@ -152,12 +169,13 @@ fn component_ok(c: &[u8]) -> (r: bool)
 /// `&[u8]`, `resolve` returns without panicking or reading out of bounds, and
 /// every accepted path is [`well_formed_resolved`]. Empty components
 /// (leading/trailing `/`, `//`) and `.` are dropped; `..` pops the previous
-/// component; a `..` at depth 0 (which would escape the process root handle) is
-/// **denied** with `None`, as are a malformed component (NUL or > 255 bytes) and
-/// a path deeper than [`MAX_COMPONENTS`].
-pub fn resolve(buf: &[u8]) -> (r: Option<ResolvedPath<'_>>)
+/// component. A `..` at depth 0 (which would escape the process root handle) is
+/// **denied** with `Err(RejectReason::Escape)`; a malformed component (NUL or
+/// > 255 bytes) or a path deeper than [`MAX_COMPONENTS`] is
+/// `Err(RejectReason::Malformed)` (std-port 4.3).
+pub fn resolve(buf: &[u8]) -> (r: Result<ResolvedPath<'_>, RejectReason>)
     ensures
-        r matches Some(p) ==> well_formed_resolved(p, buf@),
+        r matches Ok(p) ==> well_formed_resolved(p, buf@),
 {
     broadcast use vstd::slice::group_slice_axioms;
 
@@ -182,17 +200,17 @@ pub fn resolve(buf: &[u8]) -> (r: Option<ResolvedPath<'_>>)
             // `.` — the current directory: drop.
         } else if comp.len() == 2 && comp[0] == DOT && comp[1] == DOT {
             // `..` — the parent. Popping at depth 0 would name above the root
-            // handle: unnameable (rev2§2.3), so denied.
+            // handle: unnameable (rev2§2.3), so denied (a confinement escape).
             if k == 0 {
-                return None;
+                return Err(RejectReason::Escape);
             }
             k = k - 1;
         } else {
             if !component_ok(comp) {
-                return None;
+                return Err(RejectReason::Malformed);
             }
             if k >= MAX_COMPONENTS {
-                return None;
+                return Err(RejectReason::Malformed);
             }
             assert(subseq_of(comp@, buf@)) by {
                 assert(comp@ == buf@.subrange(start as int, sep as int));
@@ -224,7 +242,7 @@ pub fn resolve(buf: &[u8]) -> (r: Option<ResolvedPath<'_>>)
             k = k + 1;
         }
         if sep >= buf.len() {
-            return Some(ResolvedPath { comps, n: k });
+            return Ok(ResolvedPath { comps, n: k });
         }
         start = sep + 1;
     }

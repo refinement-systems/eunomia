@@ -1,17 +1,19 @@
 #!/bin/bash
-# QEMU boot test — the std-port Phase-4.1 fs GATE (findings #13). It boots the
-# full stack (mkfs image → virtio-blk → storaged → mount → console → shell) and
+# QEMU boot test — the std-port fs GATE (findings #13, extended by #15). It boots
+# the full stack (mkfs image → virtio-blk → storaged → mount → console → shell) and
 # drives the shell through the std fs client `user/stdfs`, asserting the whole
 # `sys/fs/eunomia` surface works at EL0 against storaged:
 #
 #   run bin/stdfs → the fs run. Each `[stdfs]` line is one op: `alive` (stdio),
 #     `wrote N bytes` (File::create + write_all + sync_all → Write/Sync),
-#     `read back ok` (fs::read → chunked Read), `dotdot resolves + escape refused`
-#     (the verified `eunomia_sys::path::resolve`, std-port 4.2: `.`/`..` resolved
-#     client-side, an escaping `..` denied), `readdir found smoke` (read_dir →
-#     List), `renamed ok` (fs::rename → Rename), `removed ok` (remove_file →
-#     Unlink). It ends with the green marker `STD4 PASS` and the shell reaps it as
-#     `exited(0)`.
+#     `read back ok` (fs::read → chunked Read), `dotdot resolves; escape->denied,
+#     malformed->invalid` (the verified `eunomia_sys::path::resolve`, std-port 4.2/4.3:
+#     `.`/`..` resolved client-side, an escaping `..` → `PermissionDenied`, a NUL name
+#     → `InvalidFilename`), `readdir found smoke` (read_dir → List), `metadata ok`
+#     (fs::metadata dir/file kind + len → the Stat→List kind probe, std-port 4.3),
+#     `renamed ok` (fs::rename → Rename), `removed ok` (remove_file → Unlink). It ends
+#     with the green marker `STD4 PASS` and the shell reaps it as `exited(0)`.
+#     marker `STD4 PASS` and the shell reaps it as `exited(0)`.
 #
 # The live witness for the *client-side connect handshake* + storaged's second
 # session (multiplexed) is `[storaged] fs session negotiated wire version 2`,
@@ -87,8 +89,9 @@ wait_for '\[stdfs\] alive' 60
 wait_for '\[storaged\] fs session negotiated wire version 2' 30
 wait_for '\[stdfs\] wrote .* bytes' 30
 wait_for '\[stdfs\] read back ok' 30
-wait_for '\[stdfs\] dotdot resolves + escape refused' 30
+wait_for '\[stdfs\] dotdot resolves' 30
 wait_for '\[stdfs\] readdir found smoke' 30
+wait_for '\[stdfs\] metadata ok' 30
 wait_for '\[stdfs\] renamed ok' 30
 wait_for '\[stdfs\] removed ok' 30
 wait_for 'STD4 PASS' 30

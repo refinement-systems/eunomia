@@ -136,19 +136,25 @@ fn status(r: Result<Response, i64>) -> i64 {
 }
 
 /// Resolve a raw path into storage tree components (`TreePath = Vec<Vec<u8>>`,
-/// rev2§4.9), or `None` if it is unnameable — a `..` escaping the process root
-/// handle (rev2§2.3 confinement), a malformed component (NUL / > 255 bytes), or a
-/// path deeper than [`crate::path::MAX_COMPONENTS`]. The `.`/`..` resolution and the
-/// confinement check are the **verified** [`crate::path::resolve`] (total ∀ bytes);
+/// rev2§4.9), or a negative fs code if it is unnameable. The `.`/`..` resolution and
+/// the confinement check are the **verified** [`crate::path::resolve`] (total ∀ bytes);
 /// this only copies its borrowed components into owned `Vec`s over the global
-/// allocator (the `alloc` step the no-alloc verified core leaves to the caller).
-fn resolve_path(path: &[u8]) -> Option<Vec<Vec<u8>>> {
-    let r = crate::path::resolve(path)?;
+/// allocator (the `alloc` step the no-alloc verified core leaves to the caller) and
+/// translates the reject reason into an errno: a confinement **escape** (a `..` above
+/// the process root handle, rev2§2.3 "unnameable → denied") is [`ERR_FS_DENIED`]
+/// (`PermissionDenied`); a **malformed** component (NUL / > 255 bytes / too deep) is
+/// [`ERR_FS_BAD_PATH`] (`InvalidFilename`) — the std-port 4.3 split.
+fn resolve_path(path: &[u8]) -> Result<Vec<Vec<u8>>, i64> {
+    let r = match crate::path::resolve(path) {
+        Ok(r) => r,
+        Err(crate::path::RejectReason::Escape) => return Err(ERR_FS_DENIED),
+        Err(crate::path::RejectReason::Malformed) => return Err(ERR_FS_BAD_PATH),
+    };
     let mut out = Vec::with_capacity(r.n);
     for j in 0..r.n {
         out.push(r.comps[j].to_vec());
     }
-    Some(out)
+    Ok(out)
 }
 
 // Every storaged message is ≤ 256 bytes (rev2§3.1). A read requests a data chunk that
@@ -165,8 +171,9 @@ pub fn read(path: &[u8], offset: u64, buf: &mut [u8]) -> i64 {
         return 0;
     }
     let handle = ROOT_HANDLE.load(Ordering::Relaxed);
-    let Some(components) = resolve_path(path) else {
-        return ERR_FS_BAD_PATH;
+    let components = match resolve_path(path) {
+        Ok(c) => c,
+        Err(code) => return code,
     };
     let want = buf.len().min(READ_CHUNK) as u32;
     let req = Request::Read {
@@ -193,8 +200,9 @@ pub fn read(path: &[u8], offset: u64, buf: &mut [u8]) -> i64 {
 /// bytes written (`== data.len()` on success) or a negative fs code.
 pub fn write(path: &[u8], offset: u64, data: &[u8]) -> i64 {
     let handle = ROOT_HANDLE.load(Ordering::Relaxed);
-    let Some(components) = resolve_path(path) else {
-        return ERR_FS_BAD_PATH;
+    let components = match resolve_path(path) {
+        Ok(c) => c,
+        Err(code) => return code,
     };
     let mut written = 0usize;
     while written < data.len() {
@@ -217,13 +225,15 @@ pub fn write(path: &[u8], offset: u64, data: &[u8]) -> i64 {
 }
 
 /// The size of the file at `path` (`Stat`), or a negative fs code — [`ERR_FS_NOT_FOUND`]
-/// if absent. Used by `File::open` (existence) and `File::seek(End)`/`metadata` (size).
-/// `Stat` reads the file content length, so it answers for files; a directory's type is
-/// read from `readdir` instead (4.3 gives directories a fuller `metadata`).
+/// if absent. Used by `File::open` (existence) and `File::seek(End)` (size); `Stat`
+/// reads the file content length, so it answers for files only. Directory-aware
+/// metadata (kind + size) is [`metadata`], which probes `List` when `Stat` reports no
+/// file content.
 pub fn stat(path: &[u8]) -> i64 {
     let handle = ROOT_HANDLE.load(Ordering::Relaxed);
-    let Some(components) = resolve_path(path) else {
-        return ERR_FS_BAD_PATH;
+    let components = match resolve_path(path) {
+        Ok(c) => c,
+        Err(code) => return code,
     };
     let req = Request::Stat {
         handle,
@@ -238,11 +248,92 @@ pub fn stat(path: &[u8]) -> i64 {
     }
 }
 
+/// Resolved file metadata for the std `sys/fs::stat`/`lstat`/`file_attr` arm
+/// (std-port 4.3): the entry kind + size. `code == 0` on success (and `size`/`is_dir`
+/// are meaningful); otherwise `code` is a negative fs code and `size`/`is_dir` are
+/// zeroed. `#[repr(C)]` so it crosses the `extern "Rust"` seam to the std arm with a
+/// fixed layout the std side mirrors (the `Vec<u8>`/slice seam posture, made explicit).
+#[repr(C)]
+pub struct Meta {
+    pub code: i64,
+    pub size: u64,
+    pub is_dir: bool,
+}
+
+impl Meta {
+    fn err(code: i64) -> Meta {
+        Meta {
+            code,
+            size: 0,
+            is_dir: false,
+        }
+    }
+}
+
+/// Resolve the kind + size of the entry at `path` by probing storaged. `Stat` answers
+/// for a **file** with its content length; a **directory** is not a file, so storaged
+/// answers its `Stat` with `Err(BadPath)`/`Err(NotADir)` (the store's `NotAFile`), and
+/// a `List` probe then confirms the directory (rev2§4.9: a path is a file or a
+/// directory, never both). A genuinely **absent** path answers `Stat` with `NotFound`
+/// (the store read returns nothing) — no probe, so it keeps the clean `NotFound` errno.
+/// Any other server `Err` is surfaced as-is. **Disclosed limit:** a directory whose
+/// listing overflows one 256-byte message probes as [`ERR_FS_INTERNAL`] until the bulk
+/// data plane (the same cap [`readdir`] discloses, rev2§3.1).
+pub fn metadata(path: &[u8]) -> Meta {
+    let handle = ROOT_HANDLE.load(Ordering::Relaxed);
+    let components = match resolve_path(path) {
+        Ok(c) => c,
+        Err(code) => return Meta::err(code),
+    };
+    // A file answers Stat with its content length.
+    match request(&Request::Stat {
+        handle,
+        path: components.clone(),
+    }) {
+        Ok(Response::SnapId(size)) => {
+            return Meta {
+                code: 0,
+                size,
+                is_dir: false,
+            };
+        }
+        // NotFound means the path is genuinely absent (the store read returned
+        // nothing) — a directory is reported "not a file", below, not NotFound.
+        Ok(Response::NotFound) => return Meta::err(ERR_FS_NOT_FOUND),
+        // "Not a file" (the store's `NotAFile` → BadPath, or NotADir): the entry may
+        // be a directory — probe List to confirm and report `is_dir`.
+        Ok(Response::Err(ErrorCode::BadPath | ErrorCode::NotADir)) => {}
+        Ok(Response::Err(e)) => return Meta::err(err_code(e)),
+        Ok(_) => return Meta::err(ERR_FS_INTERNAL),
+        Err(c) => return Meta::err(c),
+    }
+    // Not a file. A directory answers List with a listing.
+    match request(&Request::List {
+        handle,
+        path: components,
+    }) {
+        Ok(Response::Listing(_)) => Meta {
+            code: 0,
+            size: 0,
+            is_dir: true,
+        },
+        Ok(Response::NotFound) => Meta::err(ERR_FS_NOT_FOUND),
+        Ok(Response::Err(e)) => Meta::err(err_code(e)),
+        Ok(_) => Meta::err(ERR_FS_INTERNAL),
+        Err(c) => Meta::err(c),
+    }
+}
+
 /// Rename `from` to `to` within the handle's subtree (`Rename`). `0` or a negative code.
 pub fn rename(from: &[u8], to: &[u8]) -> i64 {
     let handle = ROOT_HANDLE.load(Ordering::Relaxed);
-    let (Some(from), Some(to)) = (resolve_path(from), resolve_path(to)) else {
-        return ERR_FS_BAD_PATH;
+    let from = match resolve_path(from) {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
+    let to = match resolve_path(to) {
+        Ok(c) => c,
+        Err(code) => return code,
     };
     status(request(&Request::Rename { handle, from, to }))
 }
@@ -250,8 +341,9 @@ pub fn rename(from: &[u8], to: &[u8]) -> i64 {
 /// Remove the file at `path` (`Unlink`). `0` or a negative code.
 pub fn unlink(path: &[u8]) -> i64 {
     let handle = ROOT_HANDLE.load(Ordering::Relaxed);
-    let Some(path) = resolve_path(path) else {
-        return ERR_FS_BAD_PATH;
+    let path = match resolve_path(path) {
+        Ok(c) => c,
+        Err(code) => return code,
     };
     status(request(&Request::Unlink { handle, path }))
 }
@@ -277,8 +369,9 @@ const RD_ERR: u8 = 1;
 /// directory listings await the bulk data plane (disclosed, rev2§3.1).
 pub fn readdir(path: &[u8]) -> Vec<u8> {
     let handle = ROOT_HANDLE.load(Ordering::Relaxed);
-    let Some(components) = resolve_path(path) else {
-        return err_buf(ERR_FS_BAD_PATH);
+    let components = match resolve_path(path) {
+        Ok(c) => c,
+        Err(code) => return err_buf(code),
     };
     let req = Request::List {
         handle,

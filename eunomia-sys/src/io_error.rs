@@ -13,8 +13,11 @@
 //! / `NotFound` to one of the [`ERR_FS_NOT_FOUND`]-band raw codes below — a band well
 //! clear of the syscall `ERR_*` block (`-1..-12`) so this one [`classify`] serves both.
 //! std wraps them through `io::Error::from_raw_os_error`, so their kind flows through
-//! the same path as a syscall error. This is a **first-cut** map; the full rev2§4.9
-//! decision table (11 `ErrorCode` variants) is refined in 4.3.
+//! the same path as a syscall error. This is the full rev2§4.9 decision table (all 11
+//! `ErrorCode` variants + the client-only no-session code): each raw code maps to its
+//! nearest std `io::ErrorKind` (std-port 4.3). Two of them — `Stale` and `Pinned` —
+//! have no clean POSIX analog, so their targets ([`Kind::StaleNetworkFileHandle`] and
+//! [`Kind::ResourceBusy`]) are documented nearest-fits, not a verification property.
 
 use crate::syscall::{
     ERR_AGAIN, ERR_ARG, ERR_BADSLOT, ERR_CLOSED, ERR_EMPTY, ERR_FAULT, ERR_FULL, ERR_NOMEM,
@@ -62,6 +65,22 @@ pub enum Kind {
     // path), the most load-bearing fs error kind. Appended so the existing
     // discriminants (ABI to the PAL's `decode_error_kind`) stay put.
     NotFound = 6,
+    // std-port 4.3: the fuller rev2§4.9 fs decision table maps each storaged
+    // `ErrorCode` to its nearest std `io::ErrorKind`. These are appended (7..)
+    // for the same ABI-stability reason; each name matches its `ErrorKind`
+    // target so the PAL `decode_error_kind` lockstep is one-to-one. All six are
+    // *stable* `io::ErrorKind`s (1.83–1.87).
+    NotADirectory = 7,
+    ReadOnlyFilesystem = 8,
+    // `Stale` is a rev2§2.2 handle generation-mismatch (mass-revoke), *not* a
+    // network filesystem — `StaleNetworkFileHandle` (ESTALE) is the nearest std
+    // kind, a documented approximation.
+    StaleNetworkFileHandle = 9,
+    InvalidFilename = 10,
+    NotConnected = 11,
+    // `Pinned` is a rev2§4.7 tag pin refusing a deletion ≈ EBUSY (the resource is
+    // in use); `ResourceBusy` is the nearest std kind, a documented approximation.
+    ResourceBusy = 12,
 }
 
 /// Classify a raw syscall error code. Total: every `i64` yields a [`Kind`], never
@@ -74,16 +93,24 @@ pub fn classify(code: i64) -> Kind {
         ERR_NOMEM | ERR_NOSLOT => Kind::OutOfMemory,
         ERR_CLOSED => Kind::BrokenPipe,
         ERR_BADSLOT | ERR_TYPE | ERR_FAULT | ERR_ARG => Kind::InvalidInput,
-        // ── fs band (std-port 4.1, first cut; 4.3 refines) ──
-        ERR_FS_NOT_FOUND | ERR_FS_BAD_PATH | ERR_FS_NO_SUCH_SNAPSHOT => Kind::NotFound,
-        ERR_FS_DENIED | ERR_FS_READ_ONLY => Kind::PermissionDenied,
-        ERR_FS_BAD_OFFSET => Kind::InvalidInput,
-        // Stale/BadHandle/NotADir have no clean 4.1 analog (Stale especially,
-        // rev2§2.2) → InvalidInput for now; the 4.3 table gives them a home.
-        ERR_FS_STALE | ERR_FS_BAD_HANDLE | ERR_FS_NOT_A_DIR => Kind::InvalidInput,
-        // ERR_STATE has no clean io::ErrorKind analog (rev2§3.7); it, the residual
-        // fs codes (BadTicket/Internal/Pinned/NoSession), and every non-ABI code
-        // fall through to Uncategorized.
+        // ── fs band (std-port 4.3, the full rev2§4.9 decision table) ──
+        ERR_FS_NOT_FOUND | ERR_FS_NO_SUCH_SNAPSHOT => Kind::NotFound,
+        ERR_FS_DENIED => Kind::PermissionDenied,
+        // A malformed/unnameable path component (the dominant `BadPath` case is the
+        // client-side `path::resolve` rejection); a confinement escape is `Denied`
+        // (rev2§2.3), not `BadPath`, so it lands on `PermissionDenied` above.
+        ERR_FS_BAD_PATH => Kind::InvalidFilename,
+        ERR_FS_NOT_A_DIR => Kind::NotADirectory,
+        ERR_FS_READ_ONLY => Kind::ReadOnlyFilesystem,
+        ERR_FS_STALE => Kind::StaleNetworkFileHandle,
+        ERR_FS_PINNED => Kind::ResourceBusy,
+        ERR_FS_NO_SESSION => Kind::NotConnected,
+        // A bad handle id, a bad/expired ticket, and an out-of-range offset are all
+        // "the argument was bad" — `InvalidInput`, no more specific stable kind.
+        ERR_FS_BAD_HANDLE | ERR_FS_BAD_TICKET | ERR_FS_BAD_OFFSET => Kind::InvalidInput,
+        // ERR_STATE (rev2§3.7) and ERR_FS_INTERNAL (a storaged fault / client
+        // transport error) have no user-actionable analog; they and every non-ABI
+        // code fall through to Uncategorized.
         _ => Kind::Uncategorized,
     }
 }
@@ -106,8 +133,8 @@ pub fn message(code: i64) -> &'static str {
         ERR_AGAIN => "resource temporarily unavailable",
         // ── fs band (std-port 4.1) ──
         ERR_FS_NOT_FOUND => "no such file or directory",
-        ERR_FS_BAD_HANDLE => "stale storage handle",
-        ERR_FS_STALE => "storage handle revoked",
+        ERR_FS_BAD_HANDLE => "bad storage handle",
+        ERR_FS_STALE => "storage handle revoked (generation mismatch)",
         ERR_FS_DENIED => "storage access denied",
         ERR_FS_BAD_PATH => "invalid path",
         ERR_FS_NOT_A_DIR => "not a directory",
@@ -143,21 +170,22 @@ mod tests {
         (ERR_AGAIN, Kind::WouldBlock),
     ];
 
-    // The fs band (std-port 4.1): the first-cut storaged `ErrorCode` -> `Kind` map.
+    // The fs band (std-port 4.3): the full rev2§4.9 storaged `ErrorCode` -> `Kind`
+    // decision table — the oracle for the `classify` fs arm above.
     const FS: &[(i64, Kind)] = &[
         (ERR_FS_NOT_FOUND, Kind::NotFound),
-        (ERR_FS_BAD_PATH, Kind::NotFound),
         (ERR_FS_NO_SUCH_SNAPSHOT, Kind::NotFound),
         (ERR_FS_DENIED, Kind::PermissionDenied),
-        (ERR_FS_READ_ONLY, Kind::PermissionDenied),
-        (ERR_FS_BAD_OFFSET, Kind::InvalidInput),
-        (ERR_FS_STALE, Kind::InvalidInput),
+        (ERR_FS_BAD_PATH, Kind::InvalidFilename),
+        (ERR_FS_NOT_A_DIR, Kind::NotADirectory),
+        (ERR_FS_READ_ONLY, Kind::ReadOnlyFilesystem),
+        (ERR_FS_STALE, Kind::StaleNetworkFileHandle),
+        (ERR_FS_PINNED, Kind::ResourceBusy),
+        (ERR_FS_NO_SESSION, Kind::NotConnected),
         (ERR_FS_BAD_HANDLE, Kind::InvalidInput),
-        (ERR_FS_NOT_A_DIR, Kind::InvalidInput),
-        (ERR_FS_BAD_TICKET, Kind::Uncategorized),
+        (ERR_FS_BAD_TICKET, Kind::InvalidInput),
+        (ERR_FS_BAD_OFFSET, Kind::InvalidInput),
         (ERR_FS_INTERNAL, Kind::Uncategorized),
-        (ERR_FS_PINNED, Kind::Uncategorized),
-        (ERR_FS_NO_SESSION, Kind::Uncategorized),
     ];
 
     #[test]
@@ -201,8 +229,13 @@ mod tests {
         }
 
         #[test]
-        fn non_abi_codes_are_uncategorized(code in any::<i64>()) {
+        fn unmapped_codes_are_uncategorized(code in any::<i64>()) {
+            // Every code outside the two mapped bands (syscall `ABI` + the fs `FS`
+            // band) is the total fallback. Both must be excluded: the fs band is
+            // *not* in `ABI` yet is not `Uncategorized`, so excluding `ABI` alone
+            // (the pre-4.3 form) would contradict e.g. `ERR_FS_NOT_FOUND`.
             prop_assume!(!ABI.iter().any(|&(c, _)| c == code));
+            prop_assume!(!FS.iter().any(|&(c, _)| c == code));
             prop_assert_eq!(classify(code), Kind::Uncategorized);
         }
     }
