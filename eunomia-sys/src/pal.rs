@@ -16,7 +16,7 @@
 
 use core::alloc::{GlobalAlloc, Layout};
 
-use crate::{bootstrap, fs, futex, heap, io_error, random, stdio, syscall, thread, tls};
+use crate::{bootstrap, console, fs, futex, heap, io_error, random, stdio, syscall, thread, tls};
 use core::sync::atomic::AtomicU32;
 
 /// The process-global std `System` heap (std-port 2.2): a fixed `.bss` arena over
@@ -187,12 +187,38 @@ pub extern "Rust" fn __eunomia_futex_wake_all(futex: &AtomicU32) {
     futex::wake_all(futex)
 }
 
-/// Write `buf` to the kernel debug-log (rev2§7) for the bring-up `sys/stdio` arm,
-/// split into `DEBUG_WRITE_MAX`-byte `DebugWrite` chunks — the kernel `ERR_FAULT`s a
-/// longer write, so the chunking re-establishes that cap at the seam (std-port 2.3).
+/// Write `buf` to the kernel debug-log (rev2§7): the `sys/stdio` **panic last-words**
+/// path (std-port 2.3/5.1). std-port 5.1 moved ordinary stdout/stderr onto the console
+/// (below); this stays the panic sink so reporting never depends on the console channel
+/// (rev2§7 C-M9). Split into `DEBUG_WRITE_MAX`-byte `DebugWrite` chunks — the kernel
+/// `ERR_FAULT`s a longer write, so the chunking re-establishes that cap at the seam.
 #[unsafe(no_mangle)]
 pub extern "Rust" fn __eunomia_stdio_write(buf: &[u8]) -> usize {
     stdio::write(buf)
+}
+
+/// The `sys/stdio` `Stdout` write body (std-port 5.1): `buf` to the `user/console`
+/// `stdout` channel, else the debug-log fallback. All chunking/backpressure lives in
+/// [`console`]; this shim only delegates.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_stdout_write(buf: &[u8]) -> usize {
+    console::stdout_write(buf)
+}
+
+/// The `sys/stdio` `Stderr` write body (std-port 5.1): `buf` to the `user/console`
+/// `stderr` channel (`NAME_STDERR` → else the `stdout` channel), else the debug-log —
+/// a stream distinct from stdout so diagnostics never enter a pipeline's data.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_stderr_write(buf: &[u8]) -> usize {
+    console::stderr_write(buf)
+}
+
+/// The `sys/stdio` `Stdin` read body (std-port 5.1): block for the next `user/console`
+/// `stdin` message and deliver up to `buf.len()` bytes, or `0` (EOF) when no console
+/// was granted. All blocking/carry logic lives in [`console`]; this shim only delegates.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_stdin_read(buf: &mut [u8]) -> usize {
+    console::stdin_read(buf)
 }
 
 /// Monotonic nanoseconds for the `sys/time` `Instant` arm (std-port 2.4): the

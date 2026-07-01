@@ -12,8 +12,8 @@
 
 pub use loader::startup::{
     decode, Grant, GrantKind, Startup, NAME_DMA, NAME_PL011_MMIO, NAME_RANDOM_SEED, NAME_ROOT,
-    NAME_SELF_ASPACE, NAME_SELF_CSPACE, NAME_STDIN, NAME_STDOUT, NAME_STORAGE, NAME_STRING,
-    NAME_THREAD_SLOT_BASE, NAME_THREAD_UNTYPED, NAME_TIME, NAME_TMP, NAME_VIRTIO_MMIO,
+    NAME_SELF_ASPACE, NAME_SELF_CSPACE, NAME_STDERR, NAME_STDIN, NAME_STDOUT, NAME_STORAGE,
+    NAME_STRING, NAME_THREAD_SLOT_BASE, NAME_THREAD_UNTYPED, NAME_TIME, NAME_TMP, NAME_VIRTIO_MMIO,
 };
 
 /// The cspace slot holding a child's bootstrap channel (rev2§5.1): init installs the
@@ -64,6 +64,14 @@ pub fn stdin_slot(s: &Startup) -> Option<u32> {
 /// `stdout`, so this resolves to the same endpoint as [`stdin_slot`].
 pub fn stdout_slot(s: &Startup) -> Option<u32> {
     cap_slot(s, NAME_STDOUT)
+}
+
+/// `stderr` → the cspace slot of the console-channel endpoint the process writes
+/// diagnostics to (rev2§5.1, std-port 5.1). A stream distinct from `stdout`; an
+/// absent grant is not fatal — the console client falls back to the `stdout`
+/// channel, then to the kernel debug-log (see [`crate::console::attach`]).
+pub fn stderr_slot(s: &Startup) -> Option<u32> {
+    cap_slot(s, NAME_STDERR)
 }
 
 /// `storage` → the cspace slot holding the storage-session channel (rev2§5.1).

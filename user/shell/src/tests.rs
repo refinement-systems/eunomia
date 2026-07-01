@@ -509,8 +509,8 @@ const TEST_SEED: [u64; 4] = [0x00C0_FFEE, 1, 2, 3];
 /// Encode a child block and decode it back, asserting it is well-formed.
 fn child_block(time_va: u64, argv: &[&[u8]]) -> Vec<u8> {
     let mut out = [0u8; startup::MAX_BLOCK];
-    let n =
-        build_child_block(&mut out, time_va, argv, None, None, TEST_SEED).expect("within budget");
+    let n = build_child_block(&mut out, time_va, argv, None, None, None, TEST_SEED)
+        .expect("within budget");
     out[..n].to_vec()
 }
 
@@ -559,6 +559,7 @@ fn build_child_block_emits_thread_grants() {
         &[b"bin/stdsmoke"],
         Some([1, 2, 3, 4]),
         None,
+        None,
         TEST_SEED,
     )
     .expect("within budget");
@@ -588,6 +589,7 @@ fn build_child_block_emits_thread_grants() {
         &[b"bin/selftest"],
         None,
         None,
+        None,
         TEST_SEED,
     )
     .unwrap();
@@ -608,6 +610,7 @@ fn build_child_block_emits_storage_grants() {
         &[b"bin/stdfs"],
         None,
         Some(1),
+        None,
         TEST_SEED,
     )
     .expect("within budget");
@@ -625,6 +628,7 @@ fn build_child_block_emits_storage_grants() {
         &[b"bin/hello"],
         None,
         None,
+        None,
         TEST_SEED,
     )
     .unwrap();
@@ -634,12 +638,76 @@ fn build_child_block_emits_storage_grants() {
 }
 
 #[test]
+fn build_child_block_emits_console_grants() {
+    // std-port 5.1: a console-provisioned child's block names the donated console
+    // endpoint under both `stdin` and `stdout` (one channel, the interactive-console
+    // convention). No separate `stderr` grant is emitted — the child resolves stderr to
+    // the stdout channel — so a thread-capable child stays within `MAX_GRANTS`.
+    let mut out = [0u8; startup::MAX_BLOCK];
+    let n = build_child_block(
+        &mut out,
+        0xA300_0000,
+        &[b"bin/stdsmoke"],
+        None,
+        None,
+        Some(5),
+        TEST_SEED,
+    )
+    .expect("within budget");
+    let s = decode(&out[..n]).expect("valid EUS1 block");
+    assert_eq!(s.grant(startup::NAME_STDIN), Some(GrantKind::CapSlot(5)));
+    assert_eq!(s.grant(startup::NAME_STDOUT), Some(GrantKind::CapSlot(5)));
+    // stderr is the stdout-channel fallback, not a wire grant.
+    assert_eq!(s.grant(startup::NAME_STDERR), None);
+
+    // A child without a console (`None`) carries neither name (debug-log fallback).
+    let n2 = build_child_block(
+        &mut out,
+        0xA300_0000,
+        &[b"bin/hello"],
+        None,
+        None,
+        None,
+        TEST_SEED,
+    )
+    .unwrap();
+    let s2 = decode(&out[..n2]).unwrap();
+    assert_eq!(s2.grant(startup::NAME_STDIN), None);
+    assert_eq!(s2.grant(startup::NAME_STDOUT), None);
+}
+
+#[test]
+fn build_child_block_thread_child_with_console_within_max_grants() {
+    // The tightest block: a thread-capable child gets time + seed + 4 thread self-caps
+    // + 2 console grants = 8 == MAX_GRANTS. It must still encode (the exact-capacity
+    // boundary), proving the console grants do not overflow the grant arena.
+    let mut out = [0u8; startup::MAX_BLOCK];
+    let n = build_child_block(
+        &mut out,
+        0xA300_0000,
+        &[b"bin/stdsmoke", b"stdio"],
+        Some([1, 2, 3, 4]),
+        None,
+        Some(101),
+        TEST_SEED,
+    )
+    .expect("thread child + console within MAX_GRANTS");
+    let s = decode(&out[..n]).expect("valid EUS1 block");
+    assert_eq!(s.grant(startup::NAME_STDIN), Some(GrantKind::CapSlot(101)));
+    assert_eq!(s.grant(startup::NAME_STDOUT), Some(GrantKind::CapSlot(101)));
+    assert_eq!(
+        s.grant(startup::NAME_THREAD_SLOT_BASE),
+        Some(GrantKind::CapSlot(4))
+    );
+}
+
+#[test]
 fn build_child_block_refuses_over_arena() {
     // More argv entries than the arena holds (MAX_ARGV = 8) is refused cleanly,
     // not truncated — the spawn path maps this to RunErr::Startup.
     let many = [b"p" as &[u8]; 9];
     let mut out = [0u8; startup::MAX_BLOCK];
-    assert!(build_child_block(&mut out, 0, &many, None, None, TEST_SEED).is_err());
+    assert!(build_child_block(&mut out, 0, &many, None, None, None, TEST_SEED).is_err());
 }
 
 #[test]
@@ -649,7 +717,7 @@ fn build_child_block_refuses_over_budget() {
     // ≈ 369 bytes.
     let big = vec![b'x'; 300];
     let mut out = [0u8; startup::MAX_BLOCK];
-    assert!(build_child_block(&mut out, 0, &[&big], None, None, TEST_SEED).is_err());
+    assert!(build_child_block(&mut out, 0, &[&big], None, None, None, TEST_SEED).is_err());
 }
 
 #[test]

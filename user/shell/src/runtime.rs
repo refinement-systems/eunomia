@@ -85,6 +85,39 @@ const SHELL_FS_SESSION_SLOT: u32 = 7;
 /// child's startup block; the root handle is 0 (named `root`).
 const CHILD_STORAGE_SLOT: u32 = 1;
 
+// Console provisioning (std-port 5.1, scoped/opt-in). A *console-capable* child (the
+// `CONSOLE_CAPABLE` allowlist below) inherits the shell's console endpoint: the shell
+// copies its own console cap (`STDOUT_SLOT`) into the child's cspace, named `stdin`/
+// `stdout` in the startup block, so the child's std `sys/stdio` arm rides the
+// `user/console` channel instead of the debug-log. stderr resolves to the stdout channel
+// in the child (the terminal case — `eunomia_sys::console`), so no separate `stderr`
+// grant is pushed and a thread-capable child would stay within `MAX_GRANTS`. The slot
+// differs by cspace shape so it never clashes with the self-caps/working range: a
+// default (8-slot) child uses a low slot past `storage`; a thread-capable (128-slot)
+// child would use the slot just past its working range.
+//
+// **Why opt-in, not every child (a kernel limitation, not a policy choice):** the shell
+// shares its *live* console end via `cap_copy`, but `cap_copy` (kernel `derive`) does not
+// maintain the rev2§3.3 per-endpoint cap census (`end_caps`) — only retype does. So when
+// a console child is reaped, deleting its copy decrements `end_caps` for the shell's own
+// end below the true live-cap count, spuriously firing peer-closed and wedging the
+// shell's console for every command after. Restricting the donation to a dedicated,
+// last-run demonstrator (`bin/stdio`) confines that break to the end of the run. The
+// proper fix (making `cap_copy` maintain the census) is a kernel-track follow-up — see
+// `doc/results/16_console-stdio_findings.md`.
+const CHILD_CONSOLE_SLOT: u32 = 2;
+const THREAD_CHILD_CONSOLE_SLOT: u32 = CHILD_THREAD_SLOT_BASE + urt::thread_layout::WORKING_SLOTS;
+
+/// The MVP console-capability marker (same allowlist mechanism as [`is_thread_capable`]).
+/// Only a listed binary is donated the shell's console endpoint (std-port 5.1). Kept to a
+/// single dedicated, last-run demonstrator because the donation wedges the shell's own
+/// console when the child is reaped (the `cap_copy` census limitation above).
+const CONSOLE_CAPABLE: &[&[u8]] = &[b"bin/stdio"];
+
+fn is_console_capable(path: &[u8]) -> bool {
+    CONSOLE_CAPABLE.contains(&path)
+}
+
 /// The MVP thread-capability marker: a shell-side allowlist of run paths (the
 /// plan's sanctioned fallback — the verified `loader::elf::parse` extracts only
 /// PT_LOAD, so an ELF-note marker travelling in the binary is a noted upgrade that
@@ -500,6 +533,7 @@ impl Spawner {
         argv: &[&[u8]],
         thread_capable: bool,
         fs_capable: bool,
+        console_capable: bool,
     ) -> Result<Exit, RunErr> {
         let img = loader::elf::parse(image).map_err(|_| RunErr::BadElf)?;
         // Loader slot layout: aspace, tcb, cspace, one frame per segment,
@@ -513,7 +547,7 @@ impl Spawner {
             scratch: self.slots.alloc().ok_or(RunErr::NoSlots)?,
             time_copy: self.slots.alloc().ok_or(RunErr::NoSlots)?,
         };
-        let exit = self.spawn_inner(image, argv, &s, thread_capable, fs_capable);
+        let exit = self.spawn_inner(image, argv, &s, thread_capable, fs_capable, console_capable);
         // Whether it ran to completion or aborted mid-setup, the donation is
         // now empty (reap revoked it, or abort below did) and these slots
         // with it — return the window to the free list.
@@ -528,6 +562,7 @@ impl Spawner {
         s: &SpawnSlots,
         thread_capable: bool,
         fs_capable: bool,
+        console_capable: bool,
     ) -> Result<Exit, RunErr> {
         // Bootstrap channel and every child object descend from DONATION, so
         // the child is one CDT subtree teardown collapses in one revoke.
@@ -616,6 +651,35 @@ impl Spawner {
         } else {
             None
         };
+        // std-port 5.1: donate the shell's console endpoint to a console-capable child so
+        // its std `sys/stdio` arm rides the `user/console` channel instead of the
+        // debug-log. Copy the shell's own console cap (`STDOUT_SLOT`, resolved in
+        // `_start`) into the child's cspace at the console slot, named `stdin`/`stdout` in
+        // the block; stderr falls back to the stdout channel in the child. Best-effort: on
+        // failure the child keeps the debug-log fallback rather than failing the spawn, and
+        // the staged cap is deleted so `s.scratch` is empty for the notif bind below.
+        // Scoped/opt-in (`CONSOLE_CAPABLE`) because reaping the child wedges the shell's
+        // own console — the `cap_copy` census limitation documented at the const above.
+        let console_slot = if console_capable {
+            let src = STDOUT_SLOT.load(Ordering::Relaxed);
+            let dst = if thread_capable {
+                THREAD_CHILD_CONSOLE_SLOT
+            } else {
+                CHILD_CONSOLE_SLOT
+            };
+            if sys::cap_copy(src, s.scratch, sys::RIGHTS_ALL) >= 0
+                && sys::cap_install(prepared.cspace_slot, s.scratch, dst) >= 0
+            {
+                Some(dst)
+            } else {
+                // A partial copy leaves the cap staged in scratch; delete it so scratch is
+                // empty for the notif bind below (the child then keeps the debug-log fallback).
+                let _ = sys::cap_delete(s.scratch);
+                None
+            }
+        } else {
+            None
+        };
         // std-port 3.4: draw a fresh entropy sub-seed for this child from the
         // shell's own DRBG (the fork-without-reseed guard) — never the shell's
         // seed raw. The shell seeded `urt::random` from its `NAME_RANDOM_SEED`
@@ -627,6 +691,7 @@ impl Spawner {
             argv,
             thread_grants,
             storage_slot,
+            console_slot,
             urt::random::fresh_seed(),
         ) {
             Ok(n) => n,
@@ -736,7 +801,13 @@ fn cmd_run(sp: &mut Spawner, arg: &[u8]) {
     out(b"loaded ");
     out_num(image.len() as u64);
     out(b" bytes from the store\n");
-    match sp.run_once(&image, &argv, is_thread_capable(path), is_fs_capable(path)) {
+    match sp.run_once(
+        &image,
+        &argv,
+        is_thread_capable(path),
+        is_fs_capable(path),
+        is_console_capable(path),
+    ) {
         Ok(exit) => print_exit(exit),
         Err(e) => run_err(e),
     }
@@ -764,8 +835,8 @@ fn cmd_runloop(sp: &mut Spawner, arg: &[u8]) {
     let argv: [&[u8]; 1] = [path];
     for _ in 0..n {
         // The burn-fix witness runs `selftest` (a no_std child), never a
-        // thread- or fs-capable binary — no self-caps or session provisioned.
-        match sp.run_once(&image, &argv, false, false) {
+        // thread-, fs-, or console-capable binary — no self-caps, session, or console.
+        match sp.run_once(&image, &argv, false, false, false) {
             Ok(Exit::Exited(0)) => ok += 1,
             Ok(other) => {
                 out(b"unexpected: ");

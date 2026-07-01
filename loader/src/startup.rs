@@ -73,10 +73,11 @@ pub const MAX_BLOCK: usize = 256;
 pub const NAME_STRING: u8 = 0;
 /// The process's storage root (rev2§5.1).
 pub const NAME_ROOT: u8 = 1;
-/// Standard input — deliberately split from `stdout` (rev2§5.1). Reserved;
-/// populated by the console.
+/// Standard input — a console-channel endpoint (rev2§5.1), deliberately split
+/// from `stdout` so a pipeline wires one process's `stdout` to another's `stdin`.
+/// An interactive console is one channel granted under both names.
 pub const NAME_STDIN: u8 = 2;
-/// Standard output — deliberately split from `stdin`. Reserved.
+/// Standard output — a console-channel endpoint, deliberately split from `stdin`.
 pub const NAME_STDOUT: u8 = 3;
 /// A writable scratch subtree (rev2§5.1). Reserved unless carvable.
 pub const NAME_TMP: u8 = 4;
@@ -88,8 +89,9 @@ pub const NAME_TIME: u8 = 6;
 // process holds caps to its own aspace (WRITE, to map thread stacks), its own
 // cspace (to name in `thread_start_as`), and a thread-untyped to retype the
 // per-thread objects from, plus the base of a reserved free cspace-slot range.
-// All `CapSlot` grants — no codec/verified-decoder change (the `NAME_STDERR`
-// posture). Absent for a non-thread-capable process (least-authority default).
+// All `CapSlot` grants — no codec/verified-decoder change (the same posture as
+// the `stdin`/`stdout`/`stderr` console slots). Absent for a non-thread-capable
+// process (least-authority default).
 /// The process's own aspace cap slot (rev2§5.3).
 pub const NAME_SELF_ASPACE: u8 = 7;
 /// The process's own cspace cap slot (rev2§5.3).
@@ -105,6 +107,12 @@ pub const NAME_THREAD_SLOT_BASE: u8 = 10;
 /// seeds its process DRBG (`urt::random`) from it; absent ⇒ `fill_bytes` loudly
 /// aborts at first use (the `NAME_TIME` posture), never silently predictable.
 pub const NAME_RANDOM_SEED: u8 = 11;
+/// Standard error — a console-channel endpoint (rev2§5.1, std-port 5.1), a stream
+/// distinct from `stdout` so diagnostics never enter a pipeline's data path. A
+/// consumer resolves it as `NAME_STDERR` → else the `stdout` channel → else the
+/// kernel debug-log. A `CapSlot` grant like `stdin`/`stdout`, decoded through the
+/// existing `KIND_CAP_SLOT` arm — no codec/verified-decoder change.
+pub const NAME_STDERR: u8 = 12;
 /// The virtio MMIO transport window (bring-up; storaged).
 pub const NAME_VIRTIO_MMIO: u8 = 16;
 /// The DMA pool region (bring-up; storaged).

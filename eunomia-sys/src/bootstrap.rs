@@ -75,6 +75,13 @@ fn attach_grants() {
     if let Some(s) = startup() {
         crate::fs::attach(s);
     }
+    // std-port 5.1: resolve the console-channel grants (stdin/stdout/stderr) so the std
+    // `sys/stdio` arm rides the `user/console` channel. Absent ⇒ the slots stay unset,
+    // so writes fall back to the debug-log and reads report EOF (least authority — the
+    // pre-5.1 behavior for a child without a console grant).
+    if let Some(s) = startup() {
+        crate::console::attach(s);
+    }
 }
 
 #[cfg(not(any(target_os = "eunomia", target_os = "none")))]

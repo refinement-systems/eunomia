@@ -49,6 +49,11 @@
 extern crate alloc;
 
 pub mod bootstrap;
+// The userspace console stdio client (std-port 5.1): stdout/stdin/stderr over the
+// `user/console` channel. Pure helpers (`resolve`/chunking/read-carry) are host-
+// buildable so the `-p eunomia-sys` gate and `cargo test` check them; the syscall-
+// issuing paths are target-gated internally like `stdio`.
+mod console;
 pub mod encode;
 // The storaged fs client (std-port 4.1); target-gated internally like `pal`
 // (it links `storage-server`/`ipc`, target-only deps).

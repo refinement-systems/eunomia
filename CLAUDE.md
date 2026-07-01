@@ -71,6 +71,23 @@ The std-build nightly is pinned by `kernel/rust-toolchain.toml` to match the
 `vendor/rust` commit exactly (rustup auto-installs it with `rust-src`); the pin is
 kernel-scoped so it never perturbs the `verus` (Rust 1.95.0) or host toolchains.
 
+**Editing the vendored std (the `sys/pal/eunomia` PAL) forces a std rebuild
+automatically — but only because `kernel/build.rs` makes it.** `-Zbuild-std`
+fingerprints the *toolchain*, not the `__CARGO_TESTS_ONLY_SRC_ROOT`-redirected source,
+so it silently **caches std and never rebuilds it on a source edit** — a nasty trap
+(after editing e.g. `sys/stdio/eunomia.rs`, stdout still "works" via the old code path
+while stdin quietly reads EOF, and nothing recompiles). `kernel/build.rs` closes this:
+its `rerun-if-changed` on `vendor/rust/library/std/src` reruns the script on such an
+edit, and `build_std_is_stale` then wipes `target/user` (the per-binary build-std
+cache) so the next build recompiles std from the current source. Consequence: a real
+std edit pays one clean std rebuild (~1 min); steady-state builds pay only a cheap tree
+walk. **Edits to the vendored `core`/`alloc`** (outside `std/src`, and not part of the
+std-port surface) are *not* tracked — after one, `rm -rf target/user` by hand. If a
+kernel/user change ever depends on a generated or vendored input, wire that dependency
+into `build.rs` (a `rerun-if-changed` and, where a downstream cache ignores it like
+build-std does, an explicit invalidation) rather than working around it with a manual
+clean.
+
 ```sh
 # Build (target aarch64-unknown-none-softfloat and build-std set by
 # kernel/.cargo/config.toml; softfloat because trap frames don't save SIMD)

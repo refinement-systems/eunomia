@@ -285,6 +285,13 @@ pub(crate) fn build_child_block(
     // at handle 0 as `root`, so its std `sys/fs` arm connects and serves files. `None`
     // for a non-fs child (no session, least authority).
     storage_slot: Option<u32>,
+    // std-port 5.1: for a child the shell donated its console endpoint to, the child
+    // cspace slot holding that endpoint — emitted under both `stdin` and `stdout` so its
+    // std `sys/stdio` arm rides the `user/console` channel. stderr resolves to the
+    // stdout channel in the child (the terminal case), so no separate `stderr` grant is
+    // emitted. `None` for a child without a console (its stdio falls back to the
+    // debug-log, its stdin reports EOF — least authority).
+    console_slot: Option<u32>,
     // std-port 3.4: a fresh 256-bit sub-seed the shell drew from its own DRBG for
     // this child (the fork-without-reseed guard). The child seeds `urt::random`
     // from it, unblocking `HashMap`/`fill_bytes`.
@@ -320,6 +327,17 @@ pub(crate) fn build_child_block(
             (startup::NAME_THREAD_UNTYPED, thread_untyped),
             (startup::NAME_THREAD_SLOT_BASE, slot_base),
         ] {
+            s.push_grant(Grant {
+                name,
+                kind: GrantKind::CapSlot(slot),
+            })?;
+        }
+    }
+    // std-port 5.1: the donated console endpoint under both `stdin` and `stdout` (one
+    // channel, the interactive-console convention). stderr is left to the child's
+    // stdout-channel fallback, so a thread-capable child stays within `MAX_GRANTS`.
+    if let Some(slot) = console_slot {
+        for name in [startup::NAME_STDIN, startup::NAME_STDOUT] {
             s.push_grant(Grant {
                 name,
                 kind: GrantKind::CapSlot(slot),

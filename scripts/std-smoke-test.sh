@@ -37,6 +37,8 @@ rm -rf "$DEMO_ROOT"
 mkdir -p "$DEMO_ROOT/bin"
 printf 'std smoke\n' > "$DEMO_ROOT/hello.txt"
 cp "$ROOT/target/user/aarch64-unknown-eunomia/release/stdsmoke" "$DEMO_ROOT/bin/stdsmoke"
+# The std-port 5.1 console demonstrator (findings #16), run last (see below).
+cp "$ROOT/target/user/aarch64-unknown-eunomia/release/stdio" "$DEMO_ROOT/bin/stdio"
 
 "$ROOT/target/debug/mkfs" "$IMG" "$DEMO_ROOT" 64
 
@@ -137,6 +139,22 @@ wait_for 'STD35 PASS' 30
 printf 'run bin/stdsmoke panic\r' >&3
 wait_for 'panicked' 30
 
+# 4. Console stdio (std-port 5.1) — RUN LAST. `bin/stdio` reads a line from stdin over
+#    the user/console channel, echoes it to stdout, and writes a diagnostic to stderr —
+#    all over the console (the shell donates its console endpoint to this console-capable
+#    child), not the debug-log. Stdin has no debug-log path (the console driver owns the
+#    UART RX), so the echo witnesses the whole stdin→console→stdout round-trip; the stderr
+#    line witnesses independent stderr routing. It is last because reaping a console child
+#    wedges the shell's own console (the cap_copy census limitation, findings #16), so no
+#    further shell command could be delivered after it. Wait for the "start" marker (the
+#    child is now blocked in read_line) before sending the input, so the line is not lost.
+printf 'run bin/stdio\r' >&3
+wait_for '\[stdio\] start' 30
+printf 'hello-console\n' >&3
+wait_for '\[stdio\] echo=hello-console' 30
+wait_for '\[stdio\] stderr diag' 30
+wait_for 'STD51 PASS' 30
+
 kill "$QPID" 2>/dev/null || true
 wait "$QPID" 2>/dev/null || true
 trap - EXIT
@@ -198,6 +216,19 @@ if grep -q '\[stdsmoke\] tls-bad' "$LOG"; then
     echo "STD SMOKE TEST FAIL: thread_local! wrong — destructor missed or storage not per-thread" >&2
     fail=1
 fi
+# The console-stdio marker (std-port 5.1): bin/stdio echoed a stdin line and wrote a
+# stderr line over the user/console channel. Its absence means the console stdio path
+# (or the shell's console donation to the child) failed.
+if ! grep -q 'STD51 PASS' "$LOG"; then
+    echo "STD SMOKE TEST FAIL: never reached STD51 PASS (console stdio failed)" >&2
+    fail=1
+fi
+# The stdin line must round-trip over the console (stdin→console→stdout). Its absence
+# means stdin never reached the child (console not donated, or the read path is broken).
+if ! grep -q '\[stdio\] echo=hello-console' "$LOG"; then
+    echo "STD SMOKE TEST FAIL: stdin line did not echo over the console" >&2
+    fail=1
+fi
 # env::args delivered the command line (2.1).
 if ! grep -q '\[stdsmoke\] argv=.*alpha.*beta' "$LOG"; then
     echo "STD SMOKE TEST FAIL: argv not delivered to the std binary (env::args)" >&2
@@ -242,6 +273,7 @@ echo "  STD32 PASS — two std threads spawned/joined, concurrent heap alloc und
 echo "  STD33 PASS — two std threads ping-ponged under a Mutex + Condvar over sys::futex"
 echo "  STD34 PASS — HashMap over the per-process entropy seed (seed-grant → DRBG → SipHash)"
 echo "  STD35 PASS — thread_local! per-thread storage + destructor ran on spawned-thread exit"
+echo "  STD51 PASS — console stdio: stdin line echoed over the console, stderr routed independently"
 echo "  env::args delivered the command line (alpha beta)"
 echo "  SystemTime read its granted time page; Instant monotonic"
 echo "  std panic reaped as STATUS_PANIC (parent read 'panicked'), not exited/faulted"
