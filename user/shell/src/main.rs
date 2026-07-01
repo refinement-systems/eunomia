@@ -280,6 +280,11 @@ pub(crate) fn build_child_block(
     // range — emitted as `CapSlot` grants so `eunomia_sys::bootstrap` configures the
     // thread pool. `None` for a non-thread-capable child (no grants, least authority).
     thread_grants: Option<[u32; 4]>,
+    // std-port 4.1: for an fs-capable child, the child cspace slot holding the
+    // delegated storaged session — emitted as the `storage` grant, with the ref-root
+    // at handle 0 as `root`, so its std `sys/fs` arm connects and serves files. `None`
+    // for a non-fs child (no session, least authority).
+    storage_slot: Option<u32>,
     // std-port 3.4: a fresh 256-bit sub-seed the shell drew from its own DRBG for
     // this child (the fork-without-reseed guard). The child seeds `urt::random`
     // from it, unblocking `HashMap`/`fill_bytes`.
@@ -298,6 +303,16 @@ pub(crate) fn build_child_block(
         name: startup::NAME_RANDOM_SEED,
         kind: GrantKind::Seed(seed),
     })?;
+    if let Some(slot) = storage_slot {
+        s.push_grant(Grant {
+            name: startup::NAME_STORAGE,
+            kind: GrantKind::CapSlot(slot),
+        })?;
+        s.push_grant(Grant {
+            name: startup::NAME_ROOT,
+            kind: GrantKind::StorageHandle(0),
+        })?;
+    }
     if let Some([self_aspace, self_cspace, thread_untyped, slot_base]) = thread_grants {
         for (name, slot) in [
             (startup::NAME_SELF_ASPACE, self_aspace),

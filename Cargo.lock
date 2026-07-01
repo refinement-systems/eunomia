@@ -201,9 +201,11 @@ dependencies = [
 name = "eunomia-sys"
 version = "0.1.0"
 dependencies = [
+ "ipc",
  "kcore",
  "loader",
  "proptest",
+ "storage-server",
  "urt",
  "vstd",
 ]

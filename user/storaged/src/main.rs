@@ -38,11 +38,16 @@ static HEAP: urt::Heap<{ 3 * 1024 * 1024 }> = urt::Heap::new();
 const BOOT_CHAN: u32 = 0;
 const SESSION_CHAN: u32 = 1;
 const WAKE_NOTIF: u32 = 2;
-// The reactor source key for the session channel. storaged multiplexes one
-// source today; the key is what a second session (a future connect) would
-// add alongside — the reactor returns it from `wait`, so the dispatch below
-// never names a notification bit (rev2§3.6: the API hides the bit shape).
+// The fs client's session channel (std-port 4.1): init installs it at storaged
+// cspace slot 3, and the shell delegates a copy to each fs-capable child. storaged
+// multiplexes it as a *second* reactor source and admits a fresh session on the
+// child's `ConnectReq` — the second session the reactor-key dispatch was built for.
+const SECOND_SESSION_CHAN: u32 = 3;
+// The reactor source keys. The shell's session is key 0; the fs client's is key 1.
+// The reactor returns the key from `wait`, so the dispatch below never names a
+// notification bit (rev2§3.6: the API hides the bit shape).
 const SESSION_KEY: ipc::Key = 0;
+const SECOND_SESSION_KEY: ipc::Key = 1;
 /// The session's total bulk-window budget (rev2§3.5), enforced at the single
 /// admission point in `admit_connect`. The inline Read/Write path needs no bulk
 /// window today (the shared-memory bulk path is post-MVP, rev2§3.1), so the
@@ -125,6 +130,49 @@ fn fail(msg: &[u8]) -> ! {
     sys::debug_write(msg);
     sys::debug_write(b"\n");
     sys::exit()
+}
+
+/// Serve one storage request for an established session on `ep` at the negotiated
+/// `version` (rev2§3.7): decode → dispatch → encode → reply, then drain any pending
+/// GC. A request stamped with any other version is a `WireError::Version` — refused,
+/// never a crash. Shared by the shell's session and the fs client's session
+/// (std-port 4.1), so both are served identically once connected.
+#[cfg(not(test))]
+fn serve_request<D: cas::dev::BlockDev>(
+    server: &mut Server<D>,
+    ep: &Endpoint<SyscallTransport>,
+    session: u64,
+    version: u8,
+    payload: &[u8],
+    now: u64,
+) {
+    let resp = match wire::decode_request(payload, version) {
+        Ok(req) => server.handle(session, req, now),
+        Err(_) => storage_server::Response::Err(storage_server::ErrorCode::Internal),
+    };
+    match wire::encode_response(&resp, version) {
+        Ok(bytes) => send_response(ep, &bytes),
+        Err(_) => {
+            // Response too big for a message (the bulk path is post-MVP); report.
+            let e = storage_server::Response::Err(storage_server::ErrorCode::Internal);
+            send_response(ep, &wire::encode_response(&e, version).unwrap());
+        }
+    }
+    // Drain a pending GC trigger (rev2§4.6) after replying: the foreground op stays
+    // fast, reclamation follows promptly.
+    if server.gc_requested() {
+        use core::fmt::Write;
+        match server.run_gc() {
+            Ok(s) => {
+                let _ = write!(
+                    DebugOut,
+                    "[storaged] gc: freed {} objects / {} bytes, {} live\n",
+                    s.freed_objects, s.freed_bytes, s.live_objects
+                );
+            }
+            Err(_) => sys::debug_write(b"[storaged] gc failed\n"),
+        }
+    }
 }
 
 /// The three pre-mapped regions storaged needs from the init→storaged startup
@@ -248,10 +296,17 @@ pub extern "C" fn _start() -> ! {
     // under a second key (the connect path).
     let transport = SyscallTransport;
     let ep = Endpoint::new(&transport, SESSION_CHAN);
+    // The fs client's session (std-port 4.1): a second endpoint + reactor source,
+    // multiplexed under its own key. init binds this channel to WAKE_NOTIF too, so a
+    // ConnectReq or request on it wakes the same reactor.
+    let ep2 = Endpoint::new(&transport, SECOND_SESSION_CHAN);
     let mut reactor = Reactor::new(&transport, WAKE_NOTIF);
     if reactor
         .register(SESSION_CHAN, Signals::READABLE, SESSION_KEY)
         .is_err()
+        || reactor
+            .register(SECOND_SESSION_CHAN, Signals::READABLE, SECOND_SESSION_KEY)
+            .is_err()
     {
         fail(b"reactor register");
     }
@@ -313,6 +368,11 @@ pub extern "C" fn _start() -> ! {
         sys::debug_write(b"[storaged] version-mismatch refused cleanly\n");
     }
 
+    // The fs client's session (std-port 4.1, key 1): connected lazily when a child
+    // sends its `ConnectReq`, and re-connected when a later child reuses the delegated
+    // channel (a fresh `ConnectReq`, TAG_REQ-detected). `None` until the first admit.
+    let mut fs_session: Option<(u64, u8)> = None;
+
     loop {
         // Staleness sweep (rev2§4.4 trigger 4): before parking the reactor,
         // flush any ref quietly dirty past the staleness bound so it eventually
@@ -323,48 +383,70 @@ pub extern "C" fn _start() -> ! {
         // write still logs durably).
         let _ = server.store().flush_stale(now_utc());
         let (key, _signals) = reactor.wait();
-        debug_assert_eq!(key, SESSION_KEY);
-        // Drain every queued request for the ready source, then wait again
-        // (a wakeup is level-ish — keep serving until the ring is Empty).
-        loop {
-            match ep.recv_nb(&mut msg) {
-                Ok(()) => {}
-                Err(RecvErr::Empty) => break,
-                // NoSlot can't arise (no caps in storage requests); Closed/other
-                // means the peer is gone — stop draining and re-wait.
-                Err(_) => break,
-            }
-            // Decode at the negotiated version (rev2§3.7): a request stamped with
-            // any other version is a `WireError::Version` — refused, never a crash.
-            let resp = match wire::decode_request(msg.payload(), negotiated) {
-                Ok(req) => server.handle(session, req, now_utc()),
-                Err(_) => storage_server::Response::Err(storage_server::ErrorCode::Internal),
-            };
-            match wire::encode_response(&resp, negotiated) {
-                Ok(bytes) => send_response(&ep, &bytes),
-                Err(_) => {
-                    // Response too big for a message — report instead
-                    // (the bulk path is post-MVP; requests are bounded).
-                    let e = storage_server::Response::Err(storage_server::ErrorCode::Internal);
-                    send_response(&ep, &wire::encode_response(&e, negotiated).unwrap());
+        // Drain every queued message for the ready source, then wait again (a wakeup
+        // is level-ish — keep serving until the ring is Empty). Dispatch by the
+        // opaque reactor key (rev2§3.6): key 0 is the shell's session, key 1 the fs
+        // client's.
+        match key {
+            SESSION_KEY => loop {
+                match ep.recv_nb(&mut msg) {
+                    Ok(()) => {}
+                    Err(RecvErr::Empty) => break,
+                    // NoSlot can't arise (no caps in storage requests); Closed/other
+                    // means the peer is gone — stop draining and re-wait.
+                    Err(_) => break,
                 }
-            }
-            // Drain a pending GC trigger (rev2§4.6: post-rewrite or
-            // watermark) after replying: the foreground op stays fast,
-            // reclamation follows promptly.
-            if server.gc_requested() {
-                use core::fmt::Write;
-                match server.run_gc() {
-                    Ok(s) => {
-                        let _ = write!(
-                            DebugOut,
-                            "[storaged] gc: freed {} objects / {} bytes, {} live\n",
-                            s.freed_objects, s.freed_bytes, s.live_objects
-                        );
+                serve_request(
+                    &mut server,
+                    &ep,
+                    session,
+                    negotiated,
+                    msg.payload(),
+                    now_utc(),
+                );
+            },
+            SECOND_SESSION_KEY => loop {
+                match ep2.recv_nb(&mut msg) {
+                    Ok(()) => {}
+                    Err(RecvErr::Empty) => break,
+                    Err(_) => break,
+                }
+                let payload = msg.payload();
+                // A message on an unconnected fs session — or a fresh `ConnectReq`
+                // (TAG_REQ) on a connected one — is a (re)connect (rev2§3.5): admit a
+                // window and open a fresh full-rights session, closing any prior one
+                // on this channel first (a later child reusing the delegated channel).
+                if fs_session.is_none() || payload.first() == Some(&ipc::session::TAG_REQ) {
+                    if let Some((old, _)) = fs_session.take() {
+                        server.close_session(old);
                     }
-                    Err(_) => sys::debug_write(b"[storaged] gc failed\n"),
+                    let reply = admit_connect(&mut adm, server_versions, payload);
+                    let (buf, n) = reply.encode();
+                    send_response(&ep2, &buf[..n]);
+                    if let GrantReply::Grant(_, ver) = reply {
+                        // Every fs client gets its own attenuated root (rev2§2.3):
+                        // `root_grant` is the sole origin of `R_STAT_STORE`, so an fs
+                        // child's session carries the full-rights ref root at handle 0.
+                        match server.root_grant(b"main") {
+                            Ok(g) => {
+                                let id = server.open_session(alloc::vec![g]);
+                                fs_session = Some((id, ver));
+                                use core::fmt::Write;
+                                let _ = write!(
+                                    DebugOut,
+                                    "[storaged] fs session negotiated wire version {ver}\n"
+                                );
+                            }
+                            Err(_) => sys::debug_write(b"[storaged] fs session: no main ref\n"),
+                        }
+                    }
+                    continue;
                 }
-            }
+                // An established fs-session request.
+                let (id, ver) = fs_session.unwrap();
+                serve_request(&mut server, &ep2, id, ver, payload, now_utc());
+            },
+            _ => {}
         }
     }
 }

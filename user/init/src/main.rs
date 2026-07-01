@@ -57,6 +57,12 @@ const SD_NOTIF: u32 = 17;
 /// A second read-only time copy for the shell — installed into its cspace
 /// (not just mapped), so the shell can re-grant the page to its children.
 const TIME_SH_CHILD: u32 = 18;
+// The fs client's session channel (std-port 4.1): storaged multiplexes it as a
+// second session, and the shell delegates a copy to each fs-capable child. Both
+// ends live in free init slots (19 sits below storaged's spawn scratch at 20; 29
+// sits in its 27–29 margin).
+const SESSION2_A: u32 = 19; // storaged end (installed at storaged cspace slot 3)
+const SESSION2_B: u32 = 29; // shell end (delegatable, at shell cspace slot 7)
 const SD_SPAWN_BASE: u32 = 20;
 const SH_SPAWN_BASE: u32 = 40;
 
@@ -212,6 +218,13 @@ fn build_console_block(
 /// `storage` grant, so the name and the install can never drift.
 const SHELL_SESSION_SLOT: u32 = 1;
 
+/// The shell's cspace slot holding the *fs client's* delegatable session channel
+/// (std-port 4.1). Unlike `SHELL_SESSION_SLOT` (the shell's own session), this is
+/// the second storaged session the shell hands to fs-capable children — the shell
+/// copies it into each such child under the `storage` name (`build_child_block`).
+/// Slot 7 is free (0 bootstrap, 1 storage, 2 pool, 5 time, 6 console; 3/4 carved).
+const SHELL_FS_SESSION_SLOT: u32 = 7;
+
 /// Build the init→shell startup block (rev2§5.1): the unified
 /// `b"EUS1"` named-grant table (`loader::startup`) carrying the standard names the
 /// shell holds — `time` (the read-only page init mapped at `TIME_VA`, as a region
@@ -327,6 +340,13 @@ pub extern "C" fn _start() -> ! {
         sys::retype(UNTYPED, OBJ_CHANNEL, 4, SESSION_A, SESSION_B),
         b"session chan",
     );
+    // The fs client's session channel (std-port 4.1): storaged holds SESSION2_A as a
+    // second session; the shell holds SESSION2_B and delegates a copy to each
+    // fs-capable child it spawns.
+    check(
+        sys::retype(UNTYPED, OBJ_CHANNEL, 4, SESSION2_A, SESSION2_B),
+        b"fs session chan",
+    );
     // The console's bootstrap channel (init→console startup block) and the
     // console↔shell channel (rev2§7's "console cap" — one bidirectional channel,
     // granted to the shell under both stdin/stdout).
@@ -434,6 +454,12 @@ pub extern "C" fn _start() -> ! {
         sys::chan_bind(SESSION_A, sys::EV_READABLE, SD_NOTIF, 1),
         b"sd bind",
     );
+    // The fs client's session wakes the same reactor on a distinct bit (std-port 4.1);
+    // storaged's `reactor.register` re-affirms this bind and owns the bit→key mapping.
+    check(
+        sys::chan_bind(SESSION2_A, sys::EV_READABLE, SD_NOTIF, 2),
+        b"sd fs bind",
+    );
     check(
         sys::cap_install(sd.cspace_slot, SD_BOOT_B, 0),
         b"sd boot install",
@@ -445,6 +471,11 @@ pub extern "C" fn _start() -> ! {
     check(
         sys::cap_install(sd.cspace_slot, SD_NOTIF, 2),
         b"sd notif install",
+    );
+    // storaged cspace slot 3 = the fs client's session channel (its SECOND_SESSION_CHAN).
+    check(
+        sys::cap_install(sd.cspace_slot, SESSION2_A, 3),
+        b"sd fs session install",
     );
     check(spawn::start(&sd, 5).map_or(-1, |_| 0), b"start storaged");
 
@@ -576,6 +607,12 @@ pub extern "C" fn _start() -> ! {
     check(
         sys::cap_install(sh.cspace_slot, SESSION_B, SHELL_SESSION_SLOT),
         b"sh session install",
+    );
+    // The fs client's delegatable session (std-port 4.1): the shell holds it at slot 7
+    // and copies it into each fs-capable child (never used for the shell's own I/O).
+    check(
+        sys::cap_install(sh.cspace_slot, SESSION2_B, SHELL_FS_SESSION_SLOT),
+        b"sh fs session install",
     );
     check(
         sys::cap_install(sh.cspace_slot, UNTYPED2, 2),

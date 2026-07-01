@@ -66,6 +66,7 @@ fn main() {
         "user/hello",
         "user/selftest",
         "user/stdsmoke",
+        "user/stdfs",
         "user/init",
         "user/storaged",
         "user/shell",
@@ -87,6 +88,9 @@ fn main() {
     // The std-port Phase-2 GATE fixture (findings 7-1): the first std user
     // binary, copied onto the demo disk by scripts/std-smoke-test.sh.
     let stdsmoke = build_user(root, &user_target, "stdsmoke", "stdsmoke", &[]);
+    // The std-port Phase-4.1 fs GATE fixture (findings #13): the std fs client,
+    // copied onto the demo disk by scripts/fs-smoke-test.sh.
+    let stdfs = build_user(root, &user_target, "stdfs", "stdfs", &[]);
     let storaged = build_user(root, &user_target, "storaged", "storaged", &[]);
     let shell = build_user(root, &user_target, "shell", "ushell", &[]);
     let console = build_user(root, &user_target, "console", "console", &[]);
@@ -103,10 +107,10 @@ fn main() {
             ("CONSOLE_ELF_PATH", console.display().to_string()),
         ],
     );
-    // hello + selftest + stdsmoke are placed into the demo disk image by the
+    // hello + selftest + stdsmoke + stdfs are placed into the demo disk image by the
     // scripts (scripts/run-demo.sh, scripts/spawn-test.sh,
-    // scripts/std-smoke-test.sh); they are loaded from the store at runtime, not
-    // embedded in the kernel.
-    let _ = (hello, selftest, stdsmoke);
+    // scripts/std-smoke-test.sh, scripts/fs-smoke-test.sh); they are loaded from the
+    // store at runtime, not embedded in the kernel.
+    let _ = (hello, selftest, stdsmoke, stdfs);
     println!("cargo:rustc-env=INIT_ELF_PATH={}", init.display());
 }

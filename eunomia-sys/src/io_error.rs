@@ -6,12 +6,41 @@
 //! proptest for totality and against the ABI table — rather than in the trusted PAL
 //! shell, so the mapping is a tested artifact and the PAL stays a thin translator.
 //! Not byte-parsing, so proptest (not Verus) is the load-bearing tool; no `verus!{}`
-//! obligation. The fs `ErrorCode` set (storage-server) extends this in a later phase.
+//! obligation.
+//!
+//! The fs `ErrorCode` set (storage-server, rev2§4) rides here too (std-port 4.1):
+//! the fs client ([`crate::fs`], target-only) maps each storaged `Response::Err(code)`
+//! / `NotFound` to one of the [`ERR_FS_NOT_FOUND`]-band raw codes below — a band well
+//! clear of the syscall `ERR_*` block (`-1..-12`) so this one [`classify`] serves both.
+//! std wraps them through `io::Error::from_raw_os_error`, so their kind flows through
+//! the same path as a syscall error. This is a **first-cut** map; the full rev2§4.9
+//! decision table (11 `ErrorCode` variants) is refined in 4.3.
 
 use crate::syscall::{
     ERR_AGAIN, ERR_ARG, ERR_BADSLOT, ERR_CLOSED, ERR_EMPTY, ERR_FAULT, ERR_FULL, ERR_NOMEM,
     ERR_NOSLOT, ERR_PERM, ERR_STATE, ERR_TYPE,
 };
+
+// ── Storage-server fs error band (rev2§4, std-port 4.1) ──
+// One raw code per `storage_server::{Response::NotFound, ErrorCode}` variant, based
+// at `-256` so it never collides with the syscall `ERR_*` block. `crate::fs` (the
+// target-only client) owns the `ErrorCode -> code` direction; `classify`/`message`
+// below own `code -> Kind`/label — kept here so the map stays host-tested.
+pub const ERR_FS_NOT_FOUND: i64 = -256;
+pub const ERR_FS_BAD_HANDLE: i64 = -257;
+pub const ERR_FS_STALE: i64 = -258;
+pub const ERR_FS_DENIED: i64 = -259;
+pub const ERR_FS_BAD_PATH: i64 = -260;
+pub const ERR_FS_NOT_A_DIR: i64 = -261;
+pub const ERR_FS_READ_ONLY: i64 = -262;
+pub const ERR_FS_NO_SUCH_SNAPSHOT: i64 = -263;
+pub const ERR_FS_BAD_TICKET: i64 = -264;
+pub const ERR_FS_INTERNAL: i64 = -265;
+pub const ERR_FS_PINNED: i64 = -266;
+pub const ERR_FS_BAD_OFFSET: i64 = -267;
+/// The client could not reach storaged (no session grant, or the handshake/round-trip
+/// failed) — distinct from a server-returned error so the PAL can tell them apart.
+pub const ERR_FS_NO_SESSION: i64 = -268;
 
 /// A std-agnostic error category. Each variant maps 1:1 to a `std::io::ErrorKind` in
 /// the PAL `sys/io/error/eunomia.rs` arm. Only the categories the ABI codes produce
@@ -29,6 +58,10 @@ pub enum Kind {
     OutOfMemory = 3,
     BrokenPipe = 4,
     Uncategorized = 5,
+    // std-port 4.1: the fs client needs a distinct `NotFound` (a missing file /
+    // path), the most load-bearing fs error kind. Appended so the existing
+    // discriminants (ABI to the PAL's `decode_error_kind`) stay put.
+    NotFound = 6,
 }
 
 /// Classify a raw syscall error code. Total: every `i64` yields a [`Kind`], never
@@ -41,8 +74,16 @@ pub fn classify(code: i64) -> Kind {
         ERR_NOMEM | ERR_NOSLOT => Kind::OutOfMemory,
         ERR_CLOSED => Kind::BrokenPipe,
         ERR_BADSLOT | ERR_TYPE | ERR_FAULT | ERR_ARG => Kind::InvalidInput,
-        // ERR_STATE has no clean io::ErrorKind analog (rev2§3.7); it and every
-        // non-ABI code fall through to Uncategorized.
+        // ── fs band (std-port 4.1, first cut; 4.3 refines) ──
+        ERR_FS_NOT_FOUND | ERR_FS_BAD_PATH | ERR_FS_NO_SUCH_SNAPSHOT => Kind::NotFound,
+        ERR_FS_DENIED | ERR_FS_READ_ONLY => Kind::PermissionDenied,
+        ERR_FS_BAD_OFFSET => Kind::InvalidInput,
+        // Stale/BadHandle/NotADir have no clean 4.1 analog (Stale especially,
+        // rev2§2.2) → InvalidInput for now; the 4.3 table gives them a home.
+        ERR_FS_STALE | ERR_FS_BAD_HANDLE | ERR_FS_NOT_A_DIR => Kind::InvalidInput,
+        // ERR_STATE has no clean io::ErrorKind analog (rev2§3.7); it, the residual
+        // fs codes (BadTicket/Internal/Pinned/NoSession), and every non-ABI code
+        // fall through to Uncategorized.
         _ => Kind::Uncategorized,
     }
 }
@@ -63,6 +104,20 @@ pub fn message(code: i64) -> &'static str {
         ERR_CLOSED => "channel peer closed",
         ERR_STATE => "object in wrong state",
         ERR_AGAIN => "resource temporarily unavailable",
+        // ── fs band (std-port 4.1) ──
+        ERR_FS_NOT_FOUND => "no such file or directory",
+        ERR_FS_BAD_HANDLE => "stale storage handle",
+        ERR_FS_STALE => "storage handle revoked",
+        ERR_FS_DENIED => "storage access denied",
+        ERR_FS_BAD_PATH => "invalid path",
+        ERR_FS_NOT_A_DIR => "not a directory",
+        ERR_FS_READ_ONLY => "read-only storage handle",
+        ERR_FS_NO_SUCH_SNAPSHOT => "no such snapshot",
+        ERR_FS_BAD_TICKET => "bad or expired ticket",
+        ERR_FS_INTERNAL => "storage server internal error",
+        ERR_FS_PINNED => "snapshot is pinned",
+        ERR_FS_BAD_OFFSET => "offset out of range",
+        ERR_FS_NO_SESSION => "no storage session",
         _ => "unknown error",
     }
 }
@@ -88,6 +143,23 @@ mod tests {
         (ERR_AGAIN, Kind::WouldBlock),
     ];
 
+    // The fs band (std-port 4.1): the first-cut storaged `ErrorCode` -> `Kind` map.
+    const FS: &[(i64, Kind)] = &[
+        (ERR_FS_NOT_FOUND, Kind::NotFound),
+        (ERR_FS_BAD_PATH, Kind::NotFound),
+        (ERR_FS_NO_SUCH_SNAPSHOT, Kind::NotFound),
+        (ERR_FS_DENIED, Kind::PermissionDenied),
+        (ERR_FS_READ_ONLY, Kind::PermissionDenied),
+        (ERR_FS_BAD_OFFSET, Kind::InvalidInput),
+        (ERR_FS_STALE, Kind::InvalidInput),
+        (ERR_FS_BAD_HANDLE, Kind::InvalidInput),
+        (ERR_FS_NOT_A_DIR, Kind::InvalidInput),
+        (ERR_FS_BAD_TICKET, Kind::Uncategorized),
+        (ERR_FS_INTERNAL, Kind::Uncategorized),
+        (ERR_FS_PINNED, Kind::Uncategorized),
+        (ERR_FS_NO_SESSION, Kind::Uncategorized),
+    ];
+
     #[test]
     fn abi_table_is_exact() {
         for &(code, kind) in ABI {
@@ -96,6 +168,23 @@ mod tests {
                 message(code),
                 "unknown error",
                 "ABI code {code} should have a specific message"
+            );
+        }
+    }
+
+    #[test]
+    fn fs_band_is_exact_and_disjoint_from_syscall_band() {
+        for &(code, kind) in FS {
+            assert_eq!(classify(code), kind, "classify({code})");
+            assert_ne!(
+                message(code),
+                "unknown error",
+                "fs code {code} should have a specific message"
+            );
+            // The fs band must never collide with a syscall ERR_* code.
+            assert!(
+                !ABI.iter().any(|&(c, _)| c == code),
+                "fs code {code} collides with the syscall band"
             );
         }
     }
