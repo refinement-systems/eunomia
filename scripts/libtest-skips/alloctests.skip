@@ -1,0 +1,31 @@
+# On-target skip list for the upstream `alloctests` integration suite (std-port 6.1,
+# findings #19).
+#
+# Consumed by scripts/libtest-on-target.sh: one libtest test-name substring per line
+# (blank lines and `#` comments ignored). For each module run, only the entries whose
+# name begins with that module are passed as `--skip=<name>` (the 256-byte startup
+# block fits only ~1-2 per command). A whole module may be excluded from the run lists
+# in the runner itself; per-test exclusions live here with a one-line reason.
+#
+# NOTE: #[should_panic] tests are NOT listed here — they are dropped wholesale by the
+# runner's `--exclude-should-panic` flag (they panic by design and so can never pass
+# in-process under panic=abort, where catch_unwind cannot catch).
+#
+# Format:  <module>::<path::to::test>    # reason
+#
+# (Populated empirically during triage — the last `test <NAME> ...` line before an
+# abort names the culprit. Entries below are the triaged skips.)
+
+# Heap-bound: the `sort` module's `correct_1k_*` stress tests sort 1000 elements of a
+# ~10 KB element type (≈10 MB per test), which exceeds the MVP fixed 16 MiB `.bss` heap
+# (no demand paging — the arena is committed at spawn). The ≤300-element sort tests fit,
+# but they can't be kept without listing every `correct_1k_*` variant (over the startup
+# block's `--skip` budget), so the whole module is skipped. Small-input sort correctness
+# is also exercised by coretests `slice` sorting. Tune via EUNOMIA_HEAP_BYTES to re-enable.
+sort::
+
+# Alignment ceiling: `vec::overaligned_allocations` allocates a `#[repr(align(256))]` Vec,
+# but the MVP arena caps at MAX_ALIGN=128 (the AArch64 cache line) — an align>128 request
+# is a clean-OOM refusal (urt::Heap, a disclosed bound). `heap::*_overaligned_request` use
+# ≤32 and pass. (Substring shortened to fit the 256-byte startup-block `--skip` budget.)
+vec::overalign

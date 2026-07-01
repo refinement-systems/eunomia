@@ -1,0 +1,44 @@
+[package]
+name = "alloctests"
+version = "0.0.0"
+edition = "2024"
+autotests = false
+autobenches = false
+
+# Built by kernel/build.rs (`build_user_test`) for aarch64-unknown-eunomia via
+# build-std with the `test` crate, then run under QEMU (std-port 6.1, findings
+# #19). Not a workspace member — an EL0 libtest binary, host builds make no sense.
+# The [[test]] target compiles the *vendored* upstream alloctests integration
+# suite in place (its `mod X;` decls resolve against the vendored tests/ dir); the
+# one cfg-gated `extern crate eunomia_sys;` in that file — plus the dependency
+# below — forces the PAL↔seam bridge into the link so std's `__eunomia_*` externs
+# resolve. Only the `alloctests` integration target is declared (not the
+# `vec_deque_alloc_error` target, which asserts on OOM behavior).
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+test = false
+bench = false
+doc = false
+
+[[test]]
+name = "alloctests"
+path = "../../vendor/rust/library/alloctests/tests/lib.rs"
+
+[dependencies]
+eunomia-sys = { path = "../../eunomia-sys" }
+
+# The suite's own dev-deps (match vendor/rust/library/alloctests/Cargo.toml).
+[dev-dependencies]
+rand = { version = "0.9.0", default-features = false, features = ["alloc"] }
+rand_xorshift = "0.4.0"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+strip = true
+
+[profile.dev]
+panic = "abort"

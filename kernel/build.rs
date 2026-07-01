@@ -52,6 +52,88 @@ fn build_user(
     target_dir.join(triple).join("release").join(bin)
 }
 
+/// Build an on-target **libtest** binary (std-port 6.1): a `user/<pkg>` mini-crate
+/// whose `[[test]]` target compiles the vendored upstream `coretests`/`alloctests`
+/// suite. Differs from [`build_user`] in that a test target lands in `deps/` under a
+/// content-hashed name, so we drive `cargo test --no-run` with JSON output, extract
+/// the artifact's `executable` path, and copy it to a stable `release/<test>` name the
+/// runner script can find. `test` joins the build-std set (its `libc`/`process`/
+/// `os::unix` uses are all `cfg(unix)`-gated, so they compile out on this non-unix
+/// target). Guarded by the caller behind `EUNOMIA_BUILD_LIBTESTS` because these
+/// suites are large and only the libtest runner needs them.
+fn build_user_test(
+    root: &Path,
+    target_dir: &Path,
+    pkg: &str,
+    test: &str,
+    envs: &[(&str, String)],
+) -> PathBuf {
+    let triple = "aarch64-unknown-eunomia";
+    let spec = root.join("targets").join(format!("{triple}.json"));
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let mut cmd = Command::new(cargo);
+    cmd.current_dir(root.join("user").join(pkg))
+        .args(["test", "--no-run", "--release", "--target"])
+        .arg(&spec)
+        .arg("-Zjson-target-spec")
+        // `test` (libtest) joins build-std so the suite links a test harness.
+        .arg("-Zbuild-std=core,compiler_builtins,alloc,std,panic_abort,test")
+        .arg("-Zbuild-std-features=compiler-builtins-mem")
+        // Build the test harness with panic=abort. Without this, cargo builds the
+        // test/bench profile as panic=unwind, so build-std produces a *second* core
+        // (the unwind variant) and the non-sysroot deps (serde_core/verus_builtin, via
+        // eunomia-sys) link the wrong one — a duplicate-lang-item (E0152) failure. The
+        // runtime consequence (libtest defaults to subprocess-per-test) is overridden
+        // at run time by `--force-run-in-process`.
+        .arg("-Zpanic-abort-tests")
+        .args(["--test", test])
+        // Machine-readable so we can read the hashed test-binary path back.
+        .arg("--message-format=json")
+        .arg("--target-dir")
+        .arg(target_dir)
+        .env(
+            "__CARGO_TESTS_ONLY_SRC_ROOT",
+            root.join("vendor").join("rust").join("library"),
+        )
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .env_remove("CARGO_TARGET_DIR");
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let out = cmd
+        .output()
+        .unwrap_or_else(|e| panic!("spawning cargo test for {pkg}: {e}"));
+    assert!(
+        out.status.success(),
+        "building user/{pkg} test failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Find the compiler-artifact line for our test target and pull its `executable`.
+    // The value is an absolute unix path (no JSON-escaped chars), so a substring cut
+    // is enough — no JSON parser in the build dep graph. Scan from the end: the test
+    // target is the last artifact emitted (its deps come first).
+    let needle = format!("/deps/{test}-");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let exe = stdout
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let marker = "\"executable\":\"";
+            let start = line.find(marker)? + marker.len();
+            let rest = &line[start..];
+            let end = rest.find('"')?;
+            let path = &rest[..end];
+            path.contains(&needle).then(|| PathBuf::from(path))
+        })
+        .unwrap_or_else(|| panic!("no test executable for user/{pkg} in cargo json output"));
+    // Copy to a stable, unhashed name the runner stages onto the disk image.
+    let dst = target_dir.join(triple).join("release").join(test);
+    std::fs::copy(&exe, &dst)
+        .unwrap_or_else(|e| panic!("copying {} -> {}: {e}", exe.display(), dst.display()));
+    dst
+}
+
 /// The newest file modification time anywhere under `dir` (recursively), or
 /// `UNIX_EPOCH` for an empty/absent tree. Used to tell when the vendored std source
 /// has been edited relative to the last build-std artifact.
@@ -126,6 +208,16 @@ fn main() {
         "user/storaged",
         "user/shell",
         "user/console",
+        // On-target libtest suites (std-port 6.1), built only under
+        // EUNOMIA_BUILD_LIBTESTS. Track the mini-crates and the vendored test
+        // sources they compile so a change re-invokes build.rs.
+        "user/coretests",
+        "user/alloctests",
+        "vendor/rust/library/coretests/tests",
+        "vendor/rust/library/alloctests/tests",
+        // The PAL↔seam crate every std user binary links; an edit here must rebuild
+        // them (build.rs only reruns build_user on a tracked change).
+        "eunomia-sys/src",
         "ipc/src",
         "loader/src",
         "urt/src",
@@ -136,6 +228,9 @@ fn main() {
     ] {
         println!("cargo:rerun-if-changed={}", root.join(dep).display());
     }
+    // Toggling the libtest opt-in must re-run build.rs so the suites get built (or
+    // skipped) accordingly (std-port 6.1).
+    println!("cargo:rerun-if-env-changed=EUNOMIA_BUILD_LIBTESTS");
 
     let user_target = root.join("target").join("user");
 
@@ -171,19 +266,45 @@ fn main() {
     // demonstrator, copied onto the demo disk by scripts/std-smoke-test.sh.
     let stdio = build_user(root, &user_target, "stdio", "stdio", &[]);
     let storaged = build_user(root, &user_target, "storaged", "storaged", &[]);
+    // On-target libtest suites (std-port 6.1), built only when the runner opts in via
+    // EUNOMIA_BUILD_LIBTESTS (they are large — several minutes and multi-MiB ELFs — so
+    // unrelated builds and the other smoke scripts do not pay for them). Built BEFORE the
+    // shell so their ELF paths can be embedded into it: `run bin/{coretests,alloctests}`
+    // then spawns from the shell's `.rodata`, bypassing the store — the MVP fs read path
+    // reconstructs the whole file per 256-byte request, so a multi-MiB test binary is
+    // impractical to load from disk (storaged OOM + O(n²)). 16 MiB child heap covers the
+    // suites' peak allocation (raise if an allocator abort — not a test failure — appears).
+    let test_bins = std::env::var_os("EUNOMIA_BUILD_LIBTESTS")
+        .is_some()
+        .then(|| {
+            // 16 MiB covers both a single module's peak and a whole-suite run: libtest frees
+            // each test's resources before the next, so the live set is bounded (~one test),
+            // not cumulative across the thousands of tests. The child's segments + this `.bss`
+            // must also fit the 48 MiB shell donation (`DONATION_BYTES`), which 16 MiB does
+            // comfortably (32 MiB did not — the segments overran the donation → spawn failed).
+            let heap = [("EUNOMIA_HEAP_BYTES", "16777216".to_string())];
+            (
+                build_user_test(root, &user_target, "coretests", "coretests", &heap),
+                build_user_test(root, &user_target, "alloctests", "alloctests", &heap),
+            )
+        });
+
     // The shell is a std binary (std-port 5.3): size its `System` heap above the 1 MiB
     // default via `EUNOMIA_HEAP_BYTES`, threaded here into the sub-build that compiles
     // `eunomia-sys` for it (parsed by `eunomia-sys/src/heap.rs`'s `option_env!`). It loads
-    // whole child ELFs into this heap on `run`, so it wants the headroom — 4 MiB is a
-    // reservation (committed RAM at spawn, no demand paging) comfortably within `-m 256M`.
-    // Only std binaries honor it; the no_std ones never compile `heap.rs`.
-    let shell = build_user(
-        root,
-        &user_target,
-        "shell",
-        "ushell",
-        &[("EUNOMIA_HEAP_BYTES", "4194304".to_string())],
-    );
+    // whole child ELFs into this heap on `run` (holding the Vec for the child's lifetime,
+    // with a transient ~2x peak while `std::fs::read` grows it), so it wants headroom above
+    // the largest store-loaded child. It stays small on purpose: init carves the shell's
+    // whole aspace (this `.bss` heap + a ~100 MiB POOL untyped) from its own 127 MiB boot
+    // untyped, so an oversized shell heap overflows init's budget and fails the spawn. The
+    // libtest suites are embedded (see above) rather than loaded, so they do not bound it.
+    // Still a reservation (committed at spawn, no demand paging). Only std binaries honor it.
+    let mut shell_env = vec![("EUNOMIA_HEAP_BYTES", "8388608".to_string())];
+    if let Some((coretests, alloctests)) = &test_bins {
+        shell_env.push(("CORETESTS_ELF_PATH", coretests.display().to_string()));
+        shell_env.push(("ALLOCTESTS_ELF_PATH", alloctests.display().to_string()));
+    }
+    let shell = build_user(root, &user_target, "shell", "ushell", &shell_env);
     let console = build_user(root, &user_target, "console", "console", &[]);
     let init = build_user(
         root,
@@ -202,6 +323,6 @@ fn main() {
     // the scripts (scripts/run-demo.sh, scripts/spawn-test.sh,
     // scripts/std-smoke-test.sh, scripts/fs-smoke-test.sh); they are loaded from the
     // store at runtime, not embedded in the kernel.
-    let _ = (hello, selftest, stdsmoke, stdfs, stdio);
+    let _ = (hello, selftest, stdsmoke, stdfs, stdio, test_bins);
     println!("cargo:rustc-env=INIT_ELF_PATH={}", init.display());
 }

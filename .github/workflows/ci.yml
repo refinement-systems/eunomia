@@ -218,6 +218,12 @@ jobs:
         # whole sys/fs/eunomia surface works at EL0 against storaged, over a second
         # (multiplexed) session opened by the client-side connect handshake.
         run: bash scripts/fs-smoke-test.sh
+      - name: std-port Phase-6.1 on-target library-test triage (coretests/alloctests subset)
+        # Runs a small curated subset of the upstream `coretests`/`alloctests` unit-test
+        # suites against the eunomia PAL under QEMU (findings #19), so a library-facing
+        # PAL regression is caught by real Rust library tests. The full sweep and the
+        # committed skip lists (scripts/libtest-skips/) run locally via `--full`.
+        run: bash scripts/libtest-on-target.sh --ci
 
   # There is no `kani` job. Kani was the interim bounded mechanized tier; every
   # target it covered — the kcore kernel core (proven in the `verus` job) and

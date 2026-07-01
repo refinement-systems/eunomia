@@ -60,11 +60,14 @@ const SPAWN_CAP: usize = 56; // slots 8..64
 
 /// One child's memory: aspace pool + stack + segments + bootstrap channel,
 /// with generous slack. The pool (slot 2) is ~100 MiB, and only this one
-/// donation is ever outstanding. Sized to also cover a thread-capable child's
+/// donation is ever outstanding. Sized to cover a thread-capable child's
 /// thread-untyped (`urt::thread::THREAD_UNTYPED_BYTES` ≈ 2.1 MiB, incl. the std-port
-/// 3.3 per-thread futex park-notifs) on top of the base (std-port 3.2) — 16 MiB
-/// costs nothing and never runs short.
-const DONATION_BYTES: u64 = 16 * 1024 * 1024;
+/// 3.3 per-thread futex park-notifs) on top of the base (std-port 3.2), plus the
+/// on-target libtest suites' large `.bss` heap reservation (std-port 6.1:
+/// `EUNOMIA_HEAP_BYTES` = 16 MiB, committed at spawn — no demand paging) and their
+/// multi-MiB code/data segments. 48 MiB carves comfortably from the ~100 MiB pool and
+/// never runs short.
+const DONATION_BYTES: u64 = 48 * 1024 * 1024;
 /// Default child cspace: slot 0 = bootstrap, the rest a child-carved window.
 const CHILD_CSPACE_SLOTS: u64 = 8;
 
@@ -115,7 +118,10 @@ const THREAD_CHILD_CONSOLE_SLOT: u32 = CHILD_THREAD_SLOT_BASE + urt::thread_layo
 /// plan's sanctioned fallback — the verified `loader::elf::parse` extracts only
 /// PT_LOAD, so an ELF-note marker travelling in the binary is a noted upgrade that
 /// avoids touching the verified parser). Only a listed binary is provisioned.
-const THREAD_CAPABLE: &[&[u8]] = &[b"bin/stdsmoke"];
+/// The on-target libtest suites (std-port 6.1) are thread-capable: libtest spawns a
+/// capture thread per test even at the default serial concurrency, and `alloctests`
+/// tests spawn their own threads.
+const THREAD_CAPABLE: &[&[u8]] = &[b"bin/stdsmoke", b"bin/coretests", b"bin/alloctests"];
 
 fn is_thread_capable(path: &[u8]) -> bool {
     THREAD_CAPABLE.contains(&path)
@@ -127,6 +133,30 @@ const FS_CAPABLE: &[&[u8]] = &[b"bin/stdfs"];
 
 fn is_fs_capable(path: &[u8]) -> bool {
     FS_CAPABLE.contains(&path)
+}
+
+/// On-target library-test suites embedded in the shell's `.rodata` (std-port 6.1),
+/// present only under the `libtests` cfg (kernel/build.rs, under EUNOMIA_BUILD_LIBTESTS,
+/// passes their ELF paths to the shell build). `run bin/<name>` spawns these from memory
+/// instead of loading them over the store: the MVP fs read path reconstructs the whole
+/// file per 256-byte request, so a multi-MiB test binary is impractical to load from disk
+/// (storaged OOM + O(n²), re-paid per invocation). Empty in a normal build — no size or
+/// behavior change.
+#[cfg(libtests)]
+static EMBEDDED_BINS: &[(&[u8], &[u8])] = &[
+    (b"coretests", include_bytes!(env!("CORETESTS_ELF_PATH"))),
+    (b"alloctests", include_bytes!(env!("ALLOCTESTS_ELF_PATH"))),
+];
+#[cfg(not(libtests))]
+static EMBEDDED_BINS: &[(&[u8], &[u8])] = &[];
+
+/// The embedded ELF for a `bin/<name>` run path, or `None` to load it from the store.
+fn embedded_image(path: &[u8]) -> Option<&'static [u8]> {
+    let name = path.strip_prefix(b"bin/").unwrap_or(path);
+    EMBEDDED_BINS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|&(_, b)| b)
 }
 /// Children run below the shell so a blocked-shell, running-child handoff is
 /// the common case, and the rev2§5.4 ceiling keeps a child from outranking us.
@@ -496,6 +526,7 @@ impl Spawner {
         argv: &[&[u8]],
         thread_capable: bool,
         fs_capable: bool,
+        inherit_env: bool,
     ) -> Result<Exit, RunErr> {
         let img = loader::elf::parse(image).map_err(|_| RunErr::BadElf)?;
         // Loader slot layout: aspace, tcb, cspace, one frame per segment,
@@ -509,7 +540,7 @@ impl Spawner {
             scratch: self.slots.alloc().ok_or(RunErr::NoSlots)?,
             time_copy: self.slots.alloc().ok_or(RunErr::NoSlots)?,
         };
-        let exit = self.spawn_inner(image, argv, &s, thread_capable, fs_capable);
+        let exit = self.spawn_inner(image, argv, &s, thread_capable, fs_capable, inherit_env);
         // Whether it ran to completion or aborted mid-setup, the donation is
         // now empty (reap revoked it, or abort below did) and these slots
         // with it — return the window to the free list.
@@ -524,6 +555,7 @@ impl Spawner {
         s: &SpawnSlots,
         thread_capable: bool,
         fs_capable: bool,
+        inherit_env: bool,
     ) -> Result<Exit, RunErr> {
         // Bootstrap channel and every child object descend from DONATION, so
         // the child is one CDT subtree teardown collapses in one revoke.
@@ -646,8 +678,12 @@ impl Spawner {
             &mut block,
             CHILD_TIME_VA,
             argv,
-            // std-port 5.2: forward the shell's inherited environment to the child.
-            shell_env(),
+            // std-port 5.2: forward the shell's inherited environment to the child (POSIX
+            // inheritance). The on-target libtest children (std-port 6.1) opt out
+            // (`inherit_env == false`): core/alloc tests read no env vars, and dropping the
+            // ~38 bytes keeps the 256-byte startup block within budget when several libtest
+            // `--skip` filters must ride in argv.
+            if inherit_env { shell_env() } else { &[] },
             thread_grants,
             storage_slot,
             console_slot,
@@ -761,14 +797,35 @@ fn cmd_run(sp: &mut Spawner, arg: &[u8]) {
         .collect();
     let path = argv.first().copied().unwrap_or(b"");
 
-    let Some(image) = read_image(path) else {
-        out(b"error: not found\n");
-        return;
+    // An embedded on-target test suite (std-port 6.1) spawns from `.rodata`; every
+    // other binary loads from the store. Both paths hand a byte slice to `run_once`.
+    let result = if let Some(image) = embedded_image(path) {
+        // Embedded libtest suites opt out of env inheritance to keep the startup block
+        // within budget for `--skip` filters (std-port 6.1).
+        sp.run_once(
+            image,
+            &argv,
+            is_thread_capable(path),
+            is_fs_capable(path),
+            false,
+        )
+    } else {
+        let Some(image) = read_image(path) else {
+            out(b"error: not found\n");
+            return;
+        };
+        out(b"loaded ");
+        out_num(image.len() as u64);
+        out(b" bytes from the store\n");
+        sp.run_once(
+            &image,
+            &argv,
+            is_thread_capable(path),
+            is_fs_capable(path),
+            true,
+        )
     };
-    out(b"loaded ");
-    out_num(image.len() as u64);
-    out(b" bytes from the store\n");
-    match sp.run_once(&image, &argv, is_thread_capable(path), is_fs_capable(path)) {
+    match result {
         Ok(exit) => print_exit(exit),
         Err(e) => run_err(e),
     }
@@ -798,7 +855,7 @@ fn cmd_runloop(sp: &mut Spawner, arg: &[u8]) {
         // The burn-fix witness runs `selftest` (a no_std child) with no thread self-caps and no
         // fs session — just the console every child now inherits (an unused cap for a no_std
         // child), so each iteration also exercises the copy→reap endpoint-census round trip.
-        match sp.run_once(&image, &argv, false, false) {
+        match sp.run_once(&image, &argv, false, false, true) {
             Ok(Exit::Exited(0)) => ok += 1,
             Ok(other) => {
                 out(b"unexpected: ");
