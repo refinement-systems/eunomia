@@ -10,6 +10,15 @@ name = "ushell"
 path = "src/main.rs"
 
 [dependencies]
+# The PAL↔seam bridge (std-port 5.3): `extern crate eunomia_sys;` (in main.rs, target
+# build only) forces the rlib into the link so std's undefined `__eunomia_*` symbols
+# resolve, and the runtime uses `eunomia_sys::fs::request` for the versioned-store admin
+# ops and `eunomia_sys::bootstrap::env` for child env inheritance. Host-buildable, so a
+# host `cargo test` still builds it (its target-only modules are cfg'd out there).
+eunomia-sys = { path = "../../eunomia-sys" }
+# Still used directly by the target-only `runtime`: raw `urt::spawn`/`loader::spawn` for
+# capability spawn/reap (`std::process` can't model it) and raw `ipc`/`storage_server`
+# for the admin `Request`/`Response` types the shell hands `eunomia_sys::fs::request`.
 ipc = { path = "../../ipc" }
 urt = { path = "../../urt" }
 loader = { path = "../../loader", default-features = false }
@@ -25,6 +34,10 @@ proptest = "1"
 panic = "abort"
 opt-level = "s"
 lto = true
+# strip the symbol table (the std-binary posture, matching stdsmoke/stdfs/stdio): a
+# smaller on-disk ELF keeps headroom when the shell — or its parent — loads it, and the
+# `.bss` heap reservation is memsz, not file bytes, so it does not inflate the image.
+strip = true
 
 [profile.dev]
 panic = "abort"

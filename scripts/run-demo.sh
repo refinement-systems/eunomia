@@ -15,6 +15,10 @@ rm -rf "$DEMO_ROOT"
 mkdir -p "$DEMO_ROOT/docs" "$DEMO_ROOT/bin"
 printf 'Hello from the versioned store!\n' > "$DEMO_ROOT/hello.txt"
 printf 'Eunomia: capability-based OS with versioned storage.\n' > "$DEMO_ROOT/docs/readme"
+# hello is the std-port Phase-5.3 real `hello` (findings #18) — the first non-fixture
+# user program on std. The shell (itself now a std binary) spawns it interactively:
+#   run bin/hello world → [hello] arms + STD53 PASS + exited(0)
+#   run bin/hello panic → std panic reaps as 'panicked' (STATUS_PANIC)
 cp "$ROOT/target/user/aarch64-unknown-eunomia/release/hello" "$DEMO_ROOT/bin/hello"
 # selftest exercises the rev2§5.1 spawn/reclaim loop interactively:
 #   run bin/selftest 42      → exited(42)

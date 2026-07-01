@@ -39,6 +39,9 @@ printf 'std smoke\n' > "$DEMO_ROOT/hello.txt"
 cp "$ROOT/target/user/aarch64-unknown-eunomia/release/stdsmoke" "$DEMO_ROOT/bin/stdsmoke"
 # The std-port 5.1 console demonstrator (findings #16), run last (see below).
 cp "$ROOT/target/user/aarch64-unknown-eunomia/release/stdio" "$DEMO_ROOT/bin/stdio"
+# The std-port 5.3 real `hello` (findings #18): the first non-fixture user program on
+# std. The shell — itself now a std binary — spawns it via `run bin/hello`.
+cp "$ROOT/target/user/aarch64-unknown-eunomia/release/hello" "$DEMO_ROOT/bin/hello"
 
 "$ROOT/target/debug/mkfs" "$IMG" "$DEMO_ROOT" 64
 
@@ -81,6 +84,41 @@ wait_for() { # <pattern> <timeout-secs>
 
 wait_for '\[storaged\] serving' 60
 wait_for 'eunomia> ' 30
+
+# --- std-port 5.3 (findings #18): the shell ITSELF is now a std binary. --------------
+# The whole run below is driven through the std shell's REPL over the `user/console`
+# channel, so reaching any marker is already a witness that console stdio works for the
+# shell. Here we assert the shell's own std surfaces up front (before the stdsmoke fixture
+# arms): std::fs file built-ins, a versioned-store admin op over the shared session,
+# SystemTime `date`, and spawning the real (now std) `hello`. Greps are line-anchored (`^`)
+# where a command's output would otherwise collide with the shell's keystroke echo (it
+# repeats the typed line, prefixed by the `eunomia> ` prompt).
+#
+# (a) std::fs write → cat → ls round-trip: file ops ride `std::fs` over the one storaged
+#     session `eunomia_sys::fs` connected at bootstrap. `cat`'s output line is exactly the
+#     content; `ls`'s line starts with the name — neither echo line does (both start with
+#     the prompt).
+printf 'write s53.txt hello-53\r' >&3
+printf 'cat s53.txt\r' >&3
+wait_for '^hello-53' 30
+printf 'ls\r' >&3
+wait_for '^s53.txt' 30
+# (b) a versioned-store admin op (Statfs) over the SAME session via
+#     `eunomia_sys::fs::request` (std::fs cannot express it), and SystemTime `date`.
+printf 'df\r' >&3
+wait_for 'chunk region:' 30
+printf 'date\r' >&3
+wait_for 'T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]' 30
+# (c) spawn the real std `hello` child: its markers, the green STD53, and a clean reap.
+printf 'run bin/hello world\r' >&3
+wait_for '\[hello\] alive' 30
+wait_for '\[hello\] argv=.*world' 30
+wait_for 'STD53 PASS' 30
+wait_for 'exited(0)' 30
+# (d) hello's std-owned panic → STATUS_PANIC: the parent reads 'panicked', not exited(_).
+printf 'run bin/hello panic\r' >&3
+wait_for 'panicked' 30
+# --- end std-port 5.3 ---------------------------------------------------------------
 
 # 1. The success run: every std arm, in order, then the green marker and a clean
 #    reap. The shell delivers argv = [bin/stdsmoke, alpha, beta].
@@ -298,10 +336,32 @@ if grep -q 'faulted(' "$LOG"; then
 fi
 # No infrastructure crash. The std binary's panic prints lowercase 'panicked at',
 # never uppercase 'PANIC' (and no selftest runs here), so any 'PANIC' is a real
-# kernel/shell/storaged crash.
+# kernel/shell/storaged crash. The shell is a std binary too now (5.3), so it also
+# panics lowercase — an uppercase 'PANIC' remains a genuine crash.
 if grep -q 'PANIC' "$LOG"; then
     echo "STD SMOKE TEST FAIL: an unexpected PANIC appeared in the run" >&2
     grep -n 'PANIC' "$LOG" >&2
+    fail=1
+fi
+# --- std-port 5.3 (findings #18): the shell's own std surfaces. ----------------------
+# std::fs write→cat round-trip — the shell's file ops ride std::fs over the shared session.
+if ! grep -q '^hello-53' "$LOG"; then
+    echo "STD SMOKE TEST FAIL: shell 'cat' did not return the written content (write/cat over std::fs failed)" >&2
+    fail=1
+fi
+# std::fs read_dir listed the file the shell just wrote.
+if ! grep -q '^s53.txt' "$LOG"; then
+    echo "STD SMOKE TEST FAIL: shell 'ls' did not list the written file (std::fs read_dir failed)" >&2
+    fail=1
+fi
+# A versioned-store admin op (Statfs) over the shared session via eunomia_sys::fs::request.
+if ! grep -q 'chunk region:' "$LOG"; then
+    echo "STD SMOKE TEST FAIL: shell 'df' (Statfs admin op over the shared session) produced no output" >&2
+    fail=1
+fi
+# The real std 'hello' child: its green marker (and, above, a clean exited(0) reap).
+if ! grep -q 'STD53 PASS' "$LOG"; then
+    echo "STD SMOKE TEST FAIL: never reached STD53 PASS (the real std 'hello' child failed)" >&2
     fail=1
 fi
 [ "$fail" -eq 0 ] || { echo "--- tail ---" >&2; tail -60 "$LOG" >&2; exit 1; }
@@ -314,6 +374,8 @@ echo "  STD34 PASS — HashMap over the per-process entropy seed (seed-grant →
 echo "  STD35 PASS — thread_local! per-thread storage + destructor ran on spawned-thread exit"
 echo "  STD52 PASS — env inherited init→shell→child (PATH/TMPDIR/TERM); env::temp_dir=/tmp"
 echo "  STD51 PASS — console stdio: stdin line echoed over the console, stderr routed independently"
+echo "  STD53 PASS — the real std 'hello' spawned/reaped exited(0); its panic → STATUS_PANIC"
+echo "  shell on std — write/cat/ls over std::fs, df (Statfs) over the shared session, SystemTime date, REPL over the console"
 echo "  env::args delivered the command line (alpha beta)"
 echo "  SystemTime read its granted time page; Instant monotonic"
 echo "  std panic reaped as STATUS_PANIC (parent read 'panicked'), not exited/faulted"

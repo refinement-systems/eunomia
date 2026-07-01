@@ -3,20 +3,29 @@ name = "hello"
 version = "0.1.0"
 edition = "2021"
 
-# Built by kernel/build.rs for aarch64-unknown-none-softfloat; not a
-# workspace member (host builds make no sense for a no_std EL0 binary).
+# Built by kernel/build.rs for aarch64-unknown-eunomia via build-std; not a
+# workspace member (host builds make no sense for an EL0 binary). The std-port
+# Phase-5.3 real `hello` (findings #18): the first *non-fixture* user program on
+# std — the trivial validation that a real binary boots on the std runtime
+# (entry/argv/alloc/inherited-env/Instant/exit, and a `panic` arm reaping as
+# STATUS_PANIC). It links the PAL↔seam bridge through eunomia-sys like every std
+# binary. (The old no_std hello — a bootstrap-block decode/ack — predated the std
+# runtime; nothing read its ack, the shell reaps children via the reactor.)
 [workspace]
 
 [dependencies]
-ipc = { path = "../../ipc" }
-# The unified startup-block codec (loader::startup), shared with the shell
-# producer. no_std, host-buildable; default-features off keeps it to elf + startup.
-loader = { path = "../../loader", default-features = false }
+# Satisfies std's undefined `__eunomia_*` extern "Rust" symbols (the __rust_alloc
+# pattern). `extern crate eunomia_sys;` in main.rs forces the rlib into the link.
+eunomia-sys = { path = "../../eunomia-sys" }
 
 [profile.release]
 panic = "abort"
 opt-level = "s"
 lto = true
+# strip the symbol table (the stdsmoke posture): the shell loads the whole ELF
+# into its heap, so a smaller on-disk image keeps comfortable headroom (the .bss
+# heap reservation is memsz, not file bytes, so it does not inflate the image).
+strip = true
 
 [profile.dev]
 panic = "abort"
