@@ -22,7 +22,6 @@
 //! `get`/`set` (the per-thread value read/write) are *not* here — each thread
 //! touches only its own `TPIDR` block, so they need no lock and live in the seam
 //! (`eunomia_sys::tls`) with the `mrs`/`msr` asm.
-
 use crate::lock::SpinLock;
 use crate::slots::SlotAlloc;
 use core::cell::UnsafeCell;
@@ -87,8 +86,9 @@ impl KeyTable {
                     &&& !old(self).is_live(k as int)
                     &&& final(self).is_live(k as int)
                     &&& forall|j: int|
-                        0 <= j < TLS_KEYS && j != k as int ==> final(self).is_live(j)
-                            == old(self).is_live(j)
+                        0 <= j < TLS_KEYS && j != k as int ==> final(self).is_live(j) == old(
+                            self,
+                        ).is_live(j)
                 },
                 None => forall|j: int| 0 <= j < TLS_KEYS ==> old(self).is_live(j),
             },
@@ -117,7 +117,6 @@ impl KeyTable {
 }
 
 } // verus!
-
 /// Process-global key state: the verified [`KeyTable`] plus its per-key destructor
 /// registry, both guarded by one spinlock. `table` starts `None` and self-inits on
 /// first [`create`] (a bootstrap-free lazy static; all-zero + unlocked keeps it in
