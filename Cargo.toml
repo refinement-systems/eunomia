@@ -24,6 +24,7 @@ exclude = [
     "storage-server/fuzz",
     "loader/fuzz",
     "ipc/fuzz",
+    "eunomia-sys/fuzz",
 ]
 
 [workspace.package]

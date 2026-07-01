@@ -597,7 +597,7 @@ gate + `7-2` verus-builtin-build precedent). The mapping (✅ = complete):
 | 1 ✅ | 0.2 vendor pin + allowlist + unsupported PAL | 11 | 3.4 entropy + HashMap |
 | 2 ✅ | 1.1 `eunomia-sys` + syscall marshalling | 12 ✅ | 3.5 TLS key table |
 | 3 ✅ | 1.2 verified startup decoder | 13 | 4.1 fs client |
-| 4 ✅ | 2.1 entry + argv/env | 14 | 4.2 path decoder |
+| 4 ✅ | 2.1 entry + argv/env | 14 ✅ | 4.2 path decoder |
 | 5 ✅ | 2.2 GlobalAlloc | 15 | 4.3 metadata + unsupported stubs |
 | 6 ✅ | 2.3 stdio (debug-log) + exit terminus | 16 | 5.1 console stdio |
 | 7 ✅ | 2.4 time | 17 | 5.2 process/env polish |

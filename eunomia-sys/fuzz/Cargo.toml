@@ -1,0 +1,29 @@
+# cargo-fuzz harness for the std-port path resolver (std-port 4.2). A path is an
+# attacker-influenced filename in the versioned store, resolved client-side
+# before it reaches storaged (rev2§4.9/§2.3). Standalone workspace.
+[package]
+name = "eunomia-sys-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+eunomia-sys = { path = ".." }
+
+[profile.release]
+debug = true
+debug-assertions = true
+overflow-checks = true
+
+[workspace]
+
+[[bin]]
+name = "path"
+path = "fuzz_targets/path.rs"
+test = false
+doc = false
+bench = false

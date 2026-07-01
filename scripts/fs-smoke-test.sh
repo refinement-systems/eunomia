@@ -6,7 +6,9 @@
 #
 #   run bin/stdfs → the fs run. Each `[stdfs]` line is one op: `alive` (stdio),
 #     `wrote N bytes` (File::create + write_all + sync_all → Write/Sync),
-#     `read back ok` (fs::read → chunked Read), `readdir found smoke` (read_dir →
+#     `read back ok` (fs::read → chunked Read), `dotdot resolves + escape refused`
+#     (the verified `eunomia_sys::path::resolve`, std-port 4.2: `.`/`..` resolved
+#     client-side, an escaping `..` denied), `readdir found smoke` (read_dir →
 #     List), `renamed ok` (fs::rename → Rename), `removed ok` (remove_file →
 #     Unlink). It ends with the green marker `STD4 PASS` and the shell reaps it as
 #     `exited(0)`.
@@ -85,6 +87,7 @@ wait_for '\[stdfs\] alive' 60
 wait_for '\[storaged\] fs session negotiated wire version 2' 30
 wait_for '\[stdfs\] wrote .* bytes' 30
 wait_for '\[stdfs\] read back ok' 30
+wait_for '\[stdfs\] dotdot resolves + escape refused' 30
 wait_for '\[stdfs\] readdir found smoke' 30
 wait_for '\[stdfs\] renamed ok' 30
 wait_for '\[stdfs\] removed ok' 30

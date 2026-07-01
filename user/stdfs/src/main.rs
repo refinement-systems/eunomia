@@ -40,6 +40,24 @@ fn main() {
     }
     println!("[stdfs] read back ok");
 
+    // 2b. the same file named through `.`/`..` resolves to it (std-port 4.2, the
+    //     verified `eunomia_sys::path::resolve`): `docs/./smoke` and
+    //     `docs/../docs/smoke` both resolve to `[docs, smoke]` before the wire, and a
+    //     `..` escaping the root handle is refused (rev2§2.3) as a clean error, never
+    //     a panic or a wire round-trip.
+    for alias in ["docs/./smoke", "docs/../docs/smoke"] {
+        let got = fs::read(alias).unwrap_or_else(|e| panic!("read {alias}: {e}"));
+        if got != content {
+            println!("[stdfs] fs-bad alias {alias} mismatch");
+            std::process::exit(7);
+        }
+    }
+    if fs::read("../escape").is_ok() {
+        println!("[stdfs] fs-bad escaping `..` accepted");
+        std::process::exit(8);
+    }
+    println!("[stdfs] dotdot resolves + escape refused");
+
     // 3. read_dir the parent and confirm the entry is listed (the `List` path).
     let mut found = false;
     for entry in fs::read_dir("docs").expect("read_dir docs") {

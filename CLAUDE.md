@@ -151,9 +151,9 @@ cargo test -p cas
 # has wasted time before. Instead redirect to a file you can inspect mid-run, or
 # run it in the background and watch the live log / check the `miri` PID's CPU
 # with `ps` to confirm it is progressing. Quickest useful UB pass
-# (regression tests + every committed fuzz seed, ~30 s for all 3 crates):
+# (regression tests + every committed fuzz seed, ~30 s for all 4 crates):
 #   MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri test \
-#     -p cas -p loader -p storage-server \
+#     -p cas -p loader -p storage-server -p eunomia-sys \
 #     --test fuzz_regressions --test fuzz_corpus
 # Full cas sweep (canonical, parallel). -Zmiri-disable-isolation is REQUIRED:
 # proptest's failure-persistence calls current_dir(), which Miri's isolation

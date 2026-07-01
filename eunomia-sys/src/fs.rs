@@ -7,13 +7,15 @@
 //! so the seek cursor lives entirely on the std side; regular file I/O rides the root
 //! handle + path directly (there is no file-open handle, rev2§4.9).
 //!
-//! Trust posture: a **trusted marshalling shell** (the `sys/stdio` posture) over three
+//! Trust posture: a **trusted marshalling shell** (the `sys/stdio` posture) over four
 //! already-verified surfaces — the connect handshake ([`ipc::connect`]/`admit_connect`,
 //! its `Admission` proven never to over-grant), the wire header/version prefix
-//! (`wire::check_header`, total ∀ bytes), and the rights lattice (`attenuate`, monotone)
-//! — plus the trusted `svc` shell underneath [`ipc::SyscallTransport`]. No new
-//! byte-parsing logic lives here except the minimal path split ([`split_path`]), which
-//! is the seam 4.2 replaces with a Verus-total, fuzzed, `.`/`..`-resolving parser.
+//! (`wire::check_header`, total ∀ bytes), the rights lattice (`attenuate`, monotone),
+//! and the path resolver ([`crate::path::resolve`], total ∀ bytes, root-confined,
+//! std-port 4.2) — plus the trusted `svc` shell underneath [`ipc::SyscallTransport`].
+//! No byte-parsing logic lives here: [`resolve_path`] is a thin `alloc` adapter that
+//! calls the verified [`crate::path::resolve`] and copies its borrowed components into
+//! the `Vec<Vec<u8>>` wire path.
 //!
 //! Gated to the eunomia/bare-metal targets: it links `storage-server`/`ipc` (target-only
 //! deps), so the host `cargo verus verify -p eunomia-sys` graph never sees them.
@@ -133,15 +135,20 @@ fn status(r: Result<Response, i64>) -> i64 {
     }
 }
 
-/// Split a raw path into storage tree components — **the 4.2 seam** (std-port 4.1).
-/// Minimal: split on `/`, drop empty components (leading/trailing/`//`). No `.`/`..`
-/// resolution or root confinement yet; 4.2 replaces this with the Verus-total, fuzzed,
-/// `.`/`..`-resolving, root-confining parser (`TreePath = Vec<Vec<u8>>`, rev2§4.9).
-fn split_path(path: &[u8]) -> Vec<Vec<u8>> {
-    path.split(|&b| b == b'/')
-        .filter(|c| !c.is_empty())
-        .map(|c| c.to_vec())
-        .collect()
+/// Resolve a raw path into storage tree components (`TreePath = Vec<Vec<u8>>`,
+/// rev2§4.9), or `None` if it is unnameable — a `..` escaping the process root
+/// handle (rev2§2.3 confinement), a malformed component (NUL / > 255 bytes), or a
+/// path deeper than [`crate::path::MAX_COMPONENTS`]. The `.`/`..` resolution and the
+/// confinement check are the **verified** [`crate::path::resolve`] (total ∀ bytes);
+/// this only copies its borrowed components into owned `Vec`s over the global
+/// allocator (the `alloc` step the no-alloc verified core leaves to the caller).
+fn resolve_path(path: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let r = crate::path::resolve(path)?;
+    let mut out = Vec::with_capacity(r.n);
+    for j in 0..r.n {
+        out.push(r.comps[j].to_vec());
+    }
+    Some(out)
 }
 
 // Every storaged message is ≤ 256 bytes (rev2§3.1). A read requests a data chunk that
@@ -158,10 +165,13 @@ pub fn read(path: &[u8], offset: u64, buf: &mut [u8]) -> i64 {
         return 0;
     }
     let handle = ROOT_HANDLE.load(Ordering::Relaxed);
+    let Some(components) = resolve_path(path) else {
+        return ERR_FS_BAD_PATH;
+    };
     let want = buf.len().min(READ_CHUNK) as u32;
     let req = Request::Read {
         handle,
-        path: split_path(path),
+        path: components,
         offset,
         len: want,
     };
@@ -183,7 +193,9 @@ pub fn read(path: &[u8], offset: u64, buf: &mut [u8]) -> i64 {
 /// bytes written (`== data.len()` on success) or a negative fs code.
 pub fn write(path: &[u8], offset: u64, data: &[u8]) -> i64 {
     let handle = ROOT_HANDLE.load(Ordering::Relaxed);
-    let components = split_path(path);
+    let Some(components) = resolve_path(path) else {
+        return ERR_FS_BAD_PATH;
+    };
     let mut written = 0usize;
     while written < data.len() {
         let end = (written + WRITE_CHUNK).min(data.len());
@@ -210,9 +222,12 @@ pub fn write(path: &[u8], offset: u64, data: &[u8]) -> i64 {
 /// read from `readdir` instead (4.3 gives directories a fuller `metadata`).
 pub fn stat(path: &[u8]) -> i64 {
     let handle = ROOT_HANDLE.load(Ordering::Relaxed);
+    let Some(components) = resolve_path(path) else {
+        return ERR_FS_BAD_PATH;
+    };
     let req = Request::Stat {
         handle,
-        path: split_path(path),
+        path: components,
     };
     match request(&req) {
         Ok(Response::SnapId(size)) => size as i64,
@@ -226,20 +241,19 @@ pub fn stat(path: &[u8]) -> i64 {
 /// Rename `from` to `to` within the handle's subtree (`Rename`). `0` or a negative code.
 pub fn rename(from: &[u8], to: &[u8]) -> i64 {
     let handle = ROOT_HANDLE.load(Ordering::Relaxed);
-    status(request(&Request::Rename {
-        handle,
-        from: split_path(from),
-        to: split_path(to),
-    }))
+    let (Some(from), Some(to)) = (resolve_path(from), resolve_path(to)) else {
+        return ERR_FS_BAD_PATH;
+    };
+    status(request(&Request::Rename { handle, from, to }))
 }
 
 /// Remove the file at `path` (`Unlink`). `0` or a negative code.
 pub fn unlink(path: &[u8]) -> i64 {
     let handle = ROOT_HANDLE.load(Ordering::Relaxed);
-    status(request(&Request::Unlink {
-        handle,
-        path: split_path(path),
-    }))
+    let Some(path) = resolve_path(path) else {
+        return ERR_FS_BAD_PATH;
+    };
+    status(request(&Request::Unlink { handle, path }))
 }
 
 /// Flush the ref durably (`Sync`; storaged syncs the whole ref, so `fsync`/`datasync`
@@ -263,9 +277,12 @@ const RD_ERR: u8 = 1;
 /// directory listings await the bulk data plane (disclosed, rev2§3.1).
 pub fn readdir(path: &[u8]) -> Vec<u8> {
     let handle = ROOT_HANDLE.load(Ordering::Relaxed);
+    let Some(components) = resolve_path(path) else {
+        return err_buf(ERR_FS_BAD_PATH);
+    };
     let req = Request::List {
         handle,
-        path: split_path(path),
+        path: components,
     };
     match request(&req) {
         Ok(Response::Listing(entries)) => {
