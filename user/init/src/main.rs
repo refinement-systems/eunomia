@@ -263,18 +263,24 @@ fn build_shell_block(
         name: NAME_ROOT,
         kind: GrantKind::StorageHandle(0),
     })?;
-    // `stdin`/`stdout` (rev2§5.1): both
+    // `stdin`/`stdout`/`stderr` (rev2§5.1): all three
     // name the **same** console-channel endpoint in the shell's cspace — "an
     // interactive console is the same channel granted under both names". The
     // shell does all terminal I/O over this channel (input *and*
     // output); an absent grant is fatal in the shell (no debug-scaffold
-    // fallback — the no-console negative control).
+    // fallback — the no-console negative control). `stderr` shares the endpoint
+    // for a terminal (std-port 5.1); it is a distinct name so a pipeline can
+    // route it elsewhere without folding it into `stdout`.
     s.push_grant(Grant {
         name: NAME_STDIN,
         kind: GrantKind::CapSlot(SHELL_CONSOLE_SLOT),
     })?;
     s.push_grant(Grant {
         name: NAME_STDOUT,
+        kind: GrantKind::CapSlot(SHELL_CONSOLE_SLOT),
+    })?;
+    s.push_grant(Grant {
+        name: NAME_STDERR,
         kind: GrantKind::CapSlot(SHELL_CONSOLE_SLOT),
     })?;
     encode(&s, out)
@@ -723,14 +729,19 @@ mod tests {
         assert_eq!(s.grant(NAME_STORAGE), Some(GrantKind::CapSlot(1)));
         // `root`: the full-rights ref at handle 0.
         assert_eq!(s.grant(NAME_ROOT), Some(GrantKind::StorageHandle(0)));
-        // stdin/stdout: both name the one console-channel endpoint
-        // (rev2§5.1 "same channel under both names"). `tmp` stays unpopulated.
+        // stdin/stdout/stderr: all three name the one console-channel endpoint
+        // (rev2§5.1 "same channel under both names"; std-port 5.1 adds stderr for
+        // a terminal). `tmp` stays unpopulated.
         assert_eq!(
             s.grant(NAME_STDIN),
             Some(GrantKind::CapSlot(SHELL_CONSOLE_SLOT))
         );
         assert_eq!(
             s.grant(NAME_STDOUT),
+            Some(GrantKind::CapSlot(SHELL_CONSOLE_SLOT))
+        );
+        assert_eq!(
+            s.grant(NAME_STDERR),
             Some(GrantKind::CapSlot(SHELL_CONSOLE_SLOT))
         );
         assert_eq!(s.grant(NAME_TMP), None);
