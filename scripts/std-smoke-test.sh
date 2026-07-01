@@ -139,21 +139,29 @@ wait_for 'STD35 PASS' 30
 printf 'run bin/stdsmoke panic\r' >&3
 wait_for 'panicked' 30
 
-# 4. Console stdio (std-port 5.1) — RUN LAST. `bin/stdio` reads a line from stdin over
-#    the user/console channel, echoes it to stdout, and writes a diagnostic to stderr —
-#    all over the console (the shell donates its console endpoint to this console-capable
-#    child), not the debug-log. Stdin has no debug-log path (the console driver owns the
-#    UART RX), so the echo witnesses the whole stdin→console→stdout round-trip; the stderr
-#    line witnesses independent stderr routing. It is last because reaping a console child
-#    wedges the shell's own console (the cap_copy census limitation, findings #16), so no
-#    further shell command could be delivered after it. Wait for the "start" marker (the
-#    child is now blocked in read_line) before sending the input, so the line is not lost.
+# 4. Console stdio (std-port 5.1). `bin/stdio` reads a line from stdin over the user/console
+#    channel, echoes it to stdout, and writes a diagnostic to stderr — all over the console
+#    (the shell donates its console endpoint to every child it runs), not the debug-log. Stdin
+#    has no debug-log path (the console driver owns the UART RX), so the echo witnesses the
+#    whole stdin→console→stdout round-trip; the stderr line witnesses independent stderr
+#    routing. Wait for the "start" marker (the child is now blocked in read_line) before
+#    sending the input, so the line is not lost.
 printf 'run bin/stdio\r' >&3
 wait_for '\[stdio\] start' 30
 printf 'hello-console\n' >&3
 wait_for '\[stdio\] echo=hello-console' 30
 wait_for '\[stdio\] stderr diag' 30
 wait_for 'STD51 PASS' 30
+
+# 5. Reap-survival witness (findings 16-1, the cap_copy endpoint-census fix). `bin/stdio` was a
+#    console child; reaping it must leave the shell's OWN console endpoint live, so this
+#    subsequent command is still delivered over the console and its child runs. A fresh argv
+#    marker (gamma/delta) distinguishes it from arm 1. Before the kernel fix, reaping a console
+#    child fired peer-closed on the still-live shell end, wedging the shell's console — this
+#    command would never have been read and the run would hang here. (With every child now a
+#    console child, arms 1→2→… already cross this boundary; this is the explicit assertion.)
+printf 'run bin/stdsmoke gamma delta\r' >&3
+wait_for '\[stdsmoke\] argv=.*gamma.*delta' 30
 
 kill "$QPID" 2>/dev/null || true
 wait "$QPID" 2>/dev/null || true
@@ -227,6 +235,13 @@ fi
 # means stdin never reached the child (console not donated, or the read path is broken).
 if ! grep -q '\[stdio\] echo=hello-console' "$LOG"; then
     echo "STD SMOKE TEST FAIL: stdin line did not echo over the console" >&2
+    fail=1
+fi
+# Reap-survival (findings 16-1): a command run AFTER a console child reaped was still delivered
+# over the shell's console and its child ran. Its absence means reaping a console child wedged
+# the shell's own console — the cap_copy endpoint-census bug this phase fixes in the kernel.
+if ! grep -q '\[stdsmoke\] argv=.*gamma.*delta' "$LOG"; then
+    echo "STD SMOKE TEST FAIL: shell console wedged after a console child reaped (endpoint-census regression)" >&2
     fail=1
 fi
 # env::args delivered the command line (2.1).

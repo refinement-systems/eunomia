@@ -1,8 +1,8 @@
 //! The std-port console GATE fixture (findings #16): the first std binary whose
 //! `stdout`/`stdin`/`stderr` ride the userspace `user/console` channel (rev2§5.1)
-//! instead of the kernel debug-log. The shell donates its console endpoint to this
-//! binary (the `CONSOLE_CAPABLE` allowlist), so `println!`/`eprintln!` and
-//! `stdin().read_line` all flow over the console driver → serial UART.
+//! instead of the kernel debug-log. The shell donates its console endpoint to every child
+//! it runs, so this binary's `println!`/`eprintln!` and `stdin().read_line` all flow over
+//! the console driver → serial UART.
 //!
 //! It reads one line from stdin, echoes it to stdout, and writes a diagnostic to
 //! stderr, then prints `STD51 PASS`. Stdin has **no** debug-log path (the console

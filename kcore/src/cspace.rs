@@ -6480,6 +6480,52 @@ proof fn lemma_clear_slot_end_cap(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot
     }
 }
 
+// The dual of `lemma_clear_slot_end_cap`: *installing* a cap into a previously EMPTY slot
+// raises `end_cap_count` by one exactly at the new cap's `(ch, e)` channel end (the EMPTY old
+// cap was in no filter), and leaves every other filter unchanged. `derive` composes this with
+// `endpoint_cap_added`'s `end_caps[end] + 1` to keep the rev2§3.3 endpoint census
+// (`end_caps_sound`) across a `cap_copy` of a channel endpoint — the `set_slot_census` shape,
+// end-cap edition.
+proof fn lemma_set_slot_end_cap(m: Map<SlotId, CapSlot>, k: SlotId, v: CapSlot, ch: ObjId, e: int)
+    requires
+        m.dom().finite(),
+        m.dom().contains(k),
+        is_empty_cap(m[k].cap),
+    ensures
+        end_cap_count(m.insert(k, v), ch, e) == end_cap_count(m, ch, e) + (if cap_chan_end(v.cap)
+            == Some((ch, e)) {
+            1nat
+        } else {
+            0nat
+        }),
+{
+    let m2 = m.insert(k, v);
+    assert(m2.dom() =~= m.dom());
+    let f1 = m.dom().filter(|j: SlotId| cap_chan_end(m[j].cap) == Some((ch, e)));
+    let f2 = m2.dom().filter(|j: SlotId| cap_chan_end(m2[j].cap) == Some((ch, e)));
+    assert(f1.finite());
+    // The empty old cap matches no `(ch, e)` filter, so `k` is fresh in the count.
+    assert(cap_chan_end(m[k].cap) == Option::<(ObjId, int)>::None);
+    assert(!f1.contains(k));
+    if cap_chan_end(v.cap) == Some((ch, e)) {
+        assert forall|j: SlotId|
+            #![trigger f2.contains(j)]
+            f2.contains(j) <==> f1.insert(k).contains(j) by {
+            if j != k {
+                assert(m2[j] == m[j]);
+            }
+        }
+        assert(f2 =~= f1.insert(k));
+    } else {
+        assert forall|j: SlotId| #![trigger f2.contains(j)] f2.contains(j) <==> f1.contains(j) by {
+            if j != k {
+                assert(m2[j] == m[j]);
+            }
+        }
+        assert(f2 =~= f1);
+    }
+}
+
 // `count_nonempty` drops by one when a non-empty slot is cleared to empty — the
 // `lemma_designation_drop` shape over the `is_empty` filter. `delete`'s body consumes it for
 // the strict `count_nonempty` decrease its `ensures` (and the SCC measure) state.
@@ -10448,6 +10494,20 @@ pub fn derive<S: Store>(
         cap_obj(old(store).slot_view()[src].cap) matches Some(o) ==> old(
             store,
         ).refs_view().dom().contains(o),
+        // rev2§3.3 endpoint census (findings 16-1): a `Channel` copy adds a live end cap to
+        // the arena, so `derive` must bump `end_caps[end]` in lockstep to keep `end_caps_sound`
+        // — the invariant `cap_copy` previously violated at runtime, spuriously firing
+        // peer-closed on a live end. Threaded like the `delete` census obligations, projected to
+        // the two facts this path consumes: the running census, and the src channel's
+        // well-formedness (`chan_wf` ⇒ residency + `end_caps.len() == 2`) for the bump. Both are
+        // maintained by `KernelStore` as system invariants; the only (unverified) caller is the
+        // `CapCopy` syscall shell, so the `requires` is discharge-free there.
+        end_caps_sound(old(store)),
+        old(store).slot_view()[src].cap.kind matches CapKind::Channel(o, _) ==> chan_wf(
+            old(store).chan_view(),
+            old(store).slot_view(),
+            o,
+        ),
     ensures
         res is Ok ==> {
             // faithful copy: dst's kind is src's (same object / channel end),
@@ -10509,6 +10569,11 @@ pub fn derive<S: Store>(
         // (the Err paths are pure no-ops). Conditional + `requires`-free — the syscall shell, the
         // only caller, is undisturbed.
         refcount_sound(old(store)) ==> refcount_sound(final(store)),
+        // rev2§3.3 endpoint census maintained (findings 16-1): a `Channel` copy bumps
+        // `end_caps[end]` to match the arena's new end cap (`endpoint_cap_added`); every other
+        // path frames both `chan_view` and the arena's `end_cap_count`, so a sound census in
+        // yields a sound census out. This closes the `cap_copy` census hole.
+        end_caps_sound(final(store)),
 {
     let ghost m0 = old(store).slot_view();
     // Guard: refuse derivation into the subtree of an in-flight revoke. The walk
@@ -10550,6 +10615,18 @@ pub fn derive<S: Store>(
     assert(kind == derived_kind(s.cap.kind, prio_ceiling));
     assert(cap_obj(cap) == cap_obj(s.cap));
     assert(!is_empty_cap(cap));
+    // `derived_kind` preserves channel-end-ness exactly (Frame→Frame, Thread→Thread, else
+    // identity): the derived cap is a channel end cap for the src's object/end, or neither is.
+    // This bridges the src `chan_wf`/`end_caps` facts (a `requires`, stated over the src) to the
+    // installed `cap`'s census bump below (rev2§3.3, findings 16-1).
+    assert(cap_chan_end(cap) == cap_chan_end(s.cap)) by {
+        match s.cap.kind {
+            CapKind::Channel(o, e) => {},
+            CapKind::Frame { .. } => {},
+            CapKind::Thread(..) => {},
+            _ => {},
+        }
+    }
 
     // Refuse rather than wrap: an unchecked refcount bump is a UAF class
     //. Checking here (before any mutation) discharges obj_ref's
@@ -10568,6 +10645,22 @@ pub fn derive<S: Store>(
     assert(obj_opt == cap_obj(cap));
     if let Some(o) = obj_opt {
         if store.obj_refs(o) == u32::MAX {
+            return Err(());
+        }
+    }
+    // The rev2§3.3 endpoint census is bounded per end, independently of `obj_refs`, so a channel
+    // copy needs its own overflow refusal before the `end_caps[end]` bump at the tail. Read-only
+    // mirror of the `obj_refs` guard above (the `res is Err` frame still holds); the src's
+    // `chan_wf` (a `requires`) supplies the `chan_view` residency this read needs, and
+    // `derived_kind` is identity on Channel, so the src end is exactly the installed copy's end.
+
+    if let CapKind::Channel(o, e) = s.cap.kind {
+        assert(chan_wf(old(store).chan_view(), old(store).slot_view(), o));
+        let ei: usize = match e {
+            ChanEnd::A => 0,
+            ChanEnd::B => 1,
+        };
+        if store.chan_end_caps(o, ei) == u32::MAX {
             return Err(());
         }
     }
@@ -10680,6 +10773,74 @@ pub fn derive<S: Store>(
                     assert(store.refs_view() == old(store).refs_view());
                     lemma_refcount_sound_from_census_eq(old(store), store);
                 },
+            }
+        }
+    }
+    // rev2§3.3 endpoint census (findings 16-1): the `set_slot` above added a live end cap to the
+    // arena for a channel copy, so bump `end_caps[end]` in lockstep to restore `end_caps_sound`
+    // — the invariant `cap_copy` previously left broken (a later reap then spuriously fired
+    // peer-closed on the still-live end). The arena census delta the bump must match:
+    //   - `set_slot` raised `end_cap_count(·, o, end)` by one (dst was empty) and left every other
+    //     `(ch, e)` filter unchanged (`lemma_set_slot_end_cap`);
+    //   - `obj_ref` + `cdt_insert_child` are cap-preserving (`lemma_same_caps_same_end_cap`),
+    // so per `(ch2, e2)` the live arena count is `end_cap_count(m0) + [cap is that end cap]`.
+    let ghost sv_pre_bump = store.slot_view();
+    proof {
+        assert forall|ch2: ObjId, e2: int| 0 <= e2 < 2 implies #[trigger] end_cap_count(
+            sv_pre_bump,
+            ch2,
+            e2,
+        ) == end_cap_count(m0, ch2, e2) + (if cap_chan_end(cap) == Some((ch2, e2)) {
+            1nat
+        } else {
+            0nat
+        }) by {
+            lemma_set_slot_end_cap(m0, dst, d, ch2, e2);
+            lemma_same_caps_same_end_cap(m1, sv_pre_bump, ch2, e2);
+        }
+    }
+    if let CapKind::Channel(o, e) = s.cap.kind {
+        // The src `chan_wf` (a `requires`) gives `chan_view` residency + `end_caps.len() == 2`;
+        // `chan_view` is unchanged from entry (every op so far frames it), so it holds now too.
+        proof {
+            assert(cap.kind == CapKind::Channel(o, e));
+            assert(chan_wf(old(store).chan_view(), old(store).slot_view(), o));
+            assert(store.chan_view() == old(store).chan_view());
+        }
+        crate::channel::endpoint_cap_added(store, o, e);
+        proof {
+            // `endpoint_cap_added` framed `slot_view` (the arena count above still holds) and
+            // bumped `end_caps[o][end]` by one; combined with the +1 arena delta at exactly
+            // `(o, end)` (`cap_chan_end(cap)`), `end_caps_sound` is re-established everywhere.
+            let ghost eidx = crate::channel::end_idx_spec(e);
+            assert(cap_chan_end(cap) == Some((o, eidx)));
+            assert(store.slot_view() == sv_pre_bump);
+            assert(store.chan_view().dom() =~= old(store).chan_view().dom());
+            assert forall|ch2: ObjId, e2: int|
+                store.chan_view().dom().contains(ch2) && store.chan_view()[ch2].end_caps.len() == 2
+                    && 0 <= e2 < 2 implies #[trigger] store.chan_view()[ch2].end_caps[e2]
+                == end_cap_count(store.slot_view(), ch2, e2) by {
+                // `old` soundness at this entry (old `chan_view` has the same dom, and the
+                // `end_caps.len() == 2` survives the one-index `update`).
+                assert(old(store).chan_view()[ch2].end_caps.len() == 2);
+                assert(old(store).chan_view()[ch2].end_caps[e2] == end_cap_count(m0, ch2, e2));
+                // The endpoint bump raised end_caps only at `(o, eidx)`; the arena delta above
+                // raised the count at exactly the same `(o, eidx)` — they stay in lockstep.
+            }
+        }
+    } else {
+        proof {
+            // A non-channel copy left `chan_view` untouched and added no end cap to the arena
+            // (`cap_chan_end(cap) == cap_chan_end(s.cap) == None`), so `end_caps_sound` rides
+            // through unchanged from `end_caps_sound(old)`.
+            assert(cap_chan_end(cap) == Option::<(ObjId, int)>::None);
+            assert(store.chan_view() == old(store).chan_view());
+            assert(store.slot_view() == sv_pre_bump);
+            assert forall|ch2: ObjId, e2: int|
+                store.chan_view().dom().contains(ch2) && store.chan_view()[ch2].end_caps.len() == 2
+                    && 0 <= e2 < 2 implies #[trigger] store.chan_view()[ch2].end_caps[e2]
+                == end_cap_count(store.slot_view(), ch2, e2) by {
+                assert(old(store).chan_view()[ch2].end_caps[e2] == end_cap_count(m0, ch2, e2));
             }
         }
     }
