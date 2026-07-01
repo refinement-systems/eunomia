@@ -9,7 +9,8 @@
 //  - Exceptions from EL1 are kernel bugs: dump ESR/ELR/FAR and halt.
 //
 // TrapFrame layout (thread.rs): x0..x30 at 8*i, sp_el0 at 248, elr at
-// 256, spsr at 264; 272 bytes total, 16-aligned.
+// 256, spsr at 264, tpidr (EL0 TLS base) at 272; 288 bytes total (a pad
+// word follows tpidr), 16-aligned.
 
 use crate::thread::TrapFrame;
 use core::arch::global_asm;
@@ -20,7 +21,7 @@ global_asm!(
     .global exception_vectors
 
     .macro el0_entry handler
-    sub     sp, sp, #272
+    sub     sp, sp, #288
     stp     x0, x1,   [sp]
     stp     x2, x3,   [sp, #16]
     stp     x4, x5,   [sp, #32]
@@ -42,6 +43,8 @@ global_asm!(
     stp     x0, x1,   [sp, #248]
     mrs     x0, spsr_el1
     str     x0,       [sp, #264]
+    mrs     x0, tpidr_el0
+    str     x0,       [sp, #272]
     mov     x0, sp
     bl      \handler
     b       el0_restore
@@ -103,6 +106,8 @@ el0_restore:
     msr     elr_el1, x1
     ldr     x0,       [sp, #264]
     msr     spsr_el1, x0
+    ldr     x0,       [sp, #272]
+    msr     tpidr_el0, x0
     ldp     x0, x1,   [sp]
     ldp     x2, x3,   [sp, #16]
     ldp     x4, x5,   [sp, #32]
@@ -119,7 +124,7 @@ el0_restore:
     ldp     x26, x27, [sp, #208]
     ldp     x28, x29, [sp, #224]
     ldr     x30,      [sp, #240]
-    add     sp, sp, #272
+    add     sp, sp, #288
     eret
     "#
 );

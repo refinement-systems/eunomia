@@ -329,6 +329,7 @@ unsafe fn enter_first_thread(frame: &TrapFrame) -> ! {
         "msr sp_el0, {sp}",
         "msr elr_el1, {elr}",
         "msr spsr_el1, {spsr}",
+        "msr tpidr_el0, {tpidr}",
         "mov x0, xzr", "mov x1, xzr", "mov x2, xzr", "mov x3, xzr",
         "mov x4, xzr", "mov x5, xzr", "mov x6, xzr", "mov x7, xzr",
         "mov x8, xzr", "mov x9, xzr", "mov x10, xzr", "mov x11, xzr",
@@ -341,6 +342,7 @@ unsafe fn enter_first_thread(frame: &TrapFrame) -> ! {
         sp = in(reg) frame.sp_el0,
         elr = in(reg) frame.elr,
         spsr = in(reg) frame.spsr,
+        tpidr = in(reg) frame.tpidr,
         options(noreturn),
     )
 }

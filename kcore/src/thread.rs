@@ -32,8 +32,11 @@ pub enum Report {
 }
 
 /// Saved EL0 register state. Layout is known to the exception asm:
-/// x0..x30 at byte offsets 8*i, then sp_el0, elr, spsr. 272 bytes,
-/// 16-aligned.
+/// x0..x30 at byte offsets 8*i, then sp_el0, elr, spsr, tpidr. 288 bytes,
+/// 16-aligned (the trailing pad word keeps the frame a multiple of 16 so
+/// the exception entry's `sub sp` stays aligned; 280 alone would not be).
+/// `tpidr` is the EL0 TLS base (`TPIDR_EL0`), saved/restored per thread by
+/// the exception asm so it survives a context switch.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TrapFrame {
@@ -41,6 +44,8 @@ pub struct TrapFrame {
     pub sp_el0: u64,
     pub elr: u64,
     pub spsr: u64,
+    pub tpidr: u64,
+    _pad: u64,
 }
 
 impl TrapFrame {
@@ -50,9 +55,23 @@ impl TrapFrame {
             sp_el0: 0,
             elr: 0,
             spsr: 0,
+            tpidr: 0,
+            _pad: 0,
         }
     }
 }
+
+// The exception save/restore asm (kernel/src/exceptions.rs) and
+// enter_first_thread (kernel/src/main.rs) hard-code these byte offsets as raw
+// literals; pin them to the struct so a layout drift fails to compile rather
+// than silently corrupting `eret`.
+const _: () = {
+    assert!(core::mem::size_of::<TrapFrame>() == 288);
+    assert!(core::mem::offset_of!(TrapFrame, sp_el0) == 248);
+    assert!(core::mem::offset_of!(TrapFrame, elr) == 256);
+    assert!(core::mem::offset_of!(TrapFrame, spsr) == 264);
+    assert!(core::mem::offset_of!(TrapFrame, tpidr) == 272);
+};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ThreadState {
