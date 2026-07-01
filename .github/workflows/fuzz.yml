@@ -25,7 +25,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Replay corpus + regression reproducers
         run: |
-          cargo test -p cas -p storage-server -p loader \
+          cargo test -p cas -p storage-server -p loader -p eunomia-sys \
             --test fuzz_corpus --test fuzz_regressions
       - name: Replay ipc wire-codec corpus
         # ipc's corpus test + its DemoMsg body type are behind the `fuzzing`

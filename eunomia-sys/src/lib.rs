@@ -16,6 +16,12 @@
 //!   (rev2§5.1). No new decode logic: the untrusted byte boundary is
 //!   `loader::startup::decode` (verified separately); this only reads named grants out
 //!   of an already-decoded block.
+//! - [`path`] — the second **verified** surface (std-port 4.2): [`path::resolve`]
+//!   turns raw `/`-separated `OsStr` bytes into a `.`/`..`-resolved, root-confined
+//!   tree-component list, total over all bytes and proven to emit only components
+//!   storaged's `validate_name` accepts (so no accepted path can escape the
+//!   handle's subtree). Host-buildable, so the `-p eunomia-sys` gate checks it; the
+//!   target-gated [`fs`] client calls it.
 //!
 //! Agreement between this crate's local ABI twin and the kernel's real decoder is
 //! pinned by a host round-trip test (`decode(encode(call)) == Ok(call)`), not by a
@@ -54,6 +60,11 @@ pub mod grant;
 mod heap;
 pub mod io_error;
 pub mod pal;
+// The **verified** path resolver for the fs client (std-port 4.2): raw
+// `/`-separated `OsStr` bytes → a `.`/`..`-resolved, root-confined tree-component
+// list. Host-buildable (NOT target-gated) so the `-p eunomia-sys` verus gate
+// checks it; the target-gated `fs` arm calls it.
+pub mod path;
 // The entropy DRBG bridge (std-port 3.4); target-gated internally like `pal`.
 pub mod random;
 // Internal: the bring-up debug-log stdio chunker for the `pal`/`sys/stdio` arm.
