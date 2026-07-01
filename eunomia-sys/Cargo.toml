@@ -33,6 +33,23 @@ vstd = { version = "=0.0.0-2026-05-31-0205", default-features = false }
 [target.'cfg(any(target_os = "eunomia", target_os = "none"))'.dependencies]
 urt = { path = "../urt" }
 
+# The fs client (std-port 4.1) marshals the storaged session protocol. Both edges
+# are target-gated (only `fs.rs`/`pal.rs` compile them), so the host `cargo verus
+# verify -p eunomia-sys` graph is byte-identical — no storage/cas obligations enter
+# this crate's session; they verify under their own `-p` gates. `user/shell`/
+# `user/storaged` already link both under these same build flags.
+#
+# `ipc` for the client-side connect handshake (`ipc::session::connect`) + the
+# `SyscallTransport` seam; already pulled transitively via `urt`, named here for the
+# direct use. `storage-server` (default-features off ⇒ no_std+alloc; `serde` for the
+# postcard wire codec, the trusted body seam) for the Request/Response types +
+# `wire::{encode_request,decode_response}`. No cycle: storage-server → ipc,cas; none
+# reach back into eunomia-sys.
+ipc = { path = "../ipc" }
+storage-server = { path = "../storage-server", default-features = false, features = [
+    "serde",
+] }
+
 [dev-dependencies]
 # The host round-trip oracle pins the local ABI twin against the *real* kernel decoder
 # (`decode(encode(call)) == Ok(call)`). A dev-dep only — it compiles solely for the

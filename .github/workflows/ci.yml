@@ -213,6 +213,11 @@ jobs:
         # reaps as STATUS_PANIC. The combined demonstration Phase 2's sub-phases
         # (2.1–2.4) each deferred to this gate.
         run: bash scripts/std-smoke-test.sh
+      - name: std-port Phase-4.1 fs GATE (File/read/write/read_dir/rename/remove/sync)
+        # The std fs client (user/stdfs): boots it under the shell and asserts the
+        # whole sys/fs/eunomia surface works at EL0 against storaged, over a second
+        # (multiplexed) session opened by the client-side connect handshake.
+        run: bash scripts/fs-smoke-test.sh
 
   # There is no `kani` job. Kani was the interim bounded mechanized tier; every
   # target it covered — the kcore kernel core (proven in the `verus` job) and

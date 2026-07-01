@@ -69,6 +69,12 @@ fn attach_grants() {
             unsafe { core::ptr::write_volatile(w, 0) };
         }
     }
+    // std-port 4.1: if this process holds a `NAME_STORAGE` session grant, resolve it
+    // and run the client-side connect handshake now, before `main`. Absent ⇒ the
+    // session stays unset and the std `sys/fs` arm refuses cleanly (least authority).
+    if let Some(s) = startup() {
+        crate::fs::attach(s);
+    }
 }
 
 #[cfg(not(any(target_os = "eunomia", target_os = "none")))]

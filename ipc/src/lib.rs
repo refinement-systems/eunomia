@@ -56,7 +56,7 @@ pub mod wire;
 pub use endpoint::{Endpoint, Message, MAX_PAYLOAD};
 pub use reactor::{Key, Reactor, RegisterErr, Signals};
 pub use session::{
-    admit_connect, negotiate, version_ok, Admission, ConnectErr, ConnectReq, GrantReply,
+    admit_connect, connect, negotiate, version_ok, Admission, ConnectErr, ConnectReq, GrantReply,
     VersionRange, WindowGrant, PROTOCOL_VERSION,
 };
 pub use transport::{Chan, Event, RecvErr, RecvOk, SendErr, SyscallTransport, Transport};

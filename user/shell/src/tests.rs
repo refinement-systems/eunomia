@@ -509,7 +509,8 @@ const TEST_SEED: [u64; 4] = [0x00C0_FFEE, 1, 2, 3];
 /// Encode a child block and decode it back, asserting it is well-formed.
 fn child_block(time_va: u64, argv: &[&[u8]]) -> Vec<u8> {
     let mut out = [0u8; startup::MAX_BLOCK];
-    let n = build_child_block(&mut out, time_va, argv, None, TEST_SEED).expect("within budget");
+    let n =
+        build_child_block(&mut out, time_va, argv, None, None, TEST_SEED).expect("within budget");
     out[..n].to_vec()
 }
 
@@ -557,6 +558,7 @@ fn build_child_block_emits_thread_grants() {
         0xA300_0000,
         &[b"bin/stdsmoke"],
         Some([1, 2, 3, 4]),
+        None,
         TEST_SEED,
     )
     .expect("within budget");
@@ -580,9 +582,55 @@ fn build_child_block_emits_thread_grants() {
         Some(GrantKind::CapSlot(4))
     );
     // A non-thread-capable child (`None`) carries none of them.
-    let n2 = build_child_block(&mut out, 0xA300_0000, &[b"bin/selftest"], None, TEST_SEED).unwrap();
+    let n2 = build_child_block(
+        &mut out,
+        0xA300_0000,
+        &[b"bin/selftest"],
+        None,
+        None,
+        TEST_SEED,
+    )
+    .unwrap();
     let s2 = decode(&out[..n2]).unwrap();
     assert_eq!(s2.grant(startup::NAME_SELF_ASPACE), None);
+}
+
+#[test]
+fn build_child_block_emits_storage_grants() {
+    // std-port 4.1: an fs-capable child's block carries the `storage` CapSlot grant
+    // (the delegated session channel's cspace slot) and the `root` StorageHandle grant
+    // (the ref root at handle 0), alongside the time + seed grants. A non-fs child
+    // (`None`) carries neither.
+    let mut out = [0u8; startup::MAX_BLOCK];
+    let n = build_child_block(
+        &mut out,
+        0xA300_0000,
+        &[b"bin/stdfs"],
+        None,
+        Some(1),
+        TEST_SEED,
+    )
+    .expect("within budget");
+    let s = decode(&out[..n]).expect("valid EUS1 block");
+    assert_eq!(s.grant(startup::NAME_STORAGE), Some(GrantKind::CapSlot(1)));
+    assert_eq!(
+        s.grant(startup::NAME_ROOT),
+        Some(GrantKind::StorageHandle(0))
+    );
+    assert!(s.grant(NAME_TIME).is_some());
+
+    let n2 = build_child_block(
+        &mut out,
+        0xA300_0000,
+        &[b"bin/hello"],
+        None,
+        None,
+        TEST_SEED,
+    )
+    .unwrap();
+    let s2 = decode(&out[..n2]).unwrap();
+    assert_eq!(s2.grant(startup::NAME_STORAGE), None);
+    assert_eq!(s2.grant(startup::NAME_ROOT), None);
 }
 
 #[test]
@@ -591,7 +639,7 @@ fn build_child_block_refuses_over_arena() {
     // not truncated — the spawn path maps this to RunErr::Startup.
     let many = [b"p" as &[u8]; 9];
     let mut out = [0u8; startup::MAX_BLOCK];
-    assert!(build_child_block(&mut out, 0, &many, None, TEST_SEED).is_err());
+    assert!(build_child_block(&mut out, 0, &many, None, None, TEST_SEED).is_err());
 }
 
 #[test]
@@ -601,7 +649,7 @@ fn build_child_block_refuses_over_budget() {
     // ≈ 369 bytes.
     let big = vec![b'x'; 300];
     let mut out = [0u8; startup::MAX_BLOCK];
-    assert!(build_child_block(&mut out, 0, &[&big], None, TEST_SEED).is_err());
+    assert!(build_child_block(&mut out, 0, &[&big], None, None, TEST_SEED).is_err());
 }
 
 #[test]

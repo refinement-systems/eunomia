@@ -26,6 +26,10 @@ cp "$ROOT/target/user/aarch64-unknown-eunomia/release/selftest" "$DEMO_ROOT/bin/
 #   run bin/stdsmoke alpha beta → [stdsmoke] arms + STD2 PASS + exited(0)
 #   run bin/stdsmoke panic      → std panic reaps as 'panicked' (STATUS_PANIC)
 cp "$ROOT/target/user/aarch64-unknown-eunomia/release/stdsmoke" "$DEMO_ROOT/bin/stdsmoke"
+# stdfs is the std-port Phase-4.1 fs GATE fixture (findings #13) — the std fs
+# client. Drive it interactively (its dedicated harness is fs-smoke-test.sh):
+#   run bin/stdfs → [stdfs] arms + STD4 PASS + exited(0)
+cp "$ROOT/target/user/aarch64-unknown-eunomia/release/stdfs" "$DEMO_ROOT/bin/stdfs"
 
 "$ROOT/target/debug/mkfs" "$IMG" "$DEMO_ROOT" 64
 

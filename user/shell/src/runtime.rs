@@ -71,6 +71,20 @@ const CHILD_SELF_CSPACE: u32 = 2;
 const CHILD_THREAD_UNTYPED: u32 = 3;
 const CHILD_THREAD_SLOT_BASE: u32 = 4;
 
+// fs provisioning (std-port 4.1, scoped/opt-in). An fs-capable child receives a copy
+// of the shell's *second* storaged session (`SHELL_FS_SESSION_SLOT`, delegated by init)
+// installed at `CHILD_STORAGE_SLOT`, plus the `storage`/`root` startup grants, so its
+// std `sys/fs` arm can connect and serve files. Every other binary keeps least
+// authority (no session). An fs-capable child is not thread-capable, so
+// `CHILD_STORAGE_SLOT` (1) does not clash with the thread self-cap slots.
+/// The shell cspace slot holding the delegatable storaged session (init installs it;
+/// its `SHELL_FS_SESSION_SLOT`). Distinct from `STORE_SLOT` (the shell's *own*
+/// session for its built-in fs commands) — this one is only ever copied to children.
+const SHELL_FS_SESSION_SLOT: u32 = 7;
+/// The child cspace slot the delegated session lands in, named `storage` in the
+/// child's startup block; the root handle is 0 (named `root`).
+const CHILD_STORAGE_SLOT: u32 = 1;
+
 /// The MVP thread-capability marker: a shell-side allowlist of run paths (the
 /// plan's sanctioned fallback — the verified `loader::elf::parse` extracts only
 /// PT_LOAD, so an ELF-note marker travelling in the binary is a noted upgrade that
@@ -79,6 +93,14 @@ const THREAD_CAPABLE: &[&[u8]] = &[b"bin/stdsmoke"];
 
 fn is_thread_capable(path: &[u8]) -> bool {
     THREAD_CAPABLE.contains(&path)
+}
+
+/// The MVP fs-capability marker (same allowlist mechanism as [`is_thread_capable`]).
+/// Only a listed binary is delegated a storaged session (std-port 4.1).
+const FS_CAPABLE: &[&[u8]] = &[b"bin/stdfs"];
+
+fn is_fs_capable(path: &[u8]) -> bool {
+    FS_CAPABLE.contains(&path)
 }
 /// Children run below the shell so a blocked-shell, running-child handoff is
 /// the common case, and the rev2§5.4 ceiling keeps a child from outranking us.
@@ -477,6 +499,7 @@ impl Spawner {
         image: &[u8],
         argv: &[&[u8]],
         thread_capable: bool,
+        fs_capable: bool,
     ) -> Result<Exit, RunErr> {
         let img = loader::elf::parse(image).map_err(|_| RunErr::BadElf)?;
         // Loader slot layout: aspace, tcb, cspace, one frame per segment,
@@ -490,7 +513,7 @@ impl Spawner {
             scratch: self.slots.alloc().ok_or(RunErr::NoSlots)?,
             time_copy: self.slots.alloc().ok_or(RunErr::NoSlots)?,
         };
-        let exit = self.spawn_inner(image, argv, &s, thread_capable);
+        let exit = self.spawn_inner(image, argv, &s, thread_capable, fs_capable);
         // Whether it ran to completion or aborted mid-setup, the donation is
         // now empty (reap revoked it, or abort below did) and these slots
         // with it — return the window to the free list.
@@ -504,6 +527,7 @@ impl Spawner {
         argv: &[&[u8]],
         s: &SpawnSlots,
         thread_capable: bool,
+        fs_capable: bool,
     ) -> Result<Exit, RunErr> {
         // Bootstrap channel and every child object descend from DONATION, so
         // the child is one CDT subtree teardown collapses in one revoke.
@@ -575,6 +599,23 @@ impl Spawner {
         } else {
             None
         };
+        // std-port 4.1: delegate a copy of the shell's second storaged session to an
+        // fs-capable child. It lands in the child's cspace at CHILD_STORAGE_SLOT, named
+        // `storage` (+ root handle 0 as `root`) in the startup block, so the child's std
+        // `sys/fs` arm connects over it. The copy is a CDT child of the shell's slot-7
+        // cap but resides in the child's cspace, so reap's cspace teardown deletes it
+        // (the shell's slot 7 is untouched). Staged in `s.scratch`, `cap_install`-moved.
+        let storage_slot = if fs_capable {
+            let ok = sys::cap_copy(SHELL_FS_SESSION_SLOT, s.scratch, sys::RIGHTS_ALL) >= 0
+                && sys::cap_install(prepared.cspace_slot, s.scratch, CHILD_STORAGE_SLOT) >= 0;
+            if !ok {
+                self.scrub(s.time_copy);
+                return Err(RunErr::Carve);
+            }
+            Some(CHILD_STORAGE_SLOT)
+        } else {
+            None
+        };
         // std-port 3.4: draw a fresh entropy sub-seed for this child from the
         // shell's own DRBG (the fork-without-reseed guard) — never the shell's
         // seed raw. The shell seeded `urt::random` from its `NAME_RANDOM_SEED`
@@ -585,6 +626,7 @@ impl Spawner {
             CHILD_TIME_VA,
             argv,
             thread_grants,
+            storage_slot,
             urt::random::fresh_seed(),
         ) {
             Ok(n) => n,
@@ -694,7 +736,7 @@ fn cmd_run(sp: &mut Spawner, arg: &[u8]) {
     out(b"loaded ");
     out_num(image.len() as u64);
     out(b" bytes from the store\n");
-    match sp.run_once(&image, &argv, is_thread_capable(path)) {
+    match sp.run_once(&image, &argv, is_thread_capable(path), is_fs_capable(path)) {
         Ok(exit) => print_exit(exit),
         Err(e) => run_err(e),
     }
@@ -722,8 +764,8 @@ fn cmd_runloop(sp: &mut Spawner, arg: &[u8]) {
     let argv: [&[u8]; 1] = [path];
     for _ in 0..n {
         // The burn-fix witness runs `selftest` (a no_std child), never a
-        // thread-capable binary — no self-caps provisioned.
-        match sp.run_once(&image, &argv, false) {
+        // thread- or fs-capable binary — no self-caps or session provisioned.
+        match sp.run_once(&image, &argv, false, false) {
             Ok(Exit::Exited(0)) => ok += 1,
             Ok(other) => {
                 out(b"unexpected: ");

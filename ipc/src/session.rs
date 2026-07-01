@@ -118,11 +118,12 @@ pub enum GrantReply {
     Refused,
 }
 
-/// Why a connect failed (server-internal; the wire [`GrantReply`] collapses both
-/// to `Refused`). The client-side connect *mechanism* (the endpoint-cap
-/// handshake, rev2§3.5) is deferred, so its richer errors — a peer-closed session
-/// channel, a reply that does not decode, a transport error — are not yet
-/// constructed. They return when that mechanism lands.
+/// Why a connect failed. `Refused`/`VersionMismatch` are the server-internal
+/// decision reasons (the wire [`GrantReply`] collapses both to `Refused`);
+/// `PeerClosed`/`BadReply`/`Transport` are the **client-side** connect failures
+/// the driver [`connect`] surfaces — the richer errors the endpoint-cap
+/// handshake (rev2§3.5) was to construct once its client half existed. It now
+/// does (a request/response client over the pre-wired channel), so they are live.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectErr {
     /// The server refused under its window quota (rev2§3.5).
@@ -131,6 +132,14 @@ pub enum ConnectErr {
     /// supported range (rev2§3.7). Distinguished from `Refused` so a future
     /// client can know not to retry a version refusal.
     VersionMismatch,
+    /// The session channel's peer closed before the handshake completed
+    /// (client side, [`connect`]).
+    PeerClosed,
+    /// The server's reply did not decode as a [`GrantReply`] (client side).
+    BadReply,
+    /// The transport returned an unexpected error during the handshake
+    /// (client side): a `NoSlot` on receive or an `Other(_)` syscall error.
+    Transport,
 }
 
 // ── Ghost models of the codecs (the little-endian byte layout as a `Seq`) ──
@@ -603,6 +612,60 @@ pub proof fn lemma_grant_encode_decode(s: Seq<u8>)
 }
 
 } // verus!
+use crate::endpoint::MAX_PAYLOAD;
+use crate::transport::{Chan, RecvErr, SendErr, Transport};
+
+/// The **client half** of the connect handshake (rev2§3.5) — the counterpart of
+/// the server's [`admit_connect`]. It offers a version range on the pre-wired
+/// session channel and reads back the [`GrantReply`], returning the negotiated
+/// wire version or a [`ConnectErr`]. This is plain glue over the already-proven
+/// [`Transport::send_nb`]/[`Transport::recv_nb`] and the verified session codecs
+/// ([`ConnectReq::encode`], [`GrantReply::decode`]), so it stays outside
+/// `verus!{}` — no new safety-bearing logic, exactly the posture `admit_connect`
+/// takes on the server side.
+///
+/// Reactor-free by design: a minimal request/response client (the fs client's
+/// bootstrap, the shell) has no spare notification cap to drive a [`Reactor`], so
+/// backpressure (`Full`) and an empty reply ring (`Empty`) are handled by the
+/// caller's `on_block` — `crate::sys::yield_now` on the target, a no-op in a host
+/// test. The MVP requests a zero bulk window (the inline data path, rev2§3.1); the
+/// window size is a parameter the caller can grow when the bulk plane lands.
+///
+/// [`Reactor`]: crate::Reactor
+pub fn connect<T: Transport>(
+    transport: &T,
+    chan: Chan,
+    versions: VersionRange,
+    mut on_block: impl FnMut(),
+) -> Result<u8, ConnectErr> {
+    let req = ConnectReq::new(0, versions).encode();
+    loop {
+        match transport.send_nb(chan, &req, None) {
+            Ok(()) => break,
+            Err(SendErr::Full) => on_block(),
+            Err(SendErr::Closed) => return Err(ConnectErr::PeerClosed),
+            Err(SendErr::Other(_)) => return Err(ConnectErr::Transport),
+        }
+    }
+    // `recv_nb` copies a full inline payload, so the buffer must hold 256 bytes
+    // even though a `GrantReply` is at most `GRANT_LEN` (rev2§3.1).
+    let mut buf = [0u8; MAX_PAYLOAD];
+    loop {
+        match transport.recv_nb(chan, &mut buf, None) {
+            Ok(rx) => {
+                return match GrantReply::decode(&buf[..rx.len]) {
+                    Some(GrantReply::Grant(_, ver)) => Ok(ver),
+                    Some(GrantReply::Refused) => Err(ConnectErr::Refused),
+                    None => Err(ConnectErr::BadReply),
+                };
+            }
+            Err(RecvErr::Empty) => on_block(),
+            Err(RecvErr::Closed) => return Err(ConnectErr::PeerClosed),
+            Err(RecvErr::NoSlot) | Err(RecvErr::Other(_)) => return Err(ConnectErr::Transport),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -798,6 +861,160 @@ mod tests {
         assert_eq!(
             reply,
             GrantReply::Grant(WindowGrant { window: 0, size: 8 }, 3)
+        );
+    }
+
+    // ── The client-side `connect` driver, round-tripped against `admit_connect` ──
+    use crate::transport::{Chan, Event, Notif, RecvErr, RecvOk, SendErr, Transport};
+    use core::cell::RefCell;
+    use std::vec::Vec;
+
+    /// A loopback test kernel: `send_nb` runs the *server* step (`admit_connect`)
+    /// on the very bytes the client sent and queues the encoded reply, which
+    /// `recv_nb` then hands back. So `connect` is exercised end to end against the
+    /// real server admission logic without any real syscall — the reply the client
+    /// decodes is exactly what a live storaged would have sent for those bytes.
+    struct Loopback {
+        adm: RefCell<Admission>,
+        server: VersionRange,
+        last_req: RefCell<Option<Vec<u8>>>,
+        reply: RefCell<Option<Vec<u8>>>,
+    }
+
+    impl Loopback {
+        fn new(budget: u32, server: VersionRange) -> Loopback {
+            Loopback {
+                adm: RefCell::new(Admission::new(budget)),
+                server,
+                last_req: RefCell::new(None),
+                reply: RefCell::new(None),
+            }
+        }
+    }
+
+    impl Transport for Loopback {
+        fn send_nb(&self, _ch: Chan, data: &[u8], _caps: Option<&[u32; 4]>) -> Result<(), SendErr> {
+            *self.last_req.borrow_mut() = Some(data.to_vec());
+            let reply = admit_connect(&mut self.adm.borrow_mut(), self.server, data);
+            let (buf, n) = reply.encode();
+            *self.reply.borrow_mut() = Some(buf[..n].to_vec());
+            Ok(())
+        }
+
+        fn recv_nb(
+            &self,
+            _ch: Chan,
+            buf: &mut [u8],
+            _dests: Option<&[u32; 4]>,
+        ) -> Result<RecvOk, RecvErr> {
+            match self.reply.borrow_mut().take() {
+                Some(r) => {
+                    buf[..r.len()].copy_from_slice(&r);
+                    Ok(RecvOk {
+                        len: r.len(),
+                        cap_mask: 0,
+                    })
+                }
+                None => Err(RecvErr::Empty),
+            }
+        }
+
+        fn bind(&self, _ch: Chan, _ev: Event, _n: Notif, _bits: u64) -> Result<(), i64> {
+            unimplemented!()
+        }
+        fn notif_signal(&self, _n: Notif, _bits: u64) {
+            unimplemented!()
+        }
+        fn notif_wait(&self, _n: Notif) -> u64 {
+            unimplemented!()
+        }
+    }
+
+    /// A transport that fails a given way, to exercise `connect`'s error arms.
+    struct FailRecv(RecvErr);
+    impl Transport for FailRecv {
+        fn send_nb(
+            &self,
+            _ch: Chan,
+            _data: &[u8],
+            _caps: Option<&[u32; 4]>,
+        ) -> Result<(), SendErr> {
+            Ok(())
+        }
+        fn recv_nb(
+            &self,
+            _ch: Chan,
+            _buf: &mut [u8],
+            _dests: Option<&[u32; 4]>,
+        ) -> Result<RecvOk, RecvErr> {
+            Err(self.0)
+        }
+        fn bind(&self, _ch: Chan, _ev: Event, _n: Notif, _bits: u64) -> Result<(), i64> {
+            unimplemented!()
+        }
+        fn notif_signal(&self, _n: Notif, _bits: u64) {
+            unimplemented!()
+        }
+        fn notif_wait(&self, _n: Notif) -> u64 {
+            unimplemented!()
+        }
+    }
+
+    #[test]
+    fn connect_negotiates_the_version_and_sends_the_right_request() {
+        let t = Loopback::new(64, VersionRange::single(PROTOCOL_VERSION));
+        let ver = connect(&t, 0, VersionRange::single(PROTOCOL_VERSION), || {}).unwrap();
+        assert_eq!(ver, PROTOCOL_VERSION);
+        // The bytes the driver actually put on the wire decode to the offered
+        // request (a zero bulk window, the single offered version).
+        let sent = t.last_req.borrow().clone().unwrap();
+        assert_eq!(
+            ConnectReq::decode(&sent),
+            Some(ConnectReq::new(0, VersionRange::single(PROTOCOL_VERSION)))
+        );
+    }
+
+    #[test]
+    fn connect_picks_highest_common_version() {
+        // Server speaks [1,3]; offering [2,5] negotiates 3.
+        let t = Loopback::new(64, VersionRange::new(1, 3));
+        assert_eq!(connect(&t, 0, VersionRange::new(2, 5), || {}), Ok(3));
+    }
+
+    #[test]
+    fn connect_maps_a_refusal() {
+        // A version with no overlap collapses to the wire `Refused`.
+        let t = Loopback::new(64, VersionRange::single(PROTOCOL_VERSION));
+        assert_eq!(
+            connect(
+                &t,
+                0,
+                VersionRange::single(PROTOCOL_VERSION.wrapping_add(9)),
+                || {}
+            ),
+            Err(ConnectErr::Refused)
+        );
+    }
+
+    #[test]
+    fn connect_surfaces_transport_failures() {
+        assert_eq!(
+            connect(
+                &FailRecv(RecvErr::Closed),
+                0,
+                VersionRange::single(1),
+                || {}
+            ),
+            Err(ConnectErr::PeerClosed)
+        );
+        assert_eq!(
+            connect(
+                &FailRecv(RecvErr::NoSlot),
+                0,
+                VersionRange::single(1),
+                || {}
+            ),
+            Err(ConnectErr::Transport)
         );
     }
 }

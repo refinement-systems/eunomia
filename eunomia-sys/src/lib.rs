@@ -44,6 +44,9 @@ extern crate alloc;
 
 pub mod bootstrap;
 pub mod encode;
+// The storaged fs client (std-port 4.1); target-gated internally like `pal`
+// (it links `storage-server`/`ipc`, target-only deps).
+pub mod fs;
 // The `sys::futex` bridge (std-port 3.3); target-gated internally like `pal`.
 pub mod futex;
 pub mod grant;

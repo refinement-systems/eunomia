@@ -16,7 +16,7 @@
 
 use core::alloc::{GlobalAlloc, Layout};
 
-use crate::{bootstrap, futex, heap, io_error, random, stdio, syscall, thread, tls};
+use crate::{bootstrap, fs, futex, heap, io_error, random, stdio, syscall, thread, tls};
 use core::sync::atomic::AtomicU32;
 
 /// The process-global std `System` heap (std-port 2.2): a fixed `.bss` arena over
@@ -228,6 +228,57 @@ pub extern "Rust" fn __eunomia_fill_bytes(bytes: &mut [u8]) {
 #[unsafe(no_mangle)]
 pub extern "Rust" fn __eunomia_io_classify(code: i64) -> u8 {
     io_error::classify(code) as u8
+}
+
+// ── The storaged fs client (std-port 4.1) ──
+// Each shim forwards to `crate::fs`, where the marshalling lives; raw path *bytes*
+// cross the seam (the std arm holds the `OsStr` bytes) and are split into tree
+// components PAL-side (the 4.2 seam). A `< 0` return is a raw fs code the std arm
+// wraps via `io::Error::from_raw_os_error` (its kind from `__eunomia_io_classify`).
+
+/// Read up to `buf.len()` bytes of `path` at `offset`. Returns bytes read (0 = EOF)
+/// or a negative fs code.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_fs_read(path: &[u8], offset: u64, buf: &mut [u8]) -> i64 {
+    fs::read(path, offset, buf)
+}
+
+/// Write all of `data` to `path` at `offset` (creating it). Returns bytes written or
+/// a negative fs code.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_fs_write(path: &[u8], offset: u64, data: &[u8]) -> i64 {
+    fs::write(path, offset, data)
+}
+
+/// The size of the file at `path`, or a negative fs code (`ERR_FS_NOT_FOUND` if absent).
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_fs_stat(path: &[u8]) -> i64 {
+    fs::stat(path)
+}
+
+/// Rename `from` to `to`. `0` or a negative fs code.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_fs_rename(from: &[u8], to: &[u8]) -> i64 {
+    fs::rename(from, to)
+}
+
+/// Remove the file at `path`. `0` or a negative fs code.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_fs_unlink(path: &[u8]) -> i64 {
+    fs::unlink(path)
+}
+
+/// Flush the ref durably (`fsync`/`sync_all`). `0` or a negative fs code.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_fs_sync() -> i64 {
+    fs::sync()
+}
+
+/// List the directory at `path`, encoded as the flat entry buffer the std `ReadDir`
+/// iterates (see `crate::fs`). An error is carried in the buffer's tag byte.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_fs_readdir(path: &[u8]) -> alloc::vec::Vec<u8> {
+    fs::readdir(path)
 }
 
 /// A static human-readable message for a raw syscall error code, for `error_string`.
