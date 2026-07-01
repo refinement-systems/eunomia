@@ -100,6 +100,16 @@ wait_for '\[stdsmoke\] spawning threads' 30
 wait_for '\[stdsmoke\] threads joined total=' 30
 wait_for 'STD32 PASS' 30
 
+# 2b. The lock stack over sys::futex (std-port 3.3): two std threads alternate turns
+#     under a Mutex + Condvar, blocking on the condvar until their parity comes up —
+#     real cross-thread futex_wait/futex_wake. A lost wakeup would hang the join (no
+#     STD33 PASS); a wrong count would exit(7). STD33 PASS witnesses the whole
+#     Mutex/Condvar stack live at EL0.
+printf 'run bin/stdsmoke sync\r' >&3
+wait_for '\[stdsmoke\] sync start' 30
+wait_for '\[stdsmoke\] sync done total=' 30
+wait_for 'STD33 PASS' 30
+
 # 3. The std-owned panic path: the parent must read 'panicked' (STATUS_PANIC),
 #    not exited(_). std's own panic hook prints 'panicked at …' first.
 printf 'run bin/stdsmoke panic\r' >&3
@@ -124,6 +134,18 @@ fi
 # A "current thread handle already set" abort means per-thread TLS regressed.
 if grep -q 'current thread handle already set' "$LOG"; then
     echo "STD SMOKE TEST FAIL: per-thread TLS regressed (set_current aborted on a spawned thread)" >&2
+    fail=1
+fi
+# The lock-stack marker (std-port 3.3): two threads ping-ponged under a Mutex +
+# Condvar over sys::futex. Its absence means a lost wakeup hung the join, or the
+# futex backend never linked.
+if ! grep -q 'STD33 PASS' "$LOG"; then
+    echo "STD SMOKE TEST FAIL: never reached STD33 PASS (Mutex/Condvar over sys::futex failed)" >&2
+    fail=1
+fi
+# A wrong critical-section count (lost/duplicated mutual exclusion) exits with 7.
+if grep -q '\[stdsmoke\] sync-bad' "$LOG"; then
+    echo "STD SMOKE TEST FAIL: sync counter wrong — lock did not serialize the critical section" >&2
     fail=1
 fi
 # env::args delivered the command line (2.1).
@@ -167,6 +189,7 @@ fi
 echo "STD SMOKE TEST PASS:"
 echo "  STD2 PASS — println!/format!/Vec/Box/String/Instant/SystemTime live at EL0"
 echo "  STD32 PASS — two std threads spawned/joined, concurrent heap alloc under the lock, per-thread TLS"
+echo "  STD33 PASS — two std threads ping-ponged under a Mutex + Condvar over sys::futex"
 echo "  env::args delivered the command line (alpha beta)"
 echo "  SystemTime read its granted time page; Instant monotonic"
 echo "  std panic reaped as STATUS_PANIC (parent read 'panicked'), not exited/faulted"

@@ -35,7 +35,7 @@
 
 use crate::lock::SpinLock;
 use crate::slots::SlotAlloc;
-use crate::thread_layout::{stack_region, PAGE, SLOTS_PER_THREAD, STACK_PAGES};
+use crate::thread_layout::{slot_of_sp, stack_region, PAGE, SLOTS_PER_THREAD, STACK_PAGES};
 use core::cell::UnsafeCell;
 use ipc::sys;
 
@@ -49,14 +49,18 @@ use ipc::sys;
 pub const MAX_THREADS: usize = crate::thread_layout::MAX_THREADS;
 
 /// Bytes carved per thread from the process thread-untyped: one TCB + `STACK_PAGES`
-/// stack frames + one notification, with slack. Committed on a slot's first use and
-/// reused across that slot's spawn/join cycles.
+/// stack frames + two notifications (the join/termination notif and the std-port
+/// 3.3 futex park-notif), with slack. Committed on a slot's first use and reused
+/// across that slot's spawn/join cycles.
 const PER_THREAD_BYTES: u64 = 128 * 1024;
 
 /// Total bytes a thread-capable process's thread-untyped must hold — one
-/// [`PER_THREAD_BYTES`] carve per [`MAX_THREADS`] slot. The producer (the spawner)
-/// sizes the untyped it grants from this constant, the shared convention.
-pub const THREAD_UNTYPED_BYTES: u64 = PER_THREAD_BYTES * (MAX_THREADS as u64);
+/// [`PER_THREAD_BYTES`] carve per [`MAX_THREADS`] slot, plus one more block for the
+/// **main** thread's own futex park-notif (std-port 3.3; the main thread is not a
+/// pool slot, so it carves its park-notif from the shared thread-untyped). The
+/// producer (the spawner) sizes the untyped it grants from this constant, the
+/// shared convention.
+pub const THREAD_UNTYPED_BYTES: u64 = PER_THREAD_BYTES * (MAX_THREADS as u64 + 1);
 
 /// Fixed priority for spawned threads (MVP). Must be `<=` the process's own
 /// priority — the rev2§5.4 ceiling stamped on the TCB cap at retype — or `spawn`
@@ -101,6 +105,10 @@ struct Slot {
     frame: u32,
     notif: u32,
     scratch: u32,
+    /// The per-thread futex park-notif (std-port 3.3): a notification this slot's
+    /// thread blocks on in `sys::futex` and a waker signals. Retyped from `sub_ut`
+    /// at each spawn (so a join's revoke reclaims it), valid only while `in_use`.
+    park_notif: u32,
 }
 
 impl Slot {
@@ -113,6 +121,7 @@ impl Slot {
             frame: 0,
             notif: 0,
             scratch: 0,
+            park_notif: 0,
         }
     }
 }
@@ -123,9 +132,13 @@ struct Inner {
     self_cspace: u32,
     self_untyped: u32,
     /// Allocator for the per-slot working cspace slots. `None` until `configure`;
-    /// `WORDS = 2` covers up to 128 slots (`SLOTS_PER_THREAD*MAX_THREADS = 80`).
+    /// `WORDS = 2` covers up to 128 slots (`SLOTS_PER_THREAD*MAX_THREADS + 1 = 97`).
     slots: Option<SlotAlloc<2>>,
     pool: [Slot; MAX_THREADS],
+    /// The main thread's futex park-notif slot (std-port 3.3), carved lazily on its
+    /// first `sys::futex` wait from `self_untyped` + one working slot. `0` until
+    /// carved. The main thread has no pool slot, so it keeps its park-notif here.
+    main_park: u32,
 }
 
 /// Process-global thread state, guarded by its own spinlock (distinct from the
@@ -149,6 +162,7 @@ static STATE: State = State {
         self_untyped: 0,
         slots: None,
         pool: [Slot::empty(); MAX_THREADS],
+        main_park: 0,
     }),
 };
 
@@ -172,8 +186,8 @@ pub fn configure(
     inner.self_untyped = self_untyped;
     // `SlotAlloc<2>` holds at most `2*64 = 128` slots; clamp to re-establish its
     // `cap <= WORDS*64` precondition at the seam (the §11 inverse-leak guard — the
-    // `requires` erases in exec builds). `SLOTS_PER_THREAD*MAX_THREADS = 80 <= 128`,
-    // so a well-provisioned range is never actually shortened.
+    // `requires` erases in exec builds). `SLOTS_PER_THREAD*MAX_THREADS + 1 = 97 <=
+    // 128`, so a well-provisioned range is never actually shortened.
     let cap = (slot_len as usize).min(2 * 64);
     inner.slots = Some(SlotAlloc::new(slot_base, cap));
     inner.configured = true;
@@ -249,6 +263,7 @@ pub fn spawn(entry: usize, stack_size: usize, arg: u64) -> Result<JoinHandle, i6
             frame: base + 2,
             notif: base + 3,
             scratch: base + 4,
+            park_notif: base + 5,
         };
     }
 
@@ -266,6 +281,14 @@ pub fn spawn(entry: usize, stack_size: usize, arg: u64) -> Result<JoinHandle, i6
         return Err(r);
     }
     let r = sys::retype(s.sub_ut, sys::OBJ_NOTIF, 0, s.notif, 0);
+    if r < 0 {
+        recycle(&s);
+        return Err(r);
+    }
+    // The per-thread futex park-notif (std-port 3.3), from the same sub-untyped so a
+    // join's revoke reclaims it. Full rights, so any thread sharing the cspace both
+    // signals (WRITE) and waits (READ) on it.
+    let r = sys::retype(s.sub_ut, sys::OBJ_NOTIF, 0, s.park_notif, 0);
     if r < 0 {
         recycle(&s);
         return Err(r);
@@ -355,6 +378,67 @@ pub fn join(h: JoinHandle) -> Result<(), i64> {
     let inner = unsafe { &mut *STATE.inner.get() };
     inner.pool[h.slot].in_use = false;
     Ok(())
+}
+
+/// This calling thread's own futex park-notif cspace slot (std-port 3.3): the
+/// notification it blocks on in `sys::futex` and a waker signals. Identifies the
+/// caller by its stack pointer (the inverse `thread_layout::slot_of_sp`): a pool
+/// thread returns its slot's `park_notif` (carved at spawn); the **main** thread
+/// (no pool slot) lazily carves its own from `self_untyped` on first use. Only ever
+/// called by a thread *for itself*, so the SP self-identification is exact.
+/// `Err` if the process is unconfigured, the slot allocator/untyped is exhausted,
+/// or the SP maps to a slot not currently running — the futex arm degrades to a
+/// yield-poll rather than pushing a bogus slot into a syscall (the §11 guard).
+pub fn current_park_notif() -> Result<u32, i64> {
+    let sp = read_sp();
+    let _g = STATE.lock.lock();
+    // SAFETY: exclusive under `lock`.
+    let inner = unsafe { &mut *STATE.inner.get() };
+    if !inner.configured {
+        return Err(sys::ERR_STATE);
+    }
+    match slot_of_sp(sp) {
+        Some(i) => {
+            let s = inner.pool[i];
+            if s.ready && s.in_use {
+                Ok(s.park_notif)
+            } else {
+                Err(sys::ERR_STATE)
+            }
+        }
+        None => {
+            // Main thread: carve its park-notif once, from the shared thread-untyped
+            // + one working slot (the `WORKING_SLOTS` `+ 1`).
+            if inner.main_park != 0 {
+                return Ok(inner.main_park);
+            }
+            let slot = inner
+                .slots
+                .as_mut()
+                .ok_or(sys::ERR_STATE)?
+                .alloc()
+                .ok_or(sys::ERR_NOMEM)?;
+            let r = sys::retype(inner.self_untyped, sys::OBJ_NOTIF, 0, slot, 0);
+            if r < 0 {
+                inner.slots.as_mut().unwrap().free(slot);
+                return Err(r);
+            }
+            inner.main_park = slot;
+            Ok(slot)
+        }
+    }
+}
+
+/// This thread's current stack pointer, for [`current_park_notif`]'s self-lookup.
+#[inline(always)]
+fn read_sp() -> u64 {
+    let sp: u64;
+    // SAFETY: reading SP is unconditionally valid at EL0; `nomem`/`nostack` — a pure
+    // register read with no memory effect.
+    unsafe {
+        core::arch::asm!("mov {sp}, sp", sp = out(reg) sp, options(nomem, nostack, preserves_flags));
+    }
+    sp
 }
 
 /// Cooperative yield (op 2).

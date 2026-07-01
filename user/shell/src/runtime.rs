@@ -50,8 +50,9 @@ const SPAWN_CAP: usize = 56; // slots 8..64
 /// One child's memory: aspace pool + stack + segments + bootstrap channel,
 /// with generous slack. The pool (slot 2) is ~100 MiB, and only this one
 /// donation is ever outstanding. Sized to also cover a thread-capable child's
-/// thread-untyped (`urt::thread::THREAD_UNTYPED_BYTES` = 2 MiB) on top of the base
-/// (std-port 3.2) — 16 MiB costs nothing and never runs short.
+/// thread-untyped (`urt::thread::THREAD_UNTYPED_BYTES` ≈ 2.1 MiB, incl. the std-port
+/// 3.3 per-thread futex park-notifs) on top of the base (std-port 3.2) — 16 MiB
+/// costs nothing and never runs short.
 const DONATION_BYTES: u64 = 16 * 1024 * 1024;
 /// Default child cspace: slot 0 = bootstrap, the rest a child-carved window.
 const CHILD_CSPACE_SLOTS: u64 = 8;
@@ -62,7 +63,7 @@ const CHILD_CSPACE_SLOTS: u64 = 8;
 // named for the child by the `NAME_*` grants (`build_child_block`). Every other
 // binary keeps the least-authority default above.
 /// A thread-capable child's cspace: slot 0 bootstrap, 1..=3 the self-caps, and
-/// `[CHILD_THREAD_SLOT_BASE, +WORKING_SLOTS)` the working range — 4 + 80 = 84 used,
+/// `[CHILD_THREAD_SLOT_BASE, +WORKING_SLOTS)` the working range — 4 + 97 = 101 used,
 /// rounded up.
 const THREAD_CHILD_CSPACE_SLOTS: u64 = 128;
 const CHILD_SELF_ASPACE: u32 = 1;

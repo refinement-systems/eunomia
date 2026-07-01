@@ -44,6 +44,8 @@ extern crate alloc;
 
 pub mod bootstrap;
 pub mod encode;
+// The `sys::futex` bridge (std-port 3.3); target-gated internally like `pal`.
+pub mod futex;
 pub mod grant;
 // Internal: the compile-time `System`-heap reservation size for the `pal` arm.
 mod heap;

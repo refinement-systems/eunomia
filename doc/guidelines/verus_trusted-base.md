@@ -408,6 +408,34 @@ categories already enumerated — **no `external_body`, no new seam, the tally s
   `kcore::sysabi::decode` (`[u64;6]→[u64;7]`) and `eunomia-sys::encode` are re-proven
   (kcore 407, eunomia-sys 7 — count-neutral; `rlimit-run` +0.00%), adding no `external_body`.
 
+**Futex-backend routing note (std-port 3.3).** The userspace `sys::futex` backend
+(findings #10) — the one primitive that lights the whole upstream lock stack
+(`Mutex`/`Condvar`/`RwLock`/`Once`/`Parker`) — adds trusted, non-Verus constructs, all
+folding under categories already enumerated — **no `external_body`, no new seam, the
+tally stays 14**:
+
+- **The address→waiter dispatch over notifications (`urt/src/futex.rs`)** — a
+  process-global bucket table (keyed by the futex address, guarded by the *reused* 3.2
+  bucket spinlock) whose `futex_wait` enqueues under the lock (word-checked before
+  parking) and whose `futex_wake` dequeues and signals a waiter's kernel notification.
+  Its correctness is a **concurrency interleaving over `Acquire`/`Release` atoms + a
+  notification, routed to Loom-certifying / Shuttle-breadth, never Verus** (the SeqCst
+  ghost-atomic pin, `doc/guidelines/verification.md`) — same tier and category as the 3.2
+  heap spinlock it reuses. Its §11 host test is the `futex::tests::futex_no_lost_wakeup`
+  model (`RUSTFLAGS="--cfg loom" cargo test -p urt --lib`, the Shuttle twin, and the
+  `--cfg futex_neg_control` word-check-before-lock inversion that must deadlock) + the
+  QEMU Mutex/Condvar ping-pong smoke (`STD33 PASS`); the abstract recheck-before-block
+  discipline is the same one the `tla/ipc_reactor` `NoLostWakeup` model + its 3 negative
+  controls check.
+- **The per-thread futex park-notif (`urt::thread`)** — one `OBJ_NOTIF` retyped per pool
+  slot (and one lazily for the main thread) from the already-trusted thread-untyped, on
+  which a waiter blocks and a waker signals. Object provisioning over the verified
+  `kcore::notification` + untyped retype, exactly the join-notif precedent — no new seam.
+  The running thread finds its own via `thread_layout::slot_of_sp` (host-tested).
+- **The vendored-std futex arm (`sys/pal/eunomia/futex.rs`) + the `eunomia-sys` bridge +
+  the `__eunomia_futex_*` shims** are term-for-term delegation to `urt::futex` (the thin
+  PAL-shell posture), holding no logic — only the `Option<Duration>`→nanoseconds marshal.
+
 ## The seams (14 named constructs + the by-construction category)
 
 Grouped by the `verus.md` §11 category. Each interpreted-hash / size / std-gap seam is a
