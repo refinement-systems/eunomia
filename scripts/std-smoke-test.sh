@@ -134,6 +134,18 @@ wait_for '\[stdsmoke\] tls start' 30
 wait_for '\[stdsmoke\] tls done drops=' 30
 wait_for 'STD35 PASS' 30
 
+# 2e. The inherited-environment path (std-port 5.2): init defines a base env
+#     (PATH=/bin, TMPDIR=/tmp, TERM=eunomia); the shell stashes it at boot and forwards
+#     it into every child's startup block. This child reads it back via env::var/env::vars
+#     and resolves env::temp_dir() from TMPDIR (no longer a panic). Asserting PATH/TERM —
+#     not only TMPDIR — proves inheritance really happened (/tmp is also temp_dir's
+#     fallback). A missing/wrong var exits 12/13/14 (env-bad). STD52 PASS witnesses the
+#     whole init→shell→child env-inheritance chain plus the temp_dir arm.
+printf 'run bin/stdsmoke env\r' >&3
+wait_for '\[stdsmoke\] env start' 30
+wait_for '\[stdsmoke\] env ok' 30
+wait_for 'STD52 PASS' 30
+
 # 3. The std-owned panic path: the parent must read 'panicked' (STATUS_PANIC),
 #    not exited(_). std's own panic hook prints 'panicked at …' first.
 printf 'run bin/stdsmoke panic\r' >&3
@@ -224,6 +236,18 @@ if grep -q '\[stdsmoke\] tls-bad' "$LOG"; then
     echo "STD SMOKE TEST FAIL: thread_local! wrong — destructor missed or storage not per-thread" >&2
     fail=1
 fi
+# The env marker (std-port 5.2): the child read its inherited environment
+# (PATH/TMPDIR/TERM) and env::temp_dir() resolved from TMPDIR. Its absence means env
+# inheritance (init→shell→child) or the temp_dir arm failed.
+if ! grep -q 'STD52 PASS' "$LOG"; then
+    echo "STD SMOKE TEST FAIL: never reached STD52 PASS (env inheritance / temp_dir failed)" >&2
+    fail=1
+fi
+# A wrong/absent env var or temp_dir exits 12/13/14 with an env-bad line.
+if grep -q '\[stdsmoke\] env-bad' "$LOG"; then
+    echo "STD SMOKE TEST FAIL: env var/env::vars/temp_dir wrong — inheritance broken" >&2
+    fail=1
+fi
 # The console-stdio marker (std-port 5.1): bin/stdio echoed a stdin line and wrote a
 # stderr line over the user/console channel. Its absence means the console stdio path
 # (or the shell's console donation to the child) failed.
@@ -288,6 +312,7 @@ echo "  STD32 PASS — two std threads spawned/joined, concurrent heap alloc und
 echo "  STD33 PASS — two std threads ping-ponged under a Mutex + Condvar over sys::futex"
 echo "  STD34 PASS — HashMap over the per-process entropy seed (seed-grant → DRBG → SipHash)"
 echo "  STD35 PASS — thread_local! per-thread storage + destructor ran on spawned-thread exit"
+echo "  STD52 PASS — env inherited init→shell→child (PATH/TMPDIR/TERM); env::temp_dir=/tmp"
 echo "  STD51 PASS — console stdio: stdin line echoed over the console, stderr routed independently"
 echo "  env::args delivered the command line (alpha beta)"
 echo "  SystemTime read its granted time page; Instant monotonic"

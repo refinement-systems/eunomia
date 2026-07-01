@@ -225,13 +225,23 @@ const SHELL_SESSION_SLOT: u32 = 1;
 /// Slot 7 is free (0 bootstrap, 1 storage, 2 pool, 5 time, 6 console; 3/4 carved).
 const SHELL_FS_SESSION_SLOT: u32 = 7;
 
+/// The base system environment init hands the shell (std-port 5.2). init is the
+/// single definition point: the shell inherits this and forwards it verbatim to
+/// every child it spawns (`user/shell`'s `_start` stash + `build_child_block`), the
+/// POSIX inheritance model. Kept small — every env byte counts against the 256-byte
+/// `MAX_BLOCK`. `TMPDIR` feeds the std `env::temp_dir()` arm (`/tmp`); `PATH`/`TERM`
+/// are the conventional pair a std program reads. Raw `KEY=VALUE` byte-strings
+/// (rev2§5.1 `environ` convention).
+const BASE_ENV: &[&[u8]] = &[b"PATH=/bin", b"TMPDIR=/tmp", b"TERM=eunomia"];
+
 /// Build the init→shell startup block (rev2§5.1): the unified
 /// `b"EUS1"` named-grant table (`loader::startup`) carrying the standard names the
 /// shell holds — `time` (the read-only page init mapped at `TIME_VA`, as a region
 /// grant carrying the VA), `storage` (the session channel at the shell's cspace
 /// slot 1), `root` (the full-rights ref at handle 0 on that session), and
 /// `stdin`/`stdout` (both name the one
-/// console-channel endpoint at `SHELL_CONSOLE_SLOT`). `tmp` (no
+/// console-channel endpoint at `SHELL_CONSOLE_SLOT`), plus the base environment
+/// (`BASE_ENV`, std-port 5.2). `tmp` (no
 /// subtree today) stays a reserved, unemitted name. Returns the encoded length, or
 /// an `EncodeError` the caller maps to a clean boot failure (refuse-not-crash,
 /// rev2§2.7) — never a panic.
@@ -283,6 +293,11 @@ fn build_shell_block(
         name: NAME_STDERR,
         kind: GrantKind::CapSlot(SHELL_CONSOLE_SLOT),
     })?;
+    // The base environment (std-port 5.2): the shell inherits it and forwards it to
+    // its children, so `std::env::vars()` is non-empty in every spawned std binary.
+    for e in BASE_ENV {
+        s.push_env(e)?;
+    }
     encode(&s, out)
 }
 
@@ -745,6 +760,11 @@ mod tests {
             Some(GrantKind::CapSlot(SHELL_CONSOLE_SLOT))
         );
         assert_eq!(s.grant(NAME_TMP), None);
+        // The base environment (std-port 5.2): the shell inherits it verbatim and
+        // forwards it to its children. `tmp` is not a grant — the writable-scratch
+        // subtree stays unemitted; `TMPDIR` rides the env instead.
+        assert_eq!(s.nenv, BASE_ENV.len());
+        assert_eq!(&s.env[..s.nenv], BASE_ENV);
     }
 
     #[test]

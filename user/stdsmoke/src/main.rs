@@ -20,7 +20,9 @@
 //! `HashMap` over the per-process entropy DRBG (3.4) — building a default-hasher
 //! map draws `hashmap_random_keys` → `fill_bytes` → `urt::random`, seeded from
 //! the `NAME_RANDOM_SEED` grant the shell hands each child. A process not granted
-//! a seed would abort loudly here rather than hash predictably.
+//! a seed would abort loudly here rather than hash predictably. `env` exercises the
+//! inherited environment (5.2): `env::var`/`env::vars` read the values init defines
+//! and the shell forwards, and `env::temp_dir()` resolves from `TMPDIR`.
 
 extern crate eunomia_sys; // links the PAL↔seam bridge (see module doc)
 
@@ -248,6 +250,53 @@ fn main() {
             "[stdsmoke] tls done drops={drops} child_counter={child_counter} main_counter={main_counter}"
         );
         println!("STD35 PASS");
+        return;
+    }
+
+    // std-port 5.2: the environment path. The shell forwards its inherited env (from
+    // init: `PATH=/bin`, `TMPDIR=/tmp`, `TERM=eunomia`) into this child's startup
+    // block, so `env::var`/`env::vars` read real values and `env::temp_dir()` returns
+    // a sane path instead of panicking. Asserting `PATH`/`TERM` — not just `TMPDIR` —
+    // is deliberate: `/tmp` is both the `TMPDIR` value and the `temp_dir` fallback, so a
+    // non-TMPDIR var is what proves inheritance actually happened, not the fallback.
+    if args.get(1).map(String::as_str) == Some("env") {
+        use std::path::Path;
+        println!("[stdsmoke] env start");
+
+        // Each inherited var reads back its exact value.
+        for (key, want) in [("PATH", "/bin"), ("TMPDIR", "/tmp"), ("TERM", "eunomia")] {
+            match std::env::var(key) {
+                Ok(v) if v == want => {}
+                other => {
+                    println!("[stdsmoke] env-bad {key}={other:?} want={want:?}");
+                    std::process::exit(12);
+                }
+            }
+        }
+
+        // `env::vars()` enumerates the whole inherited environment (non-empty, and it
+        // contains the keys above).
+        let vars: Vec<(String, String)> = std::env::vars().collect();
+        let has = |k: &str| vars.iter().any(|(vk, _)| vk == k);
+        if vars.is_empty() || !has("PATH") || !has("TMPDIR") || !has("TERM") {
+            println!("[stdsmoke] env-bad vars={vars:?}");
+            std::process::exit(13);
+        }
+
+        // `env::temp_dir()` resolves from `TMPDIR` (the eunomia paths arm) — no longer
+        // a panic. It must equal the inherited `/tmp`.
+        let tmp = std::env::temp_dir();
+        if tmp != Path::new("/tmp") {
+            println!("[stdsmoke] env-bad tmp={tmp:?}");
+            std::process::exit(14);
+        }
+
+        println!(
+            "[stdsmoke] env ok vars={} tmp={}",
+            vars.len(),
+            tmp.display()
+        );
+        println!("STD52 PASS");
         return;
     }
 

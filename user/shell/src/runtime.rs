@@ -164,6 +164,32 @@ static STDOUT_SLOT: AtomicU32 = AtomicU32::new(u32::MAX);
 /// chunks at this so any length streams in order.
 const STDOUT_CHUNK: usize = 256;
 
+// The shell's inherited environment (std-port 5.2), stashed once in `_start` and
+// forwarded verbatim to every child it spawns (`build_child_block`) — the POSIX
+// inheritance model, with init the single definition point. The byte data lives in
+// `SHELL_BOOT`, the `'static` buffer the block was decoded from, so the stored slices
+// are genuinely `'static`; stashing slices of a *local* boot buffer would dangle
+// after `_start`. Written once before the REPL and any spawn (single-threaded shell),
+// read-only after — the same init-once discipline as `eunomia_sys::bootstrap`.
+static mut SHELL_BOOT: [u8; loader::startup::MAX_BLOCK] = [0; loader::startup::MAX_BLOCK];
+static mut SHELL_ENV: [&[u8]; loader::startup::MAX_ENV] = [&[]; loader::startup::MAX_ENV];
+static mut SHELL_NENV: usize = 0;
+
+/// The inherited environment as raw `KEY=VALUE` byte-strings (rev2§5.1), empty
+/// before `_start` stashes it. Forwarded to children by `build_child_block`.
+fn shell_env() -> &'static [&'static [u8]] {
+    // SAFETY: `SHELL_ENV`/`SHELL_NENV` are written once in `_start` before the REPL
+    // and any spawn; the single-threaded shell never mutates them afterwards. Bind an
+    // explicit array reference before slicing so no implicit autoref of a raw-pointer
+    // deref is formed.
+    unsafe {
+        let n = *core::ptr::addr_of!(SHELL_NENV);
+        let arr: &'static [&'static [u8]; loader::startup::MAX_ENV] =
+            &*core::ptr::addr_of!(SHELL_ENV);
+        &arr[..n]
+    }
+}
+
 /// The cspace slot of the storage-session channel (`storage`, rev2§5.1).
 fn store_slot() -> u32 {
     STORE_SLOT.load(Ordering::Relaxed)
@@ -664,6 +690,8 @@ impl Spawner {
             &mut block,
             CHILD_TIME_VA,
             argv,
+            // std-port 5.2: forward the shell's inherited environment to the child.
+            shell_env(),
             thread_grants,
             storage_slot,
             console_slot,
@@ -950,8 +978,23 @@ pub extern "C" fn _start() -> ! {
     // refused, not a crash (decode is total, rev2§2.7); an absent name keeps the
     // default — no `time` grant means no clock (`date` degrades), `storage`/`root`
     // default to init's convention.
-    let mut boot = [0u8; 256];
-    let (blen, _) = sys::chan_recv(BOOT_CHAN, boot.as_mut_ptr(), None);
+    // Receive into the `'static` boot buffer (std-port 5.2) so the decoded argv/env
+    // slices are `'static` and the environment can be stashed for child inheritance.
+    // SAFETY: `chan_recv` fills `SHELL_BOOT` with this thread's slot-0 startup block;
+    // single-threaded, runs once. Using the raw pointer directly avoids forming a
+    // `&mut` that would alias the `&` view below.
+    let blen = {
+        let ptr = core::ptr::addr_of_mut!(SHELL_BOOT) as *mut u8;
+        let (n, _) = sys::chan_recv(BOOT_CHAN, ptr, None);
+        n
+    };
+    // SAFETY: `SHELL_BOOT` was filled to `blen` bytes above and is not mutated after
+    // (init-once, single-threaded), so a `'static` read-only view is sound. Bind an
+    // explicit array reference before slicing (no implicit autoref of a raw deref).
+    let boot: &'static [u8] = unsafe {
+        let buf: &'static [u8; loader::startup::MAX_BLOCK] = &*core::ptr::addr_of!(SHELL_BOOT);
+        &buf[..blen.max(0) as usize]
+    };
     // `stdin`/`stdout`: the console-channel endpoint the REPL reads
     // keystrokes from and writes output to (one channel under both names,
     // rev2§5.1). Unlike the other names they have no graceful default — the
@@ -959,7 +1002,7 @@ pub extern "C" fn _start() -> ! {
     // absent grant is fatal below.
     let mut stdin_slot: Option<u32> = None;
     let mut stdout_slot: Option<u32> = None;
-    if let Some(s) = loader::startup::decode(&boot[..blen.max(0) as usize]) {
+    if let Some(s) = loader::startup::decode(boot) {
         if let Some(slot) = resolve_storage_slot(&s) {
             STORE_SLOT.store(slot, Ordering::Relaxed);
         }
@@ -985,6 +1028,18 @@ pub extern "C" fn _start() -> ! {
         stdout_slot = resolve_stdout_slot(&s);
         if let Some(slot) = stdout_slot {
             STDOUT_SLOT.store(slot, Ordering::Relaxed);
+        }
+        // std-port 5.2: stash the inherited environment so it is forwarded to every
+        // child (`build_child_block`). The slices borrow `SHELL_BOOT` (a `'static`
+        // buffer), so they stay valid for the process lifetime; `decode` guarantees
+        // `s.nenv <= MAX_ENV`.
+        // SAFETY: written once here before the REPL and any spawn; single-threaded.
+        unsafe {
+            let env = &mut *core::ptr::addr_of_mut!(SHELL_ENV);
+            for i in 0..s.nenv {
+                env[i] = s.env[i];
+            }
+            *core::ptr::addr_of_mut!(SHELL_NENV) = s.nenv;
         }
     }
 

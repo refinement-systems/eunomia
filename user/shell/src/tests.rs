@@ -509,7 +509,7 @@ const TEST_SEED: [u64; 4] = [0x00C0_FFEE, 1, 2, 3];
 /// Encode a child block and decode it back, asserting it is well-formed.
 fn child_block(time_va: u64, argv: &[&[u8]]) -> Vec<u8> {
     let mut out = [0u8; startup::MAX_BLOCK];
-    let n = build_child_block(&mut out, time_va, argv, None, None, None, TEST_SEED)
+    let n = build_child_block(&mut out, time_va, argv, &[], None, None, None, TEST_SEED)
         .expect("within budget");
     out[..n].to_vec()
 }
@@ -532,10 +532,37 @@ fn build_child_block_round_trips_time_and_argv() {
     assert_eq!(s.nargv, 2);
     assert_eq!(s.argv[0], b"bin/selftest");
     assert_eq!(s.argv[1], b"254");
-    // env is carried empty (defined, unpopulated — rev2§5.1).
+    // The `child_block` helper forwards no env, so this block carries none
+    // (std-port 5.2 forwarding is covered by `build_child_block_forwards_env`).
     assert_eq!(s.nenv, 0);
     // The per-run entropy sub-seed round-trips (std-port 3.4).
     assert_eq!(s.grant(NAME_RANDOM_SEED), Some(GrantKind::Seed(TEST_SEED)));
+}
+
+#[test]
+fn build_child_block_forwards_env() {
+    // std-port 5.2: the shell forwards its inherited environment to the child as raw
+    // `KEY=VALUE` byte-strings, so `std::env::vars()` is non-empty in a spawned std
+    // binary. Env rides its own arena (`MAX_ENV`), separate from the grant budget.
+    let env: &[&[u8]] = &[b"PATH=/bin", b"TMPDIR=/tmp", b"TERM=eunomia"];
+    let mut out = [0u8; startup::MAX_BLOCK];
+    let n = build_child_block(
+        &mut out,
+        0xA300_0000,
+        &[b"bin/stdsmoke", b"env"],
+        env,
+        None,
+        None,
+        None,
+        TEST_SEED,
+    )
+    .expect("within budget");
+    let s = decode(&out[..n]).expect("valid EUS1 block");
+    // The env round-trips in order, alongside argv and the time/seed grants.
+    assert_eq!(s.nenv, 3);
+    assert_eq!(&s.env[..s.nenv], env);
+    assert_eq!(s.nargv, 2);
+    assert!(s.grant(NAME_TIME).is_some());
 }
 
 #[test]
@@ -557,6 +584,7 @@ fn build_child_block_emits_thread_grants() {
         &mut out,
         0xA300_0000,
         &[b"bin/stdsmoke"],
+        &[],
         Some([1, 2, 3, 4]),
         None,
         None,
@@ -587,6 +615,7 @@ fn build_child_block_emits_thread_grants() {
         &mut out,
         0xA300_0000,
         &[b"bin/selftest"],
+        &[],
         None,
         None,
         None,
@@ -608,6 +637,7 @@ fn build_child_block_emits_storage_grants() {
         &mut out,
         0xA300_0000,
         &[b"bin/stdfs"],
+        &[],
         None,
         Some(1),
         None,
@@ -626,6 +656,7 @@ fn build_child_block_emits_storage_grants() {
         &mut out,
         0xA300_0000,
         &[b"bin/hello"],
+        &[],
         None,
         None,
         None,
@@ -648,6 +679,7 @@ fn build_child_block_emits_console_grants() {
         &mut out,
         0xA300_0000,
         &[b"bin/stdsmoke"],
+        &[],
         None,
         None,
         Some(5),
@@ -665,6 +697,7 @@ fn build_child_block_emits_console_grants() {
         &mut out,
         0xA300_0000,
         &[b"bin/hello"],
+        &[],
         None,
         None,
         None,
@@ -686,6 +719,7 @@ fn build_child_block_thread_child_with_console_within_max_grants() {
         &mut out,
         0xA300_0000,
         &[b"bin/stdsmoke", b"stdio"],
+        &[],
         Some([1, 2, 3, 4]),
         None,
         Some(101),
@@ -707,7 +741,7 @@ fn build_child_block_refuses_over_arena() {
     // not truncated — the spawn path maps this to RunErr::Startup.
     let many = [b"p" as &[u8]; 9];
     let mut out = [0u8; startup::MAX_BLOCK];
-    assert!(build_child_block(&mut out, 0, &many, None, None, None, TEST_SEED).is_err());
+    assert!(build_child_block(&mut out, 0, &many, &[], None, None, None, TEST_SEED).is_err());
 }
 
 #[test]
@@ -717,7 +751,7 @@ fn build_child_block_refuses_over_budget() {
     // ≈ 369 bytes.
     let big = vec![b'x'; 300];
     let mut out = [0u8; startup::MAX_BLOCK];
-    assert!(build_child_block(&mut out, 0, &[&big], None, None, None, TEST_SEED).is_err());
+    assert!(build_child_block(&mut out, 0, &[&big], &[], None, None, None, TEST_SEED).is_err());
 }
 
 #[test]
