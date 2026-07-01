@@ -18,8 +18,12 @@
 #      was acked, and a second interrupt was delivered (the mask-on-deliver /
 #      unmask-on-ack cycle). The line is software-pended from EL1 on the
 #      m1-test path (no real device, no stdin).
+#   8  TLS (rev2§6.1(d)): two threads sharing one address space each write a
+#      distinct TPIDR_EL0 and, after handoffs during which the other thread
+#      set a different value, read back their own — the kernel saves/restores
+#      the EL0 TLS base per thread across context switches.
 #
-# Success is exactly the line "1234567M1 PASS" with no error marker
+# Success is exactly the line "12345678M1 PASS" with no error marker
 # ("E<tag>!"), no "M1 FAIL", and no PANIC.
 set -euo pipefail
 
@@ -63,14 +67,15 @@ kill "$QPID" 2>/dev/null || true
 wait "$QPID" 2>/dev/null || true
 trap - EXIT
 
-if ! grep -q '1234567M1 PASS' "$LOG"; then
-    echo "M1 TEST FAIL: did not reach the full marker sequence '1234567M1 PASS'" >&2
+if ! grep -q '12345678M1 PASS' "$LOG"; then
+    echo "M1 TEST FAIL: did not reach the full marker sequence '12345678M1 PASS'" >&2
     grep -nE 'M1 FAIL|PANIC|E.!|1234' "$LOG" >&2 || true
     tail -40 "$LOG" >&2
     exit 1
 fi
 
 echo "M1 TEST PASS:"
-echo "  1234567M1 PASS — caps/CDT, revoke-through-queue + cspace, timer,"
+echo "  12345678M1 PASS — caps/CDT, revoke-through-queue + cspace, timer,"
 echo "  thread reports (exit(42), rights gating), rev2§3.3 channel"
-echo "  whole-object teardown, and the rev2§3.6 device-IRQ → notification path"
+echo "  whole-object teardown, the rev2§3.6 device-IRQ → notification path,"
+echo "  and the rev2§6.1(d) TPIDR_EL0 TLS save/restore across context switches"

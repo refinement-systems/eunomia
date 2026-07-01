@@ -99,6 +99,14 @@ const BIT_PC_B: u64 = 1 << 1;
 // N_IRQ bit — a dedicated notification, so the low bit is free.
 const BIT_IRQ: u64 = 1 << 0;
 
+// Per-thread TLS base markers for the TPIDR_EL0 save/restore check. Distinct
+// and nonzero (0 is the zeroed-frame default, so nonzero also catches a
+// stuck-at-zero restore). Each thread writes its own, and after a context
+// switch during which the other thread set a different value re-reads it: a
+// mismatch means the kernel failed to save/restore TPIDR_EL0 (rev2§6.1(d)).
+const T1_TLS: u64 = 0x1111_1111_1111_1111;
+const T2_TLS: u64 = 0x2222_2222_2222_2222;
+
 #[inline(always)]
 unsafe fn sys(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 {
     let ret: u64;
@@ -130,6 +138,20 @@ unsafe fn sys2(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> (i64, u64) {
         options(nostack),
     );
     (ret as i64, ret2)
+}
+
+/// Read the EL0 thread pointer (`TPIDR_EL0`), the TLS base. RW at EL0.
+#[inline(always)]
+unsafe fn get_tpidr() -> u64 {
+    let v: u64;
+    asm!("mrs {v}, tpidr_el0", v = out(reg) v, options(nomem, nostack));
+    v
+}
+
+/// Write the EL0 thread pointer (`TPIDR_EL0`).
+#[inline(always)]
+unsafe fn set_tpidr(v: u64) {
+    asm!("msr tpidr_el0, {v}", v = in(reg) v, options(nomem, nostack));
 }
 
 #[inline(always)]
@@ -322,6 +344,10 @@ pub extern "C" fn user_main(_arg: u64) -> ! {
     unsafe {
         putc(b'1'); // marker: thread 1 alive at EL0
 
+        // EL0 TLS base; the kernel must preserve it across context switches
+        // (rev2§6.1(d)). Checked after the first handoff to T2, below.
+        set_tpidr(T1_TLS);
+
         check(retype(UNTYPED, OBJ_NOTIF, 0, N1, 0), b'a');
         check(retype(UNTYPED, OBJ_NOTIF, 0, N2, 0), b'b');
         check(retype(UNTYPED, OBJ_CHANNEL, 4, CHAN_A, CHAN_B), b'c');
@@ -360,6 +386,12 @@ pub extern "C" fn user_main(_arg: u64) -> ! {
 
         // T2 proves the transferred cap works by signaling through it.
         wait_for(N1, BIT_CAP_PROOF, b'n');
+        // TLS: T2 has run and set its own TPIDR_EL0 to T2_TLS in the interval
+        // we were parked, so reading back our own value proves the kernel
+        // saved/restored TPIDR_EL0 across the switch (rev2§6.1(d)).
+        if get_tpidr() != T1_TLS {
+            check(-1, b'T');
+        }
         putc(b'2'); // marker: cap arrived and was used
 
         // Queue a second derived cap in flight, then revoke the parent:
@@ -491,6 +523,7 @@ pub extern "C" fn user_main(_arg: u64) -> ! {
         wait_for(N_IRQ, BIT_IRQ, b'S'); // delivery 2: ack re-enabled the line
         putc(b'7'); // marker: device IRQ delivered, acked, and re-fired
 
+        putc(b'8'); // marker: TPIDR_EL0 (EL0 TLS) preserved across switches
         debug_write(&MSG_PASS);
         exit();
     }
@@ -500,6 +533,9 @@ pub extern "C" fn user_main(_arg: u64) -> ! {
 #[no_mangle]
 pub extern "C" fn user_thread2(_arg: u64) -> ! {
     unsafe {
+        // EL0 TLS base, distinct from T1's; must survive context switches
+        // (rev2§6.1(d)). Checked after the go-ahead handoff, below.
+        set_tpidr(T2_TLS);
         // Woken by the B-readable binding; receive the cap.
         wait_for(T2_NOTIF, BIT_B_READABLE, b'A');
         let mut buf = MaybeUninit::<[u8; 256]>::uninit();
@@ -515,6 +551,11 @@ pub extern "C" fn user_thread2(_arg: u64) -> ! {
 
         // Wait for the go-ahead (sent after the revoke).
         wait_for(T2_NOTIF, BIT_GO, b'E');
+        // TLS: T1 ran with a different TPIDR_EL0 while we were parked; ours
+        // must have been restored on the switch back to us (rev2§6.1(d)).
+        if get_tpidr() != T2_TLS {
+            check(-1, b'U');
+        }
 
         // The received cap must now be dead…
         let r_dead = notif_signal(T2_GOT, BIT_CAP_PROOF);

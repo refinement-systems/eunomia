@@ -358,6 +358,30 @@ arithmetic copied from `sys/time/unsupported.rs`. Host witness: the urt `utc_ns_
 proptests (extended with a zero-base non-negativity case pinning the `Instant` invariant)
 and the urt Miri sweep.
 
+**TPIDR_EL0 TLS save/restore routing note.** Std-port Phase 3.1 makes the AArch64
+`TPIDR_EL0` register (the EL0 thread pointer / TLS base, RW at EL0) survive a context
+switch, the threading prerequisite for per-thread TLS. `kcore::thread::TrapFrame` gains
+a `tpidr` field (272 → 288 bytes, a trailing pad word preserving the 16-byte SP
+alignment the exception entry needs), and the `kernel/src/exceptions.rs`
+`el0_entry`/`el0_restore` asm spills/reloads it through that slot uniformly on every EL0
+entry/exit — exactly as it already handles `sp_el0`/`elr`/`spsr` — with
+`enter_first_thread` (`kernel/src/main.rs`) seeding it. `TrapFrame` is `#[repr(C)]`
+**plain Rust outside `verus!{}`**; the verified `TcbView` (`kcore/src/cspace.rs`) models
+no register frame, so this touches **no `verus!{}` obligation and the kcore Baseline is
+unchanged**. The hand-coded asm byte offsets are now pinned to the struct by a
+compile-time `size_of`/`offset_of` assertion (`kcore/src/thread.rs`, the
+`urt::time::TimePage` layout-assert precedent), so a struct/asm drift fails to compile
+rather than silently corrupting `eret`. This is the **same inherently-unverifiable
+asm-context-switch construct already covered by the thread-lifecycle shell seam** below
+("the asm context switch is inherently unverifiable", §6.1(d)) — inline asm marshalling
+saved EL0 register state — widened by one register, so it adds **no `external_body` and
+no new seam; the tally stays 14**. The frame stays GP-only (softfloat EL0, no
+V-register file); growing it for hardware FP/NEON is a separate future change, not this
+bump. Host witness: m1-test stage 8 (`scripts/m1-test.sh`, the `12345678M1 PASS`
+marker) boots two threads sharing one address space that each write a distinct
+`TPIDR_EL0` and, after handoffs during which the other thread set a different value,
+read back their own — failing red if the kernel drops the save/restore.
+
 ## The seams (14 named constructs + the by-construction category)
 
 Grouped by the `verus.md` §11 category. Each interpreted-hash / size / std-gap seam is a
@@ -374,7 +398,7 @@ invariant. They are the spec's rev2§6.1(a–d) `[trusted]` parts:
 | Cross-root untyped non-overlap | (b) | Disjointness within one untyped is proven (watermark monotonicity); the *independent* root untypeds' base/size constants live in `unsafe` boot code with no global frame table — their non-overlap and the int→pointer step are a boot-setup axiom. |
 | Page-table join | (c) | The cap-side map **and** unmap are both proven over object state (the map record — `map_frame` — is symmetric with the unmap; the derived copy starts unmapped, a map records the entry coordinates on the cap, a delete clears them) and the raw page-table write/clear is proven over page-table memory; what stays trusted is the *join* — that the cap's recorded mapping is the true entry location and that `aspace_map`/`aspace_unmap` truly write/clear it — which lives in the unverified kernel Store. |
 | Thread-lifecycle shell | (d) | The spawn-time priority-ceiling gate is a verified refusal in `kcore::thread::set_priority` (over-ceiling → `Err`, thread untouched; accepted → priority proven `<= ceiling`), composing on the already-verified cap-ceiling attenuation. What stays trusted: the "suspended, never rescheduled" state (exception entry, syscall exit, scheduler), the anti-forgery/anti-suppression access control (rights gates + the spawn-time cap-distribution convention), and the exit/read-report syscall dispatch + register marshalling; the asm context switch is inherently unverifiable. |
-| IRQ-delivery shell | (c)/(d) | The boot-static `IRQ_TABLE` of `IrqObj` (the device-MMIO-frame precedent, *not* retyped), the INTID→object lookup (the timer `ARMED_HEAD`-resolution analog), the device-IRQ delivery path (mask-on-deliver + the verified `notification::signal`), and the per-IRQ GIC mask/unmask the `IrqBind`/`IrqAck` syscalls drive — the int→ptr shell over the verified `kcore::irq` core (`irq_bind`/`irq_unbind`/`destroy_irq` + the `irq_binding_refs` census, reached through the Store seam). The twin of the timer tick shell, under the same "scheduler/asm shell stays trusted" umbrella, so it is **not** a new seam and the tally stays 14. Host witness: m1-test stage 7 (`scripts/m1-test.sh`) signals a bound PL011 IRQ-handler cap's notification through the real GIC + exception path (the `1234567M1 PASS` regression marker). |
+| IRQ-delivery shell | (c)/(d) | The boot-static `IRQ_TABLE` of `IrqObj` (the device-MMIO-frame precedent, *not* retyped), the INTID→object lookup (the timer `ARMED_HEAD`-resolution analog), the device-IRQ delivery path (mask-on-deliver + the verified `notification::signal`), and the per-IRQ GIC mask/unmask the `IrqBind`/`IrqAck` syscalls drive — the int→ptr shell over the verified `kcore::irq` core (`irq_bind`/`irq_unbind`/`destroy_irq` + the `irq_binding_refs` census, reached through the Store seam). The twin of the timer tick shell, under the same "scheduler/asm shell stays trusted" umbrella, so it is **not** a new seam and the tally stays 14. Host witness: m1-test stage 7 (`scripts/m1-test.sh`) signals a bound PL011 IRQ-handler cap's notification through the real GIC + exception path (the `12345678M1 PASS` regression marker). |
 | WAL queue ↔ bytes lifetime join | (c)/(e) | `laid_out` is discharged *at recovery* — `recover_records` rebuilds the run from the on-device bytes and proves it laid out, firing `lemma_gap_freedom`. What stays trusted is the join across the Store's *lifetime*: that the live in-memory `wal_records` queue keeps matching the WAL bytes as `write`/`flush`/`commit` mutate it. Maintaining that as a Store-wide invariant is the larger surface §6.1(e) keeps the commit routine plain Rust over; the full replay-equality invariant remains the `CommitProtocol` model's. |
 
 **Storage durability axiom — "fsync means fsync" (rev2§4.8, §6.1(e)).** Named in the
