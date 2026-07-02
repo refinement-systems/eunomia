@@ -219,6 +219,10 @@ cargo verus verify -p kcore
 cargo verus verify -p ipc
 cargo verus verify -p urt
 cargo verus verify -p freelist
+cargo verus verify -p le-bytes                     # shared read-direction little-
+                                                    # endian byte codec (u*_le specs,
+                                                    # read_u*_le readers); cited by
+                                                    # cas/loader/eunomia-sys decoders
 cargo verus verify -p dma-pool
 cargo verus verify -p cas --no-default-features   # cas is Vec-heavy; the
                                                   # feature-agnostic codecs verify
@@ -244,6 +248,11 @@ cargo verus verify -p loader --no-default-features # ELF page_layout (total,
                                                   # ∀ &[u8] (le readers + every
                                                   # accepted Image well-formed);
                                                   # no_std core, re-verifies ipc
+cargo verus verify -p eunomia-sys                  # syscall-argument encoder (the
+                                                    # inverse of kcore::sysabi::decode)
+                                                    # + path resolver (rev2§3.7,
+                                                    # rev2§4.9); re-verifies its gated
+                                                    # deps (loader, ipc, le-bytes)
 ```
 
 A real run ends each crate with a `verification results:: N verified, 0 errors`
@@ -315,11 +324,12 @@ skipped fmt; don't bring them back.
 
 The catch is the workspace split (`Cargo.toml`): a plain `cargo fmt` at the root
 formats every **root-workspace** member (`cas`, `kcore`, `kernel`, `ipc`,
-`storage-server`, `mkfs`, `dma-pool`, `freelist`, `virtio-blk`, `loader`, `urt`)
-but **silently skips** the separate workspaces — the `user/*` binaries
-(`storaged`, `init`, `shell`, …, their own mini-workspaces) and the `*/fuzz`
-crates (`cas/fuzz`, `storage-server/fuzz`, `loader/fuzz`, `ipc/fuzz`, excluded so
-a plain build never pulls libfuzzer). If your change touches one of those, format
+`storage-server`, `mkfs`, `dma-pool`, `freelist`, `virtio-blk`, `loader`, `urt`,
+`eunomia-sys`, `le-bytes`) but **silently skips** the separate workspaces — the
+`user/*` binaries (`storaged`, `init`, `shell`, …, their own mini-workspaces)
+and the `*/fuzz` crates (`cas/fuzz`, `storage-server/fuzz`, `loader/fuzz`,
+`ipc/fuzz`, `eunomia-sys/fuzz`, excluded so a plain build never pulls
+libfuzzer). If your change touches one of those, format
 it via its own manifest, e.g.:
 
 ```sh
