@@ -29,19 +29,27 @@ OUT_DIR="${OUT_DIR:-$ROOT/target/verus-baseline}"
 TOP_N="${TOP_N:-8}"               # slowest functions to list per crate
 NO_CLEAN="${NO_CLEAN:-0}"
 
-# The CI gate set, in CI order (.github/workflows/ci.yml `verus` job). cas and
-# storage-server are Vec/serde-heavy, so their feature-agnostic verified cores
+# The gated-crate set and per-crate flags come from the shared manifest
+# (tools/verus/verus-manifest.tsv) — the same source of truth the CI gate
+# (tools/verus/verus-gate.sh) asserts against and the trusted-base ledger's
+# ## Baselines mirrors — so this timing sweep never drifts from the gate set. cas
+# and storage-server are Vec/serde-heavy, so their feature-agnostic verified cores
 # verify in the no_std+alloc variant (--no-default-features); storage-server also
-# scopes to --lib (its placeholder bin carries no proofs). loader's verified core
-# (page_layout) is no_std + no-alloc, so it too verifies under --no-default-features.
-ALL_CRATES=(kcore ipc urt freelist dma-pool cas virtio-blk storage-server loader)
+# scopes to --lib (its placeholder bin carries no proofs); loader's verified core
+# (page_layout) is no_std + no-alloc, so it too uses --no-default-features.
+MANIFEST="${MANIFEST:-$ROOT/tools/verus/verus-manifest.tsv}"
+[ -f "$MANIFEST" ] || { echo "error: manifest not found: $MANIFEST" >&2; exit 1; }
+
+# awk -F'\t' parses the TSV without collapsing the empty flags column (a
+# whitespace-IFS `read` would merge the two tabs of a plain-crate row); skip
+# blank lines, `#` comments, and the header row. Crate order follows the manifest
+# (CI order).
+ALL_CRATES=()
+while IFS= read -r crate; do ALL_CRATES+=("$crate"); done < <(
+  awk -F'\t' '$1 != "" && $1 !~ /^#/ && $1 != "crate" { print $1 }' "$MANIFEST"
+)
 verus_args_for() {
-  case "$1" in
-    cas) echo "--no-default-features" ;;
-    storage-server) echo "--no-default-features --lib" ;;
-    loader) echo "--no-default-features" ;;
-    *) echo "" ;;
-  esac
+  awk -F'\t' -v c="$1" '$1 == c { print $2; exit }' "$MANIFEST"
 }
 
 [ -n "${VERUS_BIN_DIR:-}" ] && PATH="$VERUS_BIN_DIR:$PATH"

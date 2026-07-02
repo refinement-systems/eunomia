@@ -1,0 +1,41 @@
+# Verus verified-count manifest — the machine-readable twin of the trusted-base
+# ledger's ## Baselines section (doc/guidelines/verus_trusted-base.md), and the
+# Verus analogue of the TLC coverage ledger (tools/tla/model-manifest.tsv).
+# tools/verus/verus-gate.sh reads it to cold-verify every gated crate and assert
+# each crate's verified-obligation count; the CI verus job runs that gate, so a
+# silently-dropped obligation — Verus proving *less* while still exiting 0 —
+# fails a PR, not only a local run. scripts/verus-baseline.sh reads the same
+# crate + flags columns for its timing sweep, so there is one source of truth for
+# the gated-crate set.
+#
+# The verified count is the crate's proof-obligation count: a DROP means Verus is
+# proving fewer obligations (a coverage shrink), even when the run still exits 0.
+# It is asserted against a real COLD run — the gate `cargo clean -p <crate>`s
+# first, so a stale target/ cannot false-green: a missing `verification results::`
+# line is itself a hard failure (CLAUDE.md / doc/guidelines/verus.md, "scoped runs
+# can false-green from stale cache").
+#
+# Re-derive every count from a real cold verify — never trust a stale table. `-`
+# means "not yet pinned": the gate treats it as a fail-loud misconfiguration (it
+# would otherwise disarm the guard), so replace `-` with the run's number to arm
+# it. These counts must equal the ledger ## Baselines Result cells.
+#
+# flags are the crate's extra `cargo verus verify` arguments: --no-default-features
+# for the Vec/serde-heavy feature-agnostic cores, --lib to skip a placeholder bin;
+# empty for the plain crates. Rows are in CI order (the .github/workflows/ci.yml
+# verus job), which is also a dependency order, so each crate's gated deps are
+# already warm when it verifies.
+#
+# Columns (tab-separated): crate  flags  expected_verified
+crate	flags	expected_verified
+kcore		408
+ipc		71
+urt		30
+freelist		30
+le-bytes		6
+dma-pool		0
+cas	--no-default-features	79
+virtio-blk		3
+storage-server	--no-default-features --lib	19
+loader	--no-default-features	30
+eunomia-sys		16

@@ -657,7 +657,13 @@ rev2§6.1 `[verifying]` tag. Keep these rows and rev2§6.1 in sync with the code
 
 ## Baselines (regression gates)
 
-Any phase touching these must re-establish them at ≥ the prior numbers.
+Any phase touching these must re-establish them at ≥ the prior numbers. The Verus
+rows' verified-obligation counts are pinned machine-readably in
+`tools/verus/verus-manifest.tsv`, and `tools/verus/verus-gate.sh` cold-verifies
+every gated crate and asserts each count on every CI run — a dropped obligation
+(the prover proving *less* while still exiting 0) or a stale-cache false-green
+fails the job. That manifest and these Result cells are twins and must stay in
+agreement.
 
 | Surface | Command | Result |
 |---|---|---|

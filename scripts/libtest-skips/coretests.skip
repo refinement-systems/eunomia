@@ -12,5 +12,13 @@
 #
 # Format:  <module>::<path::to::test>    # reason
 #
-# (Populated empirically during triage — the last `test <NAME> ...` line before an
-# abort names the culprit. Entries below are the triaged skips.)
+# This list is empty by design: the full coretests suite runs green on-target with
+# no per-test exclusions. `scripts/libtest-on-target.sh --full --suite coretests`
+# reports `test result: ok. 2590 passed; 0 failed; 5 ignored; 151 filtered out`,
+# 0 aborts (the 151 are the #[should_panic] tests the runner's
+# --exclude-should-panic flag drops wholesale — see the NOTE above; the 5 are
+# upstream #[ignore]s). An entry is added here only if a forward-port to a newer
+# nightly surfaces a test that cannot pass in-process under panic=abort: the last
+# `test <NAME> ...` line before the abort names the culprit; add it in the
+# <module>::<test> form above with a one-line reason (alloctests.skip is the
+# worked example).
