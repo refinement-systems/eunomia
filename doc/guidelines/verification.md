@@ -9,7 +9,7 @@ in depth:
 - **Verus** — deductive proof of extracted functions: `doc/guidelines/verus.md`.
 - **TLA+/TLC** — design-level state machines: `doc/guidelines/tla.md`.
 - **cargo-fuzz** — adversarial bytes: `doc/guidelines/fuzzing.md`.
-- **Loom/Shuttle** — concurrency interleavings (scoped below).
+- **Loom/Shuttle** — concurrency interleavings: `doc/guidelines/loom.md`.
 - **proptest/Miri** — pure policy/schedulers and undefined-behaviour oracles.
 
 Each method proves a different kind of claim; none subsumes another, so the
@@ -44,7 +44,8 @@ strongest-sounding tool.
   under SeqCst the structure is trivially correct, so the proof would also dodge the real
   reordering question. It is irreducibly Loom-certifying / Shuttle-smoke. Only when the
   shared state genuinely *is* a SeqCst atomic does the Verus tokenized-state-machine path
-  apply (`verus.md`).
+  apply (`verus.md`). The seam, model-authoring, negative-control, and reproducibility
+  mechanics are `loom.md`'s.
 
 - **A design-level safety invariant can split between the tiers — its per-step inductive
   arm to Verus, its global/liveness arm to the model.** A protocol whose *design* lives in
@@ -94,5 +95,7 @@ alarm, not the all-clear. For Verus this is the host-test-with-teeth discipline
 in `verus.md`; for TLA+ it is the *runnable negative control* — the real action
 minus exactly one load-bearing conjunct, asserted to fail and confirmed to reach
 a concrete bad state — whose construction, faithfulness traps, and CI wiring are
-in `tla.md`. Keep the framing here at the level of the principle; the per-method
-"how" lives in each tool's guideline.
+in `tla.md`; for Loom/Shuttle it is a deliberately broken variant confirmed to
+fail — a `--cfg` negative-control that deadlocks, or a dropped-lock red control
+that trips the race detector — in `loom.md`. Keep the framing here at the level of
+the principle; the per-method "how" lives in each tool's guideline.
