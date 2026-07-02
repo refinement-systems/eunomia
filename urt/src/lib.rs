@@ -36,9 +36,10 @@
 //!     `debug_assert!` fires as a debug-build witness; release is a silent leak.
 //!     (A future `free_or_coalesce` that admits a merging free at the cap would
 //!     shrink the leak window; out of scope here.)
-//!   - **`MAX_ALIGN = 64`.** The arena base is `align(64)`, so `base.add(off)`
-//!     meets any `layout.align() <= 64` (every standard allocation, plus
-//!     cache-line / common SIMD). A larger request returns null (clean OOM).
+//!   - **`MAX_ALIGN = 128`.** The arena base is `align(128)`, so `base.add(off)`
+//!     meets any `layout.align() <= 128` (every standard allocation, plus the
+//!     AArch64 cache line — `std::sync::mpsc`'s cache-line-padded channel block, and
+//!     common SIMD). A larger request (e.g. a page) returns null (clean OOM).
 //!
 //! Usage in a process binary:
 //!   #[global_allocator]
@@ -135,10 +136,13 @@ const HEAP_RANGES: usize = 1024;
 /// stay 16-aligned (the minimum alignment every Rust allocation expects).
 const MIN_ALIGN: usize = 16;
 /// Arena base alignment (the `#[repr(align)]` below). `base.add(off)` meets any
-/// `layout.align() <= MAX_ALIGN`; a larger request is refused with null.
-const MAX_ALIGN: usize = 64;
+/// `layout.align() <= MAX_ALIGN`; a larger request is refused with null. 128 (the
+/// AArch64 cache line) so cache-line-padded std structures allocate — notably
+/// `std::sync::mpsc`, whose 128-aligned channel block every libtest run needs
+/// (std-port 6.1). A page-aligned (4096) request is still refused.
+const MAX_ALIGN: usize = 128;
 
-#[repr(C, align(64))] // = MAX_ALIGN, so base.add(off) satisfies layout.align() <= 64.
+#[repr(C, align(128))] // = MAX_ALIGN, so base.add(off) satisfies layout.align() <= 128.
 pub struct Heap<const N: usize> {
     /// Pure storage now — handed to callers, never holds allocator metadata.
     mem: UnsafeCell<[u8; N]>,
@@ -216,7 +220,7 @@ unsafe impl<const N: usize> GlobalAlloc for Heap<N> {
         match fl.alloc(need, align.max(MIN_ALIGN)) {
             // The lone raw-pointer formation: `off + need <= N` by alloc's
             // `ensures`, and `off` is `align.max(16)`-aligned, so over a
-            // 64-aligned base the address meets `layout.align() <= 64`.
+            // 128-aligned base the address meets `layout.align() <= 128`.
             Some(off) => (self.mem.get() as *mut u8).add(off),
             None => ptr::null_mut(), // OOM / fragmentation cap / no fit
         }
@@ -298,14 +302,15 @@ mod tests {
 
     #[test]
     fn over_alignment_returns_null() {
-        // align > MAX_ALIGN (64) cannot be met by the arena base → clean OOM,
-        // not UB. Below the cap (align <= 64) is exercised by alloc_free_reuse.
-        static H: Heap<4096> = Heap::new();
+        // align > MAX_ALIGN (128) cannot be met by the arena base → clean OOM,
+        // not UB. Below the cap (align <= 128) is exercised by alloc_free_reuse.
+        static H: Heap<8192> = Heap::new();
         unsafe {
-            let l = Layout::from_size_align(64, 128).unwrap();
+            let l = Layout::from_size_align(64, 256).unwrap();
             assert!(H.alloc(l).is_null());
-            // A 64-aligned request of the same size still succeeds.
-            let ok = Layout::from_size_align(64, 64).unwrap();
+            // A request at exactly the cap (128, the AArch64 cache line —
+            // `std::sync::mpsc`'s block, std-port 6.1) still succeeds.
+            let ok = Layout::from_size_align(64, 128).unwrap();
             assert!(!H.alloc(ok).is_null());
         }
     }
@@ -430,8 +435,8 @@ mod tests {
 
     fn op_strategy() -> impl Strategy<Value = Op> {
         prop_oneof![
-            // align = 1<<log2 ≤ 64 = MAX_ALIGN, so the request is never over-aligned.
-            (1usize..=256, 0u32..=6).prop_map(|(size, align_log2)| Op::Alloc { size, align_log2 }),
+            // align = 1<<log2 ≤ 128 = MAX_ALIGN, so the request is never over-aligned.
+            (1usize..=256, 0u32..=7).prop_map(|(size, align_log2)| Op::Alloc { size, align_log2 }),
             any::<usize>().prop_map(|idx| Op::Dealloc { idx }),
             (any::<usize>(), 1usize..=256)
                 .prop_map(|(idx, new_size)| Op::Realloc { idx, new_size }),

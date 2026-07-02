@@ -1,0 +1,16 @@
+# On-target skip list for the upstream `coretests` suite (std-port 6.1, findings #19).
+#
+# Consumed by scripts/libtest-on-target.sh: one libtest test-name substring per line
+# (blank lines and `#` comments ignored). For each module run, only the entries whose
+# name begins with that module are passed as `--skip=<name>` (the 256-byte startup
+# block fits only ~1-2 per command). A whole module may be excluded from the run lists
+# in the runner itself; per-test exclusions live here with a one-line reason.
+#
+# NOTE: #[should_panic] tests are NOT listed here — they are dropped wholesale by the
+# runner's `--exclude-should-panic` flag (they panic by design and so can never pass
+# in-process under panic=abort, where catch_unwind cannot catch).
+#
+# Format:  <module>::<path::to::test>    # reason
+#
+# (Populated empirically during triage — the last `test <NAME> ...` line before an
+# abort names the culprit. Entries below are the triaged skips.)
