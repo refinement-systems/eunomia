@@ -16,41 +16,16 @@ pub use loader::startup::{
     NAME_STRING, NAME_THREAD_SLOT_BASE, NAME_THREAD_UNTYPED, NAME_TIME, NAME_TMP, NAME_VIRTIO_MMIO,
 };
 
+// The pure `GrantKind` projections live with the type in `loader::startup` (shared with
+// the no_std `user/console`/`user/storaged` drivers, which cannot pull this crate). The
+// named-role helpers below wrap them; re-exported so `eunomia_sys::grant::region` (etc.)
+// stays the resolver path the PAL and `bootstrap` already use.
+pub use loader::startup::{cap_slot, region, region_va, storage_handle};
+
 /// The cspace slot holding a child's bootstrap channel (rev2§5.1): init installs the
 /// child's endpoint at slot 0 of its cspace, and `_start` reads the startup block as
 /// that channel's first message. The convention every child shares (`BOOT_CHAN = 0`).
 pub const BOOTSTRAP_CHANNEL: u32 = 0;
-
-/// The cspace slot of the cap grant named `name`, if present and a `CapSlot`.
-pub fn cap_slot(s: &Startup, name: u8) -> Option<u32> {
-    match s.grant(name)? {
-        GrantKind::CapSlot(slot) => Some(slot),
-        _ => None,
-    }
-}
-
-/// The handle number of the storage grant named `name`, if present and a
-/// `StorageHandle`.
-pub fn storage_handle(s: &Startup, name: u8) -> Option<u32> {
-    match s.grant(name)? {
-        GrantKind::StorageHandle(h) => Some(h),
-        _ => None,
-    }
-}
-
-/// The `(va, len, pa)` of the region grant named `name`, if present and a `Region`.
-pub fn region(s: &Startup, name: u8) -> Option<(u64, u64, u64)> {
-    match s.grant(name)? {
-        GrantKind::Region { va, len, pa } => Some((va, len, pa)),
-        _ => None,
-    }
-}
-
-/// The virtual address of the region grant named `name` (the field a consumer of a
-/// pre-mapped page actually needs).
-pub fn region_va(s: &Startup, name: u8) -> Option<u64> {
-    region(s, name).map(|(va, _, _)| va)
-}
 
 /// `stdin` → the cspace slot of the console-channel endpoint the process reads from
 /// (rev2§5.1). The console driver owns the PL011 RX line, so an absent grant has no
