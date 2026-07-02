@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Embedded EL0 test program — an end-to-end exercise of the syscall
 //! surface.
 //!

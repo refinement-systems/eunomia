@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 // Shared bare-metal link-arg helpers for the `user/*` build scripts (rev2§5, rev2§7).
 //
 // The user binaries live in their own mini-workspaces, so this file is pulled into each

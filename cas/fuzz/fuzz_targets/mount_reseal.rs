@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 #![no_main]
 //! Mount as a *total* function over arbitrary device contents, sealed or
 //! not — `Ok` or `Err`, never a panic, never an allocation unbounded by

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The trusted userspace syscall shell (rev2§6.1(d)).
 //!
 //! The typed wrappers over the raw `svc #0` shim. The wrappers are the surface the PAL

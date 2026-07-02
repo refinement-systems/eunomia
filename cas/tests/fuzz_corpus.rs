@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Replay the committed fuzz corpus through the same decoders the cargo-fuzz
 //! targets drive. This keeps every fuzz-discovered (and seed) input alive as
 //! an ordinary test even where libFuzzer doesn't run, and — the cheap

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: 0BSD
 # Establish a TLC model-checking baseline for every committed model/cfg.
 #
 #   scripts/tla-baseline.sh                       # baseline every cfg in the manifest

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The std runtime GATE fixture: the first *live* `std` binary on Eunomia. It
 //! exercises the core std runtime surfaces — entry/argv/env, GlobalAlloc,
 //! stdio→debug-log, time — end to end and prints a green-boot marker

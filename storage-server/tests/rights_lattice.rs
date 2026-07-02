@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Rights-lattice property tests (spec rev2§2.3). The example
 //! tests in `sessions.rs` pin individual derivations; these pin the *laws*:
 //!

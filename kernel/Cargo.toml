@@ -2,6 +2,7 @@
 name = "kernel"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 # `doc = false`: the kernel is a bare-metal aarch64-unknown-none-softfloat
 # binary (own `#[panic_handler]`, ELF `#[link_section]`s, build-std). A

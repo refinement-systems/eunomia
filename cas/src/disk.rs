@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! On-disk formats (rev2§4.2): superblocks, WAL records, the ref table,
 //! and the chunk index. All hand-defined and little-endian — nothing
 //! persistent speaks postcard (rev2§3.7). Decoders are strict and reject

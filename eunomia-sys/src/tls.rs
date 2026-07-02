@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Per-thread TLS block + the key-based TLS backend.
 //!
 //! Eunomia has real per-thread TLS — `TPIDR_EL0` survives a context switch;

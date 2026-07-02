@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Replay the committed request_dispatch corpus through the real
 //! decode-and-dispatch seam, so seed and fuzz-found inputs stay alive as an
 //! ordinary test and `cargo miri test` UB-checks the postcard decoder on

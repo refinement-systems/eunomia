@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The storage engine (rev2§4.3-4.7): memtable + WAL + flush + the A/B
 //! superblock commit, with crash recovery and GC. This is the code the
 //! CommitProtocol TLA+ model models; the crash-injection proptest at the

@@ -1,5 +1,7 @@
 # Forward-port runbook — the vendored Rust fork
 
+This work is licensed under a [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0) license.
+
 Eunomia's `std` runs on a **vendored fork of the Rust standard library**
 (`vendor/rust`, a git submodule) that carries a custom `eunomia` platform-abstraction
 layer (PAL). Upstream Rust moves; this fork must be re-based onto newer nightlies over

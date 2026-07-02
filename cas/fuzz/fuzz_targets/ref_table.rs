@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 #![no_main]
 //! The durable reference table (rev2§4.1, rev2§4.7): per-ref roots +
 //! revocation generation + edit version, the snapshot rows, and the tags.

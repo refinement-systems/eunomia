@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 #![no_main]
 //! The workhorse oracle: directory-entry TLV is canonical, so any bytes
 //! the decoder accepts must equal their own re-encoding. A decoder that

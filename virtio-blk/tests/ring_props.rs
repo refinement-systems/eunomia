@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The proptest tier rev2§6 mandates for the driver: descriptor-chain
 //! construction, used/avail-ring arithmetic, and `u16` index wrap. The driver
 //! logic is pure sequential ring arithmetic over the fake's shared memory, so

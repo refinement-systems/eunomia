@@ -1,5 +1,7 @@
 # Verus
 
+This work is licensed under a [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0) license.
+
 Verus is the kernel core's **deductive-verification tier**: it proves the `kcore`
 object model and the rev2§4.7/rev2§4.8 host chokepoints meet functional `ensures`,
 **terminate**, and preserve their `wf` invariants **for all inputs**, with no

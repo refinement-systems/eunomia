@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! init — the one process the kernel constructs (rev2§1). Holds all initial
 //! authority and wires the running system (rev2§5.2: init is the only
 //! binder): it reads the PL031 once and publishes the time page (rev2§2.6),

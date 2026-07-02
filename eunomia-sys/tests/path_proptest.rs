@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Property tests for the path resolver: random path-shaped byte
 //! strings checked against a plain reference resolver, for the structural output
 //! invariants, and for join↔resolve idempotence (the "presentation policy"

@@ -2,6 +2,7 @@
 name = "coretests"
 version = "0.0.0"
 edition = "2024"
+license = "0BSD"
 autotests = false
 autobenches = false
 

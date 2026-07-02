@@ -1,4 +1,5 @@
 ---- MODULE CapRevocation ----
+\* SPDX-License-Identifier: 0BSD
 \* Kernel capability revocation model for Eunomia OS (spec rev2§2.2, rev2§3.4,
 \* rev2§5.1, rev2§6).
 \*

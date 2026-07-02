@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The std `System` heap reservation size `N`.
 //!
 //! eunomia's `GlobalAlloc` arm is backed by a fixed `.bss` `urt::Heap<N>` (the

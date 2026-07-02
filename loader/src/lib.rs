@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Program loader (rev2§5): ELF64 parsing (host-testable) and
 //! spawn-with-explicit-cspace (target-only, over ipc::sys).
 //!

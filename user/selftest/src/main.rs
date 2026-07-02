@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! A spawn/reclaim test subject. Its whole world arrives via the rev2§5.1
 //! startup convention: a bootstrap channel in cspace slot 0 whose first
 //! queued message is the unified `b"EUS1"` startup block — a `TIME`

@@ -1,5 +1,7 @@
 # Eunomia OS — Design Document (rev2)
 
+This work is licensed under a [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0) license.
+
 Eunomia is an experimental operating system built around three commitments:
 
 1. **Capability-based access to all resources.** No ambient authority; a process's reach is exactly the contents of its capability space plus its storage sessions.

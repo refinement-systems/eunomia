@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Minimal ELF64 little-endian parser for aarch64 executables.
 //! Strict (untrusted input — images come from the versioned store):
 //! bounds-checked, no panics.

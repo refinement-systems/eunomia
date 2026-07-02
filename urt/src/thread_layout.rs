@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Pure address-space geometry for in-process thread stacks.
 //!
 //! Split out of `thread` (which is bare-metal-only, since it issues syscalls) so

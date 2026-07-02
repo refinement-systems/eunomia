@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The 32-level ready queue (rev2§5.4): strict fixed-priority, round-robin within a
 //! level. kcore owns the list *logic* — enqueue (append-to-tail), dequeue (pop-head),
 //! unqueue (arbitrary-position splice), and the `top_ready` bit-scan — operating on the

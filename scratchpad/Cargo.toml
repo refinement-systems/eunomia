@@ -2,6 +2,7 @@
 name = "scratchpad"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 vstd = "=0.0.0-2026-05-31-0205"

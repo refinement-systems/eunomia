@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The fixed, hand-defined message header (spec rev2§3.7). Every IPC message is
 //! this header followed by a postcard-encoded body. The header layout **never
 //! migrates** — it is the layer that makes every other layer migratable — so

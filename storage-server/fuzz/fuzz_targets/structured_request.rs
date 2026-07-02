@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 #![no_main]
 //! The encoder direction. `#[derive(Arbitrary)]` builds a *typed* `Request`
 //! straight from fuzz bytes; we encode it and decode it back. Driving the

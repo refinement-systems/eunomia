@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The non-blocking IPC primitives — "what every server sees": a typed `Message`
 //! (256-byte payload + 4 cap slots, rev2§3.1) and an `Endpoint` that bundles a
 //! channel handle with a `Transport`, with cap marshalling and null-slot

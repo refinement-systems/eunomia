@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! `eunomia-sys` — the PAL↔kernel seam for the Rust std port (rev2§3.7,
 //! rev2§6.1(d)).
 //!

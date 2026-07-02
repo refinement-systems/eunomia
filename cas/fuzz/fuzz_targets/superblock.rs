@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 #![no_main]
 //! Raw superblock decode: arbitrary bytes through `Superblock::decode`,
 //! no fix-up. The rejection path (bad magic / version / checksum) is

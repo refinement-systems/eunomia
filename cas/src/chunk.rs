@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! FastCDC chunker (spec rev2§4.1): gear-hash content-defined chunking,
 //! target chunk size 16–64 KiB, with normalized chunking (a stricter
 //! boundary mask below the target size, a looser one above it).

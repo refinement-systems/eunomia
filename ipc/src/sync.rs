@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! cfg-selected concurrency primitives for the IPC model + harnesses:
 //! `std` by default, `loom` under `--cfg loom`,
 //! `shuttle` under `--cfg shuttle`. Mirrors `urt`'s concurrency seam.

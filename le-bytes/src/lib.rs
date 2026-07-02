@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! `le-bytes` — the verified read-direction little-endian byte machinery, shared
 //! by every decoder that reads fixed-width little-endian fields off a `&[u8]`
 //! buffer (cas's node decoder, loader's ELF `parse`, rev2§6/§8).

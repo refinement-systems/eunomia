@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: 0BSD
 # QEMU boot test — the rev2§2.6 proof: wall-clock time observable end to end.
 # Boots the full system, takes two snapshots, and asserts that their
 # UTC timestamps land in a sane window around the host clock, are

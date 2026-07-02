@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Replay the committed fuzz corpora through their targets, re-checking the
 //! invariants. Keeps fuzz inputs alive as ordinary tests and lets `cargo miri
 //! test` UB-check them on each. Covers all targets — `elf_parse` (the parser),

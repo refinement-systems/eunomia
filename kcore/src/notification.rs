@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Notification objects (spec rev2§3.6): a machine word of signal bits plus a
 //! FIFO waiter queue. Signalers OR bits in; a waiter receives the whole
 //! accumulated word, which clears. Event delivery never allocates — the

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Userspace console stdio.
 //!
 //! The std PAL's `sys/stdio` arm routes `stdout`/`stdin`/`stderr` here, and this

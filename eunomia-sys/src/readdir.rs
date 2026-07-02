@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The `read_dir` cursor head shared with the std `sys/fs/eunomia` arm.
 //!
 //! `ReadDir` crosses the seam as an integer handle, not a serialized buffer: the

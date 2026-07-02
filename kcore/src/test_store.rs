@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Concrete array-backed `Store` + the executable contract checks for the
 //! cspace ops (`delete`, `cdt_unlink`, `slot_move`).
 //!

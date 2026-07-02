@@ -1,5 +1,7 @@
 # TLA+/TLC — design-level model checking on Eunomia OS
 
+This work is licensed under a [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0) license.
+
 This is the single, self-contained guideline for writing and checking TLA+
 specifications on this project. It assumes familiarity with TLA+ syntax; it does
 not teach the language. Every rule below is load-bearing: the suite's value

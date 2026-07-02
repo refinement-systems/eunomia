@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 #![no_main]
 //! The IPC wire body decoder on arbitrary bytes (spec rev2§3.7).
 //! Oracle: `decode` is total (never panics — that is the whole point of the

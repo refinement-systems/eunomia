@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The object-store seam.
 //!
 //! `kcore`'s operations are written against this trait instead of raw pointers:

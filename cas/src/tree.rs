@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Nested directory operations (spec rev2§4.9): every operation is
 //! openat-shaped — relative to an explicitly named root, taking component
 //! lists. `/` is shell presentation, not a format concept. There is no

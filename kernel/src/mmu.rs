@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 // Identity-map MMU setup for AArch64 EL1, QEMU virt machine.
 //
 // Translation regime: TTBR0, 39-bit VA (T0SZ=25), 4K granule, level-1

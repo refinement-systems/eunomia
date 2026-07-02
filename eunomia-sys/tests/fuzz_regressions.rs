@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Regression tests for the path resolver. Each pins a hardened
 //! behavior — the confinement denials and the `.`/`..` resolution semantics that
 //! the Verus totality theorem does not (and cannot) state — so it cannot silently

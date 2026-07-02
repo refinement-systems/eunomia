@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Sessions and connect (spec rev2§3.5) — the **admission** layer. A client
 //! funds the channel (retypes it from its own untyped, rev2§3.2) and sends a
 //! `ConnectReq` naming a requested **bulk-window size**; the server grants or

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Seed-corpus generator for the cas/fuzz targets. Emits valid, canonical
 //! artifacts built with the real encoders into `cas/fuzz/corpus/<target>/`,
 //! so every fuzz run (and the committed-corpus replay test) starts warm on

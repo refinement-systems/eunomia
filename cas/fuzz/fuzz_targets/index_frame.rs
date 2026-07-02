@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 #![no_main]
 //! The format-v2 durable index: the hash→extent map plus the free-extent
 //! list, one frame (rev2§4.2 items 3–4). We fuzz `decode_index` directly —

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! mkfs — host-side tool to build the initial disk image (rev2§7).
 //!
 //! Reuses the cas storage engine: format the device, create the `main`

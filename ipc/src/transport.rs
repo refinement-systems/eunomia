@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The transport seam: the kernel IPC surface behind a trait, so the reactor is
 //! generic over it.
 //!

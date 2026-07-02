@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Content-addressed storage primitives (spec rev2§4).
 //!
 //! This crate is pure Rust, host-testable (std), no kernel dependency.

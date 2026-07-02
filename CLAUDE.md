@@ -1,5 +1,7 @@
 # Eunomia OS — Development Guide
 
+This work is licensed under a [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0) license.
+
 Full design specification: `doc/spec/spec_rev2.md`. Read the spec before
 touching any component. Section numbers below refer to that document.
 All spec references must contain the revision number, like "rev2§6" or "rev2§3.1".

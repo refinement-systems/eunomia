@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Process-global thread-local **key table**: the verified key
 //! allocator behind std's key-based TLS (`vendor/rust`'s `sys/thread_local/os.rs`).
 //!

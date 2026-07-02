@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Userspace virtio-blk driver (rev2§2.5): virtio-mmio (modern,
 //! version 2) split virtqueue, written exclusively against DmaPool —
 //! the driver never sees a physical address, only opaque

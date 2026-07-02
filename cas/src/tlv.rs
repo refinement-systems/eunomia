@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Single directory-entry TLV codec (spec rev2§4.9), exposed as a standalone
 //! encode/decode pair for the canonical-form fuzz oracle.
 //!

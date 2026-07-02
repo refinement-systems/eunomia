@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Fuzz-only mutators (compiled only under the `fuzzing` feature).
 //!
 //! A coverage-guided mutator cannot forge a BLAKE3 checksum, so a fuzzer

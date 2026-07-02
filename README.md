@@ -1,5 +1,7 @@
 # Eunomia OS
 
+This work is licensed under a [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0) license.
+
 An experimental operating system built around three commitments:
 
 1. **Capability-based access to everything.** No ambient authority: a
@@ -232,3 +234,36 @@ tla/             TLA+ models; tools/tla/ has the check scripts
 doc/spec/        The design document — read this first
 scripts/         run-demo.sh
 ```
+
+## Licensing
+
+Project-owned code in this repository is licensed under the 0BSD license; see
+[`LICENSE.0BSD`](LICENSE.0BSD) for the full text. Project-owned Markdown
+documentation is licensed under the CC0 1.0 Universal public-domain dedication;
+see [`LICENSE.CC0`](LICENSE.CC0) for the full text.
+
+Third-party dependencies and vendored external code retain their own licenses.
+The complete combined build is therefore not simply 0BSD: the 0BSD license
+applies only to this project's own code, and dependency or vendored components
+remain governed by their respective license terms. Eunomia-owned crates reported
+as `N/A` by `cargo license` are covered by the project-code statement above, not
+listed as third-party dependencies here.
+
+### Third-party Rust dependency licenses
+
+| License expression | Crates |
+| --- | --- |
+| `(Apache-2.0 OR MIT) AND Unicode-3.0` | `unicode-ident` |
+| `Apache-2.0` | `shuttle` |
+| `Apache-2.0 OR Apache-2.0 WITH LLVM-exception OR CC0-1.0` | `blake3` |
+| `Apache-2.0 OR Apache-2.0 WITH LLVM-exception OR MIT` | `linux-raw-sys`, `rustix`, `wasi`, `wasip2`, `wasip3`, `wasm-encoder`, `wasm-metadata`, `wasmparser`, `wit-bindgen`, `wit-bindgen-core`, `wit-bindgen-rust`, `wit-bindgen-rust-macro`, `wit-component`, `wit-parser` |
+| `Apache-2.0 OR BSD-2-Clause OR MIT` | `zerocopy`, `zerocopy-derive` |
+| `Apache-2.0 OR CC0-1.0 OR MIT-0` | `constant_time_eq` |
+| `Apache-2.0 OR LGPL-2.1-or-later OR MIT` | `r-efi` |
+| `Apache-2.0 OR MIT` | `anyhow`, `arrayvec`, `autocfg`, `bit-set`, `bit-vec`, `bitflags`, `cc`, `cfg-if`, `cobs`, `cpufeatures`, `embedded-io`, `equivalent`, `errno`, `fastrand`, `find-msvc-tools`, `fnv`, `generator`, `getrandom`, `hashbrown`, `heck`, `hex`, `id-arena`, `indexmap`, `itoa`, `lazy_static`, `leb128fmt`, `libc`, `log`, `num-traits`, `once_cell`, `pin-project-lite`, `postcard`, `ppv-lite86`, `prettyplease`, `proc-macro2`, `proptest`, `quick-error`, `quote`, `rand`, `rand_chacha`, `rand_core`, `rand_pcg`, `rand_xorshift`, `regex-automata`, `regex-syntax`, `rustversion`, `rusty-fork`, `scoped-tls`, `semver`, `serde`, `serde_core`, `serde_derive`, `serde_json`, `shlex`, `smallvec`, `syn`, `tempfile`, `thiserror`, `thiserror-impl`, `thread_local`, `unarray`, `unicode-xid`, `verus_prettyplease`, `verus_syn`, `wait-timeout`, `windows-link`, `windows-result`, `windows-sys` |
+| `BSD-2-Clause` | `arrayref` |
+| `MIT` | `assoc`, `bitvec`, `funty`, `loom`, `matchers`, `nu-ansi-term`, `owo-colors`, `radium`, `sharded-slab`, `synstructure`, `tap`, `tracing`, `tracing-core`, `tracing-log`, `tracing-subscriber`, `valuable`, `verus_builtin`, `verus_builtin_macros`, `verus_state_machines_macros`, `vstd`, `wyz`, `zmij` |
+| `MIT OR Apache-2.0` | `arbitrary`, `derive_arbitrary`, `jobserver` |
+| `(MIT OR Apache-2.0) AND NCSA` | `libfuzzer-sys` |
+| `MIT OR Unlicense` | `aho-corasick`, `memchr` |
+| `Zlib` | `foldhash` |

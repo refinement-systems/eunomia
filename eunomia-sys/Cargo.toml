@@ -2,6 +2,7 @@
 name = "eunomia-sys"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 # eunomia-sys is the PAL↔kernel seam crate for the Rust std port (rev2§3.7,
 # rev2§6.1(d)): the raw `svc #0` syscall wrappers (trusted inline-asm shell) over a

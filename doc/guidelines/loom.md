@@ -1,5 +1,7 @@
 # Loom and Shuttle
 
+This work is licensed under a [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0) license.
+
 Loom and Shuttle are the **concurrency-interleaving tier**: they exercise the
 *actual code's* thread interleavings, the class of bug — a lost wakeup, a torn
 seqlock read, a non-exclusive lock — that a single-threaded property test never

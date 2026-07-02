@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Kernel-side scheduler (spec rev2§1, rev2§5.4). The thread *object* — TCB layout,
 //! trap frame, report state machine, binding slots — lives in
 //! [`kcore::thread`] (re-exported below); this module keeps the

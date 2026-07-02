@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

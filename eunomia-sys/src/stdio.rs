@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Bring-up stdio over the kernel debug-log.
 //!
 //! The std PAL's `sys/stdio` arm routes stdout/stderr (and panic last-words) here, and

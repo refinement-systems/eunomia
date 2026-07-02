@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: 0BSD
 # Verus verified-count gate — cold-verify every gated crate and assert its
 # verified-obligation count against the pinned row in
 # tools/verus/verus-manifest.tsv (the machine-readable twin of the trusted-base

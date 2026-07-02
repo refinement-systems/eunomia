@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! `ModelTransport`: a deterministic in-memory kernel implementing `Transport`,
 //! so Shuttle/Loom can schedule the communicating processes (sender, receiver)
 //! over the shared channel + notification objects — the cross-process races

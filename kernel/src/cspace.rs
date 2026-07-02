@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Kernel-side capability-space surface: the object machinery lives in
 //! [`kcore::cspace`] (host-buildable); this module re-exports it and
 //! supplies the `KernelStore`-bound wrappers for the few ops that fire events or

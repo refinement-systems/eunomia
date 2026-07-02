@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! File content storage (spec rev2§4.1, rev2§4.9): content ≤ INLINE_MAX lives
 //! inline in the directory entry; larger content is FastCDC-chunked and
 //! referenced through a chunk-list object. The inline rule is a pure

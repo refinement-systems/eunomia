@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! In-process thread spawn/join/yield/sleep (rev2§5.3) — the substrate the std
 //! `sys/thread/eunomia` arm drives through the `eunomia_sys::thread` bridge.
 //!

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The std-PAL thread bridge: thin delegation to `urt::thread`,
 //! the verification-disciplined in-process thread primitive. Holds no logic of its
 //! own — the `pal` `__eunomia_thread_*` shims are one-line calls into here, and

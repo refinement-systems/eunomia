@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 #![no_main]
 //! FastCDC chunker invariants on arbitrary input (rev2§4.1). Boundaries decide
 //! chunk hashes, so they are a format property: deterministic, chunks

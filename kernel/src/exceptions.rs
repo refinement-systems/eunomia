@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 // Exception vector table and handlers for AArch64 EL1.
 //
 // Two regimes:

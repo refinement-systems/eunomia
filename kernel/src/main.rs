@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 #![no_std]
 #![no_main]
 

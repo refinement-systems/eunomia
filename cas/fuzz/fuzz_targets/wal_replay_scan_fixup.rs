@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 #![no_main]
 //! WAL replay scan *behind* the per-record checksum gate. Raw bytes almost
 //! never form a valid record, so the unguarded scanner stops at offset 0

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Kernel-side IRQ surface (rev2§1, rev2§3.6): the trusted int→ptr shell over the
 //! verified [`kcore::irq`] object core — the twin of [`crate::timer`]'s tick shell.
 //!

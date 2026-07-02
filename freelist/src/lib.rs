@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! `freelist` — the verified free-list core, shared by `dma-pool` (rev2§2.5) and
 //! the `urt` heap allocator (rev2§6).
 //!

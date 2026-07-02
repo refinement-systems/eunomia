@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Object and slot handles.
 //!
 //! The arena rewrite replaces `kcore`'s intrusive `*mut` graph with opaque,

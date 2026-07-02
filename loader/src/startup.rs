@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The startup block (rev2§5.1): the first message on a child's bootstrap
 //! channel, carrying *argv*, *env*, and a **named-grant table**. One versioned,
 //! self-describing format (`b"EUS1"`) serves every parent→child bootstrap

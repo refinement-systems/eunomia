@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Regression tests for cases surfaced by loader/fuzz. Each pins the
 //! hardened behavior so the case cannot silently regress.
 

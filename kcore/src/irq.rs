@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! IRQ-handler objects (rev2§1, rev2§3.6): a cap granting the right to receive and
 //! acknowledge a device interrupt. The **census twin of the timer object** (`crate::timer`),
 //! minus the armed list: an IRQ cap binds a (notification, bits) pair exactly as a timer

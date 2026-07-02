@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! A userspace `sys::futex` backend: the one primitive upstream
 //! std needs to light `Mutex`/`Condvar`/`RwLock`/`Once`/`Parker`. We write no lock
 //! logic — upstream's futex impls come free — only the three futex functions over a

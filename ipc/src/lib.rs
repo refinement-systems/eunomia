@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Userspace IPC crate — shared by every server (spec rev2§3.5, rev2§3.7).
 //!
 //! Responsibilities:

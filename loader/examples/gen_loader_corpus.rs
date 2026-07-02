@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Seed-corpus generator for loader/fuzz. Emits minimal valid ELF64
 //! aarch64 ET_EXEC images so the fuzzer mutates real header/segment fields
 //! from a parseable base. Run: `cargo run -p loader --example gen_loader_corpus`.

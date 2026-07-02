@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 #![no_main]
 //! Page-layout arithmetic on arbitrary `(vaddr, memsz)` (rev2§5).
 //! `spawn::prepare` page-rounds each segment of an untrusted image; that math

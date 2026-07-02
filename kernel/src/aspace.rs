@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Kernel-side address-space shell (spec rev2§2.5). The walker itself — table
 //! allocation, `map`/`unmap`, the read-only lookup, the descriptor bit
 //! assembly, the VA-index arithmetic — lives in [`kcore::aspace`] as safe

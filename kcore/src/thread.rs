@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Thread objects and their terminal reports (spec rev2§5.1, rev2§5.3).
 //!
 //! kcore owns the thread *object*: the TCB layout, the trap frame (plain

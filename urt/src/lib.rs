@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Userspace runtime: a global allocator over a static in-image heap.
 //!
 //! The allocator is first-fit with address-ordered two-sided coalescing. Its

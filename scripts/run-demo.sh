@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: 0BSD
 # Build everything, assemble the demo disk image with mkfs, boot the full
 # system in QEMU (MVP demo script, spec rev2§1). Interactive by default;
 # pipe commands on stdin for scripted runs.

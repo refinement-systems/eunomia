@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 include!("../build_common.rs");
 
 fn main() {

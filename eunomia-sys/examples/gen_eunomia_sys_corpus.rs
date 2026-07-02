@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Seed-corpus generator for eunomia-sys/fuzz. The `path`
 //! resolver takes raw, attacker-influenced filename bytes with no checksum/length
 //! gate, so — unlike the ELF/startup/cas generators, which emit structures that

@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: 0BSD
 # QEMU boot test — the std-port fs GATE. It boots
 # the full stack (mkfs image → virtio-blk → storaged → mount → console → shell) and
 # drives the shell through the std fs client `user/stdfs`, asserting the whole

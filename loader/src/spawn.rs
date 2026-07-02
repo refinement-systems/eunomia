@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Spawn-with-caps (rev2§5, rev2§5.1): build a child process from an ELF
 //! image and an explicitly constructed cspace.
 //!

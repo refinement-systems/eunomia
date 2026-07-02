@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The time page (spec rev2§2.6): wall-clock time with zero syscalls.
 //!
 //! Init reads the PL031 RTC once at boot and publishes

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Host tests for the mkfs directory walk (rev2§6 Baseline tier).
 //!
 //! The walk (`populate`) and the name rule (`name_acceptable`) are driven

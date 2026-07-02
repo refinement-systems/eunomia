@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Process bootstrap (rev2§5.1): receive the slot-0 startup block and stash it.
 //!
 //! The PAL `_start` calls [`init`] once, before `main`. It receives the first

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Little-endian byte split/reassemble identities for the hand-written codecs
 //! (spec rev2§3.7). The header and session wire forms encode `u16`/`u32` fields
 //! as explicit `|`/`<<`/`&` mask-shift arithmetic (not `to_le_bytes`, which Verus

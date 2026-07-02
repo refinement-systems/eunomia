@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: 0BSD
 # QEMU boot test — the rev2§5.1 spawn/reclaim proof, same genre as M1's
 # revocation test. Boots the full system and drives the shell through:
 #

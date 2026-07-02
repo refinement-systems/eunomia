@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The std-port fs GATE fixture: the first std binary
 //! to drive the real `sys/fs/eunomia` client against storaged. It exercises the whole
 //! file surface the gate names — create/write, read-back, `read_dir`, `rename`,

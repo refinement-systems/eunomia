@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 // PL011 UART — the kernel-internal diagnostic path only (rev2§7).
 //
 // The user-facing console is the userspace `user/console` driver, which owns the

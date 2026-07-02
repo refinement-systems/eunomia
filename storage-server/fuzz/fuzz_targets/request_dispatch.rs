@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 #![no_main]
 //! The request dispatch seam. Bytes go through the *same* entry the real
 //! server loop uses — `wire::decode_request` then `Server::handle` — rather

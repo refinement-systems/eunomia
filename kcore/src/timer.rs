@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Timer objects (spec rev2§1, rev2§3.6): a cap to program a deadline that signals
 //! a bound notification. kcore owns the armed-timer *list* — insert, unlink,
 //! and the expiry sweep — operating on the list head through the [`Store`]

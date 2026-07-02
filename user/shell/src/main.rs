@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The Eunomia shell (spec rev2§7): built-ins over a storage session.
 //!
 //! World (built by init, rev2§5.1): slot 0 = bootstrap channel (first message

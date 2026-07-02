@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Asynchronous IPC channels (spec rev2§3.1-3.4, rev2§3.6).
 //!
 //! A channel is two endpoints (A, B) over two fixed-depth rings of message

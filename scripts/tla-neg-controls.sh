@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: 0BSD
 # Run the committed negative-control cfgs and assert each FAILS as designed.
 #
 #   scripts/tla-neg-controls.sh [safety|liveness|all]

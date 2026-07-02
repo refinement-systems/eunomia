@@ -1,5 +1,7 @@
 # Fuzzing
 
+This work is licensed under a [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0) license.
+
 cargo-fuzz (libFuzzer) harnesses for the host-side parsers — the on-disk
 formats, the IPC wire protocol, and the ELF loader. 
 

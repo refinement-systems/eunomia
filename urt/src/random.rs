@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Per-process entropy DRBG: the backend for std's `fill_bytes`
 //! / `hashmap_random_keys`, and the source a parent draws each child's sub-seed
 //! from.

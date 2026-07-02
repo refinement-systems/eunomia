@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 #![no_main]
 //! Path resolution on arbitrary bytes (rev2§4.9/§2.3). A path is an
 //! attacker-influenced filename in the versioned store, resolved client-side

@@ -1,5 +1,7 @@
 # The trusted base — ledger
 
+This work is licensed under a [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0) license.
+
 **The trusted base is exactly the seams enumerated below.** This file is the single
 source of truth for `CLAUDE.md`'s "the trusted base is exactly …" claim and for
 `doc/guidelines/verus.md`'s pointer (its "## The trusted base" section and Part B §11).

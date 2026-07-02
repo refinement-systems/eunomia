@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! A register-accurate fake virtio-mmio block device for host tests.
 //!
 //! Backed by a Vec "disk" and the same shared memory the driver's

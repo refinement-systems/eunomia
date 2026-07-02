@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! A yielding spinlock — the process-global heap's mutual-exclusion primitive
 //! once in-process threads exist (rev2§5.3).
 //!

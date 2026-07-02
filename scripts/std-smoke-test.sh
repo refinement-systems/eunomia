@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: 0BSD
 # QEMU boot test — the std runtime GATE. It exercises the core std runtime surfaces
 # (entry+argv/env, GlobalAlloc, stdio→debug-log + exit terminus, time) live under
 # QEMU: it boots the full system and drives the shell through the first

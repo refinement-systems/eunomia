@@ -2,6 +2,7 @@
 name = "storage-server"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 # The lib (sessions/handles/wire) is no_std+alloc for the on-OS build;
 # "std" covers host testing and the placeholder host binary.

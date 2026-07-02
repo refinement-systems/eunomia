@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Storage server — userspace process holding the virtio-blk cap (spec rev2§4).
 //!
 //! The session/handle/dispatch core lives in lib.rs and is host-testable.

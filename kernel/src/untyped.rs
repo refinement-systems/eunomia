@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Kernel-side retype: the system's one int→pointer boundary.
 //! The validation ([`retype_check`]), placement arithmetic ([`carve`]),
 //! CDT install ([`retype_install`]), and `reset` are pure/verifiable

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The storaged filesystem client.
 //!
 //! The client half of the storage session protocol (rev2§4): it marshals the std

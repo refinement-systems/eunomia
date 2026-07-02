@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The wire codec (spec rev2§3.7): every message is the fixed
 //! [`Header`](crate::header::Header) (`header.rs`, byte-stable and Verus-verified)
 //! followed by a **postcard**-encoded body.

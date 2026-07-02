@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 #![no_main]
 //! ELF64 parse on arbitrary bytes (rev2§5). Program images are data in the
 //! versioned store, so any holder of write access to a path feeds bytes to

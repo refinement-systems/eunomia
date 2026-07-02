@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Regression tests for findings surfaced by the storage-server and cas
 //! fuzz targets, rooted in cas. Each pins the hardened behavior so the
 //! finding cannot silently regress.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Wire encoding for the storage protocol (spec rev2§3.7): a fixed
 //! hand-defined header (magic, protocol id, version) + a postcard body.
 //! Messages fit the 256-byte inline channel payload (rev2§3.1); bulk data

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 #![no_main]
 //! The session connect codecs on arbitrary bytes (spec rev2§3.5/§3.7).
 //! `ConnectReq`/`GrantReply::decode` are fixed-width, hand-written little-endian

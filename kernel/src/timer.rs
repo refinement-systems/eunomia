@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Kernel-side time and timer surface (spec rev2§2.6, rev2§3.6). The armed-timer
 //! list *logic* lives in [`kcore::timer`]; this module keeps what is
 //! architectural — the generic-timer register access (CNTVCT/CNTV, the

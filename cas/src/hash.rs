@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! BLAKE3 content addressing (spec rev2§4.1).
 //! Hash = address internally; never authority at the boundary (spec rev2§2.4).
 

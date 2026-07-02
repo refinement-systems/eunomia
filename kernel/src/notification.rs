@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Kernel-side notification surface: the word + waiter-queue logic lives in
 //! [`kcore::notification`]; this module re-exports it and supplies the
 //! `KernelStore`-bound wrapper for `signal` (which wakes a waiter through the

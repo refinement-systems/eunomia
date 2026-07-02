@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! A free-list over a contiguous block of a process's own cspace slots.
 //!
 //! A parent that spawns children needs to recycle the cspace slots that

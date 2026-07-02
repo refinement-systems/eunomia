@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 #![no_main]
 //! The WAL replay scanner over an arbitrary region — the same loop
 //! `Store::mount` runs (rev2§4.5). The interesting unit isn't one record but

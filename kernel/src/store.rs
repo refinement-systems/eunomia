@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! `KernelStore`: the production [`kcore::store::Store`] resolver — the one
 //! sanctioned handle→pointer boundary. A production `ObjId`/`SlotId` *is* the
 //! object's/slot's live address; every accessor casts it back and reads/writes

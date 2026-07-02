@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Verified path resolver: raw `/`-separated `OsStr` bytes → a
 //! `.`/`..`-resolved, root-confined storage tree-component list (rev2§4.9,
 //! rev2§2.3).

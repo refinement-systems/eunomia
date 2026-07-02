@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Raw syscall wrappers for Eunomia userspace (aarch64-none only).
 //!
 //! ABI (scaffold, not stable — rev2§3.7): SVC #0, number in x7, args

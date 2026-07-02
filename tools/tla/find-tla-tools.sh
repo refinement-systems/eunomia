@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: 0BSD
 # intentionally no shebang - for sourcing, not executing
 
 # Permission to use, copy, modify, and/or distribute this software for

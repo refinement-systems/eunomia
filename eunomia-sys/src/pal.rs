@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The PAL↔seam ABI exports (rev2§6.1(d)).
 //!
 //! The vendored std PAL (`vendor/rust`'s `sys/pal/eunomia`) cannot depend on this

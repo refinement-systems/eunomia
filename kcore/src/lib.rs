@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Kernel object core: the architecture-independent kernel object machinery —
 //! capability spaces and the CDT, untyped retype arithmetic, IPC channels,
 //! notifications, thread objects and reports, timer lists, and the

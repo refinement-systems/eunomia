@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The std-PAL futex bridge: thin delegation to `urt::futex`, the
 //! userspace `sys::futex` backend (an address→waiter table over kernel
 //! notifications). Holds no logic of its own — the `pal` `__eunomia_futex_*` shims

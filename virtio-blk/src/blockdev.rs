@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Adapter: the byte-addressed `cas::dev::BlockDev` over sector-addressed
 //! virtio-blk. Partial-sector writes are read-modify-write at sector
 //! granularity; `flush` maps to VIRTIO_BLK_T_FLUSH — the fsync axiom

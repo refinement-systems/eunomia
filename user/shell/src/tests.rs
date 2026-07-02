@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Host tests for the shell's pure non-I/O logic (rev2§6 Baseline tier).
 //!
 //! The shell binary is aarch64 `#![no_std] #![no_main]`; its syscall-/spawn-

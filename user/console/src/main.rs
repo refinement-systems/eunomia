@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! console — the userspace PL011 UART console driver on Eunomia (spec rev2§7).
 //! It holds the PL011 IRQ-handler cap and the MMIO frame cap, delivers
 //! RX keystrokes to the shell and writes the shell's output bytes to the UART,

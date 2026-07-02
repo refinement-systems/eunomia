@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The rev2§5.1 canonical parent loop, factored out of any one parent.
 //!
 //! A spawned child is a CDT subtree under one cap: the **donation**, a

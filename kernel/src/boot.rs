@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 use core::arch::global_asm;
 
 global_asm!(

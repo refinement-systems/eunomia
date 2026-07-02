@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 #![no_main]
 //! Two oracles over the directory node format (rev2§4.1, rev2§4.9):
 //!

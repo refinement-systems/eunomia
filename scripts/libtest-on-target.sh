@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: 0BSD
 # On-target library-test triage. Runs subsets of the
 # upstream Rust `coretests` and `alloctests` unit-test suites against the eunomia PAL
 # under QEMU, so a PAL regression (or a forward-port to a newer nightly) is caught by

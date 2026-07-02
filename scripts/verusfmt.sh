@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: 0BSD
 #
 # Format Verus code with verusfmt — the complement to `cargo fmt`.
 #

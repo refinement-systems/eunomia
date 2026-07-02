@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Block-device abstraction for the storage engine.
 //!
 //! `flush` is the fsync barrier — the single trusted axiom of the storage

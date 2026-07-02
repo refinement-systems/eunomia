@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The verified syscall-argument encoder (rev2§3.7) — the inverse of
 //! `kcore::sysabi::decode`.
 //!

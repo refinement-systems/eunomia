@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Kernel-side channel surface: the ring/binding/teardown logic lives in
 //! [`kcore::channel`]; this module re-exports it and supplies the
 //! `KernelStore`-bound wrappers for `send`/`recv` (which fire readable/

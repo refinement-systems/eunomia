@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The PL011 register layer over an injectable MMIO seam. The pure functions —
 //! RX-FIFO drain, polled TX write, RX
 //! interrupt enable — are host-tested against a fake (rev2§6 Baseline tier);

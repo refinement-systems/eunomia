@@ -2,6 +2,7 @@
 name = "ipc"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 # no_std by default. "wire" pulls the postcard codec (and, with it, alloc — see
 # lib.rs); minimal binaries (hello/selftest/init) that use only `ipc::sys` build

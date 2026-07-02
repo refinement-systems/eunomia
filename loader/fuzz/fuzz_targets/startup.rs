@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 #![no_main]
 //! Startup-block decode on arbitrary bytes (rev2§5.1). The block is the first
 //! message on a child's bootstrap channel, decoded in `_start` before anything

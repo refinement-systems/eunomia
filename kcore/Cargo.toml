@@ -2,6 +2,7 @@
 name = "kcore"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 # kcore is the architecture-independent kernel object machinery: host-buildable
 # so Verus and ordinary `cargo test` can verify it, and cross-buildable for

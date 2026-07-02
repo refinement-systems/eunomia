@@ -1,4 +1,5 @@
 ---- MODULE IpcReactor ----
+\* SPDX-License-Identifier: 0BSD
 \* Userspace IPC reactor: the lost-wakeup + backpressure protocol (spec rev2§3.3,
 \* rev2§3.6).
 \*

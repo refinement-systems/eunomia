@@ -2,6 +2,7 @@
 name = "virtio-blk"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 # no_std by default (the OS userspace build uses default-features = false
 # once the M3 process model exists); "std" pulls the fake device and the

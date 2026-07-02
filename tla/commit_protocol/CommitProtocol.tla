@@ -1,4 +1,5 @@
 ---- MODULE CommitProtocol ----
+\* SPDX-License-Identifier: 0BSD
 \* Storage commit / crash-recovery protocol for Eunomia OS (spec rev2§4.2–4.5, rev2§6).
 \*
 \* Abstraction: writes to a ref are numbered 1,2,3,… per ref ("versions").

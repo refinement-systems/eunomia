@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The QEMU-gated shell runtime (rev2§5.1): the spawn/reap loop, the storage
 //! IPC, the REPL, and the bare-metal entry / allocator / panic handler.
 //!

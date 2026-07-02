@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: 0BSD
 # Establish a Verus verification *timing* baseline for every gated crate.
 #
 #   scripts/verus-baseline.sh                 # baseline all crates (the CI gate set)

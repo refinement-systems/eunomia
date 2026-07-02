@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Property tests for `Segment::page_layout` — the page-rounding arithmetic
 //! `spawn::prepare` runs on each segment, host-buildable on its own. rev2§6
 //! routes loader's layout math to the host "Miri + proptest" baseline; this is

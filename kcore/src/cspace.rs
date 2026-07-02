@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Capability spaces and the capability derivation tree (rev2§2.1–2.3,
 //! rev2§3.4).
 //!

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! storaged — the storage server on Eunomia (spec rev2§4): mounts the
 //! versioned store over virtio-blk and serves the handle-relative session
 //! protocol to the shell over a channel.

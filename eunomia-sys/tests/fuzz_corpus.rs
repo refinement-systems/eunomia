@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Replay the committed path-resolver fuzz corpus through `resolve`, re-checking
 //! the invariants. Keeps the fuzz inputs alive as ordinary tests and lets `cargo
 //! miri test --test fuzz_corpus` UB-check each one. Mirrors

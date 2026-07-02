@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Seed-corpus generator for the storage-server/fuzz targets. Emits one
 //! valid wire-encoded request per opcode so the dispatch fuzzer starts from
 //! structurally-valid messages and mutates their *fields* (offsets,

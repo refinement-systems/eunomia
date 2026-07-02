@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Per-ref in-memory overlay — the memtable (spec rev2§4.3–4.4).
 //!
 //! Writes land here first, keyed by path with per-file interval maps;

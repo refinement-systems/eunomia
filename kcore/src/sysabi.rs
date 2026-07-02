@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Syscall ABI decode + validation (rev2§3.7). The pure half of
 //! `kernel/src/syscall.rs`: turn the raw register file `(nr, a[0..7])` into a
 //! typed [`Sys`] value, performing every check that needs **no** capability or

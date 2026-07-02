@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Untyped memory and retype (rev2§1, rev2§2.5, rev2§3.2).
 //!
 //! An untyped cap names a physical range and carries a watermark; retype

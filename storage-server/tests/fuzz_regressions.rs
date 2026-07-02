@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Regression test for a finding surfaced by storage-server/fuzz.
 //!
 //! The root cause lives in cas (`cas/tests/fuzz_regressions.rs`); this is

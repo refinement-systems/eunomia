@@ -2,6 +2,7 @@
 name = "cas"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 # "std" enables host testing; "no_std" for embedded use is planned but
 # not yet wired — all algorithms are host-testable (spec rev2§1).

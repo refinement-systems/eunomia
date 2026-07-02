@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! io-error classification policy (rev2§3.7).
 //!
 //! The total map from the syscall ABI error codes (the `ERR_*` constants the kernel

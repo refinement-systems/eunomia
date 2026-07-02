@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Driver tests against the fake virtio-mmio device, ending with the
 //! whole cas storage engine running over the driver — the same code that
 //! later binds to real MMIO in QEMU.

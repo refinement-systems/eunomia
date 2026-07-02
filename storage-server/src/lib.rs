@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Storage server core: sessions, handles, tickets (spec rev2§2.2-2.4).
 //!
 //! A storage cap at the boundary is a small integer handle, meaningful

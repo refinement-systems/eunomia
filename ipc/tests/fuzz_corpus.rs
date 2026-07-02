@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Replay the committed `wire_decode` corpus through the same decoder the
 //! cargo-fuzz target drives (mirrors `cas/tests/fuzz_corpus.rs`). This keeps
 //! every fuzz-discovered (and seed) input alive as an ordinary test even where

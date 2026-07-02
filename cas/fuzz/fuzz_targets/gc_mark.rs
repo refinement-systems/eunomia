@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 #![no_main]
 //! The GC mark walk (rev2§4.6) over adversarial *tree structure* — the
 //! complement to `tree_node`, which fuzzes single-node decoding. The input is

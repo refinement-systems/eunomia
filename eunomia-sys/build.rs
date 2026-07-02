@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 fn main() {
     // The `bare_metal` cfg alias for the bare-metal aarch64 EL0 build
     // (aarch64-unknown-none / aarch64-unknown-eunomia): the single source of the

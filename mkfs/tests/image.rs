@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 use cas::dev::FileDev;
 use cas::store::{Store, StoreOptions};
 

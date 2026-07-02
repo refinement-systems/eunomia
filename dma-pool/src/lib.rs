@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! DmaPool — the single place in the system where physical addresses are
 //! visible (rev2§2.5).
 //!

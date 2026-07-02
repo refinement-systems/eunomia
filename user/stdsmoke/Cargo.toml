@@ -2,6 +2,7 @@
 name = "stdsmoke"
 version = "0.1.0"
 edition = "2021"
+license = "0BSD"
 
 # Built by kernel/build.rs for aarch64-unknown-eunomia via build-std; not a
 # workspace member (host builds make no sense for an EL0 binary). The first

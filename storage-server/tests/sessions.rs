@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Session/handle semantics tests (spec rev2§2.2-2.4): handle relativity,
 //! subtree confinement, monotone attenuation, generation revocation,
 //! one-shot tickets, audit.

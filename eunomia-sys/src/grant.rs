@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Named-grant resolution (rev2§5.1).
 //!
 //! A thin, reusable resolver over the `loader::startup` decoder: it reads the

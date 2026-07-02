@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The real `hello` — the first *non-fixture* user program on std. Where
 //! `user/stdsmoke` is a gate fixture, this is the actual
 //! "hello world" a user runs from the shell (`run bin/hello`), and its whole point

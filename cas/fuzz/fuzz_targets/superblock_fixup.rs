@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 #![no_main]
 //! Superblock decode *behind* the integrity gate. A mutation fuzzer can
 //! never forge the body checksum, so without help it explores the

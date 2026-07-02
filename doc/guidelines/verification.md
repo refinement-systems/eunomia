@@ -1,5 +1,7 @@
 # Verification: choosing the method
 
+This work is licensed under a [CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0) license.
+
 This is the dispatcher. The verification *tiering* — which class of claim is
 discharged by which method, and why the tiers compose — is rev2§6, which is
 authoritative. This note turns that tiering into a problem-shape → tool routing

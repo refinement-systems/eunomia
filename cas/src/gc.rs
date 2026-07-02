@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! GC mark phase (spec rev2§4.6): the reachability walk from a tree root.
 //!
 //! Mark state is an exact in-memory hash set — the MVP bet that mark time

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Fuzz/test support for the wire codec: a representative *boring* body
 //! type and the round-trip oracle, shared by the cargo-fuzz target
 //! (`ipc/fuzz/fuzz_targets/wire_decode.rs`), the corpus-replay test

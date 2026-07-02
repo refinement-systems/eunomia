@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: 0BSD
 # Drive the cargo-fuzz harnesses across every fuzz crate.
 #
 #   scripts/fuzz.sh smoke            # replay the committed corpus only (fast; CI per-PR)

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Async-completion tests: the fake completes a request *after* the driver
 //! has already polled a stale used-index, so `try_complete` runs over a real
 //! stale→fresh transition. This is the coverage that guards against a

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Seed-corpus generator for the ipc/fuzz targets (mirrors gen_cas_corpus).
 //! Emits valid wire messages built with the real encoder, plus a few edge
 //! inputs, into `ipc/fuzz/corpus/<target>/`, so every fuzz run (and the

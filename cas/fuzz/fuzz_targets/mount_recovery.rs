@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 #![no_main]
 //! Mount = crash recovery (rev2§4.5), as a parser of hostile disks. Arbitrary
 //! bytes are presented as one whole image over the fake block device;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! The IPC reactor (spec rev2§3.6) — the lost-wakeup core. An epoll-shaped
 //! `register(source, signals, key)` / `wait() -> (key, signals)` API over a
 //! notification word's **bit-groups**.

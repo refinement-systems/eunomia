@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! mkfs — host-side tool to build the initial disk image (rev2§7).
 //!
 //! Thin CLI shell over [`mkfs::run`]; the walk/format logic lives in the

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Minimal GICv3 bring-up for QEMU virt (single core, group-1 only).
 //!
 //! Enough to take the virtual-timer PPI (INTID 27) at EL1, plus the distributor

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: 0BSD
 //! Per-directory prolly trees (Merkle search trees) — spec rev2§4.1, rev2§4.9.
 //!
 //! A directory is a sorted sequence of entries, split into content-addressed

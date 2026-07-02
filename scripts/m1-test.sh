@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: 0BSD
 # QEMU boot test — the M1 exit criterion (rev2§1), the kernel's cap-mechanism
 # regression. Builds the embedded EL0 test program (`cargo build --features
 # m1-test`, kernel/src/user.rs) and boots it. The program walks the whole
