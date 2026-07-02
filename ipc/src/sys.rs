@@ -415,6 +415,11 @@ pub const REPORT_FAULTED: i64 = 2;
 /// deliberately (it sits at the top of the u64 range, out of the small
 /// statuses real programs use).
 pub const STATUS_PANIC: u64 = u64::MAX;
+// `eunomia_sys::syscall` and the vendored std PAL mirror this all-ones sentinel as a
+// literal (neither can import the other's crate). This pin freezes the value so the copies
+// cannot drift apart silently — a change here fails the build, the signal to update the
+// twins in lockstep.
+const _: () = assert!(STATUS_PANIC == u64::MAX);
 
 /// Read a thread's terminal report record (rev2§5.1). Returns
 /// (state, status-or-cause, faulting-address); negative state = error.
