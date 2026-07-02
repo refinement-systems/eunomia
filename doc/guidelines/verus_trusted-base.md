@@ -242,8 +242,8 @@ lone seq-ceiling record counted past it). The predicate was *already proven* by 
 projection `spec fn` + its corollary `lemma_recover_reconstructs` name it, and the teeth
 control `lemma_recover_reconstructs_pins_head` pins the head bound so a deliberately-wrong
 (off-by-one) anchor fails it — the green proof is not vacuous over its sole producer (a
-temporary `(wal_head + 1)` `ensures` was confirmed to *fail to verify*, then reverted; see
-`doc/results/13_verus-findings.md`). What stays TLA-owned + by-construction, by design: the
+temporary `(wal_head + 1)` `ensures` was confirmed to *fail to verify*, then reverted). What
+stays TLA-owned + by-construction, by design: the
 *global* `AckedWritesRecoverable`/`RecoverReconstructs` over `writeCtr`/`walLog`
 (`CommitProtocol.tla:261`/`:281`) — global acked-write state the verified core does not model
 — and the **WAL queue ↔ bytes lifetime join** (the seam row below, rev2§6.1(e)); the
@@ -313,7 +313,11 @@ is **vacuous** here: `urt::Heap::alloc` has no Verus `requires` and is total ove
 re-establishes no precondition — the thinnest possible delegation. The reservation size
 `N` is a host-tested compile-time const (`eunomia-sys/src/heap.rs`, 1 MiB default,
 `EUNOMIA_HEAP_BYTES`-overridable via a `const fn` decimal parser — a build-time error,
-not a runtime one). `eunomia-sys` takes `urt` as a target-gated dependency, so a cold
+not a runtime one). This fixed `.bss` reservation is the entire allocator-provisioning
+mechanism — there is **no `sbrk`/heap-grow path**, so no page-table-join folding note is
+carried here: a growable heap (a `heap` named grant + a retype/map top-up folding under the
+by-construction page-table-join seam, rev2§2.5) stays deferred, and that note is authored
+only if and when the mechanism lands. `eunomia-sys` takes `urt` as a target-gated dependency, so a cold
 `-p eunomia-sys` session now also re-verifies urt (25) + freelist (30) transitively,
 `rlimit` byte-identical to their standalone gates; eunomia-sys's **own** count stays 7
 (`heap.rs`/the `pal` shims add no `verus!{}`).
