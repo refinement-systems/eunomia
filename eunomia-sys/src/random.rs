@@ -1,4 +1,4 @@
-//! The std-PAL entropy bridge (std-port 3.4): thin delegation to `urt::random`,
+//! The std-PAL entropy bridge: thin delegation to `urt::random`,
 //! the per-process DRBG (xoshiro256\*\* over the `NAME_RANDOM_SEED` grant). Holds
 //! no logic of its own — the `pal` `__eunomia_fill_bytes` shim is a one-line call
 //! into here, and here is a one-line call into `urt`. Gated to the

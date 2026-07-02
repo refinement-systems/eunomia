@@ -446,15 +446,15 @@ fn build_child_block_round_trips_time_and_argv() {
     assert_eq!(s.argv[0], b"bin/selftest");
     assert_eq!(s.argv[1], b"254");
     // The `child_block` helper forwards no env, so this block carries none
-    // (std-port 5.2 forwarding is covered by `build_child_block_forwards_env`).
+    // (forwarding is covered by `build_child_block_forwards_env`).
     assert_eq!(s.nenv, 0);
-    // The per-run entropy sub-seed round-trips (std-port 3.4).
+    // The per-run entropy sub-seed round-trips.
     assert_eq!(s.grant(NAME_RANDOM_SEED), Some(GrantKind::Seed(TEST_SEED)));
 }
 
 #[test]
 fn build_child_block_forwards_env() {
-    // std-port 5.2: the shell forwards its inherited environment to the child as raw
+    // the shell forwards its inherited environment to the child as raw
     // `KEY=VALUE` byte-strings, so `std::env::vars()` is non-empty in a spawned std
     // binary. Env rides its own arena (`MAX_ENV`), separate from the grant budget.
     let env: &[&[u8]] = &[b"PATH=/bin", b"TMPDIR=/tmp", b"TERM=eunomia"];
@@ -489,7 +489,7 @@ fn build_child_block_no_argv_is_just_the_time_grant() {
 
 #[test]
 fn build_child_block_emits_thread_grants() {
-    // std-port 3.2: a thread-capable child's block carries the four self-cap
+    // a thread-capable child's block carries the four self-cap
     // CapSlot grants (self-aspace/self-cspace/thread-untyped/slot-base) alongside
     // the time grant and argv — each resolving to the child cspace slot it names.
     let mut out = [0u8; startup::MAX_BLOCK];
@@ -541,7 +541,7 @@ fn build_child_block_emits_thread_grants() {
 
 #[test]
 fn build_child_block_emits_storage_grants() {
-    // std-port 4.1: an fs-capable child's block carries the `storage` CapSlot grant
+    // an fs-capable child's block carries the `storage` CapSlot grant
     // (the delegated session channel's cspace slot) and the `root` StorageHandle grant
     // (the ref root at handle 0), alongside the time + seed grants. A non-fs child
     // (`None`) carries neither.
@@ -583,7 +583,7 @@ fn build_child_block_emits_storage_grants() {
 
 #[test]
 fn build_child_block_emits_console_grants() {
-    // std-port 5.1: a console-provisioned child's block names the donated console
+    // a console-provisioned child's block names the donated console
     // endpoint under both `stdin` and `stdout` (one channel, the interactive-console
     // convention). No separate `stderr` grant is emitted — the child resolves stderr to
     // the stdout channel — so a thread-capable child stays within `MAX_GRANTS`.

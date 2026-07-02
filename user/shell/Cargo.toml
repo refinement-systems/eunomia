@@ -10,7 +10,7 @@ name = "ushell"
 path = "src/main.rs"
 
 [dependencies]
-# The PAL↔seam bridge (std-port 5.3): `extern crate eunomia_sys;` (in main.rs, target
+# The PAL↔seam bridge: `extern crate eunomia_sys;` (in main.rs, target
 # build only) forces the rlib into the link so std's undefined `__eunomia_*` symbols
 # resolve, and the runtime uses `eunomia_sys::fs::request` for the versioned-store admin
 # ops and `eunomia_sys::bootstrap::env` for child env inheritance. Host-buildable, so a

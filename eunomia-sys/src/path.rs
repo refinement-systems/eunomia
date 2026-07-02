@@ -1,4 +1,4 @@
-//! Verified path resolver (std-port 4.2): raw `/`-separated `OsStr` bytes → a
+//! Verified path resolver: raw `/`-separated `OsStr` bytes → a
 //! `.`/`..`-resolved, root-confined storage tree-component list (rev2§4.9,
 //! rev2§2.3).
 //!
@@ -9,7 +9,7 @@
 //! unreachability") makes a `..` that would pop above the process root handle
 //! *unnameable*, so it is **denied** (not clamped): [`resolve`] returns
 //! `Err(RejectReason::Escape)`, distinct from `Err(RejectReason::Malformed)` for a
-//! badly-formed component (std-port 4.3).
+//! badly-formed component.
 //!
 //! The verified theorem is **totality** — over every `&[u8]`, `resolve` returns
 //! without panicking or reading out of bounds — plus **output well-formedness**:
@@ -52,7 +52,7 @@ pub struct ResolvedPath<'a> {
     pub n: usize,
 }
 
-/// Why [`resolve`] refused a path (std-port 4.3). The distinction is carried so the
+/// Why [`resolve`] refused a path. The distinction is carried so the
 /// fs client can give a confinement escape a different errno from a malformed name:
 /// a `..` popping above the process root handle is a rev2§2.3 confinement violation
 /// (denied — `PermissionDenied`), whereas a NUL / over-long / too-deep component is
@@ -172,7 +172,7 @@ fn component_ok(c: &[u8]) -> (r: bool)
 /// component. A `..` at depth 0 (which would escape the process root handle) is
 /// **denied** with `Err(RejectReason::Escape)`; a malformed component (NUL or
 /// > 255 bytes) or a path deeper than [`MAX_COMPONENTS`] is
-/// `Err(RejectReason::Malformed)` (std-port 4.3).
+/// `Err(RejectReason::Malformed)`.
 pub fn resolve(buf: &[u8]) -> (r: Result<ResolvedPath<'_>, RejectReason>)
     ensures
         r matches Ok(p) ==> well_formed_resolved(p, buf@),

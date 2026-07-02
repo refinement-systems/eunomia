@@ -1,4 +1,4 @@
-//! Regression tests for the path resolver (std-port 4.2). Each pins a hardened
+//! Regression tests for the path resolver. Each pins a hardened
 //! behavior — the confinement denials and the `.`/`..` resolution semantics that
 //! the Verus totality theorem does not (and cannot) state — so it cannot silently
 //! regress. Mirrors `loader/tests/fuzz_regressions.rs`.
@@ -11,12 +11,12 @@ fn resolve_vec(input: &[u8]) -> Option<Vec<Vec<u8>>> {
     Some((0..r.n).map(|j| r.comps[j].to_vec()).collect())
 }
 
-/// `true` iff `input` is refused as a confinement **escape** (std-port 4.3).
+/// `true` iff `input` is refused as a confinement **escape**.
 fn is_escape(input: &[u8]) -> bool {
     matches!(path::resolve(input), Err(path::RejectReason::Escape))
 }
 
-/// `true` iff `input` is refused as a **malformed** / too-deep path (std-port 4.3).
+/// `true` iff `input` is refused as a **malformed** / too-deep path.
 fn is_malformed(input: &[u8]) -> bool {
     matches!(path::resolve(input), Err(path::RejectReason::Malformed))
 }
@@ -27,7 +27,7 @@ fn comps(parts: &[&[u8]]) -> Vec<Vec<u8>> {
 }
 
 /// A `..` that would pop above the process root handle names something
-/// unreachable (rev2§2.3 confinement) — denied as an **escape** (std-port 4.3:
+/// unreachable (rev2§2.3 confinement) — denied as an **escape** (
 /// `RejectReason::Escape` → `ERR_FS_DENIED`), never clamped to root and never sent
 /// to storaged.
 #[test]
@@ -65,8 +65,8 @@ fn empty_components_collapsed() {
 }
 
 /// A NUL byte or a > 255-byte component is not a storable name
-/// (`cas::prolly::validate_name`); refused client-side as **malformed** (std-port
-/// 4.3: `RejectReason::Malformed` → `ERR_FS_BAD_PATH`, distinct from an escape)
+/// (`cas::prolly::validate_name`); refused client-side as **malformed**
+/// (`RejectReason::Malformed` → `ERR_FS_BAD_PATH`, distinct from an escape)
 /// rather than round-tripped into a server `BadPath`.
 #[test]
 fn malformed_components_refused() {
@@ -93,7 +93,7 @@ fn depth_cap_enforced() {
         .collect::<Vec<_>>()
         .join("/")
         .into_bytes();
-    // Over-deep is a malformed refusal (std-port 4.3), not an escape.
+    // Over-deep is a malformed refusal, not an escape.
     assert!(is_malformed(&too_deep));
     // Churn far past the cap via `..` re-pushes stays within it (depth ≤ 1).
     let churn = (0..1000)

@@ -1,8 +1,8 @@
-//! Userspace console stdio (std-port 5.1).
+//! Userspace console stdio.
 //!
 //! The std PAL's `sys/stdio` arm routes `stdout`/`stdin`/`stderr` here, and this
 //! marshals them over the `user/console` channel — the rev2§5.1 capability-routed
-//! terminal, replacing the bring-up debug-log path (`crate::stdio`, std-port 2.3) for
+//! terminal, replacing the bring-up debug-log path (`crate::stdio`) for
 //! all interactive I/O. Panic last-words still ride the debug-log (rev2§7 C-M9): panic
 //! reporting must not depend on the console, which may be the very thing that wedged.
 //!
@@ -175,14 +175,14 @@ fn write_chan(chan: u32, buf: &[u8]) -> usize {
     buf.len()
 }
 
-/// The `sys/stdio` `Stdout` write body (std-port 5.1): the console `stdout` channel,
+/// The `sys/stdio` `Stdout` write body: the console `stdout` channel,
 /// else the debug-log.
 #[cfg(bare_metal)]
 pub fn stdout_write(buf: &[u8]) -> usize {
     write_chan(STDOUT_CHAN.load(Ordering::Relaxed), buf)
 }
 
-/// The `sys/stdio` `Stderr` write body (std-port 5.1): the console `stderr` channel
+/// The `sys/stdio` `Stderr` write body: the console `stderr` channel
 /// (`NAME_STDERR` → else the `stdout` channel, resolved at [`attach`]), else the
 /// debug-log. Kept distinct from stdout so diagnostics never enter a pipeline's data.
 #[cfg(bare_metal)]
@@ -190,10 +190,10 @@ pub fn stderr_write(buf: &[u8]) -> usize {
     write_chan(STDERR_CHAN.load(Ordering::Relaxed), buf)
 }
 
-/// The `sys/stdio` `Stdin` read body (std-port 5.1): block until at least one byte
+/// The `sys/stdio` `Stdin` read body: block until at least one byte
 /// arrives on the console `stdin` channel and deliver up to `buf.len()` of it, carrying
 /// any remainder for the next call. Returns `0` (EOF) when no console was granted — the
-/// pre-5.1 behavior for a child without a `stdin` grant. Serialized by std's stdin lock.
+/// fallback for a child without a `stdin` grant. Serialized by std's stdin lock.
 #[cfg(bare_metal)]
 pub fn stdin_read(buf: &mut [u8]) -> usize {
     if buf.is_empty() {

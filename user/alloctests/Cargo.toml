@@ -6,7 +6,7 @@ autotests = false
 autobenches = false
 
 # Built by kernel/build.rs (`build_user_test`) for aarch64-unknown-eunomia via
-# build-std with the `test` crate, then run under QEMU (std-port 6.1, findings
+# build-std with the `test` crate, then run under QEMU (findings
 # #19). Not a workspace member — an EL0 libtest binary, host builds make no sense.
 # The [[test]] target compiles the *vendored* upstream alloctests integration
 # suite in place (its `mod X;` decls resolve against the vendored tests/ dir); the

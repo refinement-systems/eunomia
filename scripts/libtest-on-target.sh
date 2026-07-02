@@ -1,5 +1,5 @@
 #!/bin/bash
-# On-target library-test triage (std-port 6.1, findings #19). Runs subsets of the
+# On-target library-test triage. Runs subsets of the
 # upstream Rust `coretests` and `alloctests` unit-test suites against the eunomia PAL
 # under QEMU, so a PAL regression (or a forward-port to a newer nightly) is caught by
 # real library tests, not only the bespoke `stdsmoke` fixture.

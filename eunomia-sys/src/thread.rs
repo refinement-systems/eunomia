@@ -1,4 +1,4 @@
-//! The std-PAL thread bridge (std-port 3.2): thin delegation to `urt::thread`,
+//! The std-PAL thread bridge: thin delegation to `urt::thread`,
 //! the verification-disciplined in-process thread primitive. Holds no logic of its
 //! own — the `pal` `__eunomia_thread_*` shims are one-line calls into here, and
 //! here is one-line calls into `urt`. Gated to the eunomia/bare-metal targets

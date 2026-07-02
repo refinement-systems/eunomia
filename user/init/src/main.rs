@@ -57,7 +57,7 @@ const SD_NOTIF: u32 = 17;
 /// A second read-only time copy for the shell — installed into its cspace
 /// (not just mapped), so the shell can re-grant the page to its children.
 const TIME_SH_CHILD: u32 = 18;
-// The fs client's session channel (std-port 4.1): storaged multiplexes it as a
+// The fs client's session channel: storaged multiplexes it as a
 // second session, and the shell delegates a copy to each fs-capable child. Both
 // ends live in free init slots (19 sits below storaged's spawn scratch at 20; 29
 // sits in its 27–29 margin).
@@ -173,7 +173,7 @@ fn build_storaged_block(
             pa: 0,
         },
     })?;
-    // The per-run entropy seed (std-port 3.4): a fresh sub-seed for this child.
+    // The per-run entropy seed: a fresh sub-seed for this child.
     // storaged keys directories in sorted prolly trees, not `HashMap`s (rev2§4.9),
     // so it does not consume it today — but every child is seeded uniformly.
     s.push_grant(Grant {
@@ -204,7 +204,7 @@ fn build_console_block(
             pa: 0,
         },
     })?;
-    // A fresh per-run entropy sub-seed (std-port 3.4); the console never uses it
+    // A fresh per-run entropy sub-seed; the console never uses it
     // (it does no hashing), but every child is seeded uniformly.
     s.push_grant(Grant {
         name: startup::NAME_RANDOM_SEED,
@@ -218,14 +218,14 @@ fn build_console_block(
 /// `storage` grant, so the name and the install can never drift.
 const SHELL_SESSION_SLOT: u32 = 1;
 
-/// The shell's cspace slot holding the *fs client's* delegatable session channel
-/// (std-port 4.1). Unlike `SHELL_SESSION_SLOT` (the shell's own session), this is
+/// The shell's cspace slot holding the *fs client's* delegatable session channel.
+/// Unlike `SHELL_SESSION_SLOT` (the shell's own session), this is
 /// the second storaged session the shell hands to fs-capable children — the shell
 /// copies it into each such child under the `storage` name (`build_child_block`).
 /// Slot 7 is free (0 bootstrap, 1 storage, 2 pool, 5 time, 6 console; 3/4 carved).
 const SHELL_FS_SESSION_SLOT: u32 = 7;
 
-/// The base system environment init hands the shell (std-port 5.2). init is the
+/// The base system environment init hands the shell. init is the
 /// single definition point: the shell inherits this and forwards it verbatim to
 /// every child it spawns (`user/shell`'s `_start` stash + `build_child_block`), the
 /// POSIX inheritance model. Kept small — every env byte counts against the 256-byte
@@ -241,7 +241,7 @@ const BASE_ENV: &[&[u8]] = &[b"PATH=/bin", b"TMPDIR=/tmp", b"TERM=eunomia"];
 /// slot 1), `root` (the full-rights ref at handle 0 on that session), and
 /// `stdin`/`stdout` (both name the one
 /// console-channel endpoint at `SHELL_CONSOLE_SLOT`), plus the base environment
-/// (`BASE_ENV`, std-port 5.2). `tmp` (no
+/// (`BASE_ENV`). `tmp` (no
 /// subtree today) stays a reserved, unemitted name. Returns the encoded length, or
 /// an `EncodeError` the caller maps to a clean boot failure (refuse-not-crash,
 /// rev2§2.7) — never a panic.
@@ -259,7 +259,7 @@ fn build_shell_block(
             pa: 0,
         },
     })?;
-    // The shell's per-run entropy seed (std-port 3.4): the shell seeds its own
+    // The shell's per-run entropy seed: the shell seeds its own
     // DRBG from it and draws a fresh sub-seed for each child it spawns.
     s.push_grant(Grant {
         name: NAME_RANDOM_SEED,
@@ -279,7 +279,7 @@ fn build_shell_block(
     // shell does all terminal I/O over this channel (input *and*
     // output); an absent grant is fatal in the shell (no debug-scaffold
     // fallback — the no-console negative control). `stderr` shares the endpoint
-    // for a terminal (std-port 5.1); it is a distinct name so a pipeline can
+    // for a terminal; it is a distinct name so a pipeline can
     // route it elsewhere without folding it into `stdout`.
     s.push_grant(Grant {
         name: NAME_STDIN,
@@ -293,7 +293,7 @@ fn build_shell_block(
         name: NAME_STDERR,
         kind: GrantKind::CapSlot(SHELL_CONSOLE_SLOT),
     })?;
-    // The base environment (std-port 5.2): the shell inherits it and forwards it to
+    // The base environment: the shell inherits it and forwards it to
     // its children, so `std::env::vars()` is non-empty in every spawned std binary.
     for e in BASE_ENV {
         s.push_env(e)?;
@@ -361,7 +361,7 @@ pub extern "C" fn _start() -> ! {
         sys::retype(UNTYPED, OBJ_CHANNEL, 4, SESSION_A, SESSION_B),
         b"session chan",
     );
-    // The fs client's session channel (std-port 4.1): storaged holds SESSION2_A as a
+    // The fs client's session channel: storaged holds SESSION2_A as a
     // second session; the shell holds SESSION2_B and delegates a copy to each
     // fs-capable child it spawns.
     check(
@@ -385,7 +385,7 @@ pub extern "C" fn _start() -> ! {
     // correct form: the supervisor whose liveness dominates everyone's
     // funds the mapping everyone shares, so nobody can fault anybody.
     let (wall_base_ns, cntvct_base, cntfrq) = read_boot_utc();
-    // std-port 3.4: seed init's DRBG — the root of the entropy seed-tree. QEMU
+    // seed init's DRBG — the root of the entropy seed-tree. QEMU
     // `virt` offers no good entropy source (rev2§2.6), so this MVP seed is
     // deliberately *predictable* and *non-cryptographic*: it mixes the one-shot
     // RTC wall time with the boot CNTVCT/CNTFRQ. Each child then receives a
@@ -475,7 +475,7 @@ pub extern "C" fn _start() -> ! {
         sys::chan_bind(SESSION_A, sys::EV_READABLE, SD_NOTIF, 1),
         b"sd bind",
     );
-    // The fs client's session wakes the same reactor on a distinct bit (std-port 4.1);
+    // The fs client's session wakes the same reactor on a distinct bit;
     // storaged's `reactor.register` re-affirms this bind and owns the bit→key mapping.
     check(
         sys::chan_bind(SESSION2_A, sys::EV_READABLE, SD_NOTIF, 2),
@@ -629,7 +629,7 @@ pub extern "C" fn _start() -> ! {
         sys::cap_install(sh.cspace_slot, SESSION_B, SHELL_SESSION_SLOT),
         b"sh session install",
     );
-    // The fs client's delegatable session (std-port 4.1): the shell holds it at slot 7
+    // The fs client's delegatable session: the shell holds it at slot 7
     // and copies it into each fs-capable child (never used for the shell's own I/O).
     check(
         sys::cap_install(sh.cspace_slot, SESSION2_B, SHELL_FS_SESSION_SLOT),
@@ -745,7 +745,7 @@ mod tests {
         // `root`: the full-rights ref at handle 0.
         assert_eq!(s.grant(NAME_ROOT), Some(GrantKind::StorageHandle(0)));
         // stdin/stdout/stderr: all three name the one console-channel endpoint
-        // (rev2§5.1 "same channel under both names"; std-port 5.1 adds stderr for
+        // (rev2§5.1 "same channel under both names"; adds stderr for
         // a terminal). `tmp` stays unpopulated.
         assert_eq!(
             s.grant(NAME_STDIN),
@@ -760,7 +760,7 @@ mod tests {
             Some(GrantKind::CapSlot(SHELL_CONSOLE_SLOT))
         );
         assert_eq!(s.grant(NAME_TMP), None);
-        // The base environment (std-port 5.2): the shell inherits it verbatim and
+        // The base environment: the shell inherits it verbatim and
         // forwards it to its children. `tmp` is not a grant — the writable-scratch
         // subtree stays unemitted; `TMPDIR` rides the env instead.
         assert_eq!(s.nenv, BASE_ENV.len());

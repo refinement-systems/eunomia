@@ -43,7 +43,7 @@ static HEAP: urt::Heap<{ 3 * 1024 * 1024 }> = urt::Heap::new();
 const BOOT_CHAN: u32 = 0;
 const SESSION_CHAN: u32 = 1;
 const WAKE_NOTIF: u32 = 2;
-// The fs client's session channel (std-port 4.1): init installs it at storaged
+// The fs client's session channel: init installs it at storaged
 // cspace slot 3, and the shell delegates a copy to each fs-capable child. storaged
 // multiplexes it as a *second* reactor source and admits a fresh session on the
 // child's `ConnectReq` — the second session the reactor-key dispatch was built for.
@@ -140,8 +140,8 @@ fn fail(msg: &[u8]) -> ! {
 /// Serve one storage request for an established session on `ep` at the negotiated
 /// `version` (rev2§3.7): decode → dispatch → encode → reply, then drain any pending
 /// GC. A request stamped with any other version is a `WireError::Version` — refused,
-/// never a crash. Shared by the shell's session and the fs client's session
-/// (std-port 4.1), so both are served identically once connected.
+/// never a crash. Shared by the shell's session and the fs client's session,
+/// so both are served identically once connected.
 #[cfg(not(test))]
 fn serve_request<D: cas::dev::BlockDev>(
     server: &mut Server<D>,
@@ -292,7 +292,7 @@ pub extern "C" fn _start() -> ! {
     // under a second key (the connect path).
     let transport = SyscallTransport;
     let ep = Endpoint::new(&transport, SESSION_CHAN);
-    // The fs client's session (std-port 4.1): a second endpoint + reactor source,
+    // The fs client's session: a second endpoint + reactor source,
     // multiplexed under its own key. init binds this channel to WAKE_NOTIF too, so a
     // ConnectReq or request on it wakes the same reactor.
     let ep2 = Endpoint::new(&transport, SECOND_SESSION_CHAN);
@@ -364,7 +364,7 @@ pub extern "C" fn _start() -> ! {
         sys::debug_write(b"[storaged] version-mismatch refused cleanly\n");
     }
 
-    // The fs client's session (std-port 4.1, key 1): connected lazily when a child
+    // The fs client's session (key 1): connected lazily when a child
     // sends its `ConnectReq`, and re-connected when a later child reuses the delegated
     // channel (a fresh `ConnectReq`, TAG_REQ-detected). `None` until the first admit.
     let mut fs_session: Option<(u64, u8)> = None;

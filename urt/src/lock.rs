@@ -17,7 +17,7 @@
 //! `Acquire`/`Release` one that ships. `loom_tests` is the proof of record (two
 //! threads, one shared non-atomic cell — mutual exclusion holds under every
 //! interleaving; a lock-removal control makes Loom flag the race), with a Shuttle
-//! breadth twin. This is the same tier as the 3.3 futex bucket lock, which reuses
+//! breadth twin. This is the same tier as the futex bucket lock, which reuses
 //! this primitive.
 //!
 //! **Priority-inversion mitigation (rev2§5.4).** The acquire loop *yields* (the
@@ -191,7 +191,7 @@ mod loom_tests {
 /// Shuttle breadth twin of `loom_tests` — a second scheduler over the same
 /// two-thread critical section. NON-CERTIFYING (Shuttle reinterprets the
 /// Acquire/Release as SeqCst), a randomized deadlock/logic smoke and the template
-/// for the 3.3 futex work. Run with `RUSTFLAGS="--cfg shuttle" cargo test -p urt
+/// for the futex work. Run with `RUSTFLAGS="--cfg shuttle" cargo test -p urt
 /// --lib`.
 #[cfg(all(test, shuttle))]
 mod shuttle_tests {

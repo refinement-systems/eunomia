@@ -1,10 +1,10 @@
-//! Bring-up stdio over the kernel debug-log (std-port 2.3).
+//! Bring-up stdio over the kernel debug-log.
 //!
 //! The std PAL's `sys/stdio` arm routes stdout/stderr (and panic last-words) here, and
 //! this issues the `DebugWrite` syscall — rev2§7's EL0 debug-print scaffold. That is a
 //! disclosed, *temporary* deviation from the rev2§2 capability model (rev2§2.7): an
 //! ambient kernel-diagnostic path, default-on for dev images, that no capability gates.
-//! Phase 5.1 moves stdout/stdin onto the userspace console channel; only panic
+//! Ordinary stdout/stdin ride the userspace console channel; only panic
 //! last-words stay on this path (rev2§7 C-M9, "kept ... for kernel-internal panic
 //! reporting").
 //!

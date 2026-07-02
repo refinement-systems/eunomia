@@ -17,7 +17,7 @@ use storage_server::{ErrorCode, Request, Response};
 use urt::slots::SlotAlloc;
 use urt::spawn::{Exit, SpawnRec};
 
-// The shell is now a std binary (std-port 5.3): std owns `_start`, the allocator
+// The shell is now a std binary: std owns `_start`, the allocator
 // (a `urt::Heap` sized by `EUNOMIA_HEAP_BYTES`, threaded by `kernel/build.rs`), the
 // panic handler, and stdio/time/args/env — so there is no `#[global_allocator]` or
 // `#[panic_handler]` here. It keeps raw `urt::spawn`/`loader::spawn` for capability
@@ -61,9 +61,9 @@ const SPAWN_CAP: usize = 56; // slots 8..64
 /// One child's memory: aspace pool + stack + segments + bootstrap channel,
 /// with generous slack. The pool (slot 2) is ~100 MiB, and only this one
 /// donation is ever outstanding. Sized to cover a thread-capable child's
-/// thread-untyped (`urt::thread::THREAD_UNTYPED_BYTES` ≈ 2.1 MiB, incl. the std-port
-/// 3.3 per-thread futex park-notifs) on top of the base (std-port 3.2), plus the
-/// on-target libtest suites' large `.bss` heap reservation (std-port 6.1:
+/// thread-untyped (`urt::thread::THREAD_UNTYPED_BYTES` ≈ 2.1 MiB, incl. the
+/// per-thread futex park-notifs) on top of the base, plus the
+/// on-target libtest suites' large `.bss` heap reservation (
 /// `EUNOMIA_HEAP_BYTES` = 16 MiB, committed at spawn — no demand paging) and their
 /// multi-MiB code/data segments. 48 MiB carves comfortably from the ~100 MiB pool and
 /// never runs short.
@@ -71,7 +71,7 @@ const DONATION_BYTES: u64 = 48 * 1024 * 1024;
 /// Default child cspace: slot 0 = bootstrap, the rest a child-carved window.
 const CHILD_CSPACE_SLOTS: u64 = 8;
 
-// In-process-threading provisioning (std-port 3.2, scoped/opt-in). A thread-capable
+// In-process-threading provisioning (scoped/opt-in). A thread-capable
 // child gets a wider cspace and, installed at these fixed slots, caps to its own
 // aspace (WRITE)/cspace + a thread-untyped, plus a reserved working-slot range —
 // named for the child by the `NAME_*` grants (`build_child_block`). Every other
@@ -85,7 +85,7 @@ const CHILD_SELF_CSPACE: u32 = 2;
 const CHILD_THREAD_UNTYPED: u32 = 3;
 const CHILD_THREAD_SLOT_BASE: u32 = 4;
 
-// fs provisioning (std-port 4.1, scoped/opt-in). An fs-capable child receives a copy
+// fs provisioning (scoped/opt-in). An fs-capable child receives a copy
 // of the shell's *second* storaged session (`SHELL_FS_SESSION_SLOT`, delegated by init)
 // installed at `CHILD_STORAGE_SLOT`, plus the `storage`/`root` startup grants, so its
 // std `sys/fs` arm can connect and serve files. Every other binary keeps least
@@ -100,7 +100,7 @@ const SHELL_FS_SESSION_SLOT: u32 = 7;
 /// child's startup block; the root handle is 0 (named `root`).
 const CHILD_STORAGE_SLOT: u32 = 1;
 
-// Console provisioning (std-port 5.1): *every* child inherits the shell's console endpoint
+// Console provisioning: *every* child inherits the shell's console endpoint
 // (true foreground-terminal inheritance) — the shell copies its own console cap
 // (`CONSOLE_SLOT`) into the child's cspace, named `stdin`/`stdout` in the startup block, so the
 // child's std `sys/stdio` arm rides the `user/console` channel instead of the debug-log. stderr
@@ -115,10 +115,10 @@ const CHILD_CONSOLE_SLOT: u32 = 2;
 const THREAD_CHILD_CONSOLE_SLOT: u32 = CHILD_THREAD_SLOT_BASE + urt::thread_layout::WORKING_SLOTS;
 
 /// The MVP thread-capability marker: a shell-side allowlist of run paths (the
-/// plan's sanctioned fallback — the verified `loader::elf::parse` extracts only
+/// sanctioned fallback — the verified `loader::elf::parse` extracts only
 /// PT_LOAD, so an ELF-note marker travelling in the binary is a noted upgrade that
 /// avoids touching the verified parser). Only a listed binary is provisioned.
-/// The on-target libtest suites (std-port 6.1) are thread-capable: libtest spawns a
+/// The on-target libtest suites are thread-capable: libtest spawns a
 /// capture thread per test even at the default serial concurrency, and `alloctests`
 /// tests spawn their own threads.
 const THREAD_CAPABLE: &[&[u8]] = &[b"bin/stdsmoke", b"bin/coretests", b"bin/alloctests"];
@@ -128,14 +128,14 @@ fn is_thread_capable(path: &[u8]) -> bool {
 }
 
 /// The MVP fs-capability marker (same allowlist mechanism as [`is_thread_capable`]).
-/// Only a listed binary is delegated a storaged session (std-port 4.1).
+/// Only a listed binary is delegated a storaged session.
 const FS_CAPABLE: &[&[u8]] = &[b"bin/stdfs"];
 
 fn is_fs_capable(path: &[u8]) -> bool {
     FS_CAPABLE.contains(&path)
 }
 
-/// On-target library-test suites embedded in the shell's `.rodata` (std-port 6.1),
+/// On-target library-test suites embedded in the shell's `.rodata`,
 /// present only under the `libtests` cfg (kernel/build.rs, under EUNOMIA_BUILD_LIBTESTS,
 /// passes their ELF paths to the shell build). `run bin/<name>` spawns these from memory
 /// instead of loading them over the store: the MVP fs read path reconstructs the whole
@@ -235,7 +235,7 @@ fn out_utc(ns: u64) {
 }
 
 /// One admin round-trip against storaged over the shell's single storaged session
-/// (std-port 5.3): the versioned-store ops (`Snapshot`/`ListSnapshots`/`Rollback`/
+/// the versioned-store ops (`Snapshot`/`ListSnapshots`/`Rollback`/
 /// `DeleteSnapshot`/`SetClass`/`Gc`/`Statfs`/`Sync`) that `std::fs` cannot express.
 /// `eunomia_sys::fs` owns the session it connected at bootstrap (the connect
 /// handshake + negotiated version), so the shell hands it a raw `Request` and reads
@@ -280,7 +280,7 @@ fn report(resp: Response) {
 }
 
 /// Render a std `io::Error` onto the console as the shell's `error: …` line — the
-/// `std::fs` replacement for the raw `Response::Err` → [`err_name`] path (std-port 5.3).
+/// `std::fs` replacement for the raw `Response::Err` → [`err_name`] path.
 fn out_io_err(e: &std::io::Error) {
     out(b"error: ");
     out(e.to_string().as_bytes());
@@ -303,7 +303,7 @@ fn path_arg(arg: &[u8]) -> Option<&str> {
     }
 }
 
-/// `ls [path]` over `std::fs::read_dir` (std-port 5.3): the listing rides the shared
+/// `ls [path]` over `std::fs::read_dir`: the listing rides the shared
 /// storaged session `eunomia_sys::fs` owns, and the entry kind/size arrive cached in
 /// the listing (no per-entry re-probe). Directories print with a trailing `/`.
 fn cmd_ls(arg: &[u8]) {
@@ -331,7 +331,7 @@ fn cmd_ls(arg: &[u8]) {
     }
 }
 
-/// `cat <path>` over `std::fs::read` (std-port 5.3). A trailing newline is added when
+/// `cat <path>` over `std::fs::read`. A trailing newline is added when
 /// the file does not end in one, matching the pre-std behaviour.
 fn cmd_cat(arg: &[u8]) {
     let Some(path) = path_arg(arg) else { return };
@@ -371,7 +371,7 @@ fn cmd_snaps() {
     }
 }
 
-/// Wall-clock time via std `SystemTime` (std-port 5.3): `eunomia_sys` reads the same
+/// Wall-clock time via std `SystemTime`: `eunomia_sys` reads the same
 /// rev2§2.6 time page under the hood (the granted page + CNTVCT), so `date` is still
 /// off the IPC path. init grants the shell the time page, so `now()` never panics here.
 fn cmd_date() {
@@ -564,7 +564,7 @@ impl Spawner {
             return Err(RunErr::Carve);
         }
         // A thread-capable child needs a wider cspace to hold its self-caps and the
-        // per-thread working-slot range (std-port 3.2); every other child keeps the
+        // per-thread working-slot range; every other child keeps the
         // minimal default (least-authority).
         let cspace_slots = if thread_capable {
             THREAD_CHILD_CSPACE_SLOTS
@@ -594,7 +594,7 @@ impl Spawner {
         // the command-line argv) queued before the child runs. An over-budget
         // block is a clean spawn failure, never a panic (rev2§2.7).
         sys::cap_install(prepared.cspace_slot, s.chan_b, 0);
-        // Thread-capability (std-port 3.2, scoped): install into the child's own
+        // Thread-capability (scoped): install into the child's own
         // cspace copies of its aspace (WRITE, to map thread stacks) and cspace caps
         // (to name in `thread_start_as`), and a thread-untyped carved from DONATION
         // (so it collapses under the reap revoke like every other child object). Each
@@ -627,7 +627,7 @@ impl Spawner {
         } else {
             None
         };
-        // std-port 4.1: delegate a copy of the shell's second storaged session to an
+        // delegate a copy of the shell's second storaged session to an
         // fs-capable child. It lands in the child's cspace at CHILD_STORAGE_SLOT, named
         // `storage` (+ root handle 0 as `root`) in the startup block, so the child's std
         // `sys/fs` arm connects over it. The copy is a CDT child of the shell's slot-7
@@ -644,7 +644,7 @@ impl Spawner {
         } else {
             None
         };
-        // std-port 5.1: donate the shell's console endpoint to every child so its std
+        // donate the shell's console endpoint to every child so its std
         // `sys/stdio` arm rides the `user/console` channel instead of the debug-log. Copy the
         // shell's own console cap (`CONSOLE_SLOT`, init's convention) into the child's cspace
         // at the console slot, named `stdin`/`stdout` in the block; stderr falls back to the
@@ -669,7 +669,7 @@ impl Spawner {
                 None
             }
         };
-        // std-port 3.4: draw a fresh entropy sub-seed for this child from the
+        // draw a fresh entropy sub-seed for this child from the
         // shell's own DRBG (the fork-without-reseed guard) — never the shell's
         // seed raw. `eunomia_sys::bootstrap` seeded `urt::random` from the shell's
         // `NAME_RANDOM_SEED` grant at bootstrap (the shell still draws from it here).
@@ -678,8 +678,8 @@ impl Spawner {
             &mut block,
             CHILD_TIME_VA,
             argv,
-            // std-port 5.2: forward the shell's inherited environment to the child (POSIX
-            // inheritance). The on-target libtest children (std-port 6.1) opt out
+            // forward the shell's inherited environment to the child (POSIX
+            // inheritance). The on-target libtest children opt out
             // (`inherit_env == false`): core/alloc tests read no env vars, and dropping the
             // ~38 bytes keeps the 256-byte startup block within budget when several libtest
             // `--skip` filters must ride in argv.
@@ -779,7 +779,7 @@ fn run_err(e: RunErr) {
     });
 }
 
-/// Load a program image from the store via `std::fs::read` (std-port 5.3): the ELF the
+/// Load a program image from the store via `std::fs::read`: the ELF the
 /// shell spawns, read over the shared storaged session. `None` — not found, unreadable,
 /// or a non-UTF-8 path — is the caller's clean "error: not found".
 fn read_image(path: &[u8]) -> Option<Vec<u8>> {
@@ -797,11 +797,11 @@ fn cmd_run(sp: &mut Spawner, arg: &[u8]) {
         .collect();
     let path = argv.first().copied().unwrap_or(b"");
 
-    // An embedded on-target test suite (std-port 6.1) spawns from `.rodata`; every
+    // An embedded on-target test suite spawns from `.rodata`; every
     // other binary loads from the store. Both paths hand a byte slice to `run_once`.
     let result = if let Some(image) = embedded_image(path) {
         // Embedded libtest suites opt out of env inheritance to keep the startup block
-        // within budget for `--skip` filters (std-port 6.1).
+        // within budget for `--skip` filters.
         sp.run_once(
             image,
             &argv,
@@ -879,7 +879,7 @@ fn cmd_runloop(sp: &mut Spawner, arg: &[u8]) {
     out(b"\n");
 }
 
-/// `rm <path>` over `std::fs::remove_file` (std-port 5.3).
+/// `rm <path>` over `std::fs::remove_file`.
 fn cmd_rm(arg: &[u8]) {
     let Some(path) = path_arg(arg) else { return };
     match std::fs::remove_file(path) {
@@ -888,7 +888,7 @@ fn cmd_rm(arg: &[u8]) {
     }
 }
 
-/// `write <path> <text>` over `std::fs::write` (std-port 5.3): create-or-overwrite the
+/// `write <path> <text>` over `std::fs::write`: create-or-overwrite the
 /// file with `text`. `File::create`'s truncate is emulated by an unlink (rev2§4.9 has
 /// no `set_len`), so a re-`write` replaces the content rather than overlaying it.
 fn cmd_write(arg: &[u8]) {
@@ -902,7 +902,7 @@ fn cmd_write(arg: &[u8]) {
     }
 }
 
-/// `mv <from> <to>` over `std::fs::rename` (std-port 5.3). Cross-subtree rename is
+/// `mv <from> <to>` over `std::fs::rename`. Cross-subtree rename is
 /// `EXDEV` by construction (rev2§4.9); within the ref it is a tree move.
 fn cmd_mv(arg: &[u8]) {
     let mut ma = arg.splitn(2, |&b| b == b' ');
@@ -969,7 +969,7 @@ fn dispatch(sp: &mut Spawner, line: &[u8]) {
     }
 }
 
-/// The shell's entry (std-port 5.3). std owns `_start`, the allocator, and the panic
+/// The shell's entry. std owns `_start`, the allocator, and the panic
 /// handler; `eunomia_sys` at bootstrap has already decoded the rev2§5.1 startup block —
 /// argv/env, the time page (`SystemTime`), the DRBG seed (`urt::random`, for per-child
 /// sub-seeds), the storaged session (`eunomia_sys::fs` connected it), and

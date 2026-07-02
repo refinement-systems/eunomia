@@ -1,4 +1,4 @@
-//! The storaged filesystem client (std-port 4.1).
+//! The storaged filesystem client.
 //!
 //! The client half of the storage session protocol (rev2§4): it marshals the std
 //! `sys/fs/eunomia` arm's file ops into `storage_server::Request`s over the pre-wired
@@ -14,8 +14,8 @@
 //! already-verified surfaces — the connect handshake ([`ipc::connect`]/`admit_connect`,
 //! its `Admission` proven never to over-grant), the wire header/version prefix
 //! (`wire::check_header`, total ∀ bytes), the rights lattice (`attenuate`, monotone),
-//! and the path resolver ([`crate::path::resolve`], total ∀ bytes, root-confined,
-//! std-port 4.2) — plus the trusted `svc` shell underneath [`ipc::SyscallTransport`].
+//! and the path resolver ([`crate::path::resolve`], total ∀ bytes, root-confined)
+//! — plus the trusted `svc` shell underneath [`ipc::SyscallTransport`].
 //! No byte-parsing logic lives here: [`resolve_path`] is a thin `alloc` adapter that
 //! calls the verified [`crate::path::resolve`] and copies its borrowed components into
 //! the `Vec<Vec<u8>>` wire path, and the `read_dir` snapshot table is client bookkeeping
@@ -91,7 +91,7 @@ fn version() -> Option<u8> {
 /// the caller's chunk loops keep it so. A dead/absent session is [`ERR_FS_NO_SESSION`].
 ///
 /// Public as the **admin escape hatch** for a client that delegates its whole storaged
-/// session to this crate (the std-port 5.3 shell): its `std::fs` file ops ride the arms
+/// session to this crate (the shell): its `std::fs` file ops ride the arms
 /// below, while its versioned-store admin ops (`Snapshot`/`ListSnapshots`/`Rollback`/
 /// `DeleteSnapshot`/`SetClass`/`Gc`/`Statfs`) — which `std::fs` cannot express — send
 /// their `Request` here directly and read the raw `Response`. It reuses the one session
@@ -167,7 +167,7 @@ fn status(r: Result<Response, i64>) -> i64 {
 /// translates the reject reason into an errno: a confinement **escape** (a `..` above
 /// the process root handle, rev2§2.3 "unnameable → denied") is [`ERR_FS_DENIED`]
 /// (`PermissionDenied`); a **malformed** component (NUL / > 255 bytes / too deep) is
-/// [`ERR_FS_BAD_PATH`] (`InvalidFilename`) — the std-port 4.3 split.
+/// [`ERR_FS_BAD_PATH`] (`InvalidFilename`) — the split.
 fn resolve_path(path: &[u8]) -> Result<Vec<Vec<u8>>, i64> {
     let r = match crate::path::resolve(path) {
         Ok(r) => r,
@@ -273,7 +273,7 @@ pub fn stat(path: &[u8]) -> i64 {
 }
 
 /// Resolved file metadata for the std `sys/fs::stat`/`lstat`/`file_attr` arm
-/// (std-port 4.3): the entry kind + size. `code == 0` on success (and `size`/`is_dir`
+/// the entry kind + size. `code == 0` on success (and `size`/`is_dir`
 /// are meaningful); otherwise `code` is a negative fs code and `size`/`is_dir` are
 /// zeroed. `#[repr(C)]` so it crosses the `extern "Rust"` seam to the std arm with a
 /// fixed layout the std side mirrors (the `Vec<u8>`/slice seam posture, made explicit).

@@ -42,7 +42,7 @@ pub fn stdout_slot(s: &Startup) -> Option<u32> {
 }
 
 /// `stderr` → the cspace slot of the console-channel endpoint the process writes
-/// diagnostics to (rev2§5.1, std-port 5.1). A stream distinct from `stdout`; an
+/// diagnostics to (rev2§5.1). A stream distinct from `stdout`; an
 /// absent grant is not fatal — the console client falls back to the `stdout`
 /// channel, then to the kernel debug-log (see [`crate::console::attach`]).
 pub fn stderr_slot(s: &Startup) -> Option<u32> {
@@ -65,7 +65,7 @@ pub fn time_va(s: &Startup) -> Option<u64> {
     region_va(s, NAME_TIME)
 }
 
-/// `random_seed` → the process's 256-bit entropy seed (std-port 3.4), if present and
+/// `random_seed` → the process's 256-bit entropy seed, if present and
 /// a `Seed`. The child seeds its process DRBG (`urt::random`) from it; absent leaves
 /// the DRBG unseeded, so `fill_bytes`/`HashMap` loudly abort at first use (the
 /// `NAME_TIME` posture — mis-provisioned, not degraded).
@@ -76,7 +76,7 @@ pub fn seed(s: &Startup) -> Option<[u64; 4]> {
     }
 }
 
-/// The four in-process-threading self-cap slots (std-port 3.2), all present iff the
+/// The four in-process-threading self-cap slots, all present iff the
 /// process is thread-capable: (self-aspace, self-cspace, thread-untyped,
 /// free-slot-range base). `None` if any is missing — the least-authority default,
 /// which the PAL maps to an `Unsupported` `thread::spawn`.

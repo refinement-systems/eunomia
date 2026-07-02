@@ -64,7 +64,7 @@
 use vstd::prelude::*;
 
 pub mod lock;
-// The per-process entropy DRBG (std-port 3.4). Portable plain-Rust arithmetic
+// The per-process entropy DRBG. Portable plain-Rust arithmetic
 // over the Loom-certified `lock::SpinLock`; its per-word byte serialization is
 // Verus-verified (`random::u64_to_le`, proven equal to `le_bytes::u64_le`), while
 // randomness quality stays off the proof surface (only that serialization and the
@@ -76,7 +76,7 @@ pub mod lock;
 #[cfg(not(any(loom, shuttle)))]
 pub mod random;
 pub mod slots;
-// The verified thread-local key table (std-port 3.5): a `KeyTable` over the
+// The verified thread-local key table: a `KeyTable` over the
 // verified `slots::SlotAlloc`, plus a plain per-key destructor registry guarded by
 // the Loom-certified `lock::SpinLock`. Gated off the loom/shuttle model builds for
 // the same reason as `random` — it holds a process-global `static` over the *const*
@@ -94,14 +94,14 @@ pub mod time;
 #[cfg(bare_metal)]
 pub mod spawn;
 
-// The in-process thread primitive (std-port 3.2) issues syscalls, so it is
+// The in-process thread primitive issues syscalls, so it is
 // bare-metal-only like `spawn`. Its host-reachable invariant — the stack-VA / slot
 // arithmetic — is host-tested in `thread_layout`; the syscall path is witnessed by
 // the QEMU spawn smoke.
 #[cfg(bare_metal)]
 pub mod thread;
 
-// The `sys::futex` backend (std-port 3.3). Unlike `lock`, `futex` is not fully
+// The `sys::futex` backend. Unlike `lock`, `futex` is not fully
 // portable — its park primitive is either the kernel notification (target) or a
 // std/loom/shuttle `Mutex`+`Condvar` parker (the model), so it is compiled only for
 // the real target and for the host test/loom/shuttle models, and absent on a plain
@@ -128,8 +128,8 @@ const MIN_ALIGN: usize = 16;
 /// Arena base alignment (the `#[repr(align)]` below). `base.add(off)` meets any
 /// `layout.align() <= MAX_ALIGN`; a larger request is refused with null. 128 (the
 /// AArch64 cache line) so cache-line-padded std structures allocate — notably
-/// `std::sync::mpsc`, whose 128-aligned channel block every libtest run needs
-/// (std-port 6.1). A page-aligned (4096) request is still refused.
+/// `std::sync::mpsc`, whose 128-aligned channel block every libtest run needs.
+/// A page-aligned (4096) request is still refused.
 const MAX_ALIGN: usize = 128;
 
 #[repr(C, align(128))] // = MAX_ALIGN, so base.add(off) satisfies layout.align() <= 128.
@@ -148,9 +148,9 @@ pub struct Heap<const N: usize> {
 
 // Mutual exclusion by the heap spinlock (`lock.rs`, Loom-certified): `alloc` and
 // `dealloc` hold `lock` across the whole `fl` access, so the `UnsafeCell` interior
-// is never reached by two threads at once. (Before in-process threads this was
-// "single-threaded, no concurrent access by construction"; std-port 3.2 replaced
-// that argument with the lock when `thread::spawn` opened concurrent allocation.)
+// is never reached by two threads at once. In-process threads (`thread::spawn`)
+// allocate concurrently, so the lock — not a single-threaded-by-construction
+// argument — is what keeps that access sound.
 unsafe impl<const N: usize> Sync for Heap<N> {}
 
 impl<const N: usize> Heap<N> {
@@ -202,7 +202,7 @@ unsafe impl<const N: usize> GlobalAlloc for Heap<N> {
         // keeps `need > 0` (FreeList::alloc returns None for n == 0).
         let need = layout.size().max(1).next_multiple_of(MIN_ALIGN);
         // Hold the lock across the whole free-list access: concurrent allocation
-        // by in-process threads (rev2§5.3) is serialized here (std-port 3.2).
+        // by in-process threads (rev2§5.3) is serialized here.
         let _guard = self.lock.lock();
         let fl = self.fl_mut();
         // `align.max(MIN_ALIGN) >= 16 > 0` discharges FreeList::alloc's sole
@@ -299,7 +299,7 @@ mod tests {
             let l = Layout::from_size_align(64, 256).unwrap();
             assert!(H.alloc(l).is_null());
             // A request at exactly the cap (128, the AArch64 cache line —
-            // `std::sync::mpsc`'s block, std-port 6.1) still succeeds.
+            // `std::sync::mpsc`'s block) still succeeds.
             let ok = Layout::from_size_align(64, 128).unwrap();
             assert!(!H.alloc(ok).is_null());
         }

@@ -5,8 +5,8 @@
 //! globals, and code), so it is started with `thread_start_as` (op 18) bound to
 //! the process's *own* aspace and cspace — **not** `thread_start` (op 13), whose
 //! fresh TCB runs in the kernel identity map where the process heap is unmapped.
-//! `thread_start_as` carries the closure pointer in the seventh arg register (x6,
-//! std-port 3.2), which lands in the new thread's initial `x0`; the std trampoline
+//! `thread_start_as` carries the closure pointer in the seventh arg register (x6),
+//! which lands in the new thread's initial `x0`; the std trampoline
 //! reads it there.
 //!
 //! **Provisioning (rev2§2.3, scoped/opt-in).** Only a thread-capable process is
@@ -49,14 +49,14 @@ use ipc::sys;
 pub const MAX_THREADS: usize = crate::thread_layout::MAX_THREADS;
 
 /// Bytes carved per thread from the process thread-untyped: one TCB + `STACK_PAGES`
-/// stack frames + two notifications (the join/termination notif and the std-port
-/// 3.3 futex park-notif), with slack. Committed on a slot's first use and reused
+/// stack frames + two notifications (the join/termination notif and the
+/// futex park-notif), with slack. Committed on a slot's first use and reused
 /// across that slot's spawn/join cycles.
 const PER_THREAD_BYTES: u64 = 128 * 1024;
 
 /// Total bytes a thread-capable process's thread-untyped must hold — one
 /// [`PER_THREAD_BYTES`] carve per [`MAX_THREADS`] slot, plus one more block for the
-/// **main** thread's own futex park-notif (std-port 3.3; the main thread is not a
+/// **main** thread's own futex park-notif (the main thread is not a
 /// pool slot, so it carves its park-notif from the shared thread-untyped). The
 /// producer (the spawner) sizes the untyped it grants from this constant, the
 /// shared convention.
@@ -105,7 +105,7 @@ struct Slot {
     frame: u32,
     notif: u32,
     scratch: u32,
-    /// The per-thread futex park-notif (std-port 3.3): a notification this slot's
+    /// The per-thread futex park-notif: a notification this slot's
     /// thread blocks on in `sys::futex` and a waker signals. Retyped from `sub_ut`
     /// at each spawn (so a join's revoke reclaims it), valid only while `in_use`.
     park_notif: u32,
@@ -135,7 +135,7 @@ struct Inner {
     /// `WORDS = 2` covers up to 128 slots (`SLOTS_PER_THREAD*MAX_THREADS + 1 = 97`).
     slots: Option<SlotAlloc<2>>,
     pool: [Slot; MAX_THREADS],
-    /// The main thread's futex park-notif slot (std-port 3.3), carved lazily on its
+    /// The main thread's futex park-notif slot, carved lazily on its
     /// first `sys::futex` wait from `self_untyped` + one working slot. `0` until
     /// carved. The main thread has no pool slot, so it keeps its park-notif here.
     main_park: u32,
@@ -285,7 +285,7 @@ pub fn spawn(entry: usize, stack_size: usize, arg: u64) -> Result<JoinHandle, i6
         recycle(&s);
         return Err(r);
     }
-    // The per-thread futex park-notif (std-port 3.3), from the same sub-untyped so a
+    // The per-thread futex park-notif, from the same sub-untyped so a
     // join's revoke reclaims it. Full rights, so any thread sharing the cspace both
     // signals (WRITE) and waits (READ) on it.
     let r = sys::retype(s.sub_ut, sys::OBJ_NOTIF, 0, s.park_notif, 0);
@@ -380,7 +380,7 @@ pub fn join(h: JoinHandle) -> Result<(), i64> {
     Ok(())
 }
 
-/// This calling thread's own futex park-notif cspace slot (std-port 3.3): the
+/// This calling thread's own futex park-notif cspace slot: the
 /// notification it blocks on in `sys::futex` and a waker signals. Identifies the
 /// caller by its stack pointer (the inverse `thread_layout::slot_of_sp`): a pool
 /// thread returns its slot's `park_notif` (carved at spawn); the **main** thread

@@ -1,11 +1,11 @@
-//! Per-thread TLS block + the key-based TLS backend (std-port 3.2/3.5).
+//! Per-thread TLS block + the key-based TLS backend.
 //!
-//! Eunomia has real per-thread TLS — 3.1 makes `TPIDR_EL0` survive a context switch;
+//! Eunomia has real per-thread TLS — `TPIDR_EL0` survives a context switch;
 //! this points it at a zeroed `[*mut (); TLS_SLOTS]` block of pointer slots: the main
 //! thread's `static` block in `_start`, each spawned thread's heap block in the
 //! `sys/thread` trampoline. A TLS **key** is an index into that block; the global key
-//! *allocation* + per-key destructor registry are the verified `urt::tls` key table
-//! (std-port 3.5), while the per-thread *value* read/write (`get`/`set`) live here —
+//! *allocation* + per-key destructor registry are the verified `urt::tls` key table,
+//! while the per-thread *value* read/write (`get`/`set`) live here —
 //! each thread touches only its own block, so they need no lock, just the block base.
 //!
 //! This backend is what std's key-based TLS (`vendor/rust`'s `sys/thread_local/os.rs`
@@ -54,7 +54,7 @@ fn set_tpidr(base: *mut ()) {
     }
 }
 
-/// This thread's TLS block base — the `TPIDR_EL0` the seam set up (3.1 preserves it
+/// This thread's TLS block base — the `TPIDR_EL0` the seam set up (preserved
 /// across context switches). A pointer to the first of `TLS_SLOTS` pointer slots.
 #[inline]
 fn tpidr_base() -> *mut *mut () {
@@ -75,7 +75,7 @@ pub fn init_main() {
 
 /// Allocate a zeroed TLS block for a spawned thread and point its `TPIDR_EL0` at it.
 /// Called by the `sys/thread` trampoline before `ThreadInit::init`. Reclaimed by
-/// [`free_thread_block`] at thread exit (std-port 3.5 — 3.2 leaked it).
+/// [`free_thread_block`] at thread exit.
 pub fn init_thread() {
     // A boxed zeroed block over the process-global heap (needs no TLS itself).
     let b = alloc::boxed::Box::new([ptr::null_mut::<()>(); TLS_SLOTS]);
@@ -157,8 +157,8 @@ pub fn run_thread_dtors() {
     }
 }
 
-/// Reclaim a spawned thread's heap TLS block at thread exit (fixes the std-port 3.2
-/// leak). A no-op for the main thread (its block is the static `.bss` `MAIN`). Called
+/// Reclaim a spawned thread's heap TLS block at thread exit. A no-op for the main thread
+/// (its block is the static `.bss` `MAIN`). Called
 /// last in the trampoline, after [`run_thread_dtors`] and `rt::thread_cleanup` — no
 /// TLS access follows on this thread.
 pub fn free_thread_block() {

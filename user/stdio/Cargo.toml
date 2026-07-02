@@ -5,7 +5,7 @@ edition = "2021"
 
 # Built by kernel/build.rs for aarch64-unknown-eunomia via build-std; not a
 # workspace member (host builds make no sense for an EL0 binary). The std-port
-# Phase-5.1 console GATE fixture (findings #16): a real std binary whose
+# console GATE fixture: a real std binary whose
 # stdout/stdin/stderr ride the userspace `user/console` channel (not the debug-log),
 # exercising the `sys/stdio/eunomia` console arm end to end — read a line, echo it,
 # write a stderr diagnostic — then prints `STD51 PASS`. Kept separate from `stdsmoke`

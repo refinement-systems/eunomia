@@ -1,7 +1,7 @@
-//! Property tests for the path resolver (std-port 4.2): random path-shaped byte
+//! Property tests for the path resolver: random path-shaped byte
 //! strings checked against a plain reference resolver, for the structural output
-//! invariants, and for join↔resolve idempotence (the "presentation policy" tier
-//! of 4.2). This is the `cargo test` complement to the cargo-fuzz differential
+//! invariants, and for join↔resolve idempotence (the "presentation policy"
+//! tier). This is the `cargo test` complement to the cargo-fuzz differential
 //! oracle (`fuzz/fuzz_targets/path.rs`), which needs nightly + cargo-fuzz.
 
 use eunomia_sys::path;
@@ -11,7 +11,7 @@ use proptest::prelude::*;
 /// split on `/`; drop empty and `.`; pop on `..`, denying at depth 0; reject a
 /// NUL / > 255-byte component; reject past `MAX_COMPONENTS`. On refusal it returns
 /// the reject **tag** — `ESCAPE` for a depth-0 `..`, `MALFORMED` otherwise —
-/// mirroring `path::RejectReason` so the differential also pins the std-port 4.3
+/// mirroring `path::RejectReason` so the differential also pins the
 /// escape/malformed split, not just the accept/reject verdict.
 const ESCAPE: u8 = 1;
 const MALFORMED: u8 = 2;
