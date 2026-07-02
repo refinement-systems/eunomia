@@ -72,6 +72,10 @@ pub mod pal;
 pub mod path;
 // The entropy DRBG bridge (std-port 3.4); target-gated internally like `pal`.
 pub mod random;
+// The `read_dir` cursor head + name-copy arithmetic shared with the std `sys/fs/eunomia`
+// arm (std-port 4.1). Host-buildable (NOT target-gated) so its pure logic unit-tests
+// under `cargo test`; the target-gated `fs` client uses it for the snapshot table.
+pub mod readdir;
 // Internal: the bring-up debug-log stdio chunker for the `pal`/`sys/stdio` arm.
 mod stdio;
 pub mod syscall;

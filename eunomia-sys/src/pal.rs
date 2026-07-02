@@ -309,11 +309,26 @@ pub extern "Rust" fn __eunomia_fs_sync() -> i64 {
     fs::sync()
 }
 
-/// List the directory at `path`, encoded as the flat entry buffer the std `ReadDir`
-/// iterates (see `crate::fs`). An error is carried in the buffer's tag byte.
+/// Open a `read_dir` snapshot for `path`: run the `List` round-trip and stash the listing
+/// behind an integer handle (`>= 0`), or return a negative fs code. The std `ReadDir`
+/// walks it with `readdir_next` and releases it with `readdir_close`.
 #[unsafe(no_mangle)]
-pub extern "Rust" fn __eunomia_fs_readdir(path: &[u8]) -> alloc::vec::Vec<u8> {
-    fs::readdir(path)
+pub extern "Rust" fn __eunomia_fs_readdir_open(path: &[u8]) -> i64 {
+    fs::readdir_open(path)
+}
+
+/// Copy the next entry of the `read_dir` snapshot `handle` into `name_buf` and return its
+/// [`fs::DirEntMeta`] head (`code`: `0` = entry, `1` = end, `< 0` = fs code). `#[repr(C)]`
+/// so the head crosses the seam with a fixed layout the std side mirrors.
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_fs_readdir_next(handle: i64, name_buf: &mut [u8]) -> fs::DirEntMeta {
+    fs::readdir_next(handle, name_buf)
+}
+
+/// Release the `read_dir` snapshot `handle` (the std `ReadDir` drop).
+#[unsafe(no_mangle)]
+pub extern "Rust" fn __eunomia_fs_readdir_close(handle: i64) {
+    fs::readdir_close(handle)
 }
 
 /// A static human-readable message for a raw syscall error code, for `error_string`.
