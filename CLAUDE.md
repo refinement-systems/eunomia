@@ -47,6 +47,7 @@ Comments and documentation (doc/spec and doc/guidelines) describe what is, not w
 Comments may in exceptional cases document paths not taken and rationale for not taking it, if the existing implementation is surprising.
 Comments may reference doc/spec and doc/guidelines, nothing else.
 Documents in doc/plans and doc/results are considered temporary intermediate reports, and may not be referenced in comments, or in specs and guidelines.
+Any references to concepts introduced in plan or result documents (such as "phase 2.1", "finding 3", "milestone M3") are also considered references to the original document, and thus disallowed in code.
 
 ---
 
