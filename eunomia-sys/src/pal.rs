@@ -12,7 +12,7 @@
 //! Gated to the eunomia/bare-metal targets so the `#[no_mangle]` names never leak into
 //! a host build (where they could clash and where the `svc` shell is a stub anyway).
 
-#![cfg(any(target_os = "eunomia", target_os = "none"))]
+#![cfg(bare_metal)]
 
 use core::alloc::{GlobalAlloc, Layout};
 

@@ -47,10 +47,9 @@ verify = true
 
 # cfg(loom)/cfg(shuttle) are set by RUSTFLAGS="--cfg loom|shuttle" for the
 # time-page seqlock models; cfg(verus_keep_ghost)/cfg(verus_only) by Verus
-# during `cargo verus verify`. target_os="eunomia" is the custom
-# aarch64-unknown-eunomia target gating the CNTVCT/spawn arms (alongside
-# bare-metal "none"); unknown to a host/none toolchain. Teach plain cargo all
-# are expected (same handling as ipc/kcore). `urt` carries no Kani harness, so
+# during `cargo verus verify`. The bare-metal aarch64 arms (CNTVCT/spawn/futex)
+# are gated by cfg(bare_metal), emitted and declared by build.rs. Teach plain
+# cargo the model/Verus cfgs are expected. `urt` carries no Kani harness, so
 # nothing injects cfg(kani).
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(shuttle)", "cfg(futex_neg_control)", "cfg(verus_keep_ghost)", "cfg(verus_only)", 'cfg(target_os, values("eunomia"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(shuttle)", "cfg(futex_neg_control)", "cfg(verus_keep_ghost)", "cfg(verus_only)"] }

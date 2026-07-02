@@ -5,7 +5,7 @@
 //! eunomia/bare-metal targets (where `urt::futex` is the notif-backed table), like
 //! [`crate::thread`].
 
-#![cfg(any(target_os = "eunomia", target_os = "none"))]
+#![cfg(bare_metal)]
 
 use core::sync::atomic::AtomicU32;
 

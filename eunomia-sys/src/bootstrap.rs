@@ -49,7 +49,7 @@ pub fn init() {
 /// it gets urt's loud panic at first `now_utc_ns` (mis-wired, not degraded). Reading
 /// `Instant` needs no grant — it reads the counter directly. Target-gated: `urt` is
 /// only a dependency on the userspace cross-build (matching [`crate::pal`]).
-#[cfg(any(target_os = "eunomia", target_os = "none"))]
+#[cfg(bare_metal)]
 fn attach_grants() {
     if let Some(va) = startup().and_then(|s| crate::grant::time_va(s)) {
         // SAFETY: `va` is the base of the read-only `TimePage` granted under
@@ -84,7 +84,7 @@ fn attach_grants() {
     }
 }
 
-#[cfg(not(any(target_os = "eunomia", target_os = "none")))]
+#[cfg(not(bare_metal))]
 fn attach_grants() {}
 
 /// Configure the `urt` in-process thread pool from the std-port 3.2 threading
@@ -92,7 +92,7 @@ fn attach_grants() {}
 /// base). Present only for a thread-capable process; absent leaves threads
 /// unconfigured, so the std `sys/thread` arm refuses `spawn` cleanly. Target-gated
 /// like [`attach_grants`] (`urt` is a userspace-cross-build-only dependency).
-#[cfg(any(target_os = "eunomia", target_os = "none"))]
+#[cfg(bare_metal)]
 fn configure_threads() {
     if let Some((aspace, cspace, untyped, slot_base)) =
         startup().and_then(|s| crate::grant::thread_caps(s))
@@ -107,7 +107,7 @@ fn configure_threads() {
     }
 }
 
-#[cfg(not(any(target_os = "eunomia", target_os = "none")))]
+#[cfg(not(bare_metal))]
 fn configure_threads() {}
 
 /// Block until the bootstrap message arrives (it is queued before the child starts,

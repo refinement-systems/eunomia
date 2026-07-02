@@ -19,7 +19,7 @@
 //! pointer arithmetic are the userspace mirror of the kernel's trusted TLS-register
 //! marshalling. No `verus!{}`; witnessed by the QEMU spawn/tls smoke.
 
-#![cfg(any(target_os = "eunomia", target_os = "none"))]
+#![cfg(bare_metal)]
 
 use core::cell::UnsafeCell;
 use core::ptr;

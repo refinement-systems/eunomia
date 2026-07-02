@@ -4,7 +4,7 @@
 //! here is one-line calls into `urt`. Gated to the eunomia/bare-metal targets
 //! (where `urt` is a dependency and the `svc` shell is real), like [`crate::pal`].
 
-#![cfg(any(target_os = "eunomia", target_os = "none"))]
+#![cfg(bare_metal)]
 
 use urt::thread::{self, JoinHandle};
 

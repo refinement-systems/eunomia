@@ -65,8 +65,10 @@ proptest = "1"
 verify = true
 
 # cfg(verus_keep_ghost)/cfg(verus_only) are injected by Verus during `cargo verus
-# verify`. target_os="eunomia" is the custom aarch64-unknown-eunomia target that gates
-# the `svc` asm (alongside bare-metal "none"); unknown to a host/none toolchain. Teach
-# plain cargo all three are expected (same handling as loader/ipc/urt).
+# verify`. The `svc` asm and PAL modules are gated by cfg(bare_metal), emitted and
+# declared by build.rs. target_os="eunomia" (the custom aarch64-unknown-eunomia
+# target, alongside bare-metal "none") is still named by the [target.'cfg(...)']
+# dependency above, which a build-script cfg cannot express; keep the value recognized
+# so a host/none toolchain does not warn. Teach plain cargo all are expected.
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(verus_keep_ghost)", "cfg(verus_only)", 'cfg(target_os, values("eunomia"))'] }

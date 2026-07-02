@@ -44,7 +44,7 @@ fn chunks(buf: &[u8]) -> impl Iterator<Item = &[u8]> + '_ {
 /// when the kernel lacks the `debug-log` feature, so the full length is always reported
 /// written (std's `write_all` then never loops). Target-gated because
 /// [`crate::syscall::debug_write`] issues the `svc` shell, whose host build is a stub.
-#[cfg(any(target_os = "eunomia", target_os = "none"))]
+#[cfg(bare_metal)]
 pub fn write(buf: &[u8]) -> usize {
     for chunk in chunks(buf) {
         crate::syscall::debug_write(chunk);

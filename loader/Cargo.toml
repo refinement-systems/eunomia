@@ -40,7 +40,7 @@ verify = true
 
 # cfg(verus_keep_ghost)/cfg(verus_only) are set by Verus during `cargo verus
 # verify`; teach plain cargo they're expected (same handling as freelist/virtio-blk/cas).
-# target_os="eunomia" is the custom aarch64-unknown-eunomia target that gates
-# `spawn` (alongside bare-metal "none"); unknown to a host/none toolchain.
+# The bare-metal aarch64 `spawn` arm is gated by cfg(bare_metal), emitted and
+# declared by build.rs.
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(verus_keep_ghost)", "cfg(verus_only)", 'cfg(target_os, values("eunomia"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(verus_keep_ghost)", "cfg(verus_only)"] }

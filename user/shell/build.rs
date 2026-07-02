@@ -1,5 +1,7 @@
+include!("../build_common.rs");
+
 fn main() {
-    println!("cargo:rerun-if-changed=link.ld");
+    rerun_inputs();
     println!("cargo:rustc-check-cfg=cfg(libtests)");
     // On-target library-test triage (std-port 6.1): when kernel/build.rs builds the
     // coretests/alloctests suites (under EUNOMIA_BUILD_LIBTESTS), it passes their ELF
@@ -18,16 +20,11 @@ fn main() {
         println!("cargo:rustc-env=CORETESTS_ELF_PATH={c}");
         println!("cargo:rustc-env=ALLOCTESTS_ELF_PATH={a}");
     }
-    // The bare-metal linker script + page-size flag are for the Eunomia target
-    // only (`target_os = "none"` or `"eunomia"`). A host build — the test
-    // harness — links with the platform default; applying the script there
-    // breaks the link (`clang: unknown argument: -zmax-page-size`). The gate
-    // leaves the shipped aarch64 binary's link args alone.
-    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if os != "none" && os != "eunomia" {
-        return;
+    // The bare-metal linker script + page-size flag are for the Eunomia target only. A
+    // host build — the test harness — links with the platform default; applying the
+    // script there breaks the link (`clang: unknown argument: -zmax-page-size`). Unlike
+    // the bin-scoped crates above, shell links plain args and guards the host path here.
+    if is_bare_metal() {
+        link_el0_image();
     }
-    let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    println!("cargo:rustc-link-arg=-T{dir}/link.ld");
-    println!("cargo:rustc-link-arg=-zmax-page-size=4096");
 }
