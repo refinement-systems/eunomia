@@ -75,6 +75,22 @@ fn main() {
     }
     println!("[stdfs] dotdot resolves; escape->denied, malformed->invalid");
 
+    // 2c. a nameable path too long to frame in one 256-byte message (rev2§3.1): its
+    //     components sit within the resolver's 255-byte / 64-depth bounds, so it resolves,
+    //     but the encoded `Request` overflows `MAX_MSG`. After the write chunker caps the
+    //     data payload the path is the only input that can do this, so the seam reports it
+    //     as `InvalidFilename` (ENAMETOOLONG), not an opaque internal error.
+    let long = "a".repeat(255);
+    let unframable = format!("{long}/{long}");
+    match fs::read(&unframable) {
+        Err(e) if e.kind() == ErrorKind::InvalidFilename => {}
+        other => {
+            println!("[stdfs] fs-bad toolong kind {other:?}");
+            std::process::exit(12);
+        }
+    }
+    println!("[stdfs] toolong->invalid");
+
     // 3. read_dir the parent and confirm the entry is listed (the `List` path).
     let mut found = false;
     for entry in fs::read_dir("docs").expect("read_dir docs") {

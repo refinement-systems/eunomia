@@ -100,7 +100,15 @@ fn version() -> Option<u8> {
 pub fn request(req: &Request) -> Result<Response, i64> {
     let ver = version().ok_or(ERR_FS_NO_SESSION)?;
     let chan = SESSION_CHAN.load(Ordering::Relaxed);
-    let bytes = wire::encode_request(req, ver).map_err(|_| ERR_FS_INTERNAL)?;
+    // The only `encode_request` failure a caller can trigger is `TooLarge`: after the
+    // chunk loops cap the data payload (`WRITE_CHUNK`/`READ_CHUNK`), the encoded path is
+    // the sole input that can push a `Request` past `MAX_MSG` (rev2§3.1) — a *nameable*
+    // path (components ≤ 255, depth ≤ 64) too long to frame in one message, which is a bad
+    // path, not a client fault. A `Body` serialization fault stays `ERR_FS_INTERNAL`.
+    let bytes = wire::encode_request(req, ver).map_err(|e| match e {
+        wire::WireError::TooLarge => ERR_FS_BAD_PATH,
+        _ => ERR_FS_INTERNAL,
+    })?;
     let t = SyscallTransport;
     loop {
         match t.send_nb(chan, &bytes, None) {

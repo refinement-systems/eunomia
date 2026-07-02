@@ -9,7 +9,9 @@
 #     `read back ok` (fs::read → chunked Read), `dotdot resolves; escape->denied,
 #     malformed->invalid` (the verified `eunomia_sys::path::resolve`, std-port 4.2/4.3:
 #     `.`/`..` resolved client-side, an escaping `..` → `PermissionDenied`, a NUL name
-#     → `InvalidFilename`), `readdir found smoke` (read_dir → List), `metadata ok`
+#     → `InvalidFilename`), `toolong->invalid` (a nameable path whose encoded request
+#     overflows the 256-byte message cap, rev2§3.1 → `InvalidFilename`),
+#     `readdir found smoke` (read_dir → List), `metadata ok`
 #     (fs::metadata dir/file kind + len → the Stat→List kind probe, std-port 4.3),
 #     `renamed ok` (fs::rename → Rename), `removed ok` (remove_file → Unlink). It ends
 #     with the green marker `STD4 PASS` and the shell reaps it as `exited(0)`.
@@ -90,6 +92,7 @@ wait_for '\[storaged\] fs session negotiated wire version 2' 30
 wait_for '\[stdfs\] wrote .* bytes' 30
 wait_for '\[stdfs\] read back ok' 30
 wait_for '\[stdfs\] dotdot resolves' 30
+wait_for '\[stdfs\] toolong->invalid' 30
 wait_for '\[stdfs\] readdir found smoke' 30
 wait_for '\[stdfs\] metadata ok' 30
 wait_for '\[stdfs\] renamed ok' 30
