@@ -22,7 +22,7 @@ loader = { path = "../loader", default-features = false }
 # (=version) in lockstep with the other gated crates: an upgrade is a deliberate PR.
 vstd = { version = "=0.0.0-2026-05-31-0205", default-features = false }
 
-# The global allocator backing the std `System` arm (std-port 2.2): a fixed `.bss`
+# The global allocator backing the std `System` arm: a fixed `.bss`
 # `urt::Heap<N>` over the Verus-verified `freelist` algorithm. Target-gated to the
 # userspace cross-build, matching `pal.rs`'s own `#![cfg(...)]` (its only user), so
 # the host `cargo verus verify` / `cargo test` graph stays byte-identical — no urt
@@ -33,7 +33,7 @@ vstd = { version = "=0.0.0-2026-05-31-0205", default-features = false }
 [target.'cfg(any(target_os = "eunomia", target_os = "none"))'.dependencies]
 urt = { path = "../urt" }
 
-# The fs client (std-port 4.1) marshals the storaged session protocol. Both edges
+# The fs client marshals the storaged session protocol. Both edges
 # are target-gated (only `fs.rs`/`pal.rs` compile them), so the host `cargo verus
 # verify -p eunomia-sys` graph is byte-identical — no storage/cas obligations enter
 # this crate's session; they verify under their own `-p` gates. `user/shell`/

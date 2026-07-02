@@ -1,4 +1,4 @@
-//! The std `System` heap reservation size `N` (std-port 2.2).
+//! The std `System` heap reservation size `N`.
 //!
 //! eunomia's `GlobalAlloc` arm is backed by a fixed `.bss` `urt::Heap<N>` (the
 //! Verus-verified `freelist` algorithm). On the MVP there is no demand paging, so

@@ -1,5 +1,4 @@
-# On-target skip list for the upstream `alloctests` integration suite (std-port 6.1,
-# findings #19).
+# On-target skip list for the upstream `alloctests` integration suite.
 #
 # Consumed by scripts/libtest-on-target.sh: one libtest test-name substring per line
 # (blank lines and `#` comments ignored). For each module run, only the entries whose

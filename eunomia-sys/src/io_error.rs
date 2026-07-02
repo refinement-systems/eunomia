@@ -8,14 +8,14 @@
 //! Not byte-parsing, so proptest (not Verus) is the load-bearing tool; no `verus!{}`
 //! obligation.
 //!
-//! The fs `ErrorCode` set (storage-server, rev2§4) rides here too (std-port 4.1):
+//! The fs `ErrorCode` set (storage-server, rev2§4) rides here too:
 //! the fs client ([`crate::fs`], target-only) maps each storaged `Response::Err(code)`
 //! / `NotFound` to one of the [`ERR_FS_NOT_FOUND`]-band raw codes below — a band well
 //! clear of the syscall `ERR_*` block (`-1..-12`) so this one [`classify`] serves both.
 //! std wraps them through `io::Error::from_raw_os_error`, so their kind flows through
 //! the same path as a syscall error. This is the full rev2§4.9 decision table (all 11
 //! `ErrorCode` variants + the client-only no-session code): each raw code maps to its
-//! nearest std `io::ErrorKind` (std-port 4.3). Two of them — `Stale` and `Pinned` —
+//! nearest std `io::ErrorKind`. Two of them — `Stale` and `Pinned` —
 //! have no clean POSIX analog, so their targets ([`Kind::StaleNetworkFileHandle`] and
 //! [`Kind::ResourceBusy`]) are documented nearest-fits, not a verification property.
 
@@ -24,7 +24,7 @@ use crate::syscall::{
     ERR_NOSLOT, ERR_PERM, ERR_STATE, ERR_TYPE,
 };
 
-// ── Storage-server fs error band (rev2§4, std-port 4.1) ──
+// ── Storage-server fs error band (rev2§4) ──
 // One raw code per `storage_server::{Response::NotFound, ErrorCode}` variant, based
 // at `-256` so it never collides with the syscall `ERR_*` block. `crate::fs` (the
 // target-only client) owns the `ErrorCode -> code` direction; `classify`/`message`
@@ -62,11 +62,11 @@ pub enum Kind {
     OutOfMemory = 3,
     BrokenPipe = 4,
     Uncategorized = 5,
-    // std-port 4.1: the fs client needs a distinct `NotFound` (a missing file /
+    // the fs client needs a distinct `NotFound` (a missing file /
     // path), the most load-bearing fs error kind. Appended so the existing
     // discriminants (ABI to the PAL's `decode_error_kind`) stay put.
     NotFound = 6,
-    // std-port 4.3: the fuller rev2§4.9 fs decision table maps each storaged
+    // the fuller rev2§4.9 fs decision table maps each storaged
     // `ErrorCode` to its nearest std `io::ErrorKind`. These are appended (7..)
     // for the same ABI-stability reason; each name matches its `ErrorKind`
     // target so the PAL `decode_error_kind` lockstep is one-to-one. All six are
@@ -115,7 +115,7 @@ pub fn classify(code: i64) -> Kind {
         ERR_NOMEM | ERR_NOSLOT => Kind::OutOfMemory,
         ERR_CLOSED => Kind::BrokenPipe,
         ERR_BADSLOT | ERR_TYPE | ERR_FAULT | ERR_ARG => Kind::InvalidInput,
-        // ── fs band (std-port 4.3, the full rev2§4.9 decision table) ──
+        // ── fs band (the full rev2§4.9 decision table) ──
         ERR_FS_NOT_FOUND | ERR_FS_NO_SUCH_SNAPSHOT => Kind::NotFound,
         ERR_FS_DENIED => Kind::PermissionDenied,
         // A malformed/unnameable path component (the dominant `BadPath` case is the
@@ -153,7 +153,7 @@ pub fn message(code: i64) -> &'static str {
         ERR_CLOSED => "channel peer closed",
         ERR_STATE => "object in wrong state",
         ERR_AGAIN => "resource temporarily unavailable",
-        // ── fs band (std-port 4.1) ──
+        // ── fs band ──
         ERR_FS_NOT_FOUND => "no such file or directory",
         ERR_FS_BAD_HANDLE => "bad storage handle",
         ERR_FS_STALE => "storage handle revoked (generation mismatch)",
@@ -192,7 +192,7 @@ mod tests {
         (ERR_AGAIN, Kind::WouldBlock),
     ];
 
-    // The fs band (std-port 4.3): the full rev2§4.9 storaged `ErrorCode` -> `Kind`
+    // The fs band: the full rev2§4.9 storaged `ErrorCode` -> `Kind`
     // decision table — the oracle for the `classify` fs arm above.
     const FS: &[(i64, Kind)] = &[
         (ERR_FS_NOT_FOUND, Kind::NotFound),
@@ -255,7 +255,7 @@ mod tests {
             // Every code outside the two mapped bands (syscall `ABI` + the fs `FS`
             // band) is the total fallback. Both must be excluded: the fs band is
             // *not* in `ABI` yet is not `Uncategorized`, so excluding `ABI` alone
-            // (the pre-4.3 form) would contradict e.g. `ERR_FS_NOT_FOUND`.
+            // would contradict e.g. `ERR_FS_NOT_FOUND`.
             prop_assume!(!ABI.iter().any(|&(c, _)| c == code));
             prop_assume!(!FS.iter().any(|&(c, _)| c == code));
             prop_assert_eq!(classify(code), Kind::Uncategorized);

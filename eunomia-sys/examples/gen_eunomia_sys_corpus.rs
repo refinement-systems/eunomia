@@ -1,4 +1,4 @@
-//! Seed-corpus generator for eunomia-sys/fuzz (std-port 4.2/6.2). The `path`
+//! Seed-corpus generator for eunomia-sys/fuzz. The `path`
 //! resolver takes raw, attacker-influenced filename bytes with no checksum/length
 //! gate, so — unlike the ELF/startup/cas generators, which emit structures that
 //! start warm past a gate — these seeds are just representative path strings, one

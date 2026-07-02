@@ -100,7 +100,7 @@ fn startup1_oversized_counts_refused() {
     assert_eq!(startup::decode(&c), None);
 }
 
-/// startup-2: the `KIND_SEED` inline-bytes grant (std-port 3.4). A declared seed
+/// startup-2: the `KIND_SEED` inline-bytes grant. A declared seed
 /// grant whose 32-byte body is cut short must `decode` to `None` (the
 /// `KIND_REGION` truncation discipline extended to the new kind); the well-formed
 /// counterpart must decode with the four words intact. The pair pins both the

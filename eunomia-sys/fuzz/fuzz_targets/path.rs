@@ -1,13 +1,13 @@
 #![no_main]
-//! Path resolution on arbitrary bytes (std-port 4.2, rev2§4.9/§2.3). A path is an
+//! Path resolution on arbitrary bytes (rev2§4.9/§2.3). A path is an
 //! attacker-influenced filename in the versioned store, resolved client-side
 //! before it reaches storaged. Property set: `resolve` never panics; every
 //! accepted component is well-formed (1..=255 bytes, no NUL, no `/`, and not
 //! `.`/`..` — so no `..` ever survives into the output, the confinement fact) and
 //! lies inside the input; the depth is within `MAX_COMPONENTS`; and — the semantic
 //! oracle Verus's totality theorem cannot state — the accepted/rejected verdict,
-//! the resolved components, *and* the reject reason (escape vs malformed, std-port
-//! 4.3) match a straightforward reference resolver.
+//! the resolved components, *and* the reject reason (escape vs malformed)
+//! match a straightforward reference resolver.
 //!
 //! Run: `cargo +nightly fuzz run path`.
 use libfuzzer_sys::fuzz_target;
@@ -19,7 +19,7 @@ use eunomia_sys::path;
 /// depth 0 (escape); reject a component with NUL or > 255 bytes; reject past
 /// `MAX_COMPONENTS`. Returns the borrowed component list, or the reject **tag** —
 /// `ESCAPE` for a depth-0 `..`, `MALFORMED` otherwise — mirroring
-/// `path::RejectReason` (std-port 4.3).
+/// `path::RejectReason`.
 const ESCAPE: u8 = 1;
 const MALFORMED: u8 = 2;
 

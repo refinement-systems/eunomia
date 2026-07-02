@@ -5,7 +5,7 @@ edition = "2021"
 
 # Built by kernel/build.rs for aarch64-unknown-eunomia via build-std; not a
 # workspace member (host builds make no sense for an EL0 binary). The std-port
-# Phase-4.1 fs GATE fixture (findings #13): a real std binary that exercises the
+# fs GATE fixture: a real std binary that exercises the
 # `sys/fs/eunomia` client end to end against storaged — create/write/read/readdir/
 # rename/remove/sync — and prints `STD4 PASS`. Kept separate from `stdsmoke` so the
 # fs concerns (and the delegated storaged session grant) stay off the thread/lock

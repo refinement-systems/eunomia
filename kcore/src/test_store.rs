@@ -5176,7 +5176,7 @@ fn endpoint_cap_dropped_decrement_and_fire() {
 
 #[test]
 fn derive_channel_endpoint_bumps_census_no_false_peer_closed() {
-    // Regression for the `cap_copy`/`derive` endpoint-census bug (findings 16-1): copying a
+    // Regression for the `cap_copy`/`derive` endpoint-census bug: copying a
     // channel end cap must bump `end_caps[end]`, so deleting the *copy* while the original lives
     // does NOT fire peer-closed. Before the fix `derive` left `end_caps` at `[1, 1]`, so the very
     // next drop hit `0` and spuriously fired peer-closed on the still-live end (wedging, e.g., the

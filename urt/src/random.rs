@@ -1,4 +1,4 @@
-//! Per-process entropy DRBG (std-port 3.4): the backend for std's `fill_bytes`
+//! Per-process entropy DRBG: the backend for std's `fill_bytes`
 //! / `hashmap_random_keys`, and the source a parent draws each child's sub-seed
 //! from.
 //!

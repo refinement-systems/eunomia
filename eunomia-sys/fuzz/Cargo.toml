@@ -1,4 +1,4 @@
-# cargo-fuzz harness for the std-port path resolver (std-port 4.2). A path is an
+# cargo-fuzz harness for the std-port path resolver. A path is an
 # attacker-influenced filename in the versioned store, resolved client-side
 # before it reaches storaged (rev2§4.9/§2.3). Standalone workspace.
 [package]

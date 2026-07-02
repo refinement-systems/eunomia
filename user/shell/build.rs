@@ -3,7 +3,7 @@ include!("../build_common.rs");
 fn main() {
     rerun_inputs();
     println!("cargo:rustc-check-cfg=cfg(libtests)");
-    // On-target library-test triage (std-port 6.1): when kernel/build.rs builds the
+    // On-target library-test triage: when kernel/build.rs builds the
     // coretests/alloctests suites (under EUNOMIA_BUILD_LIBTESTS), it passes their ELF
     // paths here so the shell embeds them and spawns from `.rodata` on `run
     // bin/{coretests,alloctests}`. This bypasses the store: the MVP fs read path

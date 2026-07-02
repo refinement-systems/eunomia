@@ -1,4 +1,4 @@
-//! A userspace `sys::futex` backend (std-port 3.3): the one primitive upstream
+//! A userspace `sys::futex` backend: the one primitive upstream
 //! std needs to light `Mutex`/`Condvar`/`RwLock`/`Once`/`Parker`. We write no lock
 //! logic — upstream's futex impls come free — only the three futex functions over a
 //! process-global address→waiter table.
@@ -7,7 +7,7 @@
 //! another thread "wakes" it. There is no kernel futex, so each waiter parks on its
 //! *own* per-thread notification ([`crate::thread::current_park_notif`]): a bucket
 //! table keyed by the futex address holds `(addr, park-notif)` for each parked
-//! waiter (guarded by the 3.2 yielding [`SpinLock`]), a `futex_wake` scans it for
+//! waiter (guarded by the yielding [`SpinLock`]), a `futex_wake` scans it for
 //! the address and signals one waiter's notif. A shared notif could not do this —
 //! the kernel delivers a notification's whole word to *one* FIFO waiter and clears
 //! it, so waking a *specific* waiter needs a per-thread object.
@@ -26,7 +26,7 @@
 //! wait/wake protocol is a *concurrency interleaving* over `Acquire`/`Release`
 //! atomics and a notification, not arithmetic — so it is **Loom-certifying, never
 //! Verus** (the version-pinned Verus ghost atomics are SeqCst-only; a proof would
-//! certify a different binary), the same tier as the 3.2 heap spinlock it reuses.
+//! certify a different binary), the same tier as the heap spinlock it reuses.
 //! The `futex_no_lost_wakeup` model (below) drives the real table under Loom
 //! (exhaustive) and Shuttle (randomized) over a mock parker, and the abstract
 //! recheck-before-block discipline is the same one `tla/ipc_reactor` model-checks.
@@ -297,7 +297,7 @@ impl FutexTable {
         }
     }
 
-    /// NEGATIVE CONTROL (std-port 3.3): the word-check is moved *outside* the bucket
+    /// NEGATIVE CONTROL: the word-check is moved *outside* the bucket
     /// lock. The store-before-enqueue interleaving then loses the wakeup — the waker
     /// finds no entry and the waiter parks forever, a deadlock Loom/Shuttle flag.
     /// Enable with `--cfg futex_neg_control` (`RUSTFLAGS="--cfg loom --cfg

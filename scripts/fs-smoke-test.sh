@@ -1,5 +1,5 @@
 #!/bin/bash
-# QEMU boot test — the std-port fs GATE (findings #13, extended by #15). It boots
+# QEMU boot test — the std-port fs GATE. It boots
 # the full stack (mkfs image → virtio-blk → storaged → mount → console → shell) and
 # drives the shell through the std fs client `user/stdfs`, asserting the whole
 # `sys/fs/eunomia` surface works at EL0 against storaged:
@@ -7,12 +7,12 @@
 #   run bin/stdfs → the fs run. Each `[stdfs]` line is one op: `alive` (stdio),
 #     `wrote N bytes` (File::create + write_all + sync_all → Write/Sync),
 #     `read back ok` (fs::read → chunked Read), `dotdot resolves; escape->denied,
-#     malformed->invalid` (the verified `eunomia_sys::path::resolve`, std-port 4.2/4.3:
+# malformed->invalid` (the verified `eunomia_sys::path::resolve`,
 #     `.`/`..` resolved client-side, an escaping `..` → `PermissionDenied`, a NUL name
 #     → `InvalidFilename`), `toolong->invalid` (a nameable path whose encoded request
 #     overflows the 256-byte message cap, rev2§3.1 → `InvalidFilename`),
 #     `readdir found smoke` (read_dir → List), `metadata ok`
-#     (fs::metadata dir/file kind + len → the Stat→List kind probe, std-port 4.3),
+# (fs::metadata dir/file kind + len → the Stat→List kind probe),
 #     `renamed ok` (fs::rename → Rename), `removed ok` (remove_file → Unlink). It ends
 #     with the green marker `STD4 PASS` and the shell reaps it as `exited(0)`.
 #     marker `STD4 PASS` and the shell reaps it as `exited(0)`.

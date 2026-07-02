@@ -1,4 +1,4 @@
-//! The `read_dir` cursor head shared with the std `sys/fs/eunomia` arm (std-port 4.1).
+//! The `read_dir` cursor head shared with the std `sys/fs/eunomia` arm.
 //!
 //! `ReadDir` crosses the seam as an integer handle, not a serialized buffer: the
 //! target-gated [`crate::fs`] client snapshots the directory listing at open time and

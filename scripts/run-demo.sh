@@ -15,7 +15,7 @@ rm -rf "$DEMO_ROOT"
 mkdir -p "$DEMO_ROOT/docs" "$DEMO_ROOT/bin"
 printf 'Hello from the versioned store!\n' > "$DEMO_ROOT/hello.txt"
 printf 'Eunomia: capability-based OS with versioned storage.\n' > "$DEMO_ROOT/docs/readme"
-# hello is the std-port Phase-5.3 real `hello` (findings #18) — the first non-fixture
+# hello is the real `hello` — the first non-fixture
 # user program on std. The shell (itself now a std binary) spawns it interactively:
 #   run bin/hello world → [hello] arms + STD53 PASS + exited(0)
 #   run bin/hello panic → std panic reaps as 'panicked' (STATUS_PANIC)
@@ -25,12 +25,12 @@ cp "$ROOT/target/user/aarch64-unknown-eunomia/release/hello" "$DEMO_ROOT/bin/hel
 #   run bin/selftest 255     → faulted(translation, 0xdead0000)
 #   runloop bin/selftest 100 → 100 spawn/wait/reclaim cycles, slots 56/56
 cp "$ROOT/target/user/aarch64-unknown-eunomia/release/selftest" "$DEMO_ROOT/bin/selftest"
-# stdsmoke is the std-port Phase-2 GATE fixture (findings 7-1) — the first std
+# stdsmoke is the std runtime GATE fixture — the first std
 # user binary. Drive it interactively (its dedicated harness is std-smoke-test.sh):
 #   run bin/stdsmoke alpha beta → [stdsmoke] arms + STD2 PASS + exited(0)
 #   run bin/stdsmoke panic      → std panic reaps as 'panicked' (STATUS_PANIC)
 cp "$ROOT/target/user/aarch64-unknown-eunomia/release/stdsmoke" "$DEMO_ROOT/bin/stdsmoke"
-# stdfs is the std-port Phase-4.1 fs GATE fixture (findings #13) — the std fs
+# stdfs is the fs GATE fixture — the std fs
 # client. Drive it interactively (its dedicated harness is fs-smoke-test.sh):
 #   run bin/stdfs → [stdfs] arms + STD4 PASS + exited(0)
 cp "$ROOT/target/user/aarch64-unknown-eunomia/release/stdfs" "$DEMO_ROOT/bin/stdfs"

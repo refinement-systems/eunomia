@@ -1,4 +1,4 @@
-//! Pure address-space geometry for in-process thread stacks (std-port 3.2).
+//! Pure address-space geometry for in-process thread stacks.
 //!
 //! Split out of `thread` (which is bare-metal-only, since it issues syscalls) so
 //! the stack-VA arithmetic — the one host-reachable invariant of the thread
@@ -24,13 +24,13 @@ pub const MAX_THREADS: usize = 16;
 /// Working cspace slots per thread slot: {sub-untyped, TCB, stack frame, notif,
 /// scratch, park-notif} (carved once per slot, reused across its spawn/join
 /// cycles). The park-notif (base+5) is the per-thread notification a `sys::futex`
-/// waiter blocks on and a waker signals (std-port 3.3).
+/// waiter blocks on and a waker signals.
 pub const SLOTS_PER_THREAD: u32 = 6;
 
 /// Total free cspace slots the thread pool needs, the convention shared by the
 /// producer (which reserves the range and sizes the child cspace) and
 /// `thread::configure`. `6 * 16 + 1 = 97 <= 128`, the `SlotAlloc<2>` cap; the
-/// trailing `+ 1` is the main thread's own futex park-notif slot (std-port 3.3),
+/// trailing `+ 1` is the main thread's own futex park-notif slot,
 /// which is not one of the pool slots.
 pub const WORKING_SLOTS: u32 = SLOTS_PER_THREAD * (MAX_THREADS as u32) + 1;
 
@@ -46,7 +46,7 @@ pub const fn stack_region(slot: usize) -> (u64, u64) {
 /// The pool slot whose stack contains `sp`, or `None` for the main thread (whose
 /// stack sits above `STACK_TOP`, outside every pool region). The inverse of
 /// [`stack_region`]: a running thread reads its own `sp` to find which slot it
-/// occupies — hence which per-thread futex park-notif is its own (std-port 3.3) —
+/// occupies — hence which per-thread futex park-notif is its own —
 /// without threading a slot index through the spawn trampoline. Well-defined
 /// because the regions are disjoint and guard-separated (the tests below), so at
 /// most one contains `sp`.

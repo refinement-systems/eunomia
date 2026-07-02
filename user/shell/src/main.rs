@@ -26,7 +26,7 @@
 //! host test build because the shell's spawn/clock path depends on `urt::spawn`
 //! and `urt::time::cntvct`, which are aarch64-bare-metal only.
 
-// The shell is a std binary (std-port 5.3): std owns `_start`, the allocator (a
+// The shell is a std binary: std owns `_start`, the allocator (a
 // `urt::Heap` sized by `EUNOMIA_HEAP_BYTES`), and the panic handler — so there is no
 // `#![no_std]`/`#![no_main]`. The syscall-/spawn-bound `runtime` and the PAL↔seam bridge
 // are target-only (`cfg(not(test))`), so a host `cargo test` builds just the pure logic
@@ -135,7 +135,7 @@ pub(crate) fn fmt_utc(buf: &mut Vec<u8>, ns: u64) {
 /// Split a path on `'/'`, dropping empty components (so leading, trailing, and
 /// repeated slashes are absorbed). `cas` paths are `Vec<Vec<u8>>`.
 ///
-/// std-port 5.3: on the eunomia target the shell's file built-ins now pass paths to
+/// on the eunomia target the shell's file built-ins now pass paths to
 /// `std::fs`, which resolves them through the *verified* `eunomia_sys::path` resolver, so
 /// this hand splitter is no longer on the target path. It is retained as the host-tested
 /// reference for the rev2§4.9 path model (a follow-up shares the verified resolver with
@@ -228,7 +228,7 @@ pub(crate) const TIME_LEN: u64 = 4096;
 /// Total in the producer direction (rev2§2.7): an over-arena (`> MAX_ARGV`/
 /// `> MAX_ENV`) or over-budget (`> MAX_BLOCK`) block returns a clean `EncodeError`
 /// the spawn path maps to a `RunErr` — refuse, never panic or silently truncate.
-/// `env` carries the shell's inherited environment (std-port 5.2), forwarded
+/// `env` carries the shell's inherited environment, forwarded
 /// verbatim to the child so its `std::env::vars()` is non-empty (POSIX inheritance).
 /// The region carries no new authority: the shell `map`s the time page before start,
 /// only the VA travels.
@@ -236,28 +236,28 @@ pub(crate) fn build_child_block(
     out: &mut [u8],
     time_va: u64,
     argv: &[&[u8]],
-    // std-port 5.2: the environment inherited from init, forwarded to the child as
+    // the environment inherited from init, forwarded to the child as
     // raw `KEY=VALUE` byte-strings (rev2§5.1). `push_env` refuses past `MAX_ENV` and
     // `encode` past `MAX_BLOCK`, both mapped to a clean spawn refusal.
     env: &[&[u8]],
-    // std-port 3.2: for a thread-capable child, the child cspace slots holding its
+    // for a thread-capable child, the child cspace slots holding its
     // self-aspace/self-cspace/thread-untyped caps and the base of its working-slot
     // range — emitted as `CapSlot` grants so `eunomia_sys::bootstrap` configures the
     // thread pool. `None` for a non-thread-capable child (no grants, least authority).
     thread_grants: Option<[u32; 4]>,
-    // std-port 4.1: for an fs-capable child, the child cspace slot holding the
+    // for an fs-capable child, the child cspace slot holding the
     // delegated storaged session — emitted as the `storage` grant, with the ref-root
     // at handle 0 as `root`, so its std `sys/fs` arm connects and serves files. `None`
     // for a non-fs child (no session, least authority).
     storage_slot: Option<u32>,
-    // std-port 5.1: for a child the shell donated its console endpoint to, the child
+    // for a child the shell donated its console endpoint to, the child
     // cspace slot holding that endpoint — emitted under both `stdin` and `stdout` so its
     // std `sys/stdio` arm rides the `user/console` channel. stderr resolves to the
     // stdout channel in the child (the terminal case), so no separate `stderr` grant is
     // emitted. `None` for a child without a console (its stdio falls back to the
     // debug-log, its stdin reports EOF — least authority).
     console_slot: Option<u32>,
-    // std-port 3.4: a fresh 256-bit sub-seed the shell drew from its own DRBG for
+    // a fresh 256-bit sub-seed the shell drew from its own DRBG for
     // this child (the fork-without-reseed guard). The child seeds `urt::random`
     // from it, unblocking `HashMap`/`fill_bytes`.
     seed: [u64; 4],
@@ -298,7 +298,7 @@ pub(crate) fn build_child_block(
             })?;
         }
     }
-    // std-port 5.1: the donated console endpoint under both `stdin` and `stdout` (one
+    // the donated console endpoint under both `stdin` and `stdout` (one
     // channel, the interactive-console convention). stderr is left to the child's
     // stdout-channel fallback, so a thread-capable child stays within `MAX_GRANTS`.
     if let Some(slot) = console_slot {
@@ -312,7 +312,7 @@ pub(crate) fn build_child_block(
     for &a in argv {
         s.push_argv(a)?;
     }
-    // std-port 5.2: the inherited environment, so the child's `std::env::vars()` is
+    // the inherited environment, so the child's `std::env::vars` is
     // non-empty. Env lives in its own arena (`MAX_ENV`), separate from the grant
     // budget; every byte still counts against `MAX_BLOCK` (enforced by `encode`).
     for &e in env {

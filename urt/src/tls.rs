@@ -1,11 +1,11 @@
-//! Process-global thread-local **key table** (std-port 3.5): the verified key
+//! Process-global thread-local **key table**: the verified key
 //! allocator behind std's key-based TLS (`vendor/rust`'s `sys/thread_local/os.rs`).
 //!
 //! A TLS *key* is an index into every thread's `TPIDR_EL0` block (the per-thread
 //! pointer slots `eunomia_sys::tls` manages). Both std's `local_pointer!` (the
 //! current-thread handle/id, `dtor = None`) and every `thread_local!` variable
-//! draw a key here — one shared allocator, **replacing std-port 3.2's raw
-//! `NEXT_SLOT` counter**. Each key also carries the destructor std registered for
+//! draw a key here — one shared allocator. Each key also carries the destructor std
+//! registered for
 //! it, so the seam's thread-exit runner can drop live `thread_local!` values.
 //!
 //! **Verified by Verus.** The allocator is a thin [`KeyTable`] over the verified

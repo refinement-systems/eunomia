@@ -1,8 +1,7 @@
-//! The std-port Phase-2 GATE fixture (findings 7-1): the first *live* `std`
-//! binary on Eunomia. Phase 2's four sub-phases (entry/argv/env, GlobalAlloc,
-//! stdio→debug-log, time) each deferred their live QEMU demonstration to this
-//! combined gate; this binary exercises every one of them end to end and prints
-//! a green-boot marker (`STD2 PASS`, the `…M1 PASS` style) the boot harness
+//! The std runtime GATE fixture: the first *live* `std` binary on Eunomia. It
+//! exercises the core std runtime surfaces — entry/argv/env, GlobalAlloc,
+//! stdio→debug-log, time — end to end and prints a green-boot marker
+//! (`STD2 PASS`, the `…M1 PASS` style) the boot harness
 //! greps (`scripts/std-smoke-test.sh`).
 //!
 //! It is a real std program — no `#![no_std]`, no `#![no_main]`, no
@@ -15,13 +14,13 @@
 //!
 //! Argument `argv[1]` selects an arm: `panic` drives the std-owned panic path
 //! (panic → `abort_internal` → `__eunomia_thread_exit(STATUS_PANIC)`, the
-//! Phase-2.3 override) so the parent shell reaps `panicked`, not `exited(_)`;
-//! `spawn`/`sync` exercise threads and locks (3.2/3.3); `hashmap` exercises
-//! `HashMap` over the per-process entropy DRBG (3.4) — building a default-hasher
+//! panic-status override) so the parent shell reaps `panicked`, not `exited(_)`;
+//! `spawn`/`sync` exercise threads and locks; `hashmap` exercises
+//! `HashMap` over the per-process entropy DRBG — building a default-hasher
 //! map draws `hashmap_random_keys` → `fill_bytes` → `urt::random`, seeded from
 //! the `NAME_RANDOM_SEED` grant the shell hands each child. A process not granted
 //! a seed would abort loudly here rather than hash predictably. `env` exercises the
-//! inherited environment (5.2): `env::var`/`env::vars` read the values init defines
+//! inherited environment: `env::var`/`env::vars` read the values init defines
 //! and the shell forwards, and `env::temp_dir()` resolves from `TMPDIR`.
 
 extern crate eunomia_sys; // links the PAL↔seam bridge (see module doc)
@@ -34,29 +33,29 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 const Y2020_SECS: u64 = 1_577_836_800;
 
 fn main() {
-    // stdio (2.3): every line below rides `println!` → debug-log → the serial
+    // stdio: every line below rides `println!` → debug-log → the serial
     // log the harness greps. The `[stdsmoke]` prefix keeps the markers from
     // colliding with kernel/shell/storaged output on the shared console.
     println!("[stdsmoke] alive");
 
-    // argv/env (2.1): the shell delivers the command line as the startup block's
+    // argv/env: the shell delivers the command line as the startup block's
     // argv; `argv[0]` is the path. Collecting into a `Vec<String>` also exercises
-    // the allocator (2.2) and `String`.
+    // the allocator and `String`.
     let args: Vec<String> = std::env::args().collect();
     println!("[stdsmoke] argv={args:?}");
 
     // The deliberate panic path: std's own handler must terminate as
-    // STATUS_PANIC so the parent distinguishes a crash from a clean exit (2.3).
+    // STATUS_PANIC so the parent distinguishes a crash from a clean exit.
     if args.get(1).map(String::as_str) == Some("panic") {
         println!("[stdsmoke] panicking");
         panic!("stdsmoke deliberate panic");
     }
 
-    // std-port 3.2: the thread-spawn path. Spawn two threads that each allocate in a
+    // the thread-spawn path. Spawn two threads that each allocate in a
     // tight loop, forcing simultaneous access to the one process heap — the concurrent
     // allocation the heap spinlock serializes (Loom-certified; here the on-target
     // witness). Each reads `thread::current().id()`, which lives in the per-thread
-    // `TPIDR_EL0` TLS (3.1/3.2): distinct ids across the two threads prove the storage
+    // `TPIDR_EL0` TLS: distinct ids across the two threads prove the storage
     // is genuinely per-thread, not the process-global it was before real TLS. Join
     // both, check the results, and confirm the ids differ.
     if args.get(1).map(String::as_str) == Some("spawn") {
@@ -103,7 +102,7 @@ fn main() {
         return;
     }
 
-    // std-port 3.3: the lock stack over `sys::futex`. Two threads alternate turns
+    // the lock stack over `sys::futex`. Two threads alternate turns
     // incrementing a shared counter, each guarding it with a `Mutex` and blocking on
     // a `Condvar` until its parity comes up — real cross-thread `futex_wait`/
     // `futex_wake` (the *blocking* path, not just the uncontended CAS fast path). If
@@ -150,7 +149,7 @@ fn main() {
         return;
     }
 
-    // std-port 3.4: the entropy path via `HashMap`. Building a default-hasher map
+    // the entropy path via `HashMap`. Building a default-hasher map
     // constructs `RandomState`, which calls `hashmap_random_keys` → `fill_bytes` →
     // the per-process DRBG (`urt::random`) seeded from the `NAME_RANDOM_SEED` grant
     // the shell handed this child. An unseeded process aborts loudly here (the
@@ -189,11 +188,11 @@ fn main() {
         return;
     }
 
-    // std-port 3.5: real `thread_local!` macro storage + destructors. A spawned
+    // real `thread_local!` macro storage + destructors. A spawned
     // thread touches two `thread_local!`s — a `Drop` sentinel and a per-thread
     // `Cell` — then exits. Two things must hold that the old single-threaded
     // `no_threads` storage got wrong: (a) the sentinel's destructor **runs on the
-    // spawned thread's exit** (the 3.5 key-based teardown — `DROPS` bumps), and (b)
+    // spawned thread's exit** (the key-based teardown — `DROPS` bumps), and (b)
     // the `Cell` is **genuinely per-thread** — the child sets its own to 7 while the
     // main thread's stays 0 (shared `no_threads` storage would leak the 7 across).
     // This is the on-target witness for the verified `urt::tls` key table + the
@@ -253,7 +252,7 @@ fn main() {
         return;
     }
 
-    // std-port 5.2: the environment path. The shell forwards its inherited env (from
+    // the environment path. The shell forwards its inherited env (from
     // init: `PATH=/bin`, `TMPDIR=/tmp`, `TERM=eunomia`) into this child's startup
     // block, so `env::var`/`env::vars` read real values and `env::temp_dir()` returns
     // a sane path instead of panicking. Asserting `PATH`/`TERM` — not just `TMPDIR` —
@@ -300,7 +299,7 @@ fn main() {
         return;
     }
 
-    // alloc (2.2): Vec growth + Box, with a checked value the harness asserts.
+    // alloc: Vec growth + Box, with a checked value the harness asserts.
     let v: Vec<u64> = (1..=100).collect();
     let sum: u64 = v.iter().sum();
     if sum != 5050 {
@@ -312,7 +311,7 @@ fn main() {
     let s = format!("box={} argc={}", boxed, args.len());
     println!("[stdsmoke] vec sum={sum} {s}");
 
-    // Instant (2.4): the grant-free monotonic counter (CNTVCT). Assert ordering
+    // Instant: the grant-free monotonic counter (CNTVCT). Assert ordering
     // rather than a nonzero delta — the virtual counter is coarse, so a tiny
     // workload can fall inside one tick; ordering is the robust invariant.
     let t0 = Instant::now();
@@ -331,7 +330,7 @@ fn main() {
         t1.duration_since(t0).as_nanos()
     );
 
-    // SystemTime (2.4): the rev2§2.6 time page the shell grants every child. A
+    // SystemTime: the rev2§2.6 time page the shell grants every child. A
     // post-2020 wall clock proves the grant attached and the tick→ns conversion
     // works in a spawned std process, not just in the shell.
     match SystemTime::now().duration_since(UNIX_EPOCH) {

@@ -1,4 +1,4 @@
-//! The std-port console GATE fixture (findings #16): the first std binary whose
+//! The std-port console GATE fixture: the first std binary whose
 //! `stdout`/`stdin`/`stderr` ride the userspace `user/console` channel (rev2§5.1)
 //! instead of the kernel debug-log. The shell donates its console endpoint to every child
 //! it runs, so this binary's `println!`/`eprintln!` and `stdin().read_line` all flow over

@@ -10494,9 +10494,9 @@ pub fn derive<S: Store>(
         cap_obj(old(store).slot_view()[src].cap) matches Some(o) ==> old(
             store,
         ).refs_view().dom().contains(o),
-        // rev2§3.3 endpoint census (findings 16-1): a `Channel` copy adds a live end cap to
+        // rev2§3.3 endpoint census: a `Channel` copy adds a live end cap to
         // the arena, so `derive` must bump `end_caps[end]` in lockstep to keep `end_caps_sound`
-        // — the invariant `cap_copy` previously violated at runtime, spuriously firing
+        // — without the bump, `cap_copy` would spuriously fire
         // peer-closed on a live end. Threaded like the `delete` census obligations, projected to
         // the two facts this path consumes: the running census, and the src channel's
         // well-formedness (`chan_wf` ⇒ residency + `end_caps.len() == 2`) for the bump. Both are
@@ -10569,7 +10569,7 @@ pub fn derive<S: Store>(
         // (the Err paths are pure no-ops). Conditional + `requires`-free — the syscall shell, the
         // only caller, is undisturbed.
         refcount_sound(old(store)) ==> refcount_sound(final(store)),
-        // rev2§3.3 endpoint census maintained (findings 16-1): a `Channel` copy bumps
+        // rev2§3.3 endpoint census maintained: a `Channel` copy bumps
         // `end_caps[end]` to match the arena's new end cap (`endpoint_cap_added`); every other
         // path frames both `chan_view` and the arena's `end_cap_count`, so a sound census in
         // yields a sound census out. This closes the `cap_copy` census hole.
@@ -10618,7 +10618,7 @@ pub fn derive<S: Store>(
     // `derived_kind` preserves channel-end-ness exactly (Frame→Frame, Thread→Thread, else
     // identity): the derived cap is a channel end cap for the src's object/end, or neither is.
     // This bridges the src `chan_wf`/`end_caps` facts (a `requires`, stated over the src) to the
-    // installed `cap`'s census bump below (rev2§3.3, findings 16-1).
+    // installed `cap`'s census bump below (rev2§3.3).
     assert(cap_chan_end(cap) == cap_chan_end(s.cap)) by {
         match s.cap.kind {
             CapKind::Channel(o, e) => {},
@@ -10776,7 +10776,7 @@ pub fn derive<S: Store>(
             }
         }
     }
-    // rev2§3.3 endpoint census (findings 16-1): the `set_slot` above added a live end cap to the
+    // rev2§3.3 endpoint census: the `set_slot` above added a live end cap to the
     // arena for a channel copy, so bump `end_caps[end]` in lockstep to restore `end_caps_sound`
     // — the invariant `cap_copy` previously left broken (a later reap then spuriously fired
     // peer-closed on the still-live end). The arena census delta the bump must match:

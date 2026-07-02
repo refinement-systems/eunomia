@@ -1,5 +1,5 @@
-//! The real `hello` — the first *non-fixture* user program on std (std-port 5.3,
-//! findings #18). Where `user/stdsmoke` is a gate fixture, this is the actual
+//! The real `hello` — the first *non-fixture* user program on std. Where
+//! `user/stdsmoke` is a gate fixture, this is the actual
 //! "hello world" a user runs from the shell (`run bin/hello`), and its whole point
 //! is that a real program now boots on the std runtime with no bare-metal
 //! scaffolding of its own.
@@ -11,10 +11,10 @@
 //! the PAL's undefined `__eunomia_*` `extern "Rust"` symbols against eunomia-sys's
 //! `#[no_mangle]` definitions (the `__rust_alloc` pattern).
 //!
-//! Arms (the plan's "validates entry/argv/alloc/exit/STATUS_PANIC"):
+//! Arms (validating entry/argv/alloc/exit/STATUS_PANIC):
 //!   - argv via `env::args`, allocation via `Vec`/`String`/`format!`,
-//!   - the inherited environment via `env::var` (init→shell→child, 5.2),
-//!   - a monotonic `Instant` delta (2.4),
+//!   - the inherited environment via `env::var` (init→shell→child),
+//!   - a monotonic `Instant` delta,
 //!   - a clean `exit(0)` (returning from `main`), and
 //!   - `run bin/hello panic` → std's own handler terminates as STATUS_PANIC so the
 //!     parent shell reaps `panicked`, not `exited(_)`.
@@ -24,17 +24,17 @@ extern crate eunomia_sys; // links the PAL↔seam bridge (see module doc)
 use std::time::Instant;
 
 fn main() {
-    // stdio (5.1): `println!` rides the `user/console` channel (the shell donates
+    // stdio: `println!` rides the `user/console` channel (the shell donates
     // its console endpoint to every child). The `[hello]` prefix keeps the markers
     // from colliding with kernel/shell/storaged lines on the shared console.
     println!("[hello] alive in its own aspace on std");
 
-    // argv (2.1) + allocation (2.2): the shell delivers the command line as the
+    // argv + allocation: the shell delivers the command line as the
     // startup block's argv; collecting into a `Vec<String>` exercises the heap.
     let args: Vec<String> = std::env::args().collect();
     println!("[hello] argv={args:?}");
 
-    // The std-owned panic path (2.3): std's handler must terminate as STATUS_PANIC
+    // The std-owned panic path: std's handler must terminate as STATUS_PANIC
     // so the parent distinguishes a crash from a clean exit.
     if args.get(1).map(String::as_str) == Some("panic") {
         println!("[hello] panicking");
@@ -52,7 +52,7 @@ fn main() {
     }
     println!("[hello] {}", greeting.trim_end());
 
-    // Inherited environment (5.2): init defines `TERM=eunomia`, the shell forwards
+    // Inherited environment: init defines `TERM=eunomia`, the shell forwards
     // it. Reading it back witnesses the init→shell→child inheritance from a real
     // program (not just the stdsmoke fixture).
     match std::env::var("TERM") {
@@ -60,7 +60,7 @@ fn main() {
         Err(_) => println!("[hello] TERM unset"),
     }
 
-    // Monotonic clock (2.4): `Instant` is zero-syscall (reads CNTVCT), no grant.
+    // Monotonic clock: `Instant` is zero-syscall (reads CNTVCT), no grant.
     let t0 = Instant::now();
     let mut acc: u64 = 0;
     for i in 0..1000u64 {

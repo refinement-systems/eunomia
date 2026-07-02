@@ -19,10 +19,10 @@ use core::alloc::{GlobalAlloc, Layout};
 use crate::{bootstrap, console, fs, futex, heap, io_error, random, stdio, syscall, thread, tls};
 use core::sync::atomic::AtomicU32;
 
-/// The process-global std `System` heap (std-port 2.2): a fixed `.bss` arena over
+/// The process-global std `System` heap: a fixed `.bss` arena over
 /// the Verus-verified `freelist` allocator. A plain `static` — interior
 /// `UnsafeCell` plus `urt`'s `unsafe impl Sync`, whose soundness is the heap's
-/// yielding spinlock (std-port 3.2): in-process threads allocate concurrently, so
+/// yielding spinlock: in-process threads allocate concurrently, so
 /// the allocator serializes its free-list access. `Heap::new()` is all-zero, so
 /// it lands in `.bss`, which the loader maps and zeroes with the RW segment. `N` is
 /// the per-binary reservation [`heap::HEAP_BYTES`] (committed RAM at spawn — no
@@ -47,7 +47,7 @@ pub extern "Rust" fn __eunomia_dealloc(ptr: *mut u8, layout: Layout) {
     unsafe { HEAP.dealloc(ptr, layout) }
 }
 
-/// Point the main thread's `TPIDR_EL0` at its TLS block (std-port 3.2). Called once
+/// Point the main thread's `TPIDR_EL0` at its TLS block. Called once
 /// by the std PAL `_start`, before `bootstrap_init`/`main` and before any
 /// `local_pointer!` access, so `set_current` works on the main thread.
 #[unsafe(no_mangle)]
@@ -55,14 +55,14 @@ pub extern "Rust" fn __eunomia_tls_init_main() {
     tls::init_main();
 }
 
-/// Set up a spawned thread's `TPIDR_EL0` TLS block (std-port 3.2). Called first in
+/// Set up a spawned thread's `TPIDR_EL0` TLS block. Called first in
 /// the `sys/thread` trampoline, before `ThreadInit::init` runs `set_current`.
 #[unsafe(no_mangle)]
 pub extern "Rust" fn __eunomia_tls_init_thread() {
     tls::init_thread();
 }
 
-/// Allocate a TLS key + register its destructor (std-port 3.5): std's key-based TLS
+/// Allocate a TLS key + register its destructor: std's key-based TLS
 /// (`sys/thread_local/os.rs` via the `key/eunomia.rs` bridge) over the verified
 /// `urt::tls` key table. `dtor` is `os::destroy_value::<T>` (or `None` for a
 /// `local_pointer!`). Returns `0` when the table is full — the std side aborts.
@@ -93,7 +93,7 @@ pub extern "Rust" fn __eunomia_tls_destroy(key: usize) {
     unsafe { tls::destroy(key) }
 }
 
-/// Run this thread's `thread_local!` destructors at thread exit (std-port 3.5).
+/// Run this thread's `thread_local!` destructors at thread exit.
 /// Called by the std trampoline / `_start` after the thread body, before
 /// `free_thread`. Eunomia owns thread exit, so it drives destructors itself.
 #[unsafe(no_mangle)]
@@ -101,8 +101,8 @@ pub extern "Rust" fn __eunomia_tls_run_dtors() {
     tls::run_thread_dtors();
 }
 
-/// Reclaim a spawned thread's heap TLS block at thread exit (std-port 3.5 — fixes
-/// the 3.2 leak). A no-op for the main thread's static block.
+/// Reclaim a spawned thread's heap TLS block at thread exit. A no-op for the
+/// main thread's static block.
 #[unsafe(no_mangle)]
 pub extern "Rust" fn __eunomia_tls_free_thread() {
     tls::free_thread_block();
@@ -128,14 +128,14 @@ pub extern "Rust" fn __eunomia_env() -> &'static [&'static [u8]] {
 }
 
 /// Exit through the kernel thread-exit terminus (rev2§5.1); the parent reaper reads
-/// `code` as the child's status. Also ends an in-process thread (std-port 3.2): the
+/// `code` as the child's status. Also ends an in-process thread: the
 /// thread's on-exit binding raises its notif, waking the joiner.
 #[unsafe(no_mangle)]
 pub extern "Rust" fn __eunomia_thread_exit(code: u64) -> ! {
     syscall::thread_exit(code)
 }
 
-/// Spawn an in-process thread (std-port 3.2): `entry` is the std trampoline, `arg`
+/// Spawn an in-process thread: `entry` is the std trampoline, `arg`
 /// its closure pointer (crosses in `x0`). Returns the join handle (`>= 0`) or a
 /// negative `ERR_*`; the `sys/thread` arm maps `< 0` through `from_raw_os_error`.
 #[unsafe(no_mangle)]
@@ -162,7 +162,7 @@ pub extern "Rust" fn __eunomia_thread_sleep(nanos: u64) {
     thread::sleep(nanos);
 }
 
-/// Wait on the futex `*futex` while it equals `expected` (std-port 3.3): the
+/// Wait on the futex `*futex` while it equals `expected`: the
 /// `sys::futex` backend for the whole upstream lock stack (Mutex/Condvar/RwLock/
 /// Once/Parker). `timeout_ns == u64::MAX` means no timeout; returns `false` only on
 /// timeout. All logic lives in the seam (`urt::futex`); this arm only marshals.
@@ -188,7 +188,7 @@ pub extern "Rust" fn __eunomia_futex_wake_all(futex: &AtomicU32) {
 }
 
 /// Write `buf` to the kernel debug-log (rev2§7): the `sys/stdio` **panic last-words**
-/// path (std-port 2.3/5.1). std-port 5.1 moved ordinary stdout/stderr onto the console
+/// path. Ordinary stdout/stderr ride the console
 /// (below); this stays the panic sink so reporting never depends on the console channel
 /// (rev2§7 C-M9). Split into `DEBUG_WRITE_MAX`-byte `DebugWrite` chunks — the kernel
 /// `ERR_FAULT`s a longer write, so the chunking re-establishes that cap at the seam.
@@ -197,7 +197,7 @@ pub extern "Rust" fn __eunomia_stdio_write(buf: &[u8]) -> usize {
     stdio::write(buf)
 }
 
-/// The `sys/stdio` `Stdout` write body (std-port 5.1): `buf` to the `user/console`
+/// The `sys/stdio` `Stdout` write body: `buf` to the `user/console`
 /// `stdout` channel, else the debug-log fallback. All chunking/backpressure lives in
 /// [`console`]; this shim only delegates.
 #[unsafe(no_mangle)]
@@ -205,7 +205,7 @@ pub extern "Rust" fn __eunomia_stdout_write(buf: &[u8]) -> usize {
     console::stdout_write(buf)
 }
 
-/// The `sys/stdio` `Stderr` write body (std-port 5.1): `buf` to the `user/console`
+/// The `sys/stdio` `Stderr` write body: `buf` to the `user/console`
 /// `stderr` channel (`NAME_STDERR` → else the `stdout` channel), else the debug-log —
 /// a stream distinct from stdout so diagnostics never enter a pipeline's data.
 #[unsafe(no_mangle)]
@@ -213,7 +213,7 @@ pub extern "Rust" fn __eunomia_stderr_write(buf: &[u8]) -> usize {
     console::stderr_write(buf)
 }
 
-/// The `sys/stdio` `Stdin` read body (std-port 5.1): block for the next `user/console`
+/// The `sys/stdio` `Stdin` read body: block for the next `user/console`
 /// `stdin` message and deliver up to `buf.len()` bytes, or `0` (EOF) when no console
 /// was granted. All blocking/carry logic lives in [`console`]; this shim only delegates.
 #[unsafe(no_mangle)]
@@ -221,7 +221,7 @@ pub extern "Rust" fn __eunomia_stdin_read(buf: &mut [u8]) -> usize {
     console::stdin_read(buf)
 }
 
-/// Monotonic nanoseconds for the `sys/time` `Instant` arm (std-port 2.4): the
+/// Monotonic nanoseconds for the `sys/time` `Instant` arm: the
 /// CNTVCT/CNTFRQ virtual counter via urt's Verus-verified `utc_ns_at`, needing no
 /// `"time"` grant. Total + monotone (the urt time row); this shim re-establishes
 /// no precondition.
@@ -231,7 +231,7 @@ pub extern "Rust" fn __eunomia_mono_ns() -> i64 {
 }
 
 /// Wall-clock nanoseconds since the Unix epoch for the `sys/time` `SystemTime` arm
-/// (std-port 2.4): the rev2§2.6 time page. Panics if no `"time"` grant was attached
+/// the rev2§2.6 time page. Panics if no `"time"` grant was attached
 /// (a process asking for wall time without it is mis-wired, not degraded — the urt
 /// posture); `bootstrap::init` attaches the page when the grant is present.
 #[unsafe(no_mangle)]
@@ -239,7 +239,7 @@ pub extern "Rust" fn __eunomia_wall_ns() -> i64 {
     urt::time::now_utc_ns()
 }
 
-/// Fill `bytes` with random data for the `sys/random` arm (std-port 3.4): std's
+/// Fill `bytes` with random data for the `sys/random` arm: std's
 /// `fill_bytes`/`hashmap_random_keys` over the per-process DRBG (`urt::random`)
 /// seeded from the `NAME_RANDOM_SEED` grant. Loudly aborts if unseeded (the seam
 /// re-establishes the "seed attached" precondition as a runtime guard, never a
@@ -256,10 +256,10 @@ pub extern "Rust" fn __eunomia_io_classify(code: i64) -> u8 {
     io_error::classify(code) as u8
 }
 
-// ── The storaged fs client (std-port 4.1) ──
+// ── The storaged fs client ──
 // Each shim forwards to `crate::fs`, where the marshalling lives; raw path *bytes*
 // cross the seam (the std arm holds the `OsStr` bytes) and are split into tree
-// components PAL-side (the 4.2 seam). A `< 0` return is a raw fs code the std arm
+// components PAL-side (the path-resolver seam). A `< 0` return is a raw fs code the std arm
 // wraps via `io::Error::from_raw_os_error` (its kind from `__eunomia_io_classify`).
 
 /// Read up to `buf.len()` bytes of `path` at `offset`. Returns bytes read (0 = EOF)
@@ -283,7 +283,7 @@ pub extern "Rust" fn __eunomia_fs_stat(path: &[u8]) -> i64 {
 }
 
 /// Directory-aware metadata (kind + size) for the `sys/fs` `stat`/`lstat`/`file_attr`
-/// arm (std-port 4.3): [`fs::Meta`] `{ code, size, is_dir }`, `#[repr(C)]` so it crosses
+/// arm: [`fs::Meta`] `{ code, size, is_dir }`, `#[repr(C)]` so it crosses
 /// the seam with a fixed layout the std side mirrors. All probe logic (Stat then List)
 /// lives in `crate::fs`; this arm only forwards.
 #[unsafe(no_mangle)]

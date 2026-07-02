@@ -1,6 +1,6 @@
 //! Replay the committed path-resolver fuzz corpus through `resolve`, re-checking
 //! the invariants. Keeps the fuzz inputs alive as ordinary tests and lets `cargo
-//! miri test --test fuzz_corpus` UB-check each one (std-port 4.2). Mirrors
+//! miri test --test fuzz_corpus` UB-check each one. Mirrors
 //! `loader/tests/fuzz_corpus.rs`.
 
 use std::fs;

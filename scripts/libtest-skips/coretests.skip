@@ -1,4 +1,4 @@
-# On-target skip list for the upstream `coretests` suite (std-port 6.1, findings #19).
+# On-target skip list for the upstream `coretests` suite.
 #
 # Consumed by scripts/libtest-on-target.sh: one libtest test-name substring per line
 # (blank lines and `#` comments ignored). For each module run, only the entries whose

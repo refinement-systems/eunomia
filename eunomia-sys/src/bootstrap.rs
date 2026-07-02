@@ -9,7 +9,7 @@
 //! `_start`.
 //!
 //! Trust posture: the untrusted byte boundary is `loader::startup::decode` (verified
-//! separately, 1.2); the `chan_recv` is the trusted `svc` shell ([`crate::syscall`]);
+//! separately); the `chan_recv` is the trusted `svc` shell ([`crate::syscall`]);
 //! everything here is plain single-threaded bookkeeping — the same posture the
 //! trusted-base ledger already grants [`crate::grant`]. No `verus!{}` obligation.
 
@@ -35,10 +35,10 @@ pub fn init() {
     let len = recv_bootstrap();
     // SAFETY: `len <= MAX_BLOCK`; runs once, before any reader.
     unsafe { commit(len) };
-    // std-port 2.4: attach the pre-mapped grant pages (today only the time page) so
+    // attach the pre-mapped grant pages (today only the time page) so
     // the std `sys/time` arm can read them. Must follow `commit` — it reads `startup()`.
     attach_grants();
-    // std-port 3.2: if this process was granted the threading self-caps (scoped,
+    // if this process was granted the threading self-caps (scoped,
     // opt-in), configure the in-process thread pool. Absent ⇒ threads are
     // `Unsupported` (the least-authority default). Also reads `startup()`.
     configure_threads();
@@ -56,7 +56,7 @@ fn attach_grants() {
         // `NAME_TIME` (rev2§2.6); it stays mapped for the process lifetime.
         unsafe { urt::time::attach(va as usize) };
     }
-    // std-port 3.4: seed the process DRBG from the per-run entropy grant, then
+    // seed the process DRBG from the per-run entropy grant, then
     // zeroize this transient copy. Absent ⇒ the DRBG stays unseeded and
     // `fill_bytes`/`HashMap` loudly abort at first use (mis-provisioned, not
     // degraded — the `NAME_TIME` posture). The seed still lives in the stashed
@@ -69,16 +69,16 @@ fn attach_grants() {
             unsafe { core::ptr::write_volatile(w, 0) };
         }
     }
-    // std-port 4.1: if this process holds a `NAME_STORAGE` session grant, resolve it
+    // if this process holds a `NAME_STORAGE` session grant, resolve it
     // and run the client-side connect handshake now, before `main`. Absent ⇒ the
     // session stays unset and the std `sys/fs` arm refuses cleanly (least authority).
     if let Some(s) = startup() {
         crate::fs::attach(s);
     }
-    // std-port 5.1: resolve the console-channel grants (stdin/stdout/stderr) so the std
+    // resolve the console-channel grants (stdin/stdout/stderr) so the std
     // `sys/stdio` arm rides the `user/console` channel. Absent ⇒ the slots stay unset,
     // so writes fall back to the debug-log and reads report EOF (least authority — the
-    // pre-5.1 behavior for a child without a console grant).
+    // fallback for a child without a console grant).
     if let Some(s) = startup() {
         crate::console::attach(s);
     }
@@ -87,7 +87,7 @@ fn attach_grants() {
 #[cfg(not(bare_metal))]
 fn attach_grants() {}
 
-/// Configure the `urt` in-process thread pool from the std-port 3.2 threading
+/// Configure the `urt` in-process thread pool from the threading
 /// self-cap grants (self-aspace/self-cspace/thread-untyped + the free-slot-range
 /// base). Present only for a thread-capable process; absent leaves threads
 /// unconfigured, so the std `sys/thread` arm refuses `spawn` cleanly. Target-gated

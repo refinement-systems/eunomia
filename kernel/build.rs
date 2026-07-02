@@ -52,7 +52,7 @@ fn build_user(
     target_dir.join(triple).join("release").join(bin)
 }
 
-/// Build an on-target **libtest** binary (std-port 6.1): a `user/<pkg>` mini-crate
+/// Build an on-target **libtest** binary: a `user/<pkg>` mini-crate
 /// whose `[[test]]` target compiles the vendored upstream `coretests`/`alloctests`
 /// suite. Differs from [`build_user`] in that a test target lands in `deps/` under a
 /// content-hashed name, so we drive `cargo test --no-run` with JSON output, extract
@@ -208,7 +208,7 @@ fn main() {
         "user/storaged",
         "user/shell",
         "user/console",
-        // On-target libtest suites (std-port 6.1), built only under
+        // On-target libtest suites, built only under
         // EUNOMIA_BUILD_LIBTESTS. Track the mini-crates and the vendored test
         // sources they compile so a change re-invokes build.rs.
         "user/coretests",
@@ -229,7 +229,7 @@ fn main() {
         println!("cargo:rerun-if-changed={}", root.join(dep).display());
     }
     // Toggling the libtest opt-in must re-run build.rs so the suites get built (or
-    // skipped) accordingly (std-port 6.1).
+    // skipped) accordingly.
     println!("cargo:rerun-if-env-changed=EUNOMIA_BUILD_LIBTESTS");
 
     let user_target = root.join("target").join("user");
@@ -256,17 +256,17 @@ fn main() {
 
     let hello = build_user(root, &user_target, "hello", "hello", &[]);
     let selftest = build_user(root, &user_target, "selftest", "selftest", &[]);
-    // The std-port Phase-2 GATE fixture (findings 7-1): the first std user
+    // The std runtime GATE fixture: the first std user
     // binary, copied onto the demo disk by scripts/std-smoke-test.sh.
     let stdsmoke = build_user(root, &user_target, "stdsmoke", "stdsmoke", &[]);
-    // The std-port Phase-4.1 fs GATE fixture (findings #13): the std fs client,
+    // The fs GATE fixture: the std fs client,
     // copied onto the demo disk by scripts/fs-smoke-test.sh.
     let stdfs = build_user(root, &user_target, "stdfs", "stdfs", &[]);
-    // The std-port Phase-5.1 console GATE fixture (findings #16): the std console
+    // The console GATE fixture: the std console
     // demonstrator, copied onto the demo disk by scripts/std-smoke-test.sh.
     let stdio = build_user(root, &user_target, "stdio", "stdio", &[]);
     let storaged = build_user(root, &user_target, "storaged", "storaged", &[]);
-    // On-target libtest suites (std-port 6.1), built only when the runner opts in via
+    // On-target libtest suites, built only when the runner opts in via
     // EUNOMIA_BUILD_LIBTESTS (they are large — several minutes and multi-MiB ELFs — so
     // unrelated builds and the other smoke scripts do not pay for them). Built BEFORE the
     // shell so their ELF paths can be embedded into it: `run bin/{coretests,alloctests}`
@@ -289,7 +289,7 @@ fn main() {
             )
         });
 
-    // The shell is a std binary (std-port 5.3): size its `System` heap above the 1 MiB
+    // The shell is a std binary: size its `System` heap above the 1 MiB
     // default via `EUNOMIA_HEAP_BYTES`, threaded here into the sub-build that compiles
     // `eunomia-sys` for it (parsed by `eunomia-sys/src/heap.rs`'s `option_env!`). It loads
     // whole child ELFs into this heap on `run` (holding the Vec for the child's lifetime,

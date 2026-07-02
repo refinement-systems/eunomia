@@ -45,7 +45,7 @@
 //! authority**: the parent maps the page before start; only the VA travels.
 //! `SEED` is the sole *inline-bytes* kind: it carries 256 bits of entropy by
 //! value (the `NAME_RANDOM_SEED` grant, rev2§5.1) — the parent's per-child
-//! sub-seed for the process DRBG (std-port 3.4). Unlike the others it holds
+//! sub-seed for the process DRBG. Unlike the others it holds
 //! *owned* bytes, not a reference to a cap or a mapped page, so the decoder
 //! copies the four words out of the message and borrows nothing new.
 // `vstd::prelude` supplies the `verus!{}` macro + ghost vocabulary for the
@@ -85,7 +85,7 @@ pub const NAME_TMP: u8 = 4;
 pub const NAME_STORAGE: u8 = 5;
 /// The monotonic time page (rev2§2.6). The one named grant delivered today.
 pub const NAME_TIME: u8 = 6;
-// In-process-threading self-caps (std-port 3.2, scoped/opt-in). A thread-capable
+// In-process-threading self-caps (scoped/opt-in). A thread-capable
 // process holds caps to its own aspace (WRITE, to map thread stacks), its own
 // cspace (to name in `thread_start_as`), and a thread-untyped to retype the
 // per-thread objects from, plus the base of a reserved free cspace-slot range.
@@ -102,12 +102,12 @@ pub const NAME_THREAD_UNTYPED: u8 = 9;
 /// is the fixed `urt::thread_layout::WORKING_SLOTS` convention (rev2§5.3).
 pub const NAME_THREAD_SLOT_BASE: u8 = 10;
 /// The process's per-run entropy seed: 256 bits the parent drew from its own DRBG
-/// (rev2§5.1, std-port 3.4). A `KIND_SEED` inline-bytes grant — the sole grant
+/// (rev2§5.1). A `KIND_SEED` inline-bytes grant — the sole grant
 /// carrying an owned value rather than a cap/handle/region reference. The child
 /// seeds its process DRBG (`urt::random`) from it; absent ⇒ `fill_bytes` loudly
 /// aborts at first use (the `NAME_TIME` posture), never silently predictable.
 pub const NAME_RANDOM_SEED: u8 = 11;
-/// Standard error — a console-channel endpoint (rev2§5.1, std-port 5.1), a stream
+/// Standard error — a console-channel endpoint (rev2§5.1), a stream
 /// distinct from `stdout` so diagnostics never enter a pipeline's data path. A
 /// consumer resolves it as `NAME_STDERR` → else the `stdout` channel → else the
 /// kernel debug-log. A `CapSlot` grant like `stdin`/`stdout`, decoded through the

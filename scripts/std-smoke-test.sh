@@ -1,17 +1,16 @@
 #!/bin/bash
-# QEMU boot test — the std-port Phase-2 GATE (findings 7-1). Phase 2's four
-# sub-phases (2.1 entry+argv/env, 2.2 GlobalAlloc, 2.3 stdio→debug-log + exit
-# terminus, 2.4 time) each deferred their *live* QEMU demonstration to this
-# combined gate. It boots the full system and drives the shell through the first
+# QEMU boot test — the std runtime GATE. It exercises the core std runtime surfaces
+# (entry+argv/env, GlobalAlloc, stdio→debug-log + exit terminus, time) live under
+# QEMU: it boots the full system and drives the shell through the first
 # std user binary (`user/stdsmoke`), asserting the whole std stack works at EL0:
 #
 #   run bin/stdsmoke alpha beta  → the success run. Each `[stdsmoke]` line is one
-#     arm: `alive` (println!/stdio, 2.3), `argv=[…alpha…beta…]` (env::args, 2.1),
-#     `vec sum=5050 box=… argc=3` (Vec/Box/String/format!/GlobalAlloc, 2.2),
-#     `instant-ok` (Instant ← CNTVCT, 2.4), `systemtime-ok` (SystemTime ← the
-#     granted time page, 2.4). It ends with the green-boot marker `STD2 PASS`
+#     arm: `alive` (println!/stdio), `argv=[…alpha…beta…]` (env::args),
+#     `vec sum=5050 box=… argc=3` (Vec/Box/String/format!/GlobalAlloc),
+#     `instant-ok` (Instant ← CNTVCT), `systemtime-ok` (SystemTime ← the
+#     granted time page). It ends with the green-boot marker `STD2 PASS`
 #     and the shell reaps it as `exited(0)`.
-#   run bin/stdsmoke panic       → the std-owned panic path (2.3): std's handler
+#   run bin/stdsmoke panic       → the std-owned panic path: std's handler
 #     terminates as the reserved STATUS_PANIC, so the parent reads `panicked`,
 #     NOT `exited(_)`. This is the live witness that a *std* binary's panic reaps
 #     correctly (selftest proves it for a no_std binary with its own handler;
@@ -37,9 +36,9 @@ rm -rf "$DEMO_ROOT"
 mkdir -p "$DEMO_ROOT/bin"
 printf 'std smoke\n' > "$DEMO_ROOT/hello.txt"
 cp "$ROOT/target/user/aarch64-unknown-eunomia/release/stdsmoke" "$DEMO_ROOT/bin/stdsmoke"
-# The std-port 5.1 console demonstrator (findings #16), run last (see below).
+# The console demonstrator, run last (see below).
 cp "$ROOT/target/user/aarch64-unknown-eunomia/release/stdio" "$DEMO_ROOT/bin/stdio"
-# The std-port 5.3 real `hello` (findings #18): the first non-fixture user program on
+# The real `hello`: the first non-fixture user program on
 # std. The shell — itself now a std binary — spawns it via `run bin/hello`.
 cp "$ROOT/target/user/aarch64-unknown-eunomia/release/hello" "$DEMO_ROOT/bin/hello"
 
@@ -85,7 +84,7 @@ wait_for() { # <pattern> <timeout-secs>
 wait_for '\[storaged\] serving' 60
 wait_for 'eunomia> ' 30
 
-# --- std-port 5.3 (findings #18): the shell ITSELF is now a std binary. --------------
+# --- the shell ITSELF is now a std binary. --------------
 # The whole run below is driven through the std shell's REPL over the `user/console`
 # channel, so reaching any marker is already a witness that console stdio works for the
 # shell. Here we assert the shell's own std surfaces up front (before the stdsmoke fixture
@@ -118,7 +117,7 @@ wait_for 'exited(0)' 30
 # (d) hello's std-owned panic → STATUS_PANIC: the parent reads 'panicked', not exited(_).
 printf 'run bin/hello panic\r' >&3
 wait_for 'panicked' 30
-# --- end std-port 5.3 ---------------------------------------------------------------
+# --- end --------------------------------------------------------------
 
 # 1. The success run: every std arm, in order, then the green marker and a clean
 #    reap. The shell delivers argv = [bin/stdsmoke, alpha, beta].
@@ -131,7 +130,7 @@ wait_for '\[stdsmoke\] systemtime-ok' 30
 wait_for 'STD2 PASS' 30
 wait_for 'exited(0)' 30
 
-# 2. The thread-spawn path (std-port 3.2): two std threads each allocate in a tight
+# 2. The thread-spawn path: two std threads each allocate in a tight
 #    loop (concurrent access to the one process heap — the race the heap spinlock
 #    serializes), each with its own TPIDR_EL0 TLS, then join. `STD32 PASS` and a
 #    clean reap witness the whole spawn/join/heap-lock/per-thread-TLS stack live.
@@ -140,7 +139,7 @@ wait_for '\[stdsmoke\] spawning threads' 30
 wait_for '\[stdsmoke\] threads joined total=' 30
 wait_for 'STD32 PASS' 30
 
-# 2b. The lock stack over sys::futex (std-port 3.3): two std threads alternate turns
+# 2b. The lock stack over sys::futex: two std threads alternate turns
 #     under a Mutex + Condvar, blocking on the condvar until their parity comes up —
 #     real cross-thread futex_wait/futex_wake. A lost wakeup would hang the join (no
 #     STD33 PASS); a wrong count would exit(7). STD33 PASS witnesses the whole
@@ -150,7 +149,7 @@ wait_for '\[stdsmoke\] sync start' 30
 wait_for '\[stdsmoke\] sync done total=' 30
 wait_for 'STD33 PASS' 30
 
-# 2c. The entropy path (std-port 3.4): build a default-hasher HashMap of 1000
+# 2c. The entropy path: build a default-hasher HashMap of 1000
 #     entries and read every key back. RandomState draws hashmap_random_keys →
 #     fill_bytes → the per-process DRBG seeded from the NAME_RANDOM_SEED grant the
 #     shell handed this child. An unseeded child would abort loudly (no STD34); a
@@ -161,7 +160,7 @@ wait_for '\[stdsmoke\] hashmap start' 30
 wait_for '\[stdsmoke\] hashmap done entries=1000' 30
 wait_for 'STD34 PASS' 30
 
-# 2d. Real thread_local! storage + destructors (std-port 3.5): a spawned thread
+# 2d. Real thread_local! storage + destructors: a spawned thread
 #     touches a Drop-sentinel thread_local! and a per-thread Cell, then exits. Its
 #     destructor must run on the spawned thread's exit (drops>0), and the Cell must
 #     be genuinely per-thread (child sees 7, main sees 0) — the old single-threaded
@@ -172,7 +171,7 @@ wait_for '\[stdsmoke\] tls start' 30
 wait_for '\[stdsmoke\] tls done drops=' 30
 wait_for 'STD35 PASS' 30
 
-# 2e. The inherited-environment path (std-port 5.2): init defines a base env
+# 2e. The inherited-environment path: init defines a base env
 #     (PATH=/bin, TMPDIR=/tmp, TERM=eunomia); the shell stashes it at boot and forwards
 #     it into every child's startup block. This child reads it back via env::var/env::vars
 #     and resolves env::temp_dir() from TMPDIR (no longer a panic). Asserting PATH/TERM —
@@ -189,7 +188,7 @@ wait_for 'STD52 PASS' 30
 printf 'run bin/stdsmoke panic\r' >&3
 wait_for 'panicked' 30
 
-# 4. Console stdio (std-port 5.1). `bin/stdio` reads a line from stdin over the user/console
+# 4. Console stdio. `bin/stdio` reads a line from stdin over the user/console
 #    channel, echoes it to stdout, and writes a diagnostic to stderr — all over the console
 #    (the shell donates its console endpoint to every child it runs), not the debug-log. Stdin
 #    has no debug-log path (the console driver owns the UART RX), so the echo witnesses the
@@ -203,7 +202,7 @@ wait_for '\[stdio\] echo=hello-console' 30
 wait_for '\[stdio\] stderr diag' 30
 wait_for 'STD51 PASS' 30
 
-# 5. Reap-survival witness (findings 16-1, the cap_copy endpoint-census fix). `bin/stdio` was a
+# 5. Reap-survival witness (the cap_copy endpoint-census fix). `bin/stdio` was a
 #    console child; reaping it must leave the shell's OWN console endpoint live, so this
 #    subsequent command is still delivered over the console and its child runs. A fresh argv
 #    marker (gamma/delta) distinguishes it from arm 1. Before the kernel fix, reaping a console
@@ -223,7 +222,7 @@ if ! grep -q 'STD2 PASS' "$LOG"; then
     echo "STD SMOKE TEST FAIL: never reached STD2 PASS (a std arm failed)" >&2
     fail=1
 fi
-# The thread-spawn marker (std-port 3.2): two threads spawned, allocated
+# The thread-spawn marker: two threads spawned, allocated
 # concurrently, and joined. Its absence means spawn/join/heap-lock/TLS failed.
 if ! grep -q 'STD32 PASS' "$LOG"; then
     echo "STD SMOKE TEST FAIL: never reached STD32 PASS (thread spawn/join failed)" >&2
@@ -234,7 +233,7 @@ if grep -q 'current thread handle already set' "$LOG"; then
     echo "STD SMOKE TEST FAIL: per-thread TLS regressed (set_current aborted on a spawned thread)" >&2
     fail=1
 fi
-# The lock-stack marker (std-port 3.3): two threads ping-ponged under a Mutex +
+# The lock-stack marker: two threads ping-ponged under a Mutex +
 # Condvar over sys::futex. Its absence means a lost wakeup hung the join, or the
 # futex backend never linked.
 if ! grep -q 'STD33 PASS' "$LOG"; then
@@ -246,7 +245,7 @@ if grep -q '\[stdsmoke\] sync-bad' "$LOG"; then
     echo "STD SMOKE TEST FAIL: sync counter wrong — lock did not serialize the critical section" >&2
     fail=1
 fi
-# The entropy/HashMap marker (std-port 3.4): a default-hasher HashMap worked over
+# The entropy/HashMap marker: a default-hasher HashMap worked over
 # the seed-grant → DRBG → SipHash path. Its absence means the seed never attached
 # (a loud abort) or the hasher round-trip failed.
 if ! grep -q 'STD34 PASS' "$LOG"; then
@@ -263,7 +262,7 @@ if grep -q 'no entropy seed attached' "$LOG"; then
     echo "STD SMOKE TEST FAIL: a child ran without an entropy seed grant (NAME_RANDOM_SEED missing)" >&2
     fail=1
 fi
-# The TLS marker (std-port 3.5): a spawned thread's thread_local! destructor ran on
+# The TLS marker: a spawned thread's thread_local! destructor ran on
 # exit and the macro storage was genuinely per-thread. Its absence means the key
 # table / dtor runner failed; a per-thread-storage or missed-destructor bug exits(11).
 if ! grep -q 'STD35 PASS' "$LOG"; then
@@ -274,7 +273,7 @@ if grep -q '\[stdsmoke\] tls-bad' "$LOG"; then
     echo "STD SMOKE TEST FAIL: thread_local! wrong — destructor missed or storage not per-thread" >&2
     fail=1
 fi
-# The env marker (std-port 5.2): the child read its inherited environment
+# The env marker: the child read its inherited environment
 # (PATH/TMPDIR/TERM) and env::temp_dir() resolved from TMPDIR. Its absence means env
 # inheritance (init→shell→child) or the temp_dir arm failed.
 if ! grep -q 'STD52 PASS' "$LOG"; then
@@ -286,7 +285,7 @@ if grep -q '\[stdsmoke\] env-bad' "$LOG"; then
     echo "STD SMOKE TEST FAIL: env var/env::vars/temp_dir wrong — inheritance broken" >&2
     fail=1
 fi
-# The console-stdio marker (std-port 5.1): bin/stdio echoed a stdin line and wrote a
+# The console-stdio marker: bin/stdio echoed a stdin line and wrote a
 # stderr line over the user/console channel. Its absence means the console stdio path
 # (or the shell's console donation to the child) failed.
 if ! grep -q 'STD51 PASS' "$LOG"; then
@@ -299,19 +298,19 @@ if ! grep -q '\[stdio\] echo=hello-console' "$LOG"; then
     echo "STD SMOKE TEST FAIL: stdin line did not echo over the console" >&2
     fail=1
 fi
-# Reap-survival (findings 16-1): a command run AFTER a console child reaped was still delivered
+# Reap-survival: a command run AFTER a console child reaped was still delivered
 # over the shell's console and its child ran. Its absence means reaping a console child wedged
 # the shell's own console — the cap_copy endpoint-census bug this phase fixes in the kernel.
 if ! grep -q '\[stdsmoke\] argv=.*gamma.*delta' "$LOG"; then
     echo "STD SMOKE TEST FAIL: shell console wedged after a console child reaped (endpoint-census regression)" >&2
     fail=1
 fi
-# env::args delivered the command line (2.1).
+# env::args delivered the command line.
 if ! grep -q '\[stdsmoke\] argv=.*alpha.*beta' "$LOG"; then
     echo "STD SMOKE TEST FAIL: argv not delivered to the std binary (env::args)" >&2
     fail=1
 fi
-# Both time arms (2.4). systemtime-bad means the time grant never attached.
+# Both time arms. systemtime-bad means the time grant never attached.
 if grep -q 'systemtime-bad' "$LOG"; then
     echo "STD SMOKE TEST FAIL: SystemTime could not read its granted time page" >&2
     fail=1
@@ -336,14 +335,14 @@ if grep -q 'faulted(' "$LOG"; then
 fi
 # No infrastructure crash. The std binary's panic prints lowercase 'panicked at',
 # never uppercase 'PANIC' (and no selftest runs here), so any 'PANIC' is a real
-# kernel/shell/storaged crash. The shell is a std binary too now (5.3), so it also
+# kernel/shell/storaged crash. The shell is a std binary too now, so it also
 # panics lowercase — an uppercase 'PANIC' remains a genuine crash.
 if grep -q 'PANIC' "$LOG"; then
     echo "STD SMOKE TEST FAIL: an unexpected PANIC appeared in the run" >&2
     grep -n 'PANIC' "$LOG" >&2
     fail=1
 fi
-# --- std-port 5.3 (findings #18): the shell's own std surfaces. ----------------------
+# --- the shell's own std surfaces. ----------------------
 # std::fs write→cat round-trip — the shell's file ops ride std::fs over the shared session.
 if ! grep -q '^hello-53' "$LOG"; then
     echo "STD SMOKE TEST FAIL: shell 'cat' did not return the written content (write/cat over std::fs failed)" >&2

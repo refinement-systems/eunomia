@@ -1,4 +1,4 @@
-//! The std-PAL futex bridge (std-port 3.3): thin delegation to `urt::futex`, the
+//! The std-PAL futex bridge: thin delegation to `urt::futex`, the
 //! userspace `sys::futex` backend (an address→waiter table over kernel
 //! notifications). Holds no logic of its own — the `pal` `__eunomia_futex_*` shims
 //! are one-line calls into here, and here is one-line calls into `urt`. Gated to the

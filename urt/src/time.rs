@@ -409,8 +409,8 @@ pub fn now_utc_ns() -> i64 {
     page.sample().utc_ns_at(cntvct())
 }
 
-/// Current monotonic nanoseconds from the virtual counter — `Instant`'s basis
-/// (std-port 2.4). Reuses the Verus-verified `Sample::utc_ns_at` over a zero
+/// Current monotonic nanoseconds from the virtual counter — `Instant`'s basis.
+/// Reuses the Verus-verified `Sample::utc_ns_at` over a zero
 /// wall/counter base, so the result is `clamp_i64(cntvct * 1e9 / cntfrq)` (ns
 /// since the counter epoch): total (saturating) and monotone by
 /// `lemma_utc_ns_at_monotone` — cntvct is hardware-monotone and cntfrq is a
@@ -638,7 +638,7 @@ mod tests {
             let _ = s.utc_ns_at(cntvct);
         }
 
-        /// `Instant`'s basis (std-port 2.4): the zero-base conversion that
+        /// `Instant`'s basis: the zero-base conversion that
         /// `now_mono_ns` uses is never negative, ∀ counter and frequency. The std
         /// time PAL feeds the result to `Duration::from_nanos` as `u64`, so a
         /// negative value would wrap to a huge duration. (Monotonicity is the

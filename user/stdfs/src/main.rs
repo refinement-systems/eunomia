@@ -1,7 +1,7 @@
-//! The std-port fs GATE fixture (findings #13, extended by #15): the first std binary
+//! The std-port fs GATE fixture: the first std binary
 //! to drive the real `sys/fs/eunomia` client against storaged. It exercises the whole
 //! file surface the gate names — create/write, read-back, `read_dir`, `rename`,
-//! `remove_file`, and `sync_all` — plus the std-port 4.3 additions: directory/file
+//! `remove_file`, and `sync_all` — plus the additions: directory/file
 //! `metadata` (`is_dir`/`is_file`/`len`) and the errno split (a confinement escape →
 //! `PermissionDenied`, a malformed name → `InvalidFilename`) — over the storaged
 //! session the shell delegated to it (a fresh session storaged multiplexes, negotiated
@@ -43,7 +43,7 @@ fn main() {
     }
     println!("[stdfs] read back ok");
 
-    // 2b. the same file named through `.`/`..` resolves to it (std-port 4.2, the
+    // 2b. the same file named through `.`/`..` resolves to it (the
     //     verified `eunomia_sys::path::resolve`): `docs/./smoke` and
     //     `docs/../docs/smoke` both resolve to `[docs, smoke]` before the wire, and a
     //     `..` escaping the root handle is refused (rev2§2.3) as a clean error, never
@@ -56,7 +56,7 @@ fn main() {
         }
     }
     // A `..` escaping the root handle is a rev2§2.3 confinement violation, so the
-    // std-port 4.3 errno split surfaces it as `PermissionDenied` (distinct from a
+    // errno split surfaces it as `PermissionDenied` (distinct from a
     // malformed name, below), never a wire round-trip.
     match fs::read("../escape") {
         Err(e) if e.kind() == ErrorKind::PermissionDenied => {}
@@ -105,7 +105,7 @@ fn main() {
     }
     println!("[stdfs] readdir found smoke");
 
-    // 3b. metadata (std-port 4.3): `docs/smoke` is a file of the written length;
+    // 3b. metadata: `docs/smoke` is a file of the written length;
     //     `docs` is a directory. The directory type comes from the seam's Stat->List
     //     probe (a directory has no file content, so `Stat` reports it absent and
     //     `List` confirms the directory, rev2§4.9).

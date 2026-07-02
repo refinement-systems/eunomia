@@ -16,7 +16,7 @@
 //!   (rev2§5.1). No new decode logic: the untrusted byte boundary is
 //!   `loader::startup::decode` (verified separately); this only reads named grants out
 //!   of an already-decoded block.
-//! - [`path`] — the second **verified** surface (std-port 4.2): [`path::resolve`]
+//! - [`path`] — the second **verified** surface: [`path::resolve`]
 //!   turns raw `/`-separated `OsStr` bytes into a `.`/`..`-resolved, root-confined
 //!   tree-component list, total over all bytes and proven to emit only components
 //!   storaged's `validate_name` accepts (so no accepted path can escape the
@@ -43,43 +43,43 @@
 //!   three surfaces above through these one-line delegations.
 #![cfg_attr(not(test), no_std)]
 
-// The per-thread TLS block (std-port 3.2) is heap-allocated over the process-global
+// The per-thread TLS block is heap-allocated over the process-global
 // allocator; pull `alloc` on the target build (where `tls` is compiled).
 #[cfg(bare_metal)]
 extern crate alloc;
 
 pub mod bootstrap;
-// The userspace console stdio client (std-port 5.1): stdout/stdin/stderr over the
+// The userspace console stdio client: stdout/stdin/stderr over the
 // `user/console` channel. Pure helpers (`resolve`/chunking/read-carry) are host-
 // buildable so the `-p eunomia-sys` gate and `cargo test` check them; the syscall-
 // issuing paths are target-gated internally like `stdio`.
 mod console;
 pub mod encode;
-// The storaged fs client (std-port 4.1); target-gated internally like `pal`
+// The storaged fs client; target-gated internally like `pal`
 // (it links `storage-server`/`ipc`, target-only deps).
 pub mod fs;
-// The `sys::futex` bridge (std-port 3.3); target-gated internally like `pal`.
+// The `sys::futex` bridge; target-gated internally like `pal`.
 pub mod futex;
 pub mod grant;
 // Internal: the compile-time `System`-heap reservation size for the `pal` arm.
 mod heap;
 pub mod io_error;
 pub mod pal;
-// The **verified** path resolver for the fs client (std-port 4.2): raw
+// The **verified** path resolver for the fs client: raw
 // `/`-separated `OsStr` bytes → a `.`/`..`-resolved, root-confined tree-component
 // list. Host-buildable (NOT target-gated) so the `-p eunomia-sys` verus gate
 // checks it; the target-gated `fs` arm calls it.
 pub mod path;
-// The entropy DRBG bridge (std-port 3.4); target-gated internally like `pal`.
+// The entropy DRBG bridge; target-gated internally like `pal`.
 pub mod random;
 // The `read_dir` cursor head + name-copy arithmetic shared with the std `sys/fs/eunomia`
-// arm (std-port 4.1). Host-buildable (NOT target-gated) so its pure logic unit-tests
+// arm. Host-buildable (NOT target-gated) so its pure logic unit-tests
 // under `cargo test`; the target-gated `fs` client uses it for the snapshot table.
 pub mod readdir;
 // Internal: the bring-up debug-log stdio chunker for the `pal`/`sys/stdio` arm.
 mod stdio;
 pub mod syscall;
-// The in-process thread bridge (std-port 3.2); target-gated internally like `pal`.
+// The in-process thread bridge; target-gated internally like `pal`.
 pub mod thread;
-// The per-thread TLS block (std-port 3.2); target-gated internally like `pal`.
+// The per-thread TLS block; target-gated internally like `pal`.
 pub mod tls;
