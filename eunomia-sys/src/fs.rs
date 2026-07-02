@@ -5,7 +5,10 @@
 //! session channel and decodes the `Response`s back. `File = (root handle, path,
 //! cursor)` — storaged is offset-stateless (`Read`/`Write` carry an explicit offset),
 //! so the seek cursor lives entirely on the std side; regular file I/O rides the root
-//! handle + path directly (there is no file-open handle, rev2§4.9).
+//! handle + path directly (there is no file-open handle, rev2§4.9). `read_dir` is the one
+//! op with client-side state: `List` returns the whole listing, which this crate
+//! snapshots behind an integer handle (a small spinlock-guarded table) and hands to the
+//! std `ReadDir` iterator one entry per `readdir_next` call, releasing it on drop.
 //!
 //! Trust posture: a **trusted marshalling shell** (the `sys/stdio` posture) over four
 //! already-verified surfaces — the connect handshake ([`ipc::connect`]/`admit_connect`,
@@ -15,7 +18,8 @@
 //! std-port 4.2) — plus the trusted `svc` shell underneath [`ipc::SyscallTransport`].
 //! No byte-parsing logic lives here: [`resolve_path`] is a thin `alloc` adapter that
 //! calls the verified [`crate::path::resolve`] and copies its borrowed components into
-//! the `Vec<Vec<u8>>` wire path.
+//! the `Vec<Vec<u8>>` wire path, and the `read_dir` snapshot table is client bookkeeping
+//! over already-decoded `DirEnt`s, not a wire codec.
 //!
 //! Gated to the eunomia/bare-metal targets: it links `storage-server`/`ipc` (target-only
 //! deps), so the host `cargo verus verify -p eunomia-sys` graph never sees them.
@@ -28,12 +32,16 @@ use crate::io_error::{
     ERR_FS_INTERNAL, ERR_FS_NOT_A_DIR, ERR_FS_NOT_FOUND, ERR_FS_NO_SESSION,
     ERR_FS_NO_SUCH_SNAPSHOT, ERR_FS_PINNED, ERR_FS_READ_ONLY, ERR_FS_STALE,
 };
+use crate::readdir::entry_head;
+pub use crate::readdir::DirEntMeta;
 use crate::syscall;
 use alloc::vec::Vec;
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU32, Ordering};
 use ipc::{RecvErr, SendErr, SyscallTransport, Transport, VersionRange};
 use storage_server::wire::{self, PROTO_VERSION};
 use storage_server::{DirEnt, ErrorCode, Request, Response};
+use urt::lock::SpinLock;
 
 /// The storage-session channel's cspace slot (`NAME_STORAGE`), or `SLOT_NONE` when
 /// this process was granted no session (a non-fs process — its fs ops then refuse
@@ -363,63 +371,134 @@ pub fn sync() -> i64 {
     status(request(&Request::Sync { handle }))
 }
 
-// The readdir wire between `fs.rs` and the std `sys/fs/eunomia` arm: a flat `Vec<u8>`
-// over the shared global allocator. Both sides are the same rustc/std, so ownership of
-// a `Vec<u8>` crosses the `extern "Rust"` seam soundly (the `__eunomia_argv` posture).
-// Layout:
-//   byte 0: 0 = ok (entries follow), 1 = error (an 8-byte i64 code, LE, follows)
-//   each entry: [kind: u8 (0 = file, 1 = dir)][size: u64 LE][name_len: u16 LE][name…]
-const RD_OK: u8 = 0;
-const RD_ERR: u8 = 1;
-// The fixed entry-head width (kind + size + name_len) the std `parse_listing` reads as an
-// 11-byte prefix before each name. std duplicates that `11` as a literal (it cannot import
-// this crate); this pin freezes the seam head so a field-width change here fails the build
-// rather than silently desyncing the decoder. The variable-length `name` and the error
-// buffer's `i64` code stay review-coupled across the seam (the `Vec<u8>` wire twin).
-const RD_ENTRY_HEAD: usize =
-    core::mem::size_of::<u8>() + core::mem::size_of::<u64>() + core::mem::size_of::<u16>();
-const _: () = assert!(RD_ENTRY_HEAD == 11);
+// ── The `read_dir` snapshot table ──
+// A `read_dir` snapshots the whole `List` response and walks it one entry at a time.
+// Structured `DirEnt`s stay structured all the way to the std arm — no byte layout
+// crosses the seam — so the snapshot lives here as an owned `Vec<DirEnt>` behind an
+// integer handle, and `readdir_next` copies one name out per call. Client bookkeeping,
+// not protocol logic.
 
-/// List the directory at `path` (`List`), encoded for the std `ReadDir` iterator. A
-/// listing that overflows one 256-byte message errors (`ERR_FS_INTERNAL`) — big
-/// directory listings await the bulk data plane (disclosed, rev2§3.1).
-pub fn readdir(path: &[u8]) -> Vec<u8> {
+/// One open `read_dir`: the whole directory snapshot captured at open time (the same
+/// whole-listing snapshot the old flat buffer materialized, rev2§4.9) plus the
+/// client-side cursor into it.
+struct DirHandle {
+    entries: Vec<DirEnt>,
+    cursor: usize,
+}
+
+/// The process-global open-`read_dir` table — client bookkeeping guarded by a spinlock
+/// (the `urt::random` `STATE` posture: a `SpinLock` over an `UnsafeCell`, every access
+/// under the lock). A handle is an index into `slots`; a `None` slot is free and reused
+/// by the next open.
+struct ReadDirTable {
+    lock: SpinLock,
+    slots: UnsafeCell<Vec<Option<DirHandle>>>,
+}
+
+// SAFETY: `slots` is only ever reached while `lock` is held (the `urt::random` `STATE`
+// posture — mutual exclusion by the spinlock).
+unsafe impl Sync for ReadDirTable {}
+
+impl ReadDirTable {
+    const fn new() -> ReadDirTable {
+        ReadDirTable {
+            lock: SpinLock::new(),
+            slots: UnsafeCell::new(Vec::new()),
+        }
+    }
+
+    /// Stash `entries` in a free slot and return its handle (`>= 0`).
+    fn open(&self, entries: Vec<DirEnt>) -> i64 {
+        let _g = self.lock.lock();
+        // SAFETY: exclusive under `lock`.
+        let slots = unsafe { &mut *self.slots.get() };
+        let h = DirHandle { entries, cursor: 0 };
+        match slots.iter().position(Option::is_none) {
+            Some(i) => {
+                slots[i] = Some(h);
+                i as i64
+            }
+            None => {
+                slots.push(Some(h));
+                (slots.len() - 1) as i64
+            }
+        }
+    }
+
+    /// Copy the next entry's name into `name_buf` and return its head, advancing the
+    /// cursor. `code == 1` at end of listing; `code < 0` for a bad handle or an over-long
+    /// name (both advance-safe — the cursor still moves on an over-long name so a resilient
+    /// consumer terminates).
+    fn next(&self, handle: i64, name_buf: &mut [u8]) -> DirEntMeta {
+        let _g = self.lock.lock();
+        // SAFETY: exclusive under `lock`.
+        let slots = unsafe { &mut *self.slots.get() };
+        let Some(h) = usize::try_from(handle)
+            .ok()
+            .and_then(|i| slots.get_mut(i))
+            .and_then(Option::as_mut)
+        else {
+            return DirEntMeta::err(ERR_FS_BAD_HANDLE);
+        };
+        let Some(e) = h.entries.get(h.cursor) else {
+            return DirEntMeta::end();
+        };
+        let (kind, size, name) = match e {
+            DirEnt::File { name, size } => (0u8, *size, name.as_slice()),
+            DirEnt::Dir { name } => (1u8, 0u64, name.as_slice()),
+        };
+        let head = entry_head(kind, size, name, name_buf);
+        h.cursor += 1;
+        head
+    }
+
+    /// Drop the snapshot at `handle`, freeing its slot for reuse. A stale/out-of-range
+    /// handle is a no-op.
+    fn close(&self, handle: i64) {
+        let _g = self.lock.lock();
+        // SAFETY: exclusive under `lock`.
+        let slots = unsafe { &mut *self.slots.get() };
+        if let Ok(i) = usize::try_from(handle) {
+            if let Some(slot) = slots.get_mut(i) {
+                *slot = None;
+            }
+        }
+    }
+}
+
+static READDIR_TABLE: ReadDirTable = ReadDirTable::new();
+
+/// Open a `read_dir` snapshot for `path` (`List`): run the round-trip and stash the
+/// listing behind a handle (`>= 0`), or return a negative fs code — an error surfaces at
+/// `read_dir` time, like the old tagged buffer did. A listing that overflows one 256-byte
+/// message errors (`ERR_FS_INTERNAL`) — big directory listings await the bulk data plane
+/// (disclosed, rev2§3.1).
+pub fn readdir_open(path: &[u8]) -> i64 {
     let handle = ROOT_HANDLE.load(Ordering::Relaxed);
     let components = match resolve_path(path) {
         Ok(c) => c,
-        Err(code) => return err_buf(code),
+        Err(code) => return code,
     };
     let req = Request::List {
         handle,
         path: components,
     };
     match request(&req) {
-        Ok(Response::Listing(entries)) => {
-            let mut out = Vec::new();
-            out.push(RD_OK);
-            for e in entries {
-                let (kind, size, name) = match e {
-                    DirEnt::File { name, size } => (0u8, size, name),
-                    DirEnt::Dir { name } => (1u8, 0u64, name),
-                };
-                out.push(kind);
-                out.extend_from_slice(&size.to_le_bytes());
-                out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-                out.extend_from_slice(&name);
-            }
-            out
-        }
-        Ok(Response::NotFound) => err_buf(ERR_FS_NOT_FOUND),
-        Ok(Response::Err(e)) => err_buf(err_code(e)),
-        Ok(_) => err_buf(ERR_FS_INTERNAL),
-        Err(c) => err_buf(c),
+        Ok(Response::Listing(entries)) => READDIR_TABLE.open(entries),
+        Ok(Response::NotFound) => ERR_FS_NOT_FOUND,
+        Ok(Response::Err(e)) => err_code(e),
+        Ok(_) => ERR_FS_INTERNAL,
+        Err(c) => c,
     }
 }
 
-/// An error-tagged readdir buffer carrying the raw fs `code`.
-fn err_buf(code: i64) -> Vec<u8> {
-    let mut out = Vec::with_capacity(9);
-    out.push(RD_ERR);
-    out.extend_from_slice(&code.to_le_bytes());
-    out
+/// Copy the next entry of the snapshot `handle` into `name_buf` and return its head
+/// (`code`: `0` = entry, `1` = end, `< 0` = fs code).
+pub fn readdir_next(handle: i64, name_buf: &mut [u8]) -> DirEntMeta {
+    READDIR_TABLE.next(handle, name_buf)
+}
+
+/// Release the snapshot `handle` (called from the std `ReadDir` drop).
+pub fn readdir_close(handle: i64) {
+    READDIR_TABLE.close(handle);
 }

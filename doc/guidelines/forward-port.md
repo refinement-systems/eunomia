@@ -139,7 +139,7 @@ contract (all shims defined in `eunomia-sys/src/pal.rs`):
 - **time:** `__eunomia_mono_ns`, `__eunomia_wall_ns`
 - **random:** `__eunomia_fill_bytes`
 - **io-error:** `__eunomia_io_classify`, `__eunomia_io_message`
-- **fs:** `__eunomia_fs_{read,write,stat,metadata,rename,unlink,sync,readdir}`
+- **fs:** `__eunomia_fs_{read,write,stat,metadata,rename,unlink,sync,readdir_open,readdir_next,readdir_close}`
 
 On a bump, diff the set std declares (across `sys/pal/eunomia/mod.rs` and the `eunomia.rs`
 arms) against the shims in `eunomia-sys/src/pal.rs`; a mismatch on either side is a defect.
@@ -255,9 +255,9 @@ four homes that must agree, each guarded by a compile-time assert where it can b
   `sys/exit.rs`.
 
 On a bump (or any edit to the reaper contract), re-confirm all four agree. This is the same
-class the committed cross-bridge lockstep guards cover (the `STATUS_PANIC`, `io_error::Kind`,
-and readdir-layout duplications between the seam crates and the std-side literals): keep the
-guards and their teeth in place.
+class the committed cross-bridge lockstep guards cover (the `STATUS_PANIC` and `io_error::Kind`
+duplications between the seam crates and the std-side literals): keep the guards and their
+teeth in place.
 
 ---
 
