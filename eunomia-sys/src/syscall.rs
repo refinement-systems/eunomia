@@ -1,13 +1,13 @@
 //! The trusted userspace syscall shell (rev2§6.1(d)).
 //!
-//! The raw `svc #0` register marshalling ([`imp`]) and the typed wrappers over it. The
-//! wrappers are the surface the PAL calls: each builds a [`Call`](crate::encode::Call),
-//! runs it through the **verified** [`encode`](crate::encode::encode) (which places the
-//! arguments and refuses any out-of-range field), and on success issues the `svc`; an
-//! `encode` refusal maps to [`ERR_ARG`] without ever reaching the kernel. So the only
-//! trusted logic here is the inline asm and the `Call` construction — the argument
-//! placement is the verified encoder's. Signatures mirror `ipc::sys` so a later
-//! consolidation onto this seam is a drop-in.
+//! The typed wrappers over the raw `svc #0` shim. The wrappers are the surface the PAL
+//! calls: each builds a [`Call`](crate::encode::Call), runs it through the **verified**
+//! [`encode`](crate::encode::encode) (which places the arguments and refuses any
+//! out-of-range field), and on success issues the `svc`; an `encode` refusal maps to
+//! [`ERR_ARG`] without ever reaching the kernel. So the only trusted logic here is the
+//! `Call` construction — the argument *placement* is the verified encoder's, and the
+//! raw register marshalling is `ipc::sys::imp` (a target-only dep), reused rather than
+//! copied so the trusted `svc` asm has a single home.
 
 use crate::encode::{encode, Call};
 
@@ -83,77 +83,23 @@ pub const REPORT_FAULTED: i64 = 2;
 pub const STATUS_PANIC: u64 = u64::MAX;
 
 // ---------------------------------------------------------------------------
-// Trusted inline-asm shell (rev2§6.1(d)). SVC #0, number in x7, args x0..x5, result in
+// Trusted inline-asm shell (rev2§6.1(d)). SVC #0, number in x7, args x0..x6, result in
 // x0 (negative = error), secondary results in x1/x2. The userspace mirror of the
-// kernel-side trusted register marshalling — inherently unverifiable, the
-// `ipc::sys::imp` pattern verbatim. A non-Eunomia (host) build links the stub so the
-// protocol/encode layers test without a real syscall.
+// kernel-side trusted register marshalling — inherently unverifiable.
+//
+// The asm itself is *not* redefined here: it lives once, in `ipc::sys::imp` (a
+// target-only dep of this crate), and the target arm re-uses it — the eight-arg
+// `syscall7` matches this seam's always-pass-x6 form, so it is aliased to `syscall`.
+// This crate's only trusted addition is the `Call` construction; the argument
+// *placement* is the verified `encode`'s. A non-Eunomia (host) build has no `ipc`
+// edge, so it keeps a local `unreachable!` stub for the protocol/encode host tests.
 // ---------------------------------------------------------------------------
 
 #[cfg(all(
     target_arch = "aarch64",
     any(target_os = "none", target_os = "eunomia")
 ))]
-mod imp {
-    #[inline(always)]
-    pub unsafe fn syscall(
-        nr: u64,
-        a0: u64,
-        a1: u64,
-        a2: u64,
-        a3: u64,
-        a4: u64,
-        a5: u64,
-        a6: u64,
-    ) -> i64 {
-        let ret: u64;
-        core::arch::asm!(
-            "svc #0",
-            inout("x0") a0 => ret,
-            inout("x1") a1 => _,
-            in("x2") a2,
-            in("x3") a3,
-            in("x4") a4,
-            in("x5") a5,
-            in("x6") a6,
-            in("x7") nr,
-            options(nostack),
-        );
-        ret as i64
-    }
-
-    #[inline(always)]
-    pub unsafe fn syscall2(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> (i64, u64) {
-        let ret: u64;
-        let ret2: u64;
-        core::arch::asm!(
-            "svc #0",
-            inout("x0") a0 => ret,
-            inout("x1") a1 => ret2,
-            in("x2") a2,
-            in("x3") a3,
-            in("x7") nr,
-            options(nostack),
-        );
-        (ret as i64, ret2)
-    }
-
-    #[inline(always)]
-    pub unsafe fn syscall3(nr: u64, a0: u64) -> (i64, u64, u64) {
-        let ret: u64;
-        let ret2: u64;
-        let ret3: u64;
-        core::arch::asm!(
-            "svc #0",
-            inout("x0") a0 => ret,
-            out("x1") ret2,
-            out("x2") ret3,
-            in("x7") nr,
-            options(nostack),
-        );
-        (ret as i64, ret2, ret3)
-    }
-}
+use ipc::sys::imp::{syscall2, syscall3, syscall7 as syscall};
 
 #[cfg(not(all(
     target_arch = "aarch64",
@@ -175,6 +121,12 @@ mod imp {
     }
 }
 
+#[cfg(not(all(
+    target_arch = "aarch64",
+    any(target_os = "none", target_os = "eunomia")
+)))]
+use imp::{syscall, syscall2, syscall3};
+
 // ---------------------------------------------------------------------------
 // Typed wrappers — the thin trusted shell the PAL calls.
 // ---------------------------------------------------------------------------
@@ -182,7 +134,7 @@ mod imp {
 /// Encode `c` and issue a single-result syscall; an `encode` refusal is `ERR_ARG`.
 fn dispatch(c: Call) -> i64 {
     match encode(c) {
-        Ok(e) => unsafe { imp::syscall(e.nr, e.a0, e.a1, e.a2, e.a3, e.a4, e.a5, e.a6) },
+        Ok(e) => unsafe { syscall(e.nr, e.a0, e.a1, e.a2, e.a3, e.a4, e.a5, e.a6) },
         Err(_) => ERR_ARG,
     }
 }
@@ -190,7 +142,7 @@ fn dispatch(c: Call) -> i64 {
 /// Encode `c` and issue a two-result syscall (`chan_recv`).
 fn dispatch2(c: Call) -> (i64, u64) {
     match encode(c) {
-        Ok(e) => unsafe { imp::syscall2(e.nr, e.a0, e.a1, e.a2, e.a3) },
+        Ok(e) => unsafe { syscall2(e.nr, e.a0, e.a1, e.a2, e.a3) },
         Err(_) => (ERR_ARG, 0),
     }
 }
@@ -198,7 +150,7 @@ fn dispatch2(c: Call) -> (i64, u64) {
 /// Encode `c` and issue a three-result syscall (`read_report`).
 fn dispatch3(c: Call) -> (i64, u64, u64) {
     match encode(c) {
-        Ok(e) => unsafe { imp::syscall3(e.nr, e.a0) },
+        Ok(e) => unsafe { syscall3(e.nr, e.a0) },
         Err(_) => (ERR_ARG, 0, 0),
     }
 }

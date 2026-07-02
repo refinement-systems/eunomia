@@ -25,7 +25,12 @@ use ipc::{
     admit_connect, sys, Admission, Endpoint, GrantReply, Message, Reactor, RecvErr, SendErr,
     Signals, SyscallTransport, VersionRange,
 };
-use loader::startup::{self, GrantKind};
+use loader::startup;
+// `GrantKind` is only constructed by the `parse_config` tests below (the binary
+// resolves regions through `startup::region`); scope the import so the target build
+// doesn't warn it unused.
+#[cfg(test)]
+use loader::startup::GrantKind;
 use storage_server::wire;
 use storage_server::Server;
 use virtio_blk::blockdev::VirtioBlockDev;
@@ -189,15 +194,6 @@ struct Config {
     time_va: u64,
 }
 
-/// The `(va, len, pa)` of the first `REGION` grant named `name`, or `None` if
-/// the name is absent or carries a non-region kind.
-fn region(s: &startup::Startup, name: u8) -> Option<(u64, u64, u64)> {
-    match s.grant(name)? {
-        GrantKind::Region { va, len, pa } => Some((va, len, pa)),
-        _ => None,
-    }
-}
-
 /// Decode the init→storaged startup block and extract the three required
 /// regions. The block is an untrusted-shaped message (rev2§2.7): a malformed
 /// block — bad magic, a truncated entry, or a missing/wrong-kind required region
@@ -207,9 +203,9 @@ fn region(s: &startup::Startup, name: u8) -> Option<(u64, u64, u64)> {
 /// `build_storaged_block`); the codec is shared on both ends.
 fn parse_config(buf: &[u8]) -> Option<Config> {
     let s = startup::decode(buf)?;
-    let (mmio_va, _mmio_len, _) = region(&s, startup::NAME_VIRTIO_MMIO)?;
-    let (dma_va, dma_len, dma_pa) = region(&s, startup::NAME_DMA)?;
-    let (time_va, _time_len, _) = region(&s, startup::NAME_TIME)?;
+    let (mmio_va, _mmio_len, _) = startup::region(&s, startup::NAME_VIRTIO_MMIO)?;
+    let (dma_va, dma_len, dma_pa) = startup::region(&s, startup::NAME_DMA)?;
+    let (time_va, _time_len, _) = startup::region(&s, startup::NAME_TIME)?;
     Some(Config {
         mmio_va,
         dma_va,

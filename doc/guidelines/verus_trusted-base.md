@@ -261,14 +261,17 @@ reads it from and refuses exactly the out-of-range fields the kernel rejects (th
 `MSG_PAYLOAD` length cap, the `ObjType`/event/which/priority ranges), accepting the
 in-range complement — the §11 inverse-leak rule re-established at the seam (Baselines
 `-p eunomia-sys` row). What stays trusted, by design: the raw `svc #0` register
-marshalling (`eunomia-sys/src/syscall.rs`'s `imp` module + its host stub) is the
-userspace mirror of the kernel-side trusted register marshalling — inline asm,
-inherently unverifiable — and is the **same construct already covered by the
+marshalling is the userspace mirror of the kernel-side trusted register marshalling —
+inline asm, inherently unverifiable — and is the **same construct already covered by the
 thread-lifecycle shell seam** ("the exit/read-report syscall dispatch + register
-marshalling … the asm context switch is inherently unverifiable", §6.1(d) below); the
-thin typed wrappers over it add no logic (the placement is the verified encoder's). So
-hosting the asm in this crate adds **no** `external_body` and **no** new seam — the
-tally stays **14**. The grant resolver (`eunomia-sys/src/grant.rs`) is plain
+marshalling … the asm context switch is inherently unverifiable", §6.1(d) below). The
+userspace asm has a **single home**, `ipc::sys::imp` (a target-only dependency of
+`eunomia-sys`); `eunomia-sys/src/syscall.rs` **re-uses** those shims — running each
+argument through the verified `encode` first — and keeps only a host stub for its
+off-target tests, rather than copying the asm (std-port 6.2 retired the copy). The thin
+typed wrappers over it add no logic (the placement is the verified encoder's). So the
+trusted userspace `svc` asm stays one `external_body`-free inline-asm shell and there is
+**no** new seam — the tally stays **14**. The grant resolver (`eunomia-sys/src/grant.rs`) is plain
 bookkeeping over the separately-verified `loader::startup` decoder, with no decode
 logic of its own. The local opcode/bound constants are an independent twin of rev2§3.7
 (userspace does not link the kernel object core, the `ipc::sys` posture); the

@@ -108,6 +108,33 @@ fn main() {
     let mut req_trailing = req_single.to_vec();
     req_trailing.push(0);
     write_seed("connect_decode", "req_trailing", &req_trailing);
+    // Boundary requests: the smallest window, and a single-version offer [2,2]
+    // (lo == hi) — the degenerate negotiation range.
+    write_seed(
+        "connect_decode",
+        "req_min_window",
+        &ConnectReq::for_window(1).encode(),
+    );
+    write_seed(
+        "connect_decode",
+        "req_single_version",
+        &ConnectReq::new(1, VersionRange::new(2, 2)).encode(),
+    );
+    // A request truncated by one byte (short of REQ_LEN → None): the low-side
+    // length-rejection edge, complementing the trailing-byte high-side edge.
+    write_seed(
+        "connect_decode",
+        "req_short",
+        &req_single[..req_single.len() - 1],
+    );
+    // Grant/refusal with one trailing byte: past GRANT_LEN / REFUSED_LEN → None
+    // (canonical framing rejects any length mismatch, per the bijection proof).
+    let mut grant_trailing = gbuf[..gn].to_vec();
+    grant_trailing.push(0);
+    write_seed("connect_decode", "grant_trailing", &grant_trailing);
+    let mut refused_trailing = rbuf[..rn].to_vec();
+    refused_trailing.push(0);
+    write_seed("connect_decode", "refused_trailing", &refused_trailing);
 
-    println!("wrote 7 seeds to ipc/fuzz/corpus/connect_decode/");
+    println!("wrote 12 seeds to ipc/fuzz/corpus/connect_decode/");
 }

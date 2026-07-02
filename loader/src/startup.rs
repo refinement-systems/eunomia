@@ -617,6 +617,46 @@ impl<'a> Startup<'a> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Grant projections — the pure structural readers over a decoded block. Kept here
+// (with `GrantKind`) so the `eunomia_sys::grant` named-role layer and the no_std user
+// drivers (`user/console`, `user/storaged`) share one definition instead of each
+// re-matching `GrantKind`. No decode logic: the untrusted byte boundary is `decode`.
+// ---------------------------------------------------------------------------
+
+/// The cspace slot of the cap grant named `name`, if present and a
+/// [`GrantKind::CapSlot`].
+pub fn cap_slot(s: &Startup, name: u8) -> Option<u32> {
+    match s.grant(name)? {
+        GrantKind::CapSlot(slot) => Some(slot),
+        _ => None,
+    }
+}
+
+/// The handle number of the storage grant named `name`, if present and a
+/// [`GrantKind::StorageHandle`].
+pub fn storage_handle(s: &Startup, name: u8) -> Option<u32> {
+    match s.grant(name)? {
+        GrantKind::StorageHandle(h) => Some(h),
+        _ => None,
+    }
+}
+
+/// The `(va, len, pa)` of the region grant named `name`, if present and a
+/// [`GrantKind::Region`].
+pub fn region(s: &Startup, name: u8) -> Option<(u64, u64, u64)> {
+    match s.grant(name)? {
+        GrantKind::Region { va, len, pa } => Some((va, len, pa)),
+        _ => None,
+    }
+}
+
+/// The virtual address of the region grant named `name` (the field a consumer of a
+/// pre-mapped page actually needs).
+pub fn region_va(s: &Startup, name: u8) -> Option<u64> {
+    region(s, name).map(|(va, _, _)| va)
+}
+
 /// A bounds-checked writer over the output buffer. Every write is `get_mut`-
 /// checked, so `encode` is total: a write past the end yields
 /// `Err(Overflow)`, never a panic or a silent truncation.
@@ -795,6 +835,31 @@ mod tests {
         assert_eq!(d.grant(NAME_ROOT), Some(GrantKind::StorageHandle(0)));
         assert_eq!(&d.argv[..d.nargv], &[b"selftest".as_slice(), b"254"]);
         assert_eq!(&d.env[..d.nenv], &[b"K=V".as_slice()]);
+    }
+
+    #[test]
+    fn grant_projections() {
+        // The pure GrantKind projections read each kind out of a decoded block and
+        // reject a wrong-kind lookup (None, not a misread) — the readers the
+        // `eunomia_sys::grant` layer and the no_std user drivers share.
+        let s = sample();
+        let mut buf = [0u8; MAX_BLOCK];
+        let n = encode(&s, &mut buf).unwrap();
+        let d = decode(&buf[..n]).unwrap();
+
+        assert_eq!(region(&d, NAME_TIME), Some((0xA300_0000, 4096, 0)));
+        assert_eq!(region_va(&d, NAME_TIME), Some(0xA300_0000));
+        assert_eq!(cap_slot(&d, NAME_STORAGE), Some(1));
+        assert_eq!(storage_handle(&d, NAME_ROOT), Some(0));
+
+        // Absent grant → None.
+        assert_eq!(region(&d, NAME_DMA), None);
+        // Wrong-kind lookup → None (a cap-slot asked of a region grant, and vice
+        // versa), never a misread.
+        assert_eq!(cap_slot(&d, NAME_TIME), None);
+        assert_eq!(region(&d, NAME_STORAGE), None);
+        assert_eq!(storage_handle(&d, NAME_STORAGE), None);
+        assert_eq!(region_va(&d, NAME_STORAGE), None);
     }
 
     #[test]

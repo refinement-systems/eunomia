@@ -27,7 +27,7 @@
 mod pl011;
 
 use ipc::{sys, Reactor, Signals, SyscallTransport};
-use loader::startup::{self, GrantKind};
+use loader::startup;
 use pl011::{drain_rx, enable_rx_interrupts, write_tx, MmioWindow};
 
 const BOOT_CHAN: u32 = 0;
@@ -61,7 +61,7 @@ pub extern "C" fn _start() -> ! {
     // 2. The PL011 MMIO base is the VA init pre-mapped the frame at (it travels
     //    as a REGION grant, not the hardcoded 0x0900_0000 — like storaged's
     //    virtio-mmio window).
-    let Some((mmio_va, _len, _pa)) = region(&s, startup::NAME_PL011_MMIO) else {
+    let Some((mmio_va, _len, _pa)) = startup::region(&s, startup::NAME_PL011_MMIO) else {
         fail(b"no pl011 mmio grant");
     };
     let mut regs = MmioWindow::new(mmio_va as usize);
@@ -156,15 +156,6 @@ fn send_bytes(chan: u32, bytes: &[u8]) {
             return;
         }
         sys::yield_now();
-    }
-}
-
-/// The `(va, len, pa)` of the first `REGION` grant named `name`, or `None` if
-/// the name is absent or carries a non-region kind (the storaged helper).
-fn region(s: &startup::Startup, name: u8) -> Option<(u64, u64, u64)> {
-    match s.grant(name)? {
-        GrantKind::Region { va, len, pa } => Some((va, len, pa)),
-        _ => None,
     }
 }
 
