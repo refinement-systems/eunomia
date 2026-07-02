@@ -81,6 +81,12 @@ pub const REPORT_FAULTED: i64 = 2;
 /// than an orderly `thread_exit(status)` (rev2§5.1). Sits at the top of the `u64` range
 /// so no well-behaved child returns it deliberately.
 pub const STATUS_PANIC: u64 = u64::MAX;
+// The vendored std PAL hard-codes this all-ones sentinel as a literal (it cannot import
+// this crate — its deps pull `vstd`): `abort_internal` in `sys/pal/eunomia/common.rs`
+// sends `u64::MAX`, and the `sys/pal/eunomia/mod.rs` / `sys/exit.rs` exit arms zero-extend
+// precisely so a clean exit never collides with it. This pin freezes the seam value so it
+// cannot drift off that literal silently — a change here fails the build.
+const _: () = assert!(STATUS_PANIC == u64::MAX);
 
 // ---------------------------------------------------------------------------
 // Trusted inline-asm shell (rev2§6.1(d)). SVC #0, number in x7, args x0..x6, result in

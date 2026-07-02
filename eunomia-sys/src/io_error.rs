@@ -51,7 +51,8 @@ pub const ERR_FS_NO_SESSION: i64 = -268;
 ///
 /// `#[repr(u8)]` with explicit discriminants: the PAL reaches this policy across the
 /// `extern "Rust"` seam as a `u8` (the `pal::__eunomia_io_classify` shim), so these
-/// numbers are ABI — the PAL's `decode_error_kind` match is kept in lockstep.
+/// numbers are ABI — the PAL's `decode_error_kind` match is kept in lockstep, pinned by
+/// the `const _` guard below (a reorder/insert here fails this crate's build).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum Kind {
@@ -82,6 +83,27 @@ pub enum Kind {
     // in use); `ResourceBusy` is the nearest std kind, a documented approximation.
     ResourceBusy = 12,
 }
+
+// Pin the discriminants the PAL's `sys/io/error/eunomia.rs::decode_error_kind` hard-codes
+// as the `u8` it matches on. std cannot import this enum (its deps pull `vstd`, unbuildable
+// as a `rustc-dep-of-std` crate), so the two sides are coupled only by review; this
+// compile-time pin makes a reorder/insert here fail the build — the signal to update the
+// PAL match in lockstep.
+const _: () = {
+    assert!(Kind::PermissionDenied as u8 == 0);
+    assert!(Kind::WouldBlock as u8 == 1);
+    assert!(Kind::InvalidInput as u8 == 2);
+    assert!(Kind::OutOfMemory as u8 == 3);
+    assert!(Kind::BrokenPipe as u8 == 4);
+    assert!(Kind::Uncategorized as u8 == 5);
+    assert!(Kind::NotFound as u8 == 6);
+    assert!(Kind::NotADirectory as u8 == 7);
+    assert!(Kind::ReadOnlyFilesystem as u8 == 8);
+    assert!(Kind::StaleNetworkFileHandle as u8 == 9);
+    assert!(Kind::InvalidFilename as u8 == 10);
+    assert!(Kind::NotConnected as u8 == 11);
+    assert!(Kind::ResourceBusy as u8 == 12);
+};
 
 /// Classify a raw syscall error code. Total: every `i64` yields a [`Kind`], never
 /// panics. `code` is the negative `ERR_*` the kernel returned (the PAL passes it

@@ -371,6 +371,14 @@ pub fn sync() -> i64 {
 //   each entry: [kind: u8 (0 = file, 1 = dir)][size: u64 LE][name_len: u16 LE][name…]
 const RD_OK: u8 = 0;
 const RD_ERR: u8 = 1;
+// The fixed entry-head width (kind + size + name_len) the std `parse_listing` reads as an
+// 11-byte prefix before each name. std duplicates that `11` as a literal (it cannot import
+// this crate); this pin freezes the seam head so a field-width change here fails the build
+// rather than silently desyncing the decoder. The variable-length `name` and the error
+// buffer's `i64` code stay review-coupled across the seam (the `Vec<u8>` wire twin).
+const RD_ENTRY_HEAD: usize =
+    core::mem::size_of::<u8>() + core::mem::size_of::<u64>() + core::mem::size_of::<u16>();
+const _: () = assert!(RD_ENTRY_HEAD == 11);
 
 /// List the directory at `path` (`List`), encoded for the std `ReadDir` iterator. A
 /// listing that overflows one 256-byte message errors (`ERR_FS_INTERNAL`) — big
