@@ -987,6 +987,7 @@ version = "0.1.0"
 dependencies = [
  "freelist",
  "ipc",
+ "le-bytes",
  "loom",
  "proptest",
  "shuttle",
