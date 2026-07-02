@@ -33,6 +33,39 @@ Verus has no crates.io binary: CI fetches the release zip (it bundles
 — bump binary + `vstd` + toolchain together, re-run the whole suite, never fold
 into a feature change.
 
+**Single-source the pin — the gate and the shipped binary link the same `vstd`.**
+The `vstd`/`verus_builtin` a proof is checked against must be the exact pair the
+shipped artifact links. The tempting split — a `[patch.crates-io]` redirecting
+`vstd` to a vendored path *for one build only*, to clear some build-time wall the
+crates.io pin trips over — is a silent soundness gap: the proof then passes against
+one `vstd` while the binary links another, and nothing fails, because ghost erases
+and both builds stay green with no test that can see the divergence. Keep every
+crate, verified and shipped, on the one crates.io pin. For the same reason **never
+fork the vendored prover**: a vendored copy earns its place only as a clean mirror
+of the release tag (re-vendored mechanically each bump), whereas a fork carries
+local patches the bump must re-apply forever — a standing maintenance axis on the
+single most trust-sensitive dependency, bought for no obligation you could not
+discharge another way. The ghost tree is reachable *only* as an ordinary
+dependency: `vstd`/`verus_builtin` reference `core`/`alloc` directly and carry none
+of the `rustc-dep-of-std` plumbing, so they cannot compile as *sysroot*
+(`build-std`) crates — the moment one enters that graph the build fails with
+`error[E0463]: can't find crate for core`. Verifiability therefore follows that
+dependency edge: code that must live where it cannot depend on `vstd` (inside `std`,
+a platform layer) can never carry a proof, so keep every decoder you intend to
+verify on the `vstd`-capable side and reach it from the far side through an
+undefined-`extern`-symbol bridge the binary resolves at link.
+
+**Keep this pin on its own axis, isolated from any other toolchain the workspace
+pins.** A workspace may legitimately need a second, unrelated toolchain elsewhere —
+a specific nightly to `build-std` a cross-compiled bare-metal target, say. Pin that
+one *narrowly*, with a `rust-toolchain.toml` in the directory that needs it, never a
+root- or workspace-wide pin: a wide pin overrides rustup's per-directory selection
+everywhere and silently drags `cargo verus verify` off Rust `1.95.0`, breaking the
+gate for a reason that looks nothing like the edit that caused it. The two pins are
+genuinely independent — verified crates are host-built on the Verus toolchain and do
+not link whatever the other toolchain builds — so advance them as separate
+maintenance streams, each its own PR.
+
 ## Authoring state machines
 
 The ghost libraries are all on crates.io at the pin, so the submodule is **not**
@@ -65,6 +98,17 @@ cargo verus verify -p dma-pool
 cargo verus verify -p cas --no-default-features   # cas is Vec-heavy; the feature-agnostic codecs verify in the no_std+alloc variant
 ```
 
+**A crate must verify in the configuration it ships.** A plain `cargo verus verify`
+builds under a crate's *default* features, so the default set must select the
+variant that actually ships. A crate that ships `no_std` must therefore not carry a
+`default = ["std"]` feature — that makes the no-flag gate check the `std` variant
+(not the shipped code) and forces every CI line to bolt on `--no-default-features`
+just to see what ships. Gate `std` on `cfg(test)` instead (`#![cfg_attr(not(test),
+no_std)]`), so the shipping configuration *is* the default one and host tests still
+pull `std`. Then a `--no-default-features` on a CI line reads as a deliberate
+feature-variant choice (the Vec-heavy `cas` codecs above), never a patch over a
+mis-defaulted crate.
+
 **Verifying a crate verifies every target it builds — binaries included, not just the
 library.** A binary with no `verus!{}` code of its own still must import the ghost prelude
 (`use vstd::prelude::*`), or the prover aborts it ("the builtin/ghost crate was not
@@ -94,6 +138,21 @@ while its run still re-checks the core). Leaving `verify = true` on a crate with
 zero proof code of its own is harmless (ghost erases) and keeps the gate armed,
 so re-added verified code auto-gates.
 
+**What a `-p` run checks is the library's host build graph — and those edges are the
+CI-cost surface.** A `cargo verus verify -p x` discharges `x`'s obligations plus
+those of every `verify = true` dependency *active in that build*, re-run each
+invocation. Three edges carry zero in, and assuming otherwise over-counts what the
+gate checks: a `[dev-dependencies]` entry never enters (the run builds the library
+and its binaries, not the test target), a dependency gated to a non-host target
+(`[target.'cfg(target_os = "none")'.dependencies]`, which the host OS never matches
+— an OS gate excludes reliably where a `target_arch` gate would still fire on a host
+of that arch) is absent from the host build, and the crate's own `#[cfg(test)]` code
+never runs under verify. Two levers follow: park a heavy verified oracle behind
+`[dev-dependencies]` to keep its obligations out of every downstream verify graph;
+and factor a small, self-contained proof (one needing only `vstd`) out of a
+long-dependency crate into its own minimal crate, so it checks alone instead of
+dragging that chain's transitive obligations through every re-verify.
+
 `verus!{}` **erases to nothing**: ghost/spec/proof code compiles away, so
 `cargo build` (host) and the aarch64 kernel cross-build link the *same* `exec`
 code the proofs run against, and `vstd` compiles to nothing load-bearing. This is
@@ -107,6 +166,23 @@ while the non-verifier build and host tests stay clean, since they link only the
 complete frame audit after such a change. `scratchpad` is the minimal
 `spec fn` canary that the pin + install + cross-build still cohere independent of
 any real crate.
+
+**Verify sees only the host verification build; target-`cfg` code is invisible to
+it.** The gate compiles for the host verification configuration, so any item behind
+a target-only `#[cfg]` — a `target_os` guard for the bare-metal target, a
+`bare_metal`-style cfg alias — evaluates false on the host and is compiled *out* of
+the verify graph. Such code is never checked, adds nothing to the obligation count,
+and stays a trusted seam even inside a `verify = true` crate (a whole module gated
+`#![cfg(target_os = "…")]` sits outside the graph in full). So reason about
+re-verification by *activation under the host cfg*, not by whether `verus!{}` text or
+the crate was touched: a change confined to cfg-inactive code leaves the verified
+build byte-identical and needs no re-proof, whereas *widening* a `cfg` so it also
+holds on the host pulls new code into the graph and must be re-run. This is the
+erasure guarantee read the other way — the cross-target build *adds* code the proof
+never saw — so keep the checkable core in a host-buildable module and confine
+target-only register reads and raw allocation to thin unverified adapters behind the
+`cfg`; logic buried inside the cfg block is a trusted seam by construction, however
+much it looks like it should be proved.
 
 **Scoped runs can false-green from stale cache.** Verus caches verification per
 build, so a `--verify-function`/`--verify-only-module`-scoped run can exit 0 from
@@ -122,6 +198,30 @@ function alone reports nothing:
 cargo verus verify -p c --verify-function foo   # EXIT=0, but cached
 cargo clean -p c && cargo verus verify -p c     # authoritative: results line present == real run
 ```
+
+**A zero exit — even a bare `0 errors` — is not a green gate; assert the count too.**
+`cargo verus verify` exits 0 on a genuine all-pass, but *also* when the prover
+quietly drops an obligation or a spec weakens to prove less — both finish with zero
+*errors*, just fewer *verified* items. A gate that checks only the process status,
+or greps for `0 errors`, lets coverage shrink through unnoticed. Parse the whole
+`verification results:: N verified, M errors` line and fail unless `M == 0` **and**
+`N` equals a per-crate count pinned in a machine-readable manifest (the twin of the
+trusted-base ledger's baselines). The `M == 0` arm keeps every checked obligation
+honest; the `N == pinned` arm catches the invisible loss — a deleted `proof fn`, an
+erased spec, a silently-skipped obligation — as a hard regression. A genuine new
+obligation raises `N` above the pin and *also* fails, which is correct: it forces a
+deliberate, reviewable bump of the manifest and ledger rather than a silent drift.
+Pin **every** gated crate, including one whose true count is `0` — an unpinned crate
+is an ungated one, and a crate that later regains proof code must not slip past.
+
+**On a cold multi-crate run, read the last results line, not the first.** A
+clean-then-verify re-discharges the whole gated dependency closure, so the run emits
+one `verification results::` line per crate in the graph; the `-p` target's line is
+always **last**, since it can verify only after its dependencies have compiled.
+Match the final line before comparing `N` to the target's pin — reading the first
+match compares a *dependency's* count against the target's number and mis-fires. And
+because a warm `target/` can let the run exit 0 while re-verifying nothing, the
+*absence* of a `verification results::` line is itself a gate failure, not a pass.
 
 ## Three-layer structure
 
@@ -238,6 +338,17 @@ strongest-sounding tool:
   effect fires, not *how* it persists** → property / undefined-behaviour testing; the
   underlying ops already carry their `ensures`, so no new proof chokepoint exists, and
   the UB checker is the oracle for any `unsafe`.
+- **A serialization that exists only to marshal data across a boundary, whose
+  decoding counterpart lives where a proof can never reach (a std PAL forbidden from
+  depending on `vstd`, a foreign runtime with no extracted twin)** → often *no codec at
+  all*: restructure the seam to carry a `#[repr(C)]` record of primitive fields
+  mirrored on both sides rather than a hand-rolled byte layout. Verifying only the
+  reachable (encode) half discharges nothing durable — its decode counterpart stays
+  unverified forever and the duplicated layout must be held in lockstep by hand —
+  whereas letting the compiler own the layout deletes the byte-parsing obligation
+  outright, leaving a single review-coupled twin: strictly less trusted surface than
+  half a proof standing over a live duplication. An obligation you can dissolve beats a
+  totality you can never complete.
 
 Whatever the tier, a model or proof earns its keep only when a deliberately broken
 variant is *confirmed to fail* (§11's host-test-with-teeth; the model tier's runnable
@@ -1175,6 +1286,33 @@ the near-universal first stumble. To compare against a *named* fixed-byte consta
 new const and no literal byte duplication, so the proof stays pinned to the single ABI
 constant.
 
+**A returned borrowed sub-slice is tied to its buffer by content, not provenance.**
+When a decoder hands back a *borrowed view* into its input — a length-prefixed
+variable field, a path segment — rather than a copied scalar, there is no pointer for
+Verus to reason about: it models the returned slice purely by its `Seq<u8>` content.
+So the postcondition is necessarily *existential* over that content, and you supply
+the witnesses at each `slice_subrange` site so the exists-introduction stays one line,
+never a whole-buffer search:
+
+```rust
+fn take_bytes(buf: &[u8], off: usize, n: usize) -> (sub: &[u8])
+    requires off + n <= buf@.len(),
+    ensures exists|a: int, b: int|
+        0 <= a <= b <= buf@.len() && sub@ == buf@.subrange(a, b),
+{
+    broadcast use vstd::slice::group_slice_axioms;   // links exec len to ghost buf@.len()
+    slice_subrange(buf, off, off + n)                // witnesses a == off, b == off + n
+}
+```
+
+What this deliberately does *not* state is that the returned slice's *address* lies
+inside `buf`: pointer-range containment lives outside the `Seq`-of-bytes model, so it
+is not a Verus obligation and cannot be proved in-macro. Safe slicing already makes
+the containment a construction guarantee — it needs no `external_body` and adds no
+seam row; cover it, if at all, with a companion host/fuzz oracle over the input's
+`as_ptr_range`. The content existential is the strongest thing provable inside
+`verus!{}`; reaching past it for provenance is a category error, not a missing lemma.
+
 **Spec the codec as accept-iff + a two-direction bijection.** Tie exec functions to
 `spec_encode`/`spec_decode` over `Seq<u8>`, and state totality and acceptance as a
 single iff — capturing short-input *and* trailing-byte rejection at once:
@@ -1348,6 +1486,25 @@ by-value `fn f(state: S, ...) -> (S, ...)` (§2) — and have the method delegat
 line. Only the small payload datatypes the free function names enter the macro; the generic
 parameter, the trait bound, and the reference stay in the plain-Rust shell, and existing
 tests that read the struct's fields keep working unchanged because the fields never move.
+
+**A result no caller consumes needs no contract — scope specs to what callers rely on.**
+The moves above keep a foreign *type* off the proof surface; the same discipline applies
+to a *value* a function deliberately leaves unmodeled — randomness, an opaque digest, any
+content whose meaning lives outside SMT. Do not give such an output a
+whole-result/whole-buffer postcondition: an `ensures out@ == concat(blocks)` drags back
+exactly the ghost machinery you were avoiding — a ghost word-sequence model, a recursive
+concatenation spec, tail-truncation reasoning — all to pin a value no downstream
+obligation ever reads. Proof cost tracks the contract's ambition, not the function's
+work, so an unconsumed `ensures` is pure overhead that typically pulls extra ghost state
+in with it. State only what callers actually depend on — every byte written, an exact
+length, a bound respected — and let the content stay off-surface.
+
+```rust
+fn fill(buf: &mut [u8]) -> (n: usize)
+    ensures n == old(buf).len()      // callers use the count; the bytes stay unmodeled
+{ /* ... */ }                        // NOT: ensures buf@ == concat(ghost_blocks) —
+                                     //   ghost seq + recursive concat + truncation, no consumer
+```
 
 ## 10. Proof scaling: small contexts and trigger economy
 
@@ -1928,6 +2085,36 @@ functions, so the pure header layer graduates into verified scope while the body
 the public API stay feature-gated and behaviorally unchanged. Record this as a routing note
 on the crate's ledger row, not a new seam.
 
+**A verified encoder whose partner decoder lives in another crate: pin the inverse with
+a host round-trip oracle, not a cross-crate equivalence proof.** When this crate encodes
+an ABI (syscall arguments, a wire header) that another crate's *verified* decoder must
+invert, resist proving the two agree inside Verus. A cross-crate equivalence proof drags
+the decoder's entire obligation set into this crate's verify session, and the
+functional-inverse fact you want — `decode(encode(x)) == x` — frequently *cannot even be
+stated*: an accept-iff/structural decoder (§8) carries shape-only `ensures`, so there is
+no functional spec to equate against. Instead verify each side's *own* properties in
+isolation (encoder: total, bounded output, correct layout ∀ inputs; decoder: accept-iff,
+in-bounds) and pin their *mutual agreement* with a host test that round-trips every
+variant through the **real** partner decoder — the genuine function, not a mock —
+carrying the anti-vacuity teeth this section demands: a control that transiently corrupts
+one encoded byte and confirms the round-trip goes RED, so a shape-only decoder that
+accepts everything cannot let the oracle pass on nothing. Re-derive the shared ABI
+constants as a *local independent twin* rather than importing the decoder's, and let the
+round-trip oracle be the sole place the two spellings are forced to coincide, so a skew
+surfaces as a failing test rather than both sides drifting together in silence.
+
+```rust
+// encoder verified here for its OWN spec (total, bounded, layout ∀ args) —
+// NOT proven to invert decode; agreement is a host oracle, not a Verus obligation.
+#[test] fn round_trips_through_real_decoder() {
+    for a in ALL_VARIANTS { assert_eq!(other_crate::decode(&encode(a)), Ok(a)); }
+}
+#[test] fn round_trip_has_teeth() {              // else a shape-only decoder that
+    let mut b = encode(SAMPLE); b[0] ^= 1;       // accepts anything passes vacuously
+    assert_ne!(other_crate::decode(&b), Ok(SAMPLE));
+}
+```
+
 **A trusted mutation may have no exec counterpart — the deliverable is then a
 lemma.** When the trusted shell reconstructs state from raw fields on every call (a
 slice rebuilt from a length field, a view rebuilt from a count), the mutation does
@@ -2012,6 +2199,60 @@ pub fn release(&mut self, b: Buf) {
     // BUG: nfree < N and bounds never re-checked here; the `requires` is vacated.
     self.inner.free(b.off, b.len);
 }
+```
+
+**Design the op total so there is no `requires` to leak.** The inverse-leak audit,
+and the burden of re-establishing a precondition at every out-of-macro wrapper, exist
+only because the verified op carries a `requires`. Where the op has a representable
+failure, delete the precondition at the source: make it **total** — validate inputs
+*inside* the body and return `Result`/`Err` (or `None`/a sentinel) over the *whole*
+input domain. The out-of-range check then discharges as part of the `ensures`,
+machine-checked inside the verified surface, instead of standing as an unchecked
+trusted-caller obligation. Three consequences follow: the inverse-leak audit over the
+wrapper is *vacuous* (no `requires`, nothing to vacate); the trusted shell stays a
+term-for-term delegate that re-establishes nothing; and a plain caller composes for
+free by mapping `Err` to its own error code. This is strictly stronger than the
+`requires`-guarded partial shape — the partial form *trusts* every caller to pre-check,
+the total form *proves* the check — so prefer it whenever a failure value exists, and
+reserve the guarded shape (with its category-(3) runtime backstop) for ops with no
+representable failure.
+
+```rust
+// PARTIAL: the bound is a caller obligation — leaks through every out-of-macro wrapper.
+fn encode(v: Val, out: &mut [u8]) -> (n: usize)
+    requires out.len() >= v.wire_len()  { /* ... */ }
+
+// TOTAL: the bound is checked inside — no requires, so nothing to re-establish or leak.
+fn encode(v: Val, out: &mut [u8]) -> (r: Result<usize, EncErr>)
+    ensures r matches Ok(n) ==> n <= out.len()   // (and the n bytes are the codec of v)
+{ if out.len() < v.wire_len() { return Err(EncErr::Short); } /* ... */ }
+// shell delegates term-for-term; a plain caller: `encode(v, buf).map_err(|_| MyErr)?`
+```
+
+**A well-formedness `requires` discharges by construction — no boundary guard needed.**
+The inverse-leak rule demands the wrapper re-establish each precondition, but the
+*cheapest sound* way to re-establish a *structural* invariant (a `wf` the verified ops
+require of the type they mutate) is to make an ill-formed value uninhabited rather than
+to re-test one at the call: the sole constructor establishes `wf`, every operation is
+proven to preserve it, and the type is buildable no other way (private fields, no second
+`pub fn` that skips the establishing step). Then at the erased boundary
+`requires self.wf()` holds *automatically* for every value that exists — discharged by
+the type's very existence, with zero residual runtime check. Reserve the runtime
+backstop of the inverse-leak rule for the *value* preconditions a wrapper receives from
+outside (a caller-supplied index, count, or foreign buffer); a type's own `wf` is better
+*sealed* than guarded. The seal breaks in one way: a wrapper that writes the private
+fields directly, or any path that bypasses the establishing constructor, reopens the
+hole.
+
+```rust
+// verified: wf is established once and preserved; the type is buildable no other way.
+impl Table {
+    pub fn new() -> (t: Table) ensures t.wf() { /* the sole well-formed shape */ }
+    fn insert(&mut self, k: Key) requires self.wf() ensures self.wf() { /* ... */ }
+}
+// out-of-macro boundary: no runtime wf check — every Table that exists is wf,
+//   so `requires self.wf()` holds for free at the erased call.
+pub fn add(t: &mut Table, k: Key) { t.insert(k); }
 ```
 
 **Host-test every assumed contract, with teeth.** Maintain a concrete reference
@@ -2176,6 +2417,29 @@ trait. Real callers pass the wall-clock read; proofs and tests pass plain intege
 The result is deterministic and Miri-safe by construction (no wall-clock sleeps, no
 trait plumbing), and the "injectable clock" a test needs is just the parameter.
 
+**Not every trusted fact is a function body — a mirrored constant or a layout assumption
+is a seam too, and its cheapest honest guard is a compile-time assertion.** When the
+trusted shell hard-codes on one side of a seam a value authoritative on the *other* — a
+slot count duplicated from the verified core, an enum discriminant a wire peer must
+match, a field offset hand-written assembly reads out of a struct — Verus models neither
+side's *agreement*, so the hazard is silent drift, not a proof obligation. Pin each such
+literal with a `const _: () = assert!(...)` on equality against the source-of-truth side
+(`==` for values, `size_of::<T>()` / `offset_of!` for layout). It sits **outside every
+`verus!{}` block**, so it adds no obligation and does not move the ledger, yet it fails
+the *build* — at zero runtime cost — the moment the two sides diverge; reach for it
+before a host test wherever the property is a compile-time-known equality, since a build
+that cannot compile is a stronger gate than a test that must be run. Where the drift
+lives in code you cannot annotate (a vendored toolchain's calling convention, a `std`
+internal a port mirrors), the honest posture is a process, not a theorem: re-check it at
+every toolchain/dependency bump (a recorded step in the bump procedure, per "The pin")
+and assert it live in CI.
+
+```rust
+const _: () = assert!(SHELL_SLOTS == core_side::SLOTS);        // mirrored constant
+const _: () = assert!(size_of::<TrapFrame>() == 256);          // asm-read layout
+const _: () = assert!(offset_of!(TrapFrame, saved_sp) == 0);
+```
+
 ## 12. Toolchain and syntax gotchas
 
 A standing checklist of mechanical traps that block compilation or verification
@@ -2204,6 +2468,17 @@ with opaque errors:
   ("matches with && is currently not allowed on the right-hand side …") — wrap it:
   `A ==> (B matches Pat && C)`; the bindings stay in scope across the parenthesized
   chain.
+- **`matches` inside an implication binds in exactly one shape.** `EXPR matches Pat ==>
+  body` lets `Pat`'s bindings reach `body` only when the `matches` is the *bare left
+  child* of a single `==>`; the form is fragile in two silent ways. Parenthesizing the
+  antecedent — `(EXPR matches Pat) ==> body` — drops the binding, so the names surface as
+  "not in scope" in `body` (`E0425`). Chaining antecedents with `&&` — `A matches Ok(e)
+  && B matches Pat ==> C` — regroups as `A matches Ok(e) && (B matches Pat ==> C)`,
+  promoting the left `matches` to a hard conjunct of the whole postcondition: it
+  *compiles*, but now asserts `A matches Ok(e)` unconditionally instead of guarding `C`
+  (false on the `Err` arm — a silent verification failure, not a compile error). Write
+  fully nested implications — `A matches Ok(e) ==> B matches Pat ==> C` — which are
+  right-associative, so each `matches` stays the bare left child of its own `==>`.
 - **A function's `requires` does not auto-instantiate inside a `while` loop** —
   restate any needed precondition as a loop invariant (diagnostic signature: the
   identical `assert` passes at the body's top and fails inside the loop).
@@ -2218,6 +2493,12 @@ with opaque errors:
 - **Gate unsupported constructs (`asm!`) out with `cfg`, not annotations** — code
   outside `verus!{}` is external by default under `cargo-verus`, so partial adoption
   needs no per-item `#[verifier::external]`.
+- **A `#[derive(Clone)]` inside `verus!{}` on a non-`Copy` struct emits a warning**
+  ("Verus does not (yet) support autoderive Clone impl when the clone is not a copy") —
+  verification still passes, so do not silence it with `#[derive(Copy)]`, which quietly
+  makes a large multi-field struct copyable at every by-value use. Hand-write the
+  field-wise `impl Clone` *outside* the block instead — external by default (previous
+  bullet), so it carries no contract and sheds the derived clone's one obligation.
 
 ## 13. Proof-performance tuning: a decision map
 
@@ -2283,6 +2564,18 @@ still pays in the opposite situation (all §10 unless noted):
   construction). **Splitting a closed `wf` into sub-predicates** to label clauses
   changes auto-unfold for no benefit — use clause-naming comments (§3).
 - Adding *any* function ripples the whole module's `rlimit`; judge by the crate total.
+
+**A count-neutral edit can still move `rlimit` — attribute the move before judging it.**
+The verified-obligation count is no proxy for solver cost: an edit that adds and removes
+no proof — enriching a function's return type from a bare value into one that also
+carries a rejection reason, say — leaves the count untouched yet changes what every
+caller threads through the solver, and can move the `rlimit` by several percent. So
+re-measure before/after even when the count is unchanged; the count-delta prediction is a
+*correctness* check (§10), never a stand-in for the perf one. Then name the cause: a rise
+that traces to a genuine signature enrichment — no spec weakened, no `ensures` loosened —
+is the legitimate cost of the feature, not a regression to revert. The
+revert-measured-regressions rule (§10) governs changes made *for* speed, not the
+checker-cost tail of a correctness-motivated one.
 
 **Patterns the idiomatic starting shape already gets right.** Reach for these from the
 start, not as a rescue: per-step/per-phase frame lemmas for every multi-step structural
@@ -2439,6 +2732,8 @@ Apply in order; stop at the first that fires.
 5. **Would the rewrite merely re-state an already-verified `ensures` under a fancier construct, or refine a struct to itself with no second abstraction?** → do not pursue; it is net-negative surface.
 
 A non-tokenized abstract *model* (step 3 unmet, but a machine-checked design↔code bridge is still wanted) is warranted only when someone commits to writing the exec-refines-model glue — otherwise it is scaffolding restating proven facts.
+
+One case short-circuits the whole rule: when a concurrent component's shared-state discipline is *only* mutual exclusion — one holder at a time, no bespoke wait/wake handshake layered on — **wrap an already-certified lock**, opening neither a tokenized machine nor a fresh interleaving model. The lock's exhaustive-enumerator certification is inherited by every consumer that reaches the guarded state solely through it, so the wrapper carries no new interleaving obligation; the one residual failure mode — a field touched *outside* the lock — is caught by the UB-checker + proptest data-race oracle. Reserve a bespoke tokenized machine or a new model for a genuinely novel protocol (a lock-free structure, a custom wakeup discipline), never for one more client of an existing mutex. One mechanical caveat: a wrapper that holds a process-global `static` over the lock's `const` constructor will not build under a model run whose substitute lock drops that `const`-ness — cfg-gate that static (and only it) out of the model builds, forfeiting no coverage, since the mutual-exclusion property the static rests on is exactly what the model still certifies through the lock.
 
 ### 15.5 Infeasible under the pin — memory-model and construct gaps
 

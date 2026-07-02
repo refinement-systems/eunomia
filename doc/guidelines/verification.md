@@ -69,6 +69,16 @@ strongest-sounding tool.
   `buf.rotate_left(sb.head)` that now provably cannot panic) — the proof crosses
   the `verus!{}` boundary by execution order, not by re-verifying the step.
 
+- **A decode-totality proof changes the paired fuzzer's *job*, not just its
+  presence.** Once the totality / canonical-form proof lands, the crash the search was
+  hunting is gone, and a differential oracle built around the verified decoder inherits
+  its exact branch structure — so a small curated seed set that touches every branch and
+  equivalence class already saturates coverage. A coverage count that then stays *flat*
+  across a long run is evidence of completeness, not a reason to grow the corpus: enrich
+  the named seeds rather than committing raw hunt output. The fuzzer stays load-bearing
+  (differential and corpus coverage remain its arm), but for a proven-total decoder its
+  posture is curated-seed-first; the corpus-management mechanics are `fuzzing.md`'s.
+
 - **Some things have no method and are trusted by construction.** The asm shell
   (boot, MMU/TLB, GIC, MMIO, the one PA→pointer site) is inherently unverifiable
   trusted base; the whole `kcore` split exists to keep it small. Crypto and
