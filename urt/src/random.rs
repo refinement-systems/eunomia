@@ -12,11 +12,12 @@
 //! (`RNDR`/virtio-rng) is a later backend swap that changes only the seed bytes'
 //! origin, not this DRBG or the per-child-reseed contract.
 //!
-//! Two invariants hold regardless of source (rev2§5.1):
+//! Two invariants hold regardless of source:
 //!   - `fill_bytes` never hands back the raw seed — every output is an advanced
 //!     xoshiro state word, so a finite seed can never repeat/exhaust silently.
 //!   - a parent draws a **fresh sub-seed per child** ([`fresh_seed`]) from its own
-//!     stream — the classic fork-without-reseed trap avoided.
+//!     stream — the classic fork-without-reseed trap avoided (rev2§5.1: "a parent
+//!     draws a fresh seed for every child so siblings never share a stream").
 //!
 //! No-seed behavior: `fill_bytes` with no seed attached **loudly aborts** (the
 //! `urt::time::now_utc_ns` "time page not attached" posture) — a mis-provisioned
