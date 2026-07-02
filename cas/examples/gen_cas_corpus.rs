@@ -16,6 +16,7 @@ use cas::disk::{
 use cas::hash::Hash;
 use cas::prolly::{
     parse_node, Content, Dir, Entry, EntryKind, MemStore, NodeRefs, NodeStore, FLAG_EXECUTABLE,
+    INLINE_MAX,
 };
 use cas::store::{Store, StoreOptions};
 
@@ -95,11 +96,73 @@ fn tlv_entry_seeds() {
         mtime: 9,
         content: Content::ChunkList(Hash::of(b"list")),
     };
+
+    // ── Boundary / equivalence-class seeds (the encode_raw field edges) ──
+    // The name length is a `u8`: the empty and the 255-byte ceiling.
+    let empty_name = Entry {
+        name: Vec::new(),
+        kind: EntryKind::File,
+        flags: 0,
+        size: 0,
+        mtime: 0,
+        content: Content::Inline(Vec::new()),
+    };
+    let max_name = Entry {
+        name: vec![b'n'; 255],
+        kind: EntryKind::File,
+        flags: 0,
+        size: 1,
+        mtime: 1,
+        content: Content::Inline(b"x".to_vec()),
+    };
+    // Inline content length is a `u16`: the empty payload and the INLINE_MAX
+    // (512-byte) ceiling — the two ends of the inline-tag length field.
+    let empty_inline = Entry {
+        name: b"e".to_vec(),
+        kind: EntryKind::File,
+        flags: 0,
+        size: 0,
+        mtime: 0,
+        content: Content::Inline(Vec::new()),
+    };
+    let inline_max = Entry {
+        name: b"m".to_vec(),
+        kind: EntryKind::File,
+        flags: 0,
+        size: INLINE_MAX as u64,
+        mtime: 0,
+        content: Content::Inline(vec![0xAB; INLINE_MAX]),
+    };
+    // The fixed 8-byte size/mtime readers at the top of the `u64` range.
+    let field_max = Entry {
+        name: b"max".to_vec(),
+        kind: EntryKind::File,
+        flags: 0,
+        size: u64::MAX,
+        mtime: u64::MAX,
+        content: Content::ChunkList(Hash::of(b"max")),
+    };
+    // A non-`FLAG_EXECUTABLE` flags word (all bits set): the optional-section
+    // decode at a value distinct from the lone `exec` seed.
+    let flags_multi = Entry {
+        name: b"flagged".to_vec(),
+        kind: EntryKind::Dir,
+        flags: u32::MAX,
+        size: 0,
+        mtime: 3,
+        content: Content::DirRoot(Hash::of(b"sub")),
+    };
     for (n, e) in [
         ("inline", inline),
         ("exec", exec),
         ("dir", dir),
         ("chunked", chunked),
+        ("empty_name", empty_name),
+        ("max_name", max_name),
+        ("empty_inline", empty_inline),
+        ("inline_max", inline_max),
+        ("field_max", field_max),
+        ("flags_multi", flags_multi),
     ] {
         write_seed("tlv_entry", n, &cas::tlv::encode(&e));
     }
@@ -128,6 +191,79 @@ fn tree_node_seeds() {
     }
     let leaf = small.save(&mut store);
     write_seed("tree_node", "leaf", &store.get(&leaf).unwrap());
+
+    // The minimal non-empty leaf: exactly one entry (count == 1).
+    let mut single = Dir::new();
+    single
+        .upsert(Entry {
+            name: b"only".to_vec(),
+            kind: EntryKind::File,
+            flags: 0,
+            size: 3,
+            mtime: 1,
+            content: Content::Inline(b"one".to_vec()),
+        })
+        .unwrap();
+    let single_root = single.save(&mut store);
+    write_seed(
+        "tree_node",
+        "single_leaf",
+        &store.get(&single_root).unwrap(),
+    );
+
+    // A leaf whose entries span all three Content variants (Inline / ChunkList
+    // / DirRoot) so one node decode covers every content tag.
+    let mut mixed = Dir::new();
+    for e in [
+        Entry {
+            name: b"a_inline".to_vec(),
+            kind: EntryKind::File,
+            flags: 0,
+            size: 2,
+            mtime: 1,
+            content: Content::Inline(b"hi".to_vec()),
+        },
+        Entry {
+            name: b"b_chunk".to_vec(),
+            kind: EntryKind::File,
+            flags: 0,
+            size: 100_000,
+            mtime: 2,
+            content: Content::ChunkList(Hash::of(b"chunks")),
+        },
+        Entry {
+            name: b"c_dir".to_vec(),
+            kind: EntryKind::Dir,
+            flags: 0,
+            size: 0,
+            mtime: 3,
+            content: Content::DirRoot(Hash::of(b"child")),
+        },
+    ] {
+        mixed.upsert(e).unwrap();
+    }
+    let mixed_root = mixed.save(&mut store);
+    write_seed("tree_node", "mixed_leaf", &store.get(&mixed_root).unwrap());
+
+    // A single-entry leaf carrying the largest item the entry encoding allows
+    // (255-byte name, INLINE_MAX inline payload, flags set) — the leaf-item
+    // size boundary.
+    let mut big = Dir::new();
+    big.upsert(Entry {
+        name: vec![b'z'; 255],
+        kind: EntryKind::File,
+        flags: FLAG_EXECUTABLE,
+        size: INLINE_MAX as u64,
+        mtime: 4,
+        content: Content::Inline(vec![0xCD; INLINE_MAX]),
+    })
+    .unwrap();
+    let big_root = big.save(&mut store);
+    write_seed(
+        "tree_node",
+        "big_entry_leaf",
+        &store.get(&big_root).unwrap(),
+    );
 
     // A wide directory that forces an internal level; dump the top node and
     // one of its leaves so both decode paths are seeded.
@@ -223,6 +359,56 @@ fn superblock_seeds() {
     let bytes = sb.encode();
     write_seed("superblock", "valid", &bytes);
     write_seed("superblock_fixup", "valid", &bytes);
+
+    // Re-seal a patched slot: recompute the body checksum so the mutated slot
+    // reaches the branches past the checksum gate (mirrors `Superblock::encode`).
+    let reseal = |buf: &mut [u8]| {
+        let sum = Hash::of(&buf[..cas::disk::SB_BODY]);
+        buf[cas::disk::SB_BODY..cas::disk::SB_BODY + 32].copy_from_slice(sum.as_bytes());
+    };
+
+    // A slot from a superseded format version: valid magic and a re-sealed
+    // checksum, but `version != SB_VERSION`, so decode returns `WrongVersion`
+    // (the tick-era refusal — never a reinterpretation, rev2§2.6). Low versions
+    // stay wrong across any future format bump; mutation cannot forge the blake3
+    // checksum, so this past-the-checksum branch is unreachable without a seed.
+    for (name, ver) in [("version_v2", 2u32), ("version_v4", 4u32)] {
+        let mut buf = sb.encode();
+        buf[8..12].copy_from_slice(&ver.to_le_bytes());
+        reseal(&mut buf);
+        write_seed("superblock", name, &buf);
+    }
+
+    // Bad magic: rejected at the magic gate, which precedes the checksum, so the
+    // slot is left un-resealed.
+    let mut bad_magic = sb.encode();
+    bad_magic[0] ^= 0xFF;
+    write_seed("superblock", "bad_magic", &bad_magic);
+
+    // Valid magic but a corrupted checksum: rejected at the checksum gate.
+    let mut bad_checksum = sb.encode();
+    bad_checksum[cas::disk::SB_BODY + 31] ^= 0xFF;
+    write_seed("superblock", "bad_checksum", &bad_checksum);
+
+    // Wrong length: rejected at the size gate (buf.len() != SB_SIZE).
+    write_seed("superblock", "truncated", &sb.encode()[..100]);
+
+    // Every offset/length field at the top of the u64 range — the fixed-width
+    // `read_u64_le` readers at their ceiling. A validly-sealed slot (geometry is
+    // a mount-time concern, not part of the byte decode), so it decodes Ok under
+    // both targets; the fixup target keeps it warm past its checksum re-seal.
+    let extremes = Superblock {
+        generation: u64::MAX,
+        ref_table: Hash::of(b"ext"),
+        wal_head: u64::MAX,
+        wal_next_seq: u64::MAX,
+        wal_len: u64::MAX,
+        chunk_tail: u64::MAX,
+        index_off: u64::MAX,
+    }
+    .encode();
+    write_seed("superblock", "field_extremes", &extremes);
+    write_seed("superblock_fixup", "field_extremes", &extremes);
 }
 
 fn wal_seeds() {
