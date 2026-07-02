@@ -65,8 +65,10 @@ use vstd::prelude::*;
 
 pub mod lock;
 // The per-process entropy DRBG (std-port 3.4). Portable plain-Rust arithmetic
-// over the Loom-certified `lock::SpinLock`; carries no `verus!{}` (randomness
-// quality is not a verification property, only the seed decode in `loader` is).
+// over the Loom-certified `lock::SpinLock`; its per-word byte serialization is
+// Verus-verified (`random::u64_to_le`, proven equal to `le_bytes::u64_le`), while
+// randomness quality stays off the proof surface (only that serialization and the
+// seed decode in `loader` are mechanized).
 // Gated off the loom/shuttle model builds only: it holds a process-global
 // `static` over the *const* `SpinLock::new()`, which those builds drop, and it
 // has no interleaving model of its own to run there (the lock it reuses is

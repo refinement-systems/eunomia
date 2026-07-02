@@ -11,6 +11,13 @@ ipc = { path = "../ipc" }
 # carries, so this edge adds no new binary and no cross-build risk.
 freelist = { path = "../freelist" }
 
+# The shared verified little-endian byte machinery: `random::fill` cites
+# `le_bytes::u64_le` (the canonical LE byte image of a word) as the `ensures` its
+# per-word serializer proves against. no_std + no-alloc with the same pinned
+# vstd, so it rides into the userspace cross-build unchanged and stays no_std even
+# when urt links std under `cargo test`; its proof helpers erase in a plain build.
+le-bytes = { path = "../le-bytes" }
+
 # vstd is the *Verus* dependency (see doc/guidelines/verus.md):
 # the `verus!{}` macro + ghost vocabulary for the rev2§4.7 host-chokepoint proofs of
 # the cspace-slot bitmap free-list (`slots.rs`) and the tick→ns conversion

@@ -8,7 +8,9 @@
 //! **xoshiro256\*\*** — a fast, non-cryptographic PRNG. This is deliberate and
 //! disclosed: the QEMU `virt` machine offers no good entropy source (rev2§2.6),
 //! so randomness *quality* is MVP-only and is **not** a verification property
-//! (only the seed *decode* in `loader::startup` is verified). The real source
+//! (only this module's per-word byte serialization — `u64_to_le` against
+//! `le_bytes::u64_le` — and the seed *decode* in `loader::startup` are verified).
+//! The real source
 //! (`RNDR`/virtio-rng) is a later backend swap that changes only the seed bytes'
 //! origin, not this DRBG or the per-child-reseed contract.
 //!
@@ -26,9 +28,13 @@
 //! Concurrency: the process-global generator is guarded by the same
 //! Loom-certified [`crate::lock::SpinLock`] the heap uses — mutual exclusion over
 //! DRBG state, no wait/wake, so no new interleaving model is needed.
-
 use crate::lock::SpinLock;
 use core::cell::UnsafeCell;
+// The `verus!{}` island below (`u64_to_le`) needs the prelude; in a plain build
+// the macro erases its proof code and the import is otherwise unused (the crate-
+// root pattern in `lib.rs`).
+#[allow(unused_imports)]
+use vstd::prelude::*;
 
 /// A non-all-zero fallback state: xoshiro256\*\* sticks at zero if its whole state
 /// is zero, so an all-zero seed is replaced by these fixed splitmix64 constants.
@@ -46,6 +52,37 @@ fn rotl(x: u64, k: u32) -> u64 {
     x.rotate_left(k)
 }
 
+verus! {
+
+/// The 8-byte little-endian image of one generator word — the verified
+/// serialization under [`Drbg::fill`]. Proven to equal `le_bytes::u64_le(w)`
+/// (the shared little-endian byte-image spec, cited by full path), so the byte
+/// *layout* is mechanized while the xoshiro transition and randomness quality
+/// stay off the proof surface (rev2§5.1). Write-direction, so no `by (bit_vector)`
+/// lemma is needed: `u64_le` is defined in shift-extraction form, and the array
+/// built from `(w >> 8k) as u8` matches it by extensional `=~=` (the `cas`
+/// `push_u64_le` / `ipc` `Header::encode` byte-image pattern).
+fn u64_to_le(w: u64) -> (r: [u8; 8])
+    ensures
+        r@ == le_bytes::u64_le(w),
+{
+    broadcast use vstd::array::group_array_axioms;
+
+    let r: [u8; 8] = [
+        w as u8,
+        (w >> 8) as u8,
+        (w >> 16) as u8,
+        (w >> 24) as u8,
+        (w >> 32) as u8,
+        (w >> 40) as u8,
+        (w >> 48) as u8,
+        (w >> 56) as u8,
+    ];
+    assert(r@ =~= le_bytes::u64_le(w));
+    r
+}
+
+} // verus!
 /// The xoshiro256\*\* generator state (Blackman & Vigna). Deterministic given a
 /// seed; the whole of `urt::random`'s logic lives here so it is directly
 /// unit-testable without touching the process-global instance.
@@ -86,11 +123,11 @@ impl Drbg {
     fn fill(&mut self, out: &mut [u8]) {
         let mut chunks = out.chunks_exact_mut(8);
         for c in &mut chunks {
-            c.copy_from_slice(&self.next_u64().to_le_bytes());
+            c.copy_from_slice(&u64_to_le(self.next_u64()));
         }
         let rem = chunks.into_remainder();
         if !rem.is_empty() {
-            let w = self.next_u64().to_le_bytes();
+            let w = u64_to_le(self.next_u64());
             let n = rem.len();
             rem.copy_from_slice(&w[..n]);
         }
