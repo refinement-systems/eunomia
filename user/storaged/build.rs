@@ -1,15 +1,13 @@
+include!("../build_common.rs");
+
 fn main() {
-    let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    // The custom linker script + page size are meaningful only for the
-    // bare-metal aarch64 EL0 image (the kernel-built binary). For host test
-    // builds (`cargo test` under cfg(test)) they must NOT be applied —
-    // they would break the libtest harness link with `cc`. Gate on the
-    // bare-metal target (`*-none` or the `aarch64-unknown-eunomia` os), and
-    // scope to bin targets so a host test harness never receives them.
-    let target = std::env::var("TARGET").unwrap_or_default();
-    if target.contains("-none") || target.contains("eunomia") {
-        println!("cargo:rustc-link-arg-bins=-T{dir}/link.ld");
-        println!("cargo:rustc-link-arg-bins=-zmax-page-size=4096");
+    rerun_inputs();
+    // The custom linker script + EL0 page size are meaningful only for the bare-metal
+    // aarch64 image (the kernel-built binary). For host test builds (`cargo test` under
+    // cfg(test)) they must NOT be applied — they would break the libtest harness link
+    // with `cc`. Gate on the bare-metal target, and scope to bin targets so a host test
+    // harness never receives them.
+    if is_bare_metal() {
+        link_el0_image_bins();
     }
-    println!("cargo:rerun-if-changed=link.ld");
 }

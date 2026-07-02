@@ -23,7 +23,7 @@
 //! a disclosed deferred upgrade.
 
 use crate::grant::Startup;
-#[cfg(any(target_os = "eunomia", target_os = "none"))]
+#[cfg(bare_metal)]
 use crate::syscall;
 use crate::syscall::SLOT_NONE;
 
@@ -128,28 +128,28 @@ impl Carry {
 // matching `crate::stdio::write` / `crate::fs`: the host build stubs the `svc` shell).
 // ---------------------------------------------------------------------------
 
-#[cfg(any(target_os = "eunomia", target_os = "none"))]
+#[cfg(bare_metal)]
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// The `stdin`/`stdout`/`stderr` console-channel cspace slots (rev2§5.1), or
 /// `SLOT_NONE` when this process was granted no console (a non-interactive child):
 /// its writes then fall back to the debug-log and its reads report EOF.
-#[cfg(any(target_os = "eunomia", target_os = "none"))]
+#[cfg(bare_metal)]
 static STDIN_CHAN: AtomicU32 = AtomicU32::new(SLOT_NONE);
-#[cfg(any(target_os = "eunomia", target_os = "none"))]
+#[cfg(bare_metal)]
 static STDOUT_CHAN: AtomicU32 = AtomicU32::new(SLOT_NONE);
-#[cfg(any(target_os = "eunomia", target_os = "none"))]
+#[cfg(bare_metal)]
 static STDERR_CHAN: AtomicU32 = AtomicU32::new(SLOT_NONE);
 
 /// The read-remainder carry ([`Carry`]); guarded by std's stdin lock (single accessor).
-#[cfg(any(target_os = "eunomia", target_os = "none"))]
+#[cfg(bare_metal)]
 static mut CARRY: Carry = Carry::new();
 
 /// Resolve the console grants and stash the channel slots, once, at bootstrap (called
 /// from [`crate::bootstrap`] after the startup block is decoded, before `main`). A
 /// process with no console grant leaves the slots `SLOT_NONE` — the least-authority
 /// default (debug-log writes, EOF reads).
-#[cfg(any(target_os = "eunomia", target_os = "none"))]
+#[cfg(bare_metal)]
 pub(crate) fn attach(s: &Startup) {
     let (stdin, stdout, stderr) = resolve(s);
     STDIN_CHAN.store(stdin, Ordering::Relaxed);
@@ -162,7 +162,7 @@ pub(crate) fn attach(s: &Startup) {
 /// infallible (the debug-log posture): a non-`ERR_FULL` failure drops the chunk rather
 /// than loop, and the full length is always reported so std's `write_all` never loops.
 /// A `SLOT_NONE` channel (no console granted) falls back to the debug-log.
-#[cfg(any(target_os = "eunomia", target_os = "none"))]
+#[cfg(bare_metal)]
 fn write_chan(chan: u32, buf: &[u8]) -> usize {
     if chan == SLOT_NONE {
         return crate::stdio::write(buf);
@@ -177,7 +177,7 @@ fn write_chan(chan: u32, buf: &[u8]) -> usize {
 
 /// The `sys/stdio` `Stdout` write body (std-port 5.1): the console `stdout` channel,
 /// else the debug-log.
-#[cfg(any(target_os = "eunomia", target_os = "none"))]
+#[cfg(bare_metal)]
 pub fn stdout_write(buf: &[u8]) -> usize {
     write_chan(STDOUT_CHAN.load(Ordering::Relaxed), buf)
 }
@@ -185,7 +185,7 @@ pub fn stdout_write(buf: &[u8]) -> usize {
 /// The `sys/stdio` `Stderr` write body (std-port 5.1): the console `stderr` channel
 /// (`NAME_STDERR` → else the `stdout` channel, resolved at [`attach`]), else the
 /// debug-log. Kept distinct from stdout so diagnostics never enter a pipeline's data.
-#[cfg(any(target_os = "eunomia", target_os = "none"))]
+#[cfg(bare_metal)]
 pub fn stderr_write(buf: &[u8]) -> usize {
     write_chan(STDERR_CHAN.load(Ordering::Relaxed), buf)
 }
@@ -194,7 +194,7 @@ pub fn stderr_write(buf: &[u8]) -> usize {
 /// arrives on the console `stdin` channel and deliver up to `buf.len()` of it, carrying
 /// any remainder for the next call. Returns `0` (EOF) when no console was granted — the
 /// pre-5.1 behavior for a child without a `stdin` grant. Serialized by std's stdin lock.
-#[cfg(any(target_os = "eunomia", target_os = "none"))]
+#[cfg(bare_metal)]
 pub fn stdin_read(buf: &mut [u8]) -> usize {
     if buf.is_empty() {
         return 0;

@@ -60,11 +60,7 @@ const MAX_WAITERS: usize = crate::thread_layout::MAX_THREADS + 1;
 // without the target-only `urt::thread` / `svc` shell. The module is compiled only
 // under `any(test, <target>)` (see `lib.rs`), so exactly one arm is ever active.
 
-#[cfg(all(
-    not(test),
-    target_arch = "aarch64",
-    any(target_os = "none", target_os = "eunomia")
-))]
+#[cfg(all(not(test), bare_metal))]
 mod park {
     /// The park token is the thread's own futex park-notif cspace slot.
     pub type Token = u32;
@@ -339,11 +335,7 @@ impl FutexTable {
 /// The unconfigured/exhausted fallback for [`FutexTable::wait_block`]: on the target,
 /// a busy yield-poll (never UB); in the model, unreachable (the parker is
 /// infallible).
-#[cfg(all(
-    not(test),
-    target_arch = "aarch64",
-    any(target_os = "none", target_os = "eunomia")
-))]
+#[cfg(all(not(test), bare_metal))]
 fn fallback_poll(futex: &AtomicU32, expected: u32) -> bool {
     loop {
         if futex.load(Ordering::Relaxed) != expected {
@@ -360,21 +352,13 @@ fn fallback_poll(_futex: &AtomicU32, _expected: u32) -> bool {
 
 // ── The target free-function API (what `eunomia_sys::futex` calls) ────────
 
-#[cfg(all(
-    not(test),
-    target_arch = "aarch64",
-    any(target_os = "none", target_os = "eunomia")
-))]
+#[cfg(all(not(test), bare_metal))]
 static TABLE: FutexTable = FutexTable::new();
 
 /// Wait while `*futex == expected`. `timeout_ns == u64::MAX` means no timeout (block
 /// on the notif); otherwise a yield-poll to the deadline. Returns `false` only on
 /// timeout, `true` otherwise (the upstream `sys::futex` contract).
-#[cfg(all(
-    not(test),
-    target_arch = "aarch64",
-    any(target_os = "none", target_os = "eunomia")
-))]
+#[cfg(all(not(test), bare_metal))]
 pub fn futex_wait(futex: &AtomicU32, expected: u32, timeout_ns: u64) -> bool {
     if timeout_ns == u64::MAX {
         TABLE.wait_block(futex, expected)
@@ -395,21 +379,13 @@ pub fn futex_wait(futex: &AtomicU32, expected: u32, timeout_ns: u64) -> bool {
 }
 
 /// Wake one waiter on `futex`; `true` iff one was woken.
-#[cfg(all(
-    not(test),
-    target_arch = "aarch64",
-    any(target_os = "none", target_os = "eunomia")
-))]
+#[cfg(all(not(test), bare_metal))]
 pub fn futex_wake(futex: &AtomicU32) -> bool {
     TABLE.wake_one(futex)
 }
 
 /// Wake all waiters on `futex`.
-#[cfg(all(
-    not(test),
-    target_arch = "aarch64",
-    any(target_os = "none", target_os = "eunomia")
-))]
+#[cfg(all(not(test), bare_metal))]
 pub fn futex_wake_all(futex: &AtomicU32) {
     TABLE.wake_all(futex)
 }

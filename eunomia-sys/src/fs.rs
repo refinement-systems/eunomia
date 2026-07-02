@@ -20,7 +20,7 @@
 //! Gated to the eunomia/bare-metal targets: it links `storage-server`/`ipc` (target-only
 //! deps), so the host `cargo verus verify -p eunomia-sys` graph never sees them.
 
-#![cfg(any(target_os = "eunomia", target_os = "none"))]
+#![cfg(bare_metal)]
 
 use crate::grant::Startup;
 use crate::io_error::{

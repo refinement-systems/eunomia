@@ -101,16 +101,10 @@ const _: () = assert!(STATUS_PANIC == u64::MAX);
 // edge, so it keeps a local `unreachable!` stub for the protocol/encode host tests.
 // ---------------------------------------------------------------------------
 
-#[cfg(all(
-    target_arch = "aarch64",
-    any(target_os = "none", target_os = "eunomia")
-))]
+#[cfg(bare_metal)]
 use ipc::sys::imp::{syscall2, syscall3, syscall7 as syscall};
 
-#[cfg(not(all(
-    target_arch = "aarch64",
-    any(target_os = "none", target_os = "eunomia")
-)))]
+#[cfg(not(bare_metal))]
 mod imp {
     /// Host builds (tests of the protocol/encode layers) must never reach a raw
     /// syscall.
@@ -127,10 +121,7 @@ mod imp {
     }
 }
 
-#[cfg(not(all(
-    target_arch = "aarch64",
-    any(target_os = "none", target_os = "eunomia")
-)))]
+#[cfg(not(bare_metal))]
 use imp::{syscall, syscall2, syscall3};
 
 // ---------------------------------------------------------------------------

@@ -5,7 +5,7 @@
 //! eunomia/bare-metal targets (where `urt::random` is the seeded generator), like
 //! [`crate::futex`].
 
-#![cfg(any(target_os = "eunomia", target_os = "none"))]
+#![cfg(bare_metal)]
 
 /// Fill `out` with random bytes for std's `fill_bytes`/`hashmap_random_keys`.
 /// Loudly aborts if no `NAME_RANDOM_SEED` grant was attached (the `urt::random`

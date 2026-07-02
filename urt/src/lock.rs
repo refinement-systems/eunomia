@@ -57,24 +57,12 @@ fn backoff() {
 fn backoff() {
     shuttle::thread::yield_now();
 }
-#[cfg(all(
-    not(loom),
-    not(shuttle),
-    target_arch = "aarch64",
-    any(target_os = "none", target_os = "eunomia")
-))]
+#[cfg(all(not(loom), not(shuttle), bare_metal))]
 #[inline]
 fn backoff() {
     ipc::sys::yield_now();
 }
-#[cfg(all(
-    not(loom),
-    not(shuttle),
-    not(all(
-        target_arch = "aarch64",
-        any(target_os = "none", target_os = "eunomia")
-    ))
-))]
+#[cfg(all(not(loom), not(shuttle), not(bare_metal)))]
 #[inline]
 fn backoff() {
     core::hint::spin_loop();

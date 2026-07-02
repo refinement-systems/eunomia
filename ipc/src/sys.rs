@@ -60,10 +60,7 @@ pub const BIND_FAULT: u64 = 1;
 /// runs each syscall's arguments through its *verified* encoder before issuing the
 /// `svc`. This is the single home for the trusted register marshalling; keep it
 /// term-for-term with `kcore`'s decode.
-#[cfg(all(
-    target_arch = "aarch64",
-    any(target_os = "none", target_os = "eunomia")
-))]
+#[cfg(bare_metal)]
 pub mod imp {
     #[inline(always)]
     pub unsafe fn syscall(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 {
@@ -151,10 +148,7 @@ pub mod imp {
 /// non-Eunomia build links these so the protocol/seam layers compile and test without
 /// a real syscall. Public for the same reason — `eunomia-sys` keeps its own host stub,
 /// but this stays in lockstep as the shared shim's host face.
-#[cfg(not(all(
-    target_arch = "aarch64",
-    any(target_os = "none", target_os = "eunomia")
-)))]
+#[cfg(not(bare_metal))]
 pub mod imp {
     /// Host builds (tests of the protocol layers) must never reach a raw
     /// syscall.

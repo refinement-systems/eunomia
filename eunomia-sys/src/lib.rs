@@ -45,7 +45,7 @@
 
 // The per-thread TLS block (std-port 3.2) is heap-allocated over the process-global
 // allocator; pull `alloc` on the target build (where `tls` is compiled).
-#[cfg(any(target_os = "eunomia", target_os = "none"))]
+#[cfg(bare_metal)]
 extern crate alloc;
 
 pub mod bootstrap;

@@ -89,20 +89,14 @@ pub mod time;
 
 // The spawn-lifecycle helper issues syscalls, so it only exists on the
 // bare-metal target; `slots` is pure bookkeeping and host-tested.
-#[cfg(all(
-    target_arch = "aarch64",
-    any(target_os = "none", target_os = "eunomia")
-))]
+#[cfg(bare_metal)]
 pub mod spawn;
 
 // The in-process thread primitive (std-port 3.2) issues syscalls, so it is
 // bare-metal-only like `spawn`. Its host-reachable invariant — the stack-VA / slot
 // arithmetic — is host-tested in `thread_layout`; the syscall path is witnessed by
 // the QEMU spawn smoke.
-#[cfg(all(
-    target_arch = "aarch64",
-    any(target_os = "none", target_os = "eunomia")
-))]
+#[cfg(bare_metal)]
 pub mod thread;
 
 // The `sys::futex` backend (std-port 3.3). Unlike `lock`, `futex` is not fully
@@ -110,13 +104,7 @@ pub mod thread;
 // std/loom/shuttle `Mutex`+`Condvar` parker (the model), so it is compiled only for
 // the real target and for the host test/loom/shuttle models, and absent on a plain
 // no_std host build (verus, plain `cargo build`), where nothing references it.
-#[cfg(any(
-    test,
-    all(
-        target_arch = "aarch64",
-        any(target_os = "none", target_os = "eunomia")
-    )
-))]
+#[cfg(any(test, bare_metal))]
 pub mod futex;
 
 use core::alloc::{GlobalAlloc, Layout};
