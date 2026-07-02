@@ -332,83 +332,18 @@ jobs:
           url="https://github.com/verus-lang/verus/releases/download/release/${VERUS_VERSION}/verus-${VERUS_VERSION}-x86-linux.zip"
           curl -fsSL "$url" -o verus.zip
           unzip -q verus.zip && rm verus.zip
-      - name: Verify kcore + host chokepoints (cargo verus verify)
+      - name: Verify kcore + host chokepoints (verus-gate.sh, pinned counts)
         run: |
           # The zip extracts to a dir holding `verus`/`cargo-verus`/`z3`; put it on
           # PATH so `cargo verus` resolves (works whether or not it nests a subdir).
           bindir="$(find ~/verus -maxdepth 2 -name cargo-verus -exec dirname {} \; | head -1)"
           if [ -z "$bindir" ]; then echo "::error::cargo-verus not found in the Verus release"; exit 1; fi
           export PATH="$bindir:$PATH"
-          cargo verus verify -p kcore
-          # rev2§4.7 host chokepoints, one -p per crate: ipc::header; ipc::session
-          # codecs + the Admission never-over-grant quota; urt::slots — the bitmap
-          # free-list ∀ cap/WORDS; urt::time — the tick→ns conversion's totality +
-          # monotonicity ∀; dma-pool — the free-list allocator's two-buffer
-          # disjointness + alignment ∀.
-          cargo verus verify -p ipc
-          cargo verus verify -p urt
-          # freelist — the free-list allocator core. The two-buffer-disjointness +
-          # alignment ∀ proof is verified once here and shared by dma-pool and the
-          # urt heap. The dma-pool gate below re-checks that its wrapper delegates
-          # cleanly (it carries 0 obligations of its own — the proof lives here).
-          cargo verus verify -p freelist
-          # le-bytes — the shared read-direction little-endian byte core (rev2§6,
-          # §8): the `u*_le` byte image, the `lemma_u*_le_bytes` `by (bit_vector)`
-          # split identities, and the `read_u*_le` byte readers, cited by cas's
-          # node decoder and loader's ELF `parse`. no_std/no-alloc sibling, so no
-          # --no-default-features needed.
-          cargo verus verify -p le-bytes
-          cargo verus verify -p dma-pool
-          # cas::disk superblock chokepoint — validate_geometry
-          # (totality + region-within-device ∀) and decode_checked (totality ∀,
-          # blake3 the assumed-total seam). cas is std-on-host / Vec-heavy, so the
-          # feature-agnostic superblock fns are verified in the no_std+alloc
-          # variant (--no-default-features).
-          cargo verus verify -p cas --no-default-features
-          # virtio-blk avail-ring index + LBA-bound arithmetic — `avail_ring_slot`
-          # (the slot byte-offset 4 + 2*(idx % qsize) and its in-bounds bound ∀ idx,
-          # qsize 1..=8) and `capacity_check` (the `check_capacity` LBA bound:
-          # OutOfRange exactly when lba + len/SECTOR exceeds capacity, overflow-safe
-          # ∀ inputs). The generic driver, MMIO `unsafe`, fake device, and cas
-          # blockdev adapter stay external; the device-shared ring is the trusted
-          # DMA seam (rev2§2.5). virtio-blk links cas (the no_std blockdev adapter
-          # storaged uses), which turns on vstd's `alloc` feature, so this session
-          # re-verifies freelist under that richer prelude — freelist's
-          # free_insert/free_both rlimit budgets are sized to cover it.
-          cargo verus verify -p virtio-blk
-          # storage-server rights lattice — `attenuate` is `parent & mask`:
-          # monotone (sets no bit absent from the parent), strips `R_STAT_STORE`
-          # whenever the mask omits bit 5, and `R_ALL` denies it by default ∀ u8 —
-          # plus the wire-decode header/version prefix (`check_header`, rev2§3.7):
-          # total ∀ bytes, refuses BadHeader exactly on short/bad-magic and
-          # Version exactly on good-magic-wrong-version (composing on the verified
-          # `ipc::version_ok`), magic before version. The session/handle dispatch
-          # stays external; the postcard body decode stays the trusted seam by
-          # feature-exclusion (serde-gated, dropped here — no external_body). Like
-          # cas it verifies in the no_std+alloc variant (--no-default-features),
-          # and --lib skips the placeholder bin (which carries no proofs). Links
-          # cas+ipc, re-verified under the alloc prelude.
-          cargo verus verify -p storage-server --no-default-features --lib
-          # loader ELF decoder — `Segment::page_layout` total/overflow-safe ∀
-          # (vaddr, memsz): Err exactly when vaddr+memsz+(PAGE-1) overflows u64;
-          # otherwise both ends page-aligned, encloses vaddr (strictly when
-          # memsz>0), page_offset in [0,PAGE), pages counts the span exactly. And
-          # `parse` is a total bounded decoder ∀ &[u8] (no panic/OOB), with the
-          # mask/shift little-endian field readers proven to reassemble each value
-          # (`read_u{16,32,64}_le` vs `u*_le`); every accepted Image is
-          # well-formed (1..=MAX_SEGMENTS segments, each file extent in-bounds and
-          # `page_layout`-safe). The startup byte codec and the target-only spawn
-          # stay external; verified as the no_std core (--no-default-features).
-          # Links ipc, re-verified transitively.
-          cargo verus verify -p loader --no-default-features
-          # eunomia-sys syscall encoder — `encode` (the inverse of sysabi::decode,
-          # rev2§3.7): total over every `Call`, always a defined opcode (nr < 27),
-          # each argument placed in decode's register, and out-of-range fields refused
-          # (the message-length cap, the ObjType/event/which/priority ranges) — so the
-          # PAL provably cannot issue a shape-rejectable syscall (the §11 inverse-leak
-          # rule). The local ABI bound consts are pinned against kcore by the host
-          # round-trip test (a kcore dev-dep, out of this verify session). The raw
-          # `svc` register marshalling + the typed wrappers are the trusted shell
-          # (rev2§6.1(d), the §6.1(d) thread-lifecycle-shell row — no new seam). Links
-          # loader, re-verified transitively (ipc, le-bytes).
-          cargo verus verify -p eunomia-sys
+          # Cold-verify every gated crate and assert each one's
+          # `verification results:: N verified` equals the count pinned in
+          # tools/verus/verus-manifest.tsv (the machine-readable twin of the
+          # trusted-base ledger's ## Baselines section). A silently-dropped
+          # obligation — Verus proving less while still exiting 0 — or a
+          # stale-cache false-green fails the gate; the per-crate rationale for
+          # what each verifies lives in that ledger.
+          bash tools/verus/verus-gate.sh
