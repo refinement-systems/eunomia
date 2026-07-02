@@ -293,6 +293,14 @@ end-to-end gate that exercises the forward-ported PAL:
 **Fuzzing** — the committed corpora + Miri replay for the verified decoders (wire, on-disk,
 ELF, startup, path). Re-run after any decode-surface change.
 
+**The link posture** — `user/hello` links `eunomia-sys` (→ `storage-server` → `cas` →
+`blake3`) but calls no fs, so a release build must shed that whole stack via LTO +
+`--gc-sections` DCE. On a bump, rebuild `hello` unstripped
+(`CARGO_PROFILE_RELEASE_STRIP=false`) and confirm `llvm-nm -C` shows no
+`blake3`/`cas`/`storage_server` symbols — a toolchain or LLVM change can regress that DCE
+silently. (`storaged`, the server, legitimately keeps them; a binary that does std fs keeps
+only the `storage_server` wire codec, not `cas`/`blake3`.)
+
 **Local QEMU note.** When running the `on-os` scripts by hand, QEMU must be killed by the
 harness or it runs forever (it waits at the shell after piped stdin hits EOF); `timeout`
 is not installed on the dev machine. Use the process-group-kill pattern in the top-level
